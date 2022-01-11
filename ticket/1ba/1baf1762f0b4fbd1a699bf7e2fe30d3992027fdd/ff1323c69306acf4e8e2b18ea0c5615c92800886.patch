@@ -1,0 +1,412 @@
+--- wxWidgets.orig/include/wx/combo.h	Wed May 31 18:31:03 2006
++++ wxWidgets/include/wx/combo.h	Sat Jun  3 10:17:46 2006
+@@ -305,5 +305,5 @@
+     //                                wxCONTROL_SELECTED: list item is selected
+     //                                wxCONTROL_DISABLED: control/item is disabled
+-    virtual void DrawFocusBackground( wxDC& dc, const wxRect& rect, int flags );
++    virtual void DrawFocusBackground( wxDC& dc, const wxRect& rect, int flags ) const;
+ 
+     // Returns true if focus indicator should be drawn in the control.
+--- wxWidgets.orig/include/wx/msw/combo.h	Sun May 21 11:31:48 2006
++++ wxWidgets/include/wx/msw/combo.h	Sat Jun  3 10:23:05 2006
+@@ -60,5 +60,5 @@
+     virtual ~wxComboCtrl();
+ 
+-    virtual void DrawFocusBackground( wxDC& dc, const wxRect& rect, int flags );
++    virtual void DrawFocusBackground( wxDC& dc, const wxRect& rect, int flags ) const;
+ 
+     static int GetFeatures() { return wxComboCtrlFeatures::All; }
+--- wxWidgets.orig/include/wx/odcombo.h	Mon May 29 18:54:39 2006
++++ wxWidgets/include/wx/odcombo.h	Sat Jun  3 11:19:07 2006
+@@ -38,5 +38,5 @@
+ 
+ //
+-// Callback flags
++// Callback flags (see wxOwnerDrawnComboBox::OnDrawItem)
+ //
+ enum
+@@ -44,5 +44,5 @@
+     // when set, we are painting the selected item in control,
+     // not in the popup
+-    wxCP_PAINTING_CONTROL           = 0x0001
++    wxODCB_PAINTING_CONTROL         = 0x0001
+ };
+ 
+@@ -85,15 +85,4 @@
+     virtual bool LazyCreate();
+ 
+-    // Callbacks for drawing and measuring items. Override in a derived class for
+-    // owner-drawnness.
+-    // item: item index to be drawn, may be wxNOT_FOUND when painting combo control itself
+-    //       and there is no valid selection
+-    // flags: wxCP_PAINTING_CONTROL is set if painting to combo control instead of list
+-    virtual void OnDrawItem( wxDC& dc, const wxRect& rect, int item, int flags ) const;
+-
+-    // Return item width, or -1 for calculating from text extent (default)
+-    virtual wxCoord OnMeasureItemWidth( size_t item ) const;
+-
+-
+     // Item management
+     void SetSelection( int item );
+@@ -133,12 +122,29 @@
+     void CheckWidth( int pos );
+ 
+-    // wxVListBox implementation
+-    virtual void OnDrawItem(wxDC& dc, const wxRect& rect, size_t n) const;
+-    //virtual wxCoord OnMeasureItem(size_t n) const;
+-    void OnDrawBackground(wxDC& dc, const wxRect& rect, size_t n) const;
++    // Callbacks for drawing and measuring items. Override in a derived class for
++    // owner-drawnness. Font, background and text colour have been prepared according
++    // to selection, focus and such.
++    // 
++    // item: item index to be drawn, may be wxNOT_FOUND when painting combo control itself
++    //       and there is no valid selection
++    // flags: wxODCB_PAINTING_CONTROL is set if painting to combo control instead of list
++    // NOTE: If wxVListBoxComboPopup is used with wxComboCtrl class not derived from
++    //       wxOwnerDrawnComboBox, this method must be overridden.
++    virtual void OnDrawItem( wxDC& dc, const wxRect& rect, int item, int flags ) const;
+ 
+-    // Return item height
++    // This is same as in wxVListBox
+     virtual wxCoord OnMeasureItem( size_t item ) const;
+ 
++    // Return item width, or -1 for calculating from text extent (default)
++    virtual wxCoord OnMeasureItemWidth( size_t item ) const;
++
++    // Draw item and combo control background. Flags are same as with OnDrawItem.
++    // NB: Can't use name OnDrawBackground because of virtual function hiding warnings.
++    virtual void OnDrawBg(wxDC& dc, const wxRect& rect, int item, int flags) const;
++
++    // Additional wxVListBox implementation (no need to override in derived classes)
++    virtual void OnDrawItem(wxDC& dc, const wxRect& rect, size_t n) const;
++    void OnDrawBackground(wxDC& dc, const wxRect& rect, size_t n) const;
++
+     // filter mouse move events happening outside the list box
+     // move selection with cursor
+@@ -182,6 +188,6 @@
+                                              public wxItemContainer
+ {
+-    friend class wxComboPopupWindow;
+-    friend class wxComboCtrlBase;
++    //friend class wxComboPopupWindow;
++    friend class wxVListBoxComboPopup;
+ public:
+ 
+@@ -273,4 +279,21 @@
+ 
+ protected:
++
++    // Callback for drawing. Font, background and text colour have been
++    // prepared according to selection, focus and such.
++    // item: item index to be drawn, may be wxNOT_FOUND when painting combo control itself
++    //       and there is no valid selection
++    // flags: wxODCB_PAINTING_CONTROL is set if painting to combo control instead of list
++    virtual void OnDrawItem( wxDC& dc, const wxRect& rect, int item, int flags ) const;
++
++    // Callback for item height, or -1 for default
++    virtual wxCoord OnMeasureItem( size_t item ) const;
++
++    // Callback for item width, or -1 for default/undetermined
++    virtual wxCoord OnMeasureItemWidth( size_t item ) const;
++
++    // Callback for background drawing. Flags are same as with
++    // OnDrawItem.
++    virtual void OnDrawBackground( wxDC& dc, const wxRect& rect, int item, int flags ) const;
+ 
+     // clears all allocated client datas
+--- wxWidgets.orig/samples/combo/combo.cpp	Mon May 29 18:54:48 2006
++++ wxWidgets/samples/combo/combo.cpp	Wed May 31 18:51:52 2006
+@@ -397,77 +397,12 @@
+ // wxOwnerDrawnComboBox with custom paint list items
+ // ----------------------------------------------------------------------------
+-/*
+-class wxPenStyleComboBox : public wxOwnerDrawnComboBox
+-{
+-public:
+-    virtual bool OnDrawListItem( wxDC& dc, const wxRect& rect, int item, int flags )
+-    {
+-        wxRect r(rect);
+-        r.Deflate(3);
+-        r.height -= 2;
+-
+-        int pen_style = wxSOLID;
+-        if ( item == 1 )
+-            pen_style = wxTRANSPARENT;
+-        else if ( item == 2 )
+-            pen_style = wxDOT;
+-        else if ( item == 3 )
+-            pen_style = wxLONG_DASH;
+-        else if ( item == 4 )
+-            pen_style = wxSHORT_DASH;
+-        else if ( item == 5 )
+-            pen_style = wxDOT_DASH;
+-        else if ( item == 6 )
+-            pen_style = wxBDIAGONAL_HATCH;
+-        else if ( item == 7 )
+-            pen_style = wxCROSSDIAG_HATCH;
+-        else if ( item == 8 )
+-            pen_style = wxFDIAGONAL_HATCH;
+-        else if ( item == 9 )
+-            pen_style = wxCROSS_HATCH;
+-        else if ( item == 10 )
+-            pen_style = wxHORIZONTAL_HATCH;
+-        else if ( item == 11 )
+-            pen_style = wxVERTICAL_HATCH;
+-
+-        wxPen pen( dc.GetTextForeground(), 3, pen_style );
+ 
+-        // Get text colour as pen colour
+-        dc.SetPen ( pen );
+-
+-        if ( !(flags & wxCP_PAINTING_CONTROL) )
+-        {
+-            dc.DrawText(GetString( item ),
+-                        r.x + 3,
+-                        (r.y + 0) + ( (r.height/2) - dc.GetCharHeight() )/2
+-                       );
+-
+-            dc.DrawLine( r.x+5, r.y+((r.height/4)*3), r.x+r.width - 5, r.y+((r.height/4)*3) );
+-        }
+-        else
+-        {
+-            dc.DrawLine( r.x+5, r.y+r.height/2, r.x+r.width - 5, r.y+r.height/2 );
+-        }
+-
+-        return true;
+-    }
+-
+-    virtual wxCoord OnMeasureListItem( int WXUNUSED(item) )
+-    {
+-        return 24;
+-    }
+-
+-    virtual wxCoord OnMeasureListItemWidth( int WXUNUSED(item) )
+-    {
+-        return -1; // default - will be measured from text width
+-    }
+-
+-};
+-*/
+-
+-class wxPenStylePopup : public wxVListBoxComboPopup
++class wxPenStyleComboBox : public wxOwnerDrawnComboBox
+ {
+ public:
+-    virtual void OnDrawItem( wxDC& dc, const wxRect& rect, int item, int flags ) const
++    virtual void OnDrawItem( wxDC& dc,
++                             const wxRect& rect,
++                             int item,
++                             int flags ) const
+     {
+         if ( item == wxNOT_FOUND )
+@@ -507,5 +442,5 @@
+         dc.SetPen ( pen );
+ 
+-        if ( !(flags & wxCP_PAINTING_CONTROL) )
++        if ( !(flags & wxODCB_PAINTING_CONTROL) )
+         {
+             dc.DrawText(GetString( item ),
+@@ -825,13 +760,11 @@
+     // to use two-stage creation (or redefine the common wx
+     // constructor).
+-    odc = new wxOwnerDrawnComboBox(panel,wxID_ANY,wxEmptyString,
+-                                   wxDefaultPosition, wxDefaultSize,
+-                                   arrItems,
+-                                   wxCB_READONLY //wxNO_BORDER | wxCB_READONLY
+-                                  );
+-
+-    odc->SetPopupControl( new wxPenStylePopup() );
++    odc = new wxPenStyleComboBox();
++    odc->Create(panel,wxID_ANY,wxEmptyString,
++                wxDefaultPosition, wxDefaultSize,
++                arrItems,
++                wxCB_READONLY //wxNO_BORDER | wxCB_READONLY
++               );
+ 
+-    //m_odc->SetCustomPaintWidth( 60 );
+     odc->SetSelection(0);
+     odc->SetButtonPosition(-2, // width adjustment
+--- wxWidgets.orig/src/common/combocmn.cpp	Wed May 31 18:31:51 2006
++++ wxWidgets/src/common/combocmn.cpp	Sat Jun  3 10:08:39 2006
+@@ -1092,5 +1092,5 @@
+ 
+ // draw focus background on area in a way typical on platform
+-void wxComboCtrlBase::DrawFocusBackground( wxDC& dc, const wxRect& rect, int flags )
++void wxComboCtrlBase::DrawFocusBackground( wxDC& dc, const wxRect& rect, int flags ) const
+ {
+     wxSize sz = GetClientSize();
+--- wxWidgets.orig/src/generic/odcombo.cpp	Mon May 29 18:55:07 2006
++++ wxWidgets/src/generic/odcombo.cpp	Sat Jun  3 11:20:53 2006
+@@ -104,8 +104,8 @@
+     if ( !(m_combo->GetWindowStyle() & wxODCB_STD_CONTROL_PAINT) )
+     {
+-        m_combo->DrawFocusBackground(dc,rect,0);
++        OnDrawBg(dc,rect,m_value,wxODCB_PAINTING_CONTROL);
+         if ( m_value >= 0 )
+         {
+-            OnDrawItem(dc,rect,m_value,wxCP_PAINTING_CONTROL);
++            OnDrawItem(dc,rect,m_value,wxODCB_PAINTING_CONTROL);
+             return;
+         }
+@@ -129,23 +129,43 @@
+ }
+ 
+-wxCoord wxVListBoxComboPopup::OnMeasureItem(size_t WXUNUSED(n)) const
++wxCoord wxVListBoxComboPopup::OnMeasureItem(size_t n) const
+ {
+-    return m_itemHeight;
++    wxOwnerDrawnComboBox* combo = (wxOwnerDrawnComboBox*) m_combo;
++
++    wxASSERT_MSG( combo->IsKindOf(CLASSINFO(wxOwnerDrawnComboBox)),
++                  wxT("you must subclass wxVListBoxComboPopup for drawing and measuring methods") );
++
++    wxCoord h = combo->OnMeasureItem(n);
++    if ( h < 0 )
++        h = m_itemHeight;
++    return h;
+ }
+ 
+-wxCoord wxVListBoxComboPopup::OnMeasureItemWidth(size_t WXUNUSED(n)) const
++wxCoord wxVListBoxComboPopup::OnMeasureItemWidth(size_t n) const
+ {
+-    //return OnMeasureListItemWidth(n);
+-    return -1;
++    wxOwnerDrawnComboBox* combo = (wxOwnerDrawnComboBox*) m_combo;
++
++    wxASSERT_MSG( combo->IsKindOf(CLASSINFO(wxOwnerDrawnComboBox)),
++                  wxT("you must subclass wxVListBoxComboPopup for drawing and measuring methods") );
++
++    return combo->OnMeasureItemWidth(n);
++}
++
++void wxVListBoxComboPopup::OnDrawBg( wxDC& dc,
++                                     const wxRect& rect,
++                                     int item,
++                                     int flags ) const
++{
++    wxOwnerDrawnComboBox* combo = (wxOwnerDrawnComboBox*) m_combo;
++
++    wxASSERT_MSG( combo->IsKindOf(CLASSINFO(wxOwnerDrawnComboBox)),
++                  wxT("you must subclass wxVListBoxComboPopup for drawing and measuring methods") );
++
++    combo->OnDrawBackground(dc,rect,item,flags);
+ }
+ 
+ void wxVListBoxComboPopup::OnDrawBackground(wxDC& dc, const wxRect& rect, size_t n) const
+ {
+-    // we need to render selected and current items differently
+-    if ( IsCurrent(n) )
+-    {
+-        m_combo->DrawFocusBackground( dc, rect, wxCONTROL_ISSUBMENU|wxCONTROL_SELECTED );
+-    }
+-    //else: do nothing for the normal items
++    OnDrawBg(dc,rect,(int)n,0);
+ }
+ 
+@@ -153,14 +173,10 @@
+ void wxVListBoxComboPopup::OnDrawItem( wxDC& dc, const wxRect& rect, int item, int flags ) const
+ {
+-    if ( flags & wxCP_PAINTING_CONTROL )
+-    {
+-        dc.DrawText( m_combo->GetValue(),
+-                     rect.x + m_combo->GetTextIndent(),
+-                     (rect.height-dc.GetCharHeight())/2 + rect.y );
+-    }
+-    else
+-    {
+-        dc.DrawText( GetString(item), rect.x + 2, rect.y );
+-    }
++    wxOwnerDrawnComboBox* combo = (wxOwnerDrawnComboBox*) m_combo;
++
++    wxASSERT_MSG( combo->IsKindOf(CLASSINFO(wxOwnerDrawnComboBox)),
++                  wxT("you must subclass wxVListBoxComboPopup for drawing and measuring methods") );
++
++    combo->OnDrawItem(dc,rect,item,flags);
+ }
+ 
+@@ -719,7 +735,8 @@
+ void wxOwnerDrawnComboBox::Select(int n)
+ {
+-    wxCHECK_RET( (n == wxNOT_FOUND) || IsValid(n), _T("invalid index in wxOwnerDrawnComboBox::Select") );
+     EnsurePopupControl();
+ 
++    wxCHECK_RET( (n == wxNOT_FOUND) || IsValid(n), _T("invalid index in wxOwnerDrawnComboBox::Select") );
++
+     m_popupInterface->SetSelection(n);
+ 
+@@ -752,8 +769,9 @@
+ int wxOwnerDrawnComboBox::DoInsert(const wxString& item, unsigned int pos)
+ {
++    EnsurePopupControl();
++
+     wxCHECK_MSG(!(GetWindowStyle() & wxCB_SORT), -1, wxT("can't insert into sorted list"));
+     wxCHECK_MSG(IsValidInsert(pos), -1, wxT("invalid index"));
+ 
+-    EnsurePopupControl();
+     m_popupInterface->Insert(item,pos);
+ 
+@@ -781,4 +799,48 @@
+ {
+     return (wxClientData*) DoGetItemClientData(n);
++}
++
++// ----------------------------------------------------------------------------
++// wxOwnerDrawnComboBox item drawing and measuring default implementations
++// ----------------------------------------------------------------------------
++
++void wxOwnerDrawnComboBox::OnDrawItem( wxDC& dc,
++                                       const wxRect& rect,
++                                       int item,
++                                       int flags ) const
++{
++    if ( flags & wxODCB_PAINTING_CONTROL )
++    {
++        dc.DrawText( GetValue(),
++                     rect.x + GetTextIndent(),
++                     (rect.height-dc.GetCharHeight())/2 + rect.y );
++    }
++    else
++    {
++        dc.DrawText( m_popupInterface->GetString(item), rect.x + 2, rect.y );
++    }
++}
++
++wxCoord wxOwnerDrawnComboBox::OnMeasureItem( size_t WXUNUSED(item) ) const
++{
++    return -1;
++}
++
++wxCoord wxOwnerDrawnComboBox::OnMeasureItemWidth( size_t WXUNUSED(item) ) const
++{
++    return -1;
++}
++
++void wxOwnerDrawnComboBox::OnDrawBackground(wxDC& dc, const wxRect& rect, int item, int flags) const
++{
++    // we need to render selected and current items differently
++    if ( m_popupInterface->IsCurrent((size_t)item) )
++    {
++        DrawFocusBackground(dc,
++                            rect,
++                            (flags&wxODCB_PAINTING_CONTROL?0:wxCONTROL_ISSUBMENU) |
++                            wxCONTROL_SELECTED);
++    }
++    //else: do nothing for the normal items
+ }
+ 
+--- wxWidgets.orig/src/msw/combo.cpp	Sun May 21 11:32:23 2006
++++ wxWidgets/src/msw/combo.cpp	Sat Jun  3 18:14:35 2006
+@@ -240,7 +240,10 @@
+ 
+ // draw focus background on area in a way typical on platform
+-void wxComboCtrl::DrawFocusBackground( wxDC& dc, const wxRect& rect, int flags )
++void wxComboCtrl::DrawFocusBackground( wxDC& dc, const wxRect& rect, int flags ) const
+ {
+     wxUxThemeEngine* theme = (wxUxThemeEngine*) NULL;
++
++    // Constructor only calls GetHWND() const, so it should be safe
++    // to cast "this" to const.
+     wxUxThemeHandle hTheme(this, L"COMBOBOX");
+     //COLORREF cref;
+
+ 	  	 

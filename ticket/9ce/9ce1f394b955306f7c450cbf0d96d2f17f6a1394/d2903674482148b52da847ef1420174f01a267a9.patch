@@ -1,0 +1,170 @@
+Index: include/wx/generic/grid.h
+===================================================================
+--- include/wx/generic/grid.h	(revision 64636)
++++ include/wx/generic/grid.h	(working copy)
+@@ -20,6 +20,8 @@
+ 
+ #include "wx/scrolwin.h"
+ 
++#include "wx/headerctrl.h"
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -1171,7 +1173,9 @@
+     int      GetCellHighlightROPenWidth() const { return m_cellHighlightROPenWidth; }
+ 
+     // this one will use wxHeaderCtrl for the column labels
+-    void UseNativeColHeader(bool native = true);
++    // style wxHD_ALLOW_HIDE allows default column hide popupmenu
++    // Set style = 0 to stop the column hide popupmenu
++    void UseNativeColHeader(bool native = true, long style = wxHD_ALLOW_HIDE);
+ 
+     // this one will still draw them manually but using the native renderer
+     // instead of using the same appearance as for the row labels
+@@ -2051,7 +2055,8 @@
+ 
+     void Init();        // common part of all ctors
+     void Create();
+-    void CreateColumnWindow();
++    void CreateColumnWindow(long style = wxHD_ALLOW_HIDE); 
++                       // default style is used only with native columnheader
+     void CalcDimensions();
+     void CalcWindowSizes();
+     bool Redimension( wxGridTableMessage& );
+Index: include/wx/generic/private/grid.h
+===================================================================
+--- include/wx/generic/private/grid.h	(revision 64636)
++++ include/wx/generic/private/grid.h	(working copy)
+@@ -139,12 +139,12 @@
+ class wxGridHeaderCtrl : public wxHeaderCtrl
+ {
+ public:
+-    wxGridHeaderCtrl(wxGrid *owner)
++    wxGridHeaderCtrl(wxGrid *owner, long style = wxHD_ALLOW_HIDE)
+         : wxHeaderCtrl(owner,
+                        wxID_ANY,
+                        wxDefaultPosition,
+                        wxDefaultSize,
+-                       wxHD_ALLOW_HIDE |
++                       style |
+                        (owner->CanDragColMove() ? wxHD_ALLOW_REORDER : 0))
+     {
+     }
+@@ -210,13 +210,41 @@
+         GetOwner()->SetColumnsOrder(order);
+     }
+ 
+-
+     // event handlers forwarding wxHeaderCtrl events to wxGrid
+     void OnClick(wxHeaderCtrlEvent& event)
+     {
++        // we need to pass a dummy mouse event to be used for the grid event
++        wxMouseEvent e;
++        e.SetState(wxGetMouseState());
++        GetOwner()->SendEvent(wxEVT_GRID_LABEL_LEFT_CLICK, -1, 
++                              event.GetColumn(), e);
+         GetOwner()->DoColHeaderClick(event.GetColumn());
+     }
+ 
++    // event handlers forwarding wxHeaderCtrl events to wxGrid
++    void OnDoubleClick(wxHeaderCtrlEvent& event)
++    {
++        // we need to pass a dummy mouse event to be used for the grid event
++        wxMouseEvent e;
++        e.SetState(wxGetMouseState());
++        GetOwner()->SendEvent(wxEVT_GRID_LABEL_LEFT_DCLICK, -1, 
++                              event.GetColumn(), e);
++    }
++
++    void OnRightClick(wxHeaderCtrlEvent& event)
++    {
++        // we need to pass a dummy mouse event to be used for the grid event
++        wxMouseEvent e;
++        e.SetState(wxGetMouseState());
++        // check if the event was processed and if not 
++        // Skip() for the default menu action
++        if( !GetOwner()->SendEvent(wxEVT_GRID_LABEL_RIGHT_CLICK, -1, 
++                                    event.GetColumn(), e))
++        {
++                event.Skip();
++        }
++    }
++
+     void OnBeginResize(wxHeaderCtrlEvent& event)
+     {
+         GetOwner()->DoStartResizeCol(event.GetColumn());
+Index: interface/wx/grid.h
+===================================================================
+--- interface/wx/grid.h	(revision 64636)
++++ interface/wx/grid.h	(working copy)
+@@ -2022,12 +2022,16 @@
+         are using the grid to display tabular data and don't have thousands of
+         columns in it.
+ 
+-        Also note that currently @c wxEVT_GRID_LABEL_LEFT_DCLICK and
+-        @c wxEVT_GRID_LABEL_RIGHT_DCLICK events are not generated for the column
+-        labels if the native columns header is used (but this limitation could
+-        possibly be lifted in the future).
++        The default style wxHD_ALLOW_HIDE shows a hide columns popup menu when 
++        a native column header is right clicked. To avoid the menu, set style 
++        to zero or alternatively Bind to the @c wxEVT_GRID_LABEL_RIGHT_CLICK 
++        event and use Skip(false) in your event handler function.
++
++        Also note that if the native column header is used then a 
++        @c wxEVT_GRID_LABEL_RIGHT_DCLICK event is not generated for column 
++        labels (but this limitation could possibly be lifted in the future).
+      */
+-    void UseNativeColHeader(bool native = true);
++    void UseNativeColHeader(bool native = true, long style = wxHD_ALLOW_HIDE);
+ 
+     //@}
+ 
+Index: src/generic/grid.cpp
+===================================================================
+--- src/generic/grid.cpp	(revision 64636)
++++ src/generic/grid.cpp	(working copy)
+@@ -170,6 +170,8 @@
+ 
+ BEGIN_EVENT_TABLE(wxGridHeaderCtrl, wxHeaderCtrl)
+     EVT_HEADER_CLICK(wxID_ANY, wxGridHeaderCtrl::OnClick)
++    EVT_HEADER_DCLICK(wxID_ANY, wxGridHeaderCtrl::OnDoubleClick)
++    EVT_HEADER_RIGHT_CLICK(wxID_ANY, wxGridHeaderCtrl::OnRightClick)
+ 
+     EVT_HEADER_BEGIN_RESIZE(wxID_ANY, wxGridHeaderCtrl::OnBeginResize)
+     EVT_HEADER_RESIZING(wxID_ANY, wxGridHeaderCtrl::OnResizing)
+@@ -2041,11 +2043,14 @@
+ 
+ }
+ 
+-void wxGrid::CreateColumnWindow()
++void wxGrid::CreateColumnWindow(long style)
+ {
++    // style is used only with native column header
++    // default is wxHD_ALLOW_HIDE. Set to 0 to stop call
++    // to ShowColumnsMenu via wxHeaderCtrlBase::OnRClick
+     if ( m_useNativeHeader )
+     {
+-        m_colWindow = new wxGridHeaderCtrl(this);
++        m_colWindow = new wxGridHeaderCtrl(this, style);
+         m_colLabelHeight = m_colWindow->GetBestSize().y;
+     }
+     else // draw labels ourselves
+@@ -5520,7 +5525,7 @@
+                    rect, hAlign, vAlign, wxHORIZONTAL);
+ }
+ 
+-void wxGrid::UseNativeColHeader(bool native)
++void wxGrid::UseNativeColHeader(bool native, long style)
+ {
+     if ( native == m_useNativeHeader )
+         return;
+@@ -5528,7 +5533,7 @@
+     delete m_colWindow;
+     m_useNativeHeader = native;
+ 
+-    CreateColumnWindow();
++    CreateColumnWindow(style);
+ 
+     if ( m_useNativeHeader )
+         GetGridColHeader()->SetColumnCount(m_numCols);

@@ -1,0 +1,117 @@
+diff --git a/include/wx/osx/cocoa/dataview.h b/include/wx/osx/cocoa/dataview.h
+index 871833e83a..a41c26d209 100644
+--- a/include/wx/osx/cocoa/dataview.h
++++ b/include/wx/osx/cocoa/dataview.h
+@@ -86,7 +86,7 @@ class wxCocoaDataViewControl;
+ class wxDataViewColumnNativeData
+ {
+ public:
+-    wxDataViewColumnNativeData() : m_NativeColumnPtr(NULL)
++    wxDataViewColumnNativeData() : m_NativeColumnPtr(NULL), m_isLast(false), m_prevWidth(0)
+     {
+     }
+ 
+@@ -105,9 +105,32 @@ public:
+         m_NativeColumnPtr = newNativeColumnPtr;
+     }
+ 
++    bool GetIsLast() const
++    {
++        return m_isLast;
++    }
++
++    void SetIsLast(bool isLast)
++    {
++        m_isLast = isLast;
++    }
++
++    int GetPrevWidth() const
++    {
++        return m_prevWidth;
++    }
++
++    void SetPrevWidth(int prevWidth)
++    {
++        m_prevWidth = prevWidth;
++    }
++
+ private:
+     // not owned by us
+     NSTableColumn* m_NativeColumnPtr;
++
++    bool m_isLast;
++    int m_prevWidth;
+ };
+ 
+ // ============================================================================
+diff --git a/src/osx/cocoa/dataview.mm b/src/osx/cocoa/dataview.mm
+index 598d6f80e7..185d4ad538 100644
+--- a/src/osx/cocoa/dataview.mm
++++ b/src/osx/cocoa/dataview.mm
+@@ -2206,7 +2206,8 @@ bool wxCocoaDataViewControl::InsertColumn(unsigned int pos, wxDataViewColumn* co
+ void wxCocoaDataViewControl::FitColumnWidthToContent(unsigned int pos)
+ {
+     const int count = GetCount();
+-    NSTableColumn *column = GetColumn(pos)->GetNativeData()->GetNativeColumnPtr();
++    wxDataViewColumnNativeData *nativeData = GetColumn(pos)->GetNativeData();
++    NSTableColumn *column = nativeData->GetNativeColumnPtr();
+     UInt32 const noOfColumns = [[m_OutlineView tableColumns] count];
+ 
+     class MaxWidthCalculator
+@@ -2338,10 +2339,31 @@ void wxCocoaDataViewControl::FitColumnWidthToContent(unsigned int pos)
+     if ( m_expanderWidth == 0 )
+         m_expanderWidth = calculator.GetExpanderWidth();
+ 
+-    if ( pos == noOfColumns - 1 )
++    bool isLast = (pos == noOfColumns - 1);
++
++    if ( isLast )
++    {
++        // Note that FitColumnWidthToContent() is called whenever a column is
++        // added, so we might also just temporarily become the last column;
++        // since we cannot know at this time whether we will just temporarily
++        // be the last column, we store our current column width in order to
++        // restore it later in case we suddenly are no longer the last column
++        // because new columns have been added --> we need to restore our
++        // previous width in that case because it must not get lost.
++        nativeData->SetPrevWidth(GetColumn(pos)->GetWidth());
++
+         [m_OutlineView sizeLastColumnToFit];
+-    else
++    }
++    else if ( GetColumn(pos)->GetWidthVariable() == wxCOL_WIDTH_AUTOSIZE )
++    {
+         [column setWidth:calculator.GetMaxWidth() + m_expanderWidth];
++    }
++    else if ( nativeData->GetIsLast() )
++    {
++        [column setWidth:nativeData->GetPrevWidth()];
++    }
++
++    nativeData->SetIsLast(isLast);
+ 
+     if ( !(GetDataViewCtrl()->GetWindowStyle() & wxDV_VARIABLE_LINE_HEIGHT) )
+     {
+diff --git a/src/osx/dataview_osx.cpp b/src/osx/dataview_osx.cpp
+index 40be2ea389..8b4901fb62 100644
+--- a/src/osx/dataview_osx.cpp
++++ b/src/osx/dataview_osx.cpp
+@@ -441,6 +441,9 @@ bool wxDataViewCtrl::InsertColumn(unsigned int pos, wxDataViewColumn* columnPtr)
+      // otherwise ask the control to 'update' the data in the newly appended column:
+       if (GetColumnCount() == 1)
+         SetExpanderColumn(columnPtr);
++
++      AdjustAutosizedColumns();
++
+      // done:
+       return true;
+     }
+@@ -482,6 +485,8 @@ bool wxDataViewCtrl::DeleteColumn(wxDataViewColumn* columnPtr)
+   {
+     m_ColumnPtrs.Remove(columnPtr);
+     delete columnPtr;
++
++    AdjustAutosizedColumns();
+     return true;
+   }
+   else

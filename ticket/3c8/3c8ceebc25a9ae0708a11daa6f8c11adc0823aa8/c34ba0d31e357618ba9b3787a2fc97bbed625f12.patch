@@ -1,0 +1,883 @@
+From 7f94bdcc18e98cf13a059471213d85a9f26e56ac Mon Sep 17 00:00:00 2001
+From: time_spanned_soul <time_spanned_soul@yahoo.com>
+Date: Sun, 26 Jun 2011 22:57:56 +0300
+Subject: [PATCH 2/2] - Thread safe Shared/Weak pointers
+
+---
+ include/wx/atomic.h       |   45 ++++++++
+ include/wx/shared_ctr.h   |   38 +++++++
+ include/wx/shared_ptr.h   |  269 +++++++++++++++++++++++++++++++++++++++++++++
+ include/wx/tracked.h      |   48 ++++++++
+ include/wx/weak_ptr.h     |  268 ++++++++++++++++++++++++++++++++++++++++++++
+ src/common/object.cpp     |    3 +
+ src/common/shared_ctr.cpp |   91 +++++++++++++++
+ 7 files changed, 762 insertions(+), 0 deletions(-)
+ create mode 100644 include/wx/shared_ctr.h
+ create mode 100644 include/wx/shared_ptr.h
+ create mode 100644 include/wx/tracked.h
+ create mode 100644 include/wx/weak_ptr.h
+ create mode 100644 src/common/shared_ctr.cpp
+
+diff --git a/include/wx/atomic.h b/include/wx/atomic.h
+index 9b7efac..5fa06f4 100644
+--- a/include/wx/atomic.h
++++ b/include/wx/atomic.h
+@@ -42,6 +42,10 @@ inline wxUint32 wxAtomicDec (wxUint32 &value)
+     return __sync_sub_and_fetch(&value, 1);
+ }
+ 
++inline bool wxAtomicCompAndSwap(wxUint32 &value, wxUint32 oldvalue, wxUint32 newvalue)
++{
++    return __sync_bool_compare_and_swap(&value, oldvalue, newvalue);
++}
+ 
+ #elif defined(__WXMSW__)
+ 
+@@ -58,6 +62,11 @@ inline wxUint32 wxAtomicDec (wxUint32 &value)
+     return InterlockedDecrement ((LONG*)&value);
+ }
+ 
++inline bool wxAtomicCompAndSwap(wxUint32 &value, wxUint32 oldvalue, wxUint32 newvalue)
++{
++    return InterlockedCompareExchange((LONG*)&value, (LONG)newvalue, (LONG)oldvalue) == (LONG)oldvalue;
++}
++
+ #elif defined(__WXMAC__) || defined(__DARWIN__)
+ 
+ #include "libkern/OSAtomic.h"
+@@ -71,6 +80,11 @@ inline wxUint32 wxAtomicDec (wxUint32 &value)
+     return OSAtomicDecrement32 ((int32_t*)&value);
+ }
+ 
++inline bool wxAtomicCompAndSwap(wxUint32 &value, wxUint32 oldvalue, wxUint32 newvalue)
++{
++    return OSAtomicCompareAndSwapLong((LONG)oldvalue, (LONG)newvalue, (LONG*)&value);
++}
++
+ #elif defined (__SOLARIS__)
+ 
+ #include <atomic.h>
+@@ -85,6 +99,12 @@ inline wxUint32 wxAtomicDec (wxUint32 &value)
+     return atomic_add_32_nv ((uint32_t*)&value, (uint32_t)-1);
+ }
+ 
++inline bool wxAtomicCompAndSwap(wxUint32 &value, wxUint32 oldvalue, wxUint32 newvalue)
++{
++    return atomic_cas_32((uint32_t*)&value, (uint32_t)oldvalue, (uint32_t)newvalue) == (uint32_t)oldvalue;
++}
++
++
+ #else // unknown platform
+ 
+ // it will result in inclusion if the generic implementation code a bit later in this page
+@@ -97,6 +117,15 @@ inline wxUint32 wxAtomicDec (wxUint32 &value)
+ 
+ inline void wxAtomicInc (wxUint32 &value) { ++value; }
+ inline wxUint32 wxAtomicDec (wxUint32 &value) { return --value; }
++inline bool wxAtomicCompAndSwap(wxUint32 &value, wxUint32 oldvalue, wxUint32 newvalue)
++{
++    if (value == oldvalue)
++    {
++        value = newvalue;
++        return true;
++    }
++    return false;
++}
+ 
+ #endif // !wxUSE_THREADS
+ 
+@@ -132,6 +161,17 @@ public:
+         wxCriticalSectionLocker lock(m_locker);
+         return --m_value;
+     }
++    
++    bool CompAndSwap(wxInt32 oldvalue, wxInt32 newvalue)
++    {
++        wxCriticalSectionLocker lock(m_locker);
++        if (m_value == oldvalue)
++        {
++            m_value = newvalue;
++            return true;
++        }
++        return false;
++    }
+ 
+ private:
+     volatile wxInt32  m_value;
+@@ -140,6 +180,10 @@ private:
+ 
+ inline void wxAtomicInc(wxAtomicInt32 &value) { value.Inc(); }
+ inline wxInt32 wxAtomicDec(wxAtomicInt32 &value) { return value.Dec(); }
++inline bool wxAtomicCompAndSwap(wxAtomicInt32 &value, wxInt32 oldvalue, wxInt32 newvalue)
++{
++    return value.CompAndSwap(oldvalue, newvalue);
++}
+ 
+ #else // !wxNEEDS_GENERIC_ATOMIC_OPS
+ 
+@@ -147,6 +191,7 @@ inline wxInt32 wxAtomicDec(wxAtomicInt32 &value) { return value.Dec(); }
+ 
+ inline void wxAtomicInc(wxInt32 &value) { wxAtomicInc((wxUint32&)value); }
+ inline wxInt32 wxAtomicDec(wxInt32 &value) { return wxAtomicDec((wxUint32&)value); }
++inline wxInt32 wxAtomicCompAndSwap(wxInt32 &value, wxInt32 oldvalue, wxInt32 newvalue) { return wxAtomicCompAndSwap((wxUint32&)value, (wxUint32)oldvalue, (wxUint32)newvalue); }
+ 
+ typedef wxInt32 wxAtomicInt32;
+ 
+diff --git a/include/wx/shared_ctr.h b/include/wx/shared_ctr.h
+new file mode 100644
+index 0000000..cf5d6d1
+--- /dev/null
++++ b/include/wx/shared_ctr.h
+@@ -0,0 +1,38 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        wx/shared_ctr.h
++// Purpose:     Counter class used to keep track of weak/strong reference
++// Author:      Marius Luca
++// Created:     26 June 11
++// RCS-ID:      $Id$
++// Copyright:   (c) 2011 Marius Luca
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_SHARED_CTR_H_
++#define _WX_SHARED_CTR_H_
++
++#include "wx/defs.h"
++#include "wx/atomic.h"
++
++class WXDLLIMPEXP_BASE wxShareCounter
++{
++public:
++    explicit wxShareCounter();
++
++    wxInt32 GetRefCount() const;
++    bool IsRef() const;
++    void IncRef();
++    bool IncRefLock();
++    bool DecRef();
++    
++    wxInt32 GetWeakRefCount() const;
++    bool IsWeakRef() const;
++    void IncWeakRef();
++    bool DecWeakRef();
++
++private:
++    wxAtomicInt m_count;
++    wxAtomicInt m_weak_count;
++};
++
++#endif // _WX_SHARED_CTR_H_
+diff --git a/include/wx/shared_ptr.h b/include/wx/shared_ptr.h
+new file mode 100644
+index 0000000..0544d4c
+--- /dev/null
++++ b/include/wx/shared_ptr.h
+@@ -0,0 +1,269 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        wx/shared_ptr.h
++// Purpose:     Shared pointer class.
++// Author:      Marius Luca
++// Created:     26 June 11
++// RCS-ID:      $Id$
++// Copyright:   (c) 2011 Marius Luca
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_SHARED_PTR_H_
++#define _WX_SHARED_PTR_H_
++
++#include "wx/tracked.h"
++
++// ----------------------------------------------------------------------------
++// wxSharedPtr: A smart pointer with non-intrusive reference counting.
++// ----------------------------------------------------------------------------
++template <class T>
++class wxSharedPtr
++{
++public:
++    wxSharedPtr() :
++        data(NULL), counter(NULL)
++    {
++    }
++
++    wxSharedPtr(const wxSharedPtr<T>& r) :
++        data(r.get_data()), counter(r.get_counter())
++    {
++        if (counter != NULL)
++            counter->IncRef();
++    }
++
++    template <class T2>
++    wxSharedPtr(const wxSharedPtr<T2>& r) :
++        data(NULL), counter(NULL)
++    {
++        data = dynamic_cast<T*>(r.get_data());
++        if (data != NULL)
++            counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncRef();
++    }
++
++    wxSharedPtr(T* newData, wxShareCounter* newCounter) :
++        data(newData), counter(newCounter)
++    {
++        if (counter != NULL)
++        {
++            if (!counter->IncRefLock())
++            {
++                counter = NULL;
++                data = NULL;
++            }
++        }
++    }
++
++    wxSharedPtr(T* newData) :
++        data(NULL), counter(NULL)
++    {
++        Reset(newData);
++    }
++
++    ~wxSharedPtr()
++    {
++        if (counter != NULL)
++        {
++            if (counter->DecRef())
++                FreeData();
++            counter = NULL;
++        }
++        data = NULL;
++    }
++
++    wxSharedPtr<T>& operator = (const wxSharedPtr<T>& r)
++    {
++        if (counter != NULL)
++        {
++            if (counter->DecRef())
++                FreeData();
++            counter = NULL;
++        }
++
++        data = r.get_data();
++        counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncRef();
++
++        return *this;
++    }
++
++    template <class T2>
++    wxSharedPtr<T>& operator = (const wxSharedPtr<T2>& r)
++    {
++        if (counter != NULL)
++        {
++            if (counter->DecRef())
++                FreeData();
++            counter = NULL;
++        }
++
++        data = dynamic_cast<T*>(r.get_data());
++        if (data != NULL)
++            counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncRef();
++
++        return *this;
++    }
++
++    wxInt32 GetRefCount() const
++    {
++        if (counter == NULL)
++            return 0;
++        return counter->GetRefCount();
++    }
++
++    void Reset()
++    {
++        if (counter != NULL)
++        {
++            if (counter->DecRef())
++                FreeData();
++            counter = NULL;
++        }
++        data = NULL;
++    }
++
++protected:
++    void ResetTracker(T*, ...)
++    {
++    }
++
++    template<class T2>
++    void ResetTracker(T*, wxTracked<T2>* tracker)
++    {
++        tracker->_internal_set_weak_ref(get_weak_ref());
++    }
++public:
++    void Reset(T* newData)
++    {
++        Reset();
++        if (newData != NULL)
++        {
++            counter = new wxShareCounter();
++            data = newData;
++            ResetTracker(data, data);
++        }
++    }
++
++    T * operator-> () const
++    {
++        if (counter == NULL)
++            return NULL;
++        return data;
++    }
++
++    T * get() const
++    {
++        if (counter == NULL)
++            return NULL;
++        return data;
++    }
++
++    T* get_data() const
++    {
++        return data;
++    }
++
++    wxShareCounter* get_counter() const
++    {
++        return counter;
++    }
++
++    operator bool () const
++    {
++        if (counter == NULL)
++            return false;
++        return data != NULL;
++    }
++
++    bool operator !() const
++    {
++        if (counter == NULL)
++            return true;
++        return data == NULL;
++    }
++
++    bool operator == (const wxSharedPtr<T>& r) const
++    {
++        return counter == r.get_counter();
++    }
++
++    bool operator == (const wxWeakPtr<T>& r) const
++    {
++        return counter == r.get_counter();
++    }
++
++    bool operator != (const wxSharedPtr<T>& r) const
++    {
++        return counter != r.get_counter();
++    }
++
++    bool operator != (const wxWeakPtr<T>& r) const
++    {
++        return counter != r.get_counter();
++    }
++
++    bool operator < (const wxSharedPtr<T>& r) const
++    {
++        return counter < r.get_counter();
++    }
++
++    bool operator < (const wxWeakPtr<T>& r) const
++    {
++        return counter < r.get_counter();
++    }
++
++    bool operator <= (const wxSharedPtr<T>& r) const
++    {
++        return counter <= r.get_counter();
++    }
++
++    bool operator <= (const wxWeakPtr<T>& r) const
++    {
++        return counter <= r.get_counter();
++    }
++
++    bool operator > (const wxSharedPtr<T>& r) const
++    {
++        return counter > r.get_counter();
++    }
++
++    bool operator > (const wxWeakPtr<T>& r) const
++    {
++        return counter > r.get_counter();
++    }
++
++    bool operator >= (const wxSharedPtr<T>& r) const
++    {
++        return counter >= r.get_counter();
++    }
++
++    bool operator >= (const wxWeakPtr<T>& r) const
++    {
++        return counter >= r.get_counter();
++    }
++
++    wxWeakPtr<T> get_weak_ref()
++    {
++        return wxWeakPtr<T>(*this);
++    }
++
++private:
++    void FreeData()
++    {
++        if (data != NULL)
++        {
++            delete data;
++            data = NULL;
++        }
++    }
++
++    T*              data;
++    wxShareCounter* counter;
++};
++
++#endif // _WX_SHARED_PTR_H_
+diff --git a/include/wx/tracked.h b/include/wx/tracked.h
+new file mode 100644
+index 0000000..772eb9b
+--- /dev/null
++++ b/include/wx/tracked.h
+@@ -0,0 +1,48 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        wx/tracked.h
++// Purpose:     Support class for object lifetime tracking (wxSharedPtr<T>/wxWeakPtr<T>)
++// Author:      Marius Luca
++// Created:     26 June 11
++// RCS-ID:      $Id$
++// Copyright:   (c) 2011 Marius Luca
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_TRACKED_H_
++#define _WX_TRACKED_H_
++
++#include "wx/shared_ctr.h"
++
++template <class T> class wxSharedPtr;
++template <class T> class wxWeakPtr;
++
++template <class T>
++class wxTracked
++{
++protected:
++    friend class wxSharedPtr<T>;
++    friend class wxWeakPtr<T>;
++    wxTracked(){}
++public:
++
++    void _internal_set_weak_ref(wxWeakPtr<T> wr)
++    {
++        _internal_weak_ref = wr;
++    }
++
++    wxWeakPtr<T> weakshare() const
++    {
++        return _internal_weak_ref;
++    }
++
++    wxSharedPtr<T> share() const
++    {
++        return _internal_weak_ref.lock();
++    }
++
++protected:
++    wxWeakPtr<T> mutable _internal_weak_ref;
++};
++
++#endif // _WX_TRACKED_H_
++
+diff --git a/include/wx/weak_ptr.h b/include/wx/weak_ptr.h
+new file mode 100644
+index 0000000..a304e02
+--- /dev/null
++++ b/include/wx/weak_ptr.h
+@@ -0,0 +1,268 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        wx/weak_ptr.h
++// Purpose:     Weak pointer class.
++// Author:      Marius Luca
++// Created:     26 June 11
++// RCS-ID:      $Id$
++// Copyright:   (c) 2011 Marius Luca
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_WEAK_PTR_H_
++#define _WX_WEAK_PTR_H_
++
++#include "wx/tracked.h"
++
++template <class T>
++class wxWeakPtr
++{
++public:
++    wxWeakPtr() :
++        data(NULL), counter(NULL)
++    {
++    }
++
++    wxWeakPtr(const wxSharedPtr<T>& r) :
++        data(r.get_data()), counter(r.get_counter())
++    {
++        if (counter != NULL)
++            counter->IncWeakRef();
++    }
++
++    template <class T2>
++    wxWeakPtr(const wxSharedPtr<T2>& r) :
++        data(NULL), counter(NULL)
++    {
++        data = dynamic_cast<T*>(r.get_data());
++        if (data != NULL)
++            counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncWeakRef();
++    }
++
++    wxWeakPtr(const wxWeakPtr<T>& r) :
++        data(r.get_data()), counter(r.get_counter())
++    {
++        if (counter != NULL)
++            counter->IncWeakRef();
++    }
++
++    template <class T2>
++    wxWeakPtr(const wxWeakPtr<T2>& r) :
++        data(NULL), counter(NULL)
++    {
++        data = dynamic_cast<T*>(r.get_data());
++        if (data != NULL)
++            counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncWeakRef();
++    }
++
++    ~wxWeakPtr()
++    {
++        if (counter != NULL)
++        {
++            counter->DecWeakRef();
++            counter = NULL;
++        }
++        data = NULL;
++    }
++
++    wxWeakPtr<T>& operator = (const wxSharedPtr<T>& r)
++    {
++        if (counter != NULL)
++        {
++            counter->DecWeakRef();
++            counter = NULL;
++        }
++
++        data = r.get_data();
++        counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncWeakRef();
++
++        return *this;
++    }
++
++    template <class T2>
++    wxWeakPtr<T>& operator = (const wxSharedPtr<T2>& r)
++    {
++        if (counter != NULL)
++        {
++            counter->DecWeakRef();
++            counter = NULL;
++        }
++
++        data = dynamic_cast<T*>(r.get_data());
++        if (data != NULL)
++            counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncWeakRef();
++
++        return *this;
++    }
++
++    wxWeakPtr<T>& operator = (const wxWeakPtr<T>& r)
++    {
++        if (counter != NULL)
++        {
++            counter->DecWeakRef();
++            counter = NULL;
++        }
++
++        data = r.get_data();
++        counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncWeakRef();
++
++        return *this;
++    }
++
++    template <class T2>
++    wxWeakPtr<T>& operator = (const wxWeakPtr<T2>& r)
++    {
++        if (counter != NULL)
++        {
++            counter->DecWeakRef();
++            counter = NULL;
++        }
++
++        data = dynamic_cast<T*>(r.get_data());
++        if (data != NULL)
++            counter = r.get_counter();
++        if (counter != NULL)
++            counter->IncWeakRef();
++
++        return *this;
++    }
++
++    wxInt32 GetRefCount() const
++    {
++        if (counter == NULL)
++            return 0;
++        return counter->GetRefCount();
++    }
++
++    void Reset()
++    {
++        if (counter != NULL)
++        {
++            counter->DecWeakRef();
++            counter = NULL;
++        }
++        data = NULL;
++    }
++
++    void Reset(const wxSharedPtr<T>* r)
++    {
++        Reset();
++        if (r != NULL)
++        {
++            counter = r->get_counter();
++            data = r->data;
++        }
++        if (counter != NULL)
++            counter->IncWeakRef();
++    }
++
++    bool expired() const
++    {
++        return counter == NULL || !counter->IsRef();
++    }
++
++    T* get_data() const
++    {
++        return data;
++    }
++
++    wxShareCounter* get_counter() const
++    {
++        return counter;
++    }
++
++    operator bool () const
++    {
++        if (counter == NULL || !counter->IsRef())
++            return false;
++        return data != NULL;
++    }
++
++    bool operator !() const
++    {
++        if (counter == NULL || !counter->IsRef())
++            return true;
++        return data == NULL;
++    }
++
++    bool operator == (const wxWeakPtr<T>& r) const
++    {
++        return counter == r.get_counter();
++    }
++
++    bool operator == (const wxSharedPtr<T>& r) const
++    {
++        return counter == r.get_counter();
++    }
++
++    bool operator != (const wxWeakPtr<T>& r) const
++    {
++        return counter != r.get_counter();
++    }
++
++    bool operator != (const wxSharedPtr<T>& r) const
++    {
++        return counter != r.get_counter();
++    }
++
++    bool operator < (const wxSharedPtr<T>& r) const
++    {
++        return counter < r.get_counter();
++    }
++
++    bool operator < (const wxWeakPtr<T>& r) const
++    {
++        return counter < r.get_counter();
++    }
++
++    bool operator <= (const wxSharedPtr<T>& r) const
++    {
++        return counter <= r.get_counter();
++    }
++
++    bool operator <= (const wxWeakPtr<T>& r) const
++    {
++        return counter <= r.get_counter();
++    }
++
++    bool operator > (const wxSharedPtr<T>& r) const
++    {
++        return counter > r.get_counter();
++    }
++
++    bool operator > (const wxWeakPtr<T>& r) const
++    {
++        return counter > r.get_counter();
++    }
++
++    bool operator >= (const wxSharedPtr<T>& r) const
++    {
++        return counter >= r.get_counter();
++    }
++
++    bool operator >= (const wxWeakPtr<T>& r) const
++    {
++        return counter >= r.get_counter();
++    }
++
++    wxSharedPtr<T> lock() const
++    {
++        return wxSharedPtr<T>(data, counter);
++    }
++
++private:
++    T*              data;
++    wxShareCounter* counter;
++};
++
++#endif // _WX_WEAK_PTR_H_
++
+diff --git a/src/common/object.cpp b/src/common/object.cpp
+index fbcd276..ed7b0e6 100644
+--- a/src/common/object.cpp
++++ b/src/common/object.cpp
+@@ -428,3 +428,6 @@ wxObject::CloneRefData(const wxObjectRefData * WXUNUSED(data)) const
+ 
+     return NULL;
+ }
++
++#include "wx/shared_ctr.h"
++#include "shared_ctr.cpp"
+diff --git a/src/common/shared_ctr.cpp b/src/common/shared_ctr.cpp
+new file mode 100644
+index 0000000..83efde0
+--- /dev/null
++++ b/src/common/shared_ctr.cpp
+@@ -0,0 +1,91 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        src/common/shared_ctr.cpp
++// Purpose:     Counter class used to keep track of weak/strong reference
++// Author:      Marius Luca
++// Created:     26 June 11
++// RCS-ID:      $Id$
++// Copyright:   (c) 2011 Marius Luca
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#ifndef WX_PRECOMP
++    #include "wx/shared_ctr.h"
++#endif
++
++wxShareCounter::wxShareCounter()
++    : m_count(1), m_weak_count(1)
++{
++}
++
++wxInt32 wxShareCounter::GetRefCount() const
++{
++    return m_count;
++}
++
++bool wxShareCounter::IsRef() const
++{
++    return m_count > 0;
++}
++
++void wxShareCounter::IncRef()
++{
++    wxAtomicInc(m_count);
++}
++
++bool wxShareCounter::IncRefLock()
++{
++    for( ;; )
++    {
++        wxInt32 tmp = static_cast< wxInt32 const volatile& >(m_count);
++        if( tmp == 0 )
++            return false;
++        if(wxAtomicCompAndSwap(m_count, tmp, tmp + 1))
++            return true;
++    }
++}
++
++bool wxShareCounter::DecRef()
++{
++    wxAtomicDec(m_count);
++    if (m_count == 0)
++    {
++        wxAtomicDec(m_weak_count);
++        if (m_weak_count == 0)
++            delete this;
++        return true;
++    }
++    return false;
++}
++
++wxInt32 wxShareCounter::GetWeakRefCount() const
++{
++    return m_weak_count;
++}
++
++bool wxShareCounter::IsWeakRef() const
++{
++    return m_weak_count > 0;
++}
++
++void wxShareCounter::IncWeakRef()
++{
++    wxAtomicInc(m_weak_count);
++}
++
++bool wxShareCounter::DecWeakRef()
++{
++    wxAtomicInc(m_weak_count);
++    if (m_weak_count == 0)
++    {
++        delete this;
++        return true;
++    }
++    return false;
++}
+-- 
+1.7.6.msysgit.0
+

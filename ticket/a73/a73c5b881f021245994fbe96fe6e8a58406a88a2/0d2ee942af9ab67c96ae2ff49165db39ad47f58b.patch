@@ -1,0 +1,89 @@
+From 0ac1a5c96a983ae62f68b00596f4cc9ea6a90722 Mon Sep 17 00:00:00 2001
+From: Richard Young <young@abvent.fr>
+Date: Sun, 21 Jun 2015 11:54:57 +0000
+Subject: [PATCH] Control Shutdown/Close by atomic function.
+
+---
+ include/wx/private/socket.h |  4 ++++
+ src/common/socket.cpp       | 19 ++++++++++++++-----
+ 2 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/include/wx/private/socket.h b/include/wx/private/socket.h
+index 973b764..2eb28e5 100644
+--- a/include/wx/private/socket.h
++++ b/include/wx/private/socket.h
+@@ -62,6 +62,9 @@
+ // with sockets so we need to include winsock.h which we do via windows.h
+ #ifdef __WINDOWS__
+     #include "wx/msw/wrapwin.h"
++    #ifndef SHUT_WR
++        #define SHUT_WR SD_SEND
++    #endif
+ #else
+     #include <sys/time.h>   // for timeval
+ #endif
+@@ -289,6 +292,7 @@ public:
+     //       them that wxSocketBase really needs
+ //protected:
+     wxSOCKET_T m_fd;
++    wxUint32 m_atomic_shutdown;
+ 
+     int m_initialRecvBufferSize;
+     int m_initialSendBufferSize;
+diff --git a/src/common/socket.cpp b/src/common/socket.cpp
+index 3c7df16..d2f23ad 100644
+--- a/src/common/socket.cpp
++++ b/src/common/socket.cpp
+@@ -48,6 +48,8 @@
+ #include "wx/private/fd.h"
+ #include "wx/private/socket.h"
+ 
++#include "wx/atomic.h"
++
+ #ifdef __UNIX__
+     #include <errno.h>
+ #endif
+@@ -307,6 +309,7 @@ wxSocketImpl::wxSocketImpl(wxSocketBase& wxsocket)
+     : m_wxsocket(&wxsocket)
+ {
+     m_fd              = INVALID_SOCKET;
++    m_atomic_shutdown = 1;
+     m_error           = wxSOCKET_NOERROR;
+     m_server          = false;
+     m_stream          = true;
+@@ -559,6 +562,8 @@ wxSocketImpl *wxSocketImpl::Accept(wxSocketBase& wxsocket)
+ 
+ void wxSocketImpl::Close()
+ {
++    if (m_atomic_shutdown != 0)
++        printf("wxSocketImpl::Shutdown - Close called before shutdown\n");
+     if ( m_fd != INVALID_SOCKET )
+     {
+         DoClose();
+@@ -568,14 +573,18 @@ void wxSocketImpl::Close()
+ 
+ void wxSocketImpl::Shutdown()
+ {
+-    int t_fd = m_fd;
+     if ( m_fd != INVALID_SOCKET )
+     {
++        if (wxAtomicDec(m_atomic_shutdown) != 0)
++        {
++            printf("wxSocketImpl::Shutdown - Already called before\n");
++            return;
++        }
+         if (shutdown(m_fd, SHUT_WR) == -1) {
+-            wxLogTrace( wxTRACE_Socket, wxT("*** shutdown() failed err=%d"), errno );
+-            if (m_fd != t_fd) {
+-                wxLogTrace( wxTRACE_Socket, wxT("Socket changed: was=%d now=%d"), t_fd, m_fd );
+-            }
++            if (m_fd == INVALID_SOCKET)
++                printf("wxSocketImpl::Shutdown - socket closed before shutdown() completed err=%d\n", errno );
++            else
++                printf("wxSocketImpl::Shutdown - shutdown() err=%d\n", errno );
+         }
+         Close();
+     }
+-- 
+2.3.2 (Apple Git-55)
+

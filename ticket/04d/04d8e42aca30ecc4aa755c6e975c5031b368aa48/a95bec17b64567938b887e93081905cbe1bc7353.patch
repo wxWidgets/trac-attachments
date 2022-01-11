@@ -1,0 +1,273 @@
+diff --git a/include/wx/ribbon/bar.h b/include/wx/ribbon/bar.h
+index 78c272a488..9dcbb04488 100644
+--- a/include/wx/ribbon/bar.h
++++ b/include/wx/ribbon/bar.h
+@@ -15,6 +15,8 @@
+ 
+ #if wxUSE_RIBBON
+ 
++class wxImageList;
++
+ #include "wx/ribbon/control.h"
+ #include "wx/ribbon/page.h"
+ 
+@@ -152,6 +154,13 @@ public:
+ 
+     void HideIfExpanded();
+ 
++    void UseImageList(bool useImageList = true) { m_useImageList = useImageList; }
++    bool UsesImageList() const { return m_useImageList; }
++    // Implementation only.
++    wxImageList* GetButtonImageList(wxSize* isize = NULL);
++    // Implementation only.
++    wxImageList* GetButtonSmallImageList(wxSize* isize = NULL);
++
+ protected:
+     friend class wxRibbonPage;
+ 
+@@ -208,6 +217,10 @@ protected:
+ 
+     wxRibbonDisplayMode m_ribbon_state;
+ 
++    bool m_useImageList;
++    wxImageList* m_buttonImageList;
++    wxImageList* m_buttonSmallImageList;
++
+ #ifndef SWIG
+     wxDECLARE_CLASS(wxRibbonBar);
+     wxDECLARE_EVENT_TABLE();
+diff --git a/include/wx/ribbon/buttonbar.h b/include/wx/ribbon/buttonbar.h
+index bc54379261..e4bccc185f 100644
+--- a/include/wx/ribbon/buttonbar.h
++++ b/include/wx/ribbon/buttonbar.h
+@@ -213,6 +213,7 @@ protected:
+     bool m_layouts_valid;
+     bool m_lock_active_state;
+     bool m_show_tooltips_for_disabled;
++    wxRibbonBar* m_ownerRibbonBar;
+ 
+ #ifndef SWIG
+     wxDECLARE_CLASS(wxRibbonButtonBar);
+diff --git a/interface/wx/ribbon/bar.h b/interface/wx/ribbon/bar.h
+index 615d07e30b..f059828e97 100644
+--- a/interface/wx/ribbon/bar.h
++++ b/interface/wx/ribbon/bar.h
+@@ -453,4 +453,26 @@ public:
+         Also calls wxRibbonPage::Realize() on each child page.
+     */
+     virtual bool Realize();
++    
++    /**
++        If the ribbon bar has many buttons, wxImageList can be used to reduce
++        bitmap resources. Call SetUseImageList after creating the ribbon bar,
++        and any subsequent AddButton or InsertButton calls will have their
++        images stored in an image list instead. Note that the conversion might
++        cause some images created from icons with alpha layers to have a black
++        background. Such images need to be edited before use.
++
++        @since 3.1.4
++    */
++    void UseImageList(bool useImageList = true);
++    
++    /**
++        Returns whether a wxImageList is being used for buttons.
++
++        @see SetUseImageList()
++
++        @since 3.1.4
++    */
++    bool UsesImageList() const;
++    
+ };
+diff --git a/src/ribbon/bar.cpp b/src/ribbon/bar.cpp
+index bb53511cf5..8ed66a313f 100644
+--- a/src/ribbon/bar.cpp
++++ b/src/ribbon/bar.cpp
+@@ -30,6 +30,7 @@
+ #endif
+ 
+ #include "wx/arrimpl.cpp"
++#include "wx/imaglist.h"
+ 
+ WX_DEFINE_USER_EXPORTED_OBJARRAY(wxRibbonPageTabInfoArray)
+ 
+@@ -735,6 +736,10 @@ wxRibbonBar::wxRibbonBar()
+     m_tab_scroll_buttons_shown = false;
+     m_arePanelsShown = true;
+     m_help_button_hovered = false;
++    m_useImageList = false;
++    m_buttonImageList = NULL;
++    m_buttonSmallImageList = NULL;
++
+ }
+ 
+ wxRibbonBar::wxRibbonBar(wxWindow* parent,
+@@ -750,6 +755,14 @@ wxRibbonBar::wxRibbonBar(wxWindow* parent,
+ wxRibbonBar::~wxRibbonBar()
+ {
+     SetArtProvider(NULL);
++    if (m_buttonImageList)
++       {
++       delete m_buttonImageList; m_buttonImageList = NULL;
++       }
++    if (m_buttonSmallImageList)
++       {
++       delete m_buttonSmallImageList; m_buttonSmallImageList = NULL;
++       }
+ }
+ 
+ bool wxRibbonBar::Create(wxWindow* parent,
+@@ -798,6 +811,28 @@ void wxRibbonBar::CommonInit(long style)
+     m_bar_hovered = false;
+ 
+     m_ribbon_state = wxRIBBON_BAR_PINNED;
++
++    m_useImageList = false;
++    m_buttonImageList = NULL;
++    m_buttonSmallImageList = NULL;
++}
++
++wxImageList* wxRibbonBar::GetButtonImageList(wxSize* isize)
++{
++    if (m_useImageList && m_buttonImageList == NULL)
++    {
++        m_buttonImageList = new wxImageList(isize->GetWidth(), isize->GetHeight(), /*mask*/false);
++    }
++    return m_buttonImageList;
++}
++
++wxImageList* wxRibbonBar::GetButtonSmallImageList(wxSize* isize)
++{
++    if (m_useImageList && m_buttonSmallImageList == NULL)
++    {
++        m_buttonSmallImageList = new wxImageList(isize->GetWidth(), isize->GetHeight(), /*mask*/false);
++    }
++    return m_buttonSmallImageList;
+ }
+ 
+ void wxRibbonBar::SetArtProvider(wxRibbonArtProvider* art)
+diff --git a/src/ribbon/buttonbar.cpp b/src/ribbon/buttonbar.cpp
+index 17cbd00827..473e3ac21d 100644
+--- a/src/ribbon/buttonbar.cpp
++++ b/src/ribbon/buttonbar.cpp
+@@ -20,6 +20,7 @@
+ #include "wx/ribbon/buttonbar.h"
+ #include "wx/ribbon/art.h"
+ #include "wx/dcbuffer.h"
++#include "wx/imaglist.h"
+ 
+ #ifndef WX_PRECOMP
+ #endif
+@@ -127,6 +128,8 @@ public:
+     wxBitmap bitmap_small;
+     wxBitmap bitmap_small_disabled;
+     wxCoord text_min_width[3];
++    wxCoord barButtonImageListPos;
++    int barButtonSmallImageListPos;
+     wxRibbonButtonBarButtonSizeInfo sizes[3];
+     wxRibbonButtonBarButtonState min_size_class;
+     wxRibbonButtonBarButtonState max_size_class;
+@@ -344,6 +347,31 @@ wxRibbonButtonBarButtonBase* wxRibbonButtonBar::InsertButton(
+     base->text_min_width[2] = 0;
+     base->min_size_class = wxRIBBON_BUTTONBAR_BUTTON_SMALL;
+     base->max_size_class = wxRIBBON_BUTTONBAR_BUTTON_LARGE;
++    
++    wxImageList* buttonImageList = NULL;
++    wxImageList* buttonSmallImageList = NULL;
++    if (m_ownerRibbonBar)
++        {
++        buttonImageList = m_ownerRibbonBar->GetButtonImageList(&m_bitmap_size_large);
++        buttonSmallImageList = m_ownerRibbonBar->GetButtonSmallImageList(&m_bitmap_size_small);
++        }
++    if (base->bitmap_large.IsOk() && buttonImageList)
++    {
++        base->barButtonImageListPos = buttonImageList->Add(base->bitmap_large);
++        base->bitmap_large = wxNullBitmap;
++        buttonImageList->Add(base->bitmap_large_disabled);
++        base->bitmap_large_disabled = wxNullBitmap;
++
++        base->barButtonSmallImageListPos = buttonSmallImageList->Add(base->bitmap_small);
++        base->bitmap_small = wxNullBitmap;
++        buttonSmallImageList->Add(base->bitmap_small_disabled);
++        base->bitmap_small_disabled = wxNullBitmap;
++    }
++    else
++    {
++        base->barButtonImageListPos = -1;
++        base->barButtonSmallImageListPos = -1;
++    }
+ 
+     wxClientDC temp_dc(this);
+     FetchButtonSizeInfo(base, wxRIBBON_BUTTONBAR_BUTTON_SMALL, temp_dc);
+@@ -851,19 +879,41 @@ void wxRibbonButtonBar::OnPaint(wxPaintEvent& WXUNUSED(evt))
+     {
+         wxRibbonButtonBarButtonInstance& button = layout->buttons.Item(btn_i);
+         wxRibbonButtonBarButtonBase* base = button.base;
++        wxRect rect(button.position + m_layout_offset, base->sizes[button.size].size);
++        if (base->barButtonImageListPos != -1 && m_ownerRibbonBar)
++        {
++            wxImageList* buttonImageList = m_ownerRibbonBar->GetButtonImageList();
++            wxImageList* buttonSmallImageList = m_ownerRibbonBar->GetButtonSmallImageList();
+ 
+-        wxBitmap* bitmap = &base->bitmap_large;
+-        wxBitmap* bitmap_small = &base->bitmap_small;
+-        if(base->state & wxRIBBON_BUTTONBAR_BUTTON_DISABLED)
++            wxBitmap bitmap;
++            wxBitmap bitmap_small;
++            if (base->state & wxRIBBON_BUTTONBAR_BUTTON_DISABLED)
++            {
++                bitmap = buttonImageList->GetBitmap(base->barButtonImageListPos+1);
++                bitmap_small = buttonSmallImageList->GetBitmap(base->barButtonSmallImageListPos+1);
++            }
++            else
++            {
++                bitmap = buttonImageList->GetBitmap(base->barButtonImageListPos);
++                bitmap_small = buttonSmallImageList->GetBitmap(base->barButtonSmallImageListPos);
++            }
++           m_art->DrawButtonBarButton(dc, this, rect, base->kind,
++              base->state | button.size, base->label, bitmap, bitmap_small);
++        }
++        else
+         {
+-            bitmap = &base->bitmap_large_disabled;
+-            bitmap_small = &base->bitmap_small_disabled;
++            wxBitmap* bitmap = &base->bitmap_large;
++            wxBitmap* bitmap_small = &base->bitmap_small;
++            if(base->state & wxRIBBON_BUTTONBAR_BUTTON_DISABLED)
++            {
++                bitmap = &base->bitmap_large_disabled;
++                bitmap_small = &base->bitmap_small_disabled;
++            }
++            m_art->DrawButtonBarButton(dc, this, rect, base->kind,
++                base->state | button.size, base->label, *bitmap, *bitmap_small);
+         }
+-        wxRect rect(button.position + m_layout_offset, base->sizes[button.size].size);
+ 
+-        m_art->DrawButtonBarButton(dc, this, rect, base->kind,
+-            base->state | button.size, base->label, *bitmap, *bitmap_small);
+-    }
++     }
+ }
+ 
+ void wxRibbonButtonBar::OnSize(wxSizeEvent& evt)
+@@ -889,6 +939,20 @@ void wxRibbonButtonBar::OnSize(wxSizeEvent& evt)
+ 
+ void wxRibbonButtonBar::CommonInit(long WXUNUSED(style))
+ {
++    //Our ultimate parent MAY be a ribbon bar, in which case
++    //we can use its image list.
++    m_ownerRibbonBar = NULL;
++    wxWindow* pWin = GetParent();
++    while (pWin)
++    {
++        m_ownerRibbonBar = dynamic_cast<wxRibbonBar*>(pWin);
++        if (m_ownerRibbonBar)
++        {
++            break;
++        }
++        pWin = pWin->GetParent();
++    }
++
+     m_bitmap_size_large = wxSize(32, 32);
+     m_bitmap_size_small = wxSize(16, 16);
+ 

@@ -1,0 +1,171 @@
+commit e3cee06dda3eae17015d5a952663cf66857ef8d9
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Fri Aug 21 17:59:25 2009 +0200
+
+    wxSocket::Initialize() and Shutdown() are for main thread only.
+    
+    Calling Initialize() from another thread could never work before but it wasn't
+    clear that this was the case so document it in the functions comments and
+    documentation now and add asserts checking that they are called from the main
+    thread only.
+    
+    Also simplify the code as we don't actually need to do any reference-counting
+    here and a simple boolean flag indicating whether the sockets are initialized
+    is enough.
+    
+    Closes #11119.
+
+diff --git a/include/wx/socket.h b/include/wx/socket.h
+index e6b11b1..e978b5c 100644
+--- a/include/wx/socket.h
++++ b/include/wx/socket.h
+@@ -179,11 +179,21 @@ public:
+     void SetNotify(wxSocketEventFlags flags);
+     void Notify(bool notify);
+ 
+-    // initialize/shutdown the sockets (usually called automatically)
+-    static bool IsInitialized();
++    // initialize/shutdown the sockets (done automatically so there is no need
++    // to call these functions usually)
++    //
++    // should always be called from the main thread only so one of the cases
++    // where they should indeed be called explicitly is when the first wxSocket
++    // object in the application is created in a different thread
+     static bool Initialize();
+     static void Shutdown();
+ 
++    // check if wxSocket had been already initialized
++    //
++    // notice that this function should be only called from the main thread as
++    // otherwise it is inherently unsafe because Initialize/Shutdown() may be
++    // called concurrently with it in the main thread
++    static bool IsInitialized();
+ 
+     // Implementation from now on
+     // --------------------------
+@@ -264,9 +274,6 @@ private:
+     wxSocketEventFlags  m_eventmask;  // which events to notify?
+     wxSocketEventFlags  m_eventsgot;  // collects events received in OnRequest()
+ 
+-    // the initialization count, wxSocket is initialized if > 0
+-    static size_t m_countInit;
+-
+ 
+     friend class wxSocketReadGuard;
+     friend class wxSocketWriteGuard;
+diff --git a/interface/wx/socket.h b/interface/wx/socket.h
+index a0ada83..b3b6837 100644
+--- a/interface/wx/socket.h
++++ b/interface/wx/socket.h
+@@ -710,6 +710,8 @@ public:
+         does anything) but you must call Shutdown() exactly once for every call
+         to Initialize().
+ 
++        This function should only be called from the main thread.
++
+         @return
+             @true if the sockets can be used, @false if the initialization
+             failed and sockets are not available at all.
+@@ -721,6 +723,9 @@ public:
+ 
+         This function undoes the call to Initialize() and must be called after
+         every successful call to Initialize().
++
++        This function should only be called from the main thread, just as
++        Initialize().
+      */
+     static void Shutdown();
+ 
+diff --git a/src/common/socket.cpp b/src/common/socket.cpp
+index 7e1aafd..fb18c2e 100644
+--- a/src/common/socket.cpp
++++ b/src/common/socket.cpp
+@@ -750,26 +750,33 @@ int wxSocketImpl::Write(const void *buffer, int size)
+ // Initialization and shutdown
+ // --------------------------------------------------------------------------
+ 
+-// FIXME-MT: all this is MT-unsafe, of course, we should protect all accesses
+-//           to m_countInit with a crit section
+-size_t wxSocketBase::m_countInit = 0;
++namespace
++{
++
++// flag indicating whether wxSocketManager was already initialized
++bool gs_socketInitDone = false;
++
++} // anonymous namespace
+ 
+ bool wxSocketBase::IsInitialized()
+ {
+-    return m_countInit > 0;
++    wxASSERT_MSG( wxIsMainThread(), "unsafe to call from other threads" );
++
++    return gs_socketInitDone;
+ }
+ 
+ bool wxSocketBase::Initialize()
+ {
+-    if ( !m_countInit++ )
++    wxCHECK_MSG( wxIsMainThread(), false,
++                 "must be called from the main thread" );
++
++    if ( !gs_socketInitDone )
+     {
+         wxSocketManager * const manager = wxSocketManager::Get();
+         if ( !manager || !manager->OnInit() )
+-        {
+-            m_countInit--;
+-
+             return false;
+-        }
++
++        gs_socketInitDone = true;
+     }
+ 
+     return true;
+@@ -777,15 +784,16 @@ bool wxSocketBase::Initialize()
+ 
+ void wxSocketBase::Shutdown()
+ {
+-    // we should be initialized
+-    wxASSERT_MSG( m_countInit > 0, wxT("extra call to Shutdown()") );
+-    if ( --m_countInit == 0 )
+-    {
+-        wxSocketManager * const manager = wxSocketManager::Get();
+-        wxCHECK_RET( manager, "should have a socket manager" );
++    wxCHECK_RET( wxIsMainThread(), "must be called from the main thread" );
+ 
+-        manager->OnExit();
+-    }
++    wxCHECK_RET( gs_socketInitDone, "unnecessary call to Shutdown()" );
++
++    gs_socketInitDone = false;
++
++    wxSocketManager * const manager = wxSocketManager::Get();
++    wxCHECK_RET( manager, "should have a socket manager" );
++
++    manager->OnExit();
+ }
+ 
+ // --------------------------------------------------------------------------
+@@ -821,13 +829,15 @@ void wxSocketBase::Init()
+     m_eventmask    =
+     m_eventsgot    = 0;
+ 
+-    if ( !IsInitialized() )
++    // when we create the first socket in the main thread we initialize the
++    // OS-dependent socket stuff: notice that this means that the user code
++    // needs to call wxSocket::Initialize() itself if the first socket it
++    // creates is not created in the main thread
++    if ( wxIsMainThread() )
+     {
+-        // this Initialize() will be undone by wxSocketModule::OnExit(), all
+-        // the other calls to it should be matched by a call to Shutdown()
+-        if (!Initialize())
++        if ( !Initialize() )
+         {
+-            wxLogError("Cannot initialize wxSocketBase");
++            wxLogError(_("Cannot initialize sockets"));
+         }
+     }
+ }

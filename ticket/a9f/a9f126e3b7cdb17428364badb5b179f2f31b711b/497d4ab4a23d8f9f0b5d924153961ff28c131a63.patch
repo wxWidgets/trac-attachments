@@ -1,0 +1,120 @@
+diff --git a/include/wx/generic/private/widthcalc.h b/include/wx/generic/private/widthcalc.h
+index cacfbf85f0..7221acedc5 100644
+--- a/include/wx/generic/private/widthcalc.h
++++ b/include/wx/generic/private/widthcalc.h
+@@ -26,7 +26,8 @@ public:
+     // column of which calculate the width
+     explicit wxMaxWidthCalculatorBase(size_t column)
+         : m_column(column),
+-          m_width(0)
++          m_width(0),
++          m_height(0)
+     {
+     }
+ 
+@@ -35,10 +36,16 @@ public:
+         m_width = wxMax(m_width, width);
+     }
+ 
++    void UpdateWithHeight(int height)
++    {
++        m_height = wxMax(m_height, height);
++    }
++
+     // Update the max with for the expected row
+     virtual void UpdateWithRow(int row) = 0;
+ 
+     int GetMaxWidth() const { return m_width; }
++    int GetMaxHeight() const { return m_height; }
+     size_t GetColumn() const { return m_column; }
+ 
+     void
+@@ -114,6 +121,7 @@ public:
+ private:
+     const size_t m_column;
+     int m_width;
++    int m_height;
+ 
+     wxDECLARE_NO_COPY_CLASS(wxMaxWidthCalculatorBase);
+ };
+diff --git a/src/common/datavcmn.cpp b/src/common/datavcmn.cpp
+index 1f5fd4d66b..37b3bedb76 100644
+--- a/src/common/datavcmn.cpp
++++ b/src/common/datavcmn.cpp
+@@ -1074,17 +1074,22 @@ wxDataViewCustomRendererBase::RenderText(const wxString& text,
+     if ( !(GetOwner()->GetOwner()->IsEnabled() && GetEnabled()) )
+         flags |= wxCONTROL_DISABLED;
+ 
+-    // Notice that we intentionally don't use any alignment here: it is not
+-    // necessary because the cell rectangle had been already adjusted to
+-    // account for the alignment in WXCallRender() and using the alignment here
+-    // results in problems with ellipsization when using native MSW renderer,
+-    // see https://trac.wxwidgets.org/ticket/17363, so just don't do it.
++    // Notice that we intentionally don't use horizontal alignment here: it is
++    // not necessary because the cell rectangle had been already adjusted to
++    // account for horizontal alignment in WXCallRender() and using horizontal
++    // alignment here results in problems with ellipsization when using native
++    // MSW renderer, see https://trac.wxwidgets.org/ticket/17363, so just don't
++    // do it.
++    // Vertical alignment is still desired becaus the cell's height doesn't
++    // have to be dictated by text height: it could also contain a taller image
++    // in which case vertical alignment makes a difference and should be taken
++    // into account.
+     wxRendererNative::Get().DrawItemText(
+         GetOwner()->GetOwner(),
+         *dc,
+         text,
+         rectText,
+-        wxALIGN_NOT,
++        GetEffectiveAlignment() & ~(wxALIGN_CENTRE_HORIZONTAL | wxALIGN_RIGHT),
+         flags,
+         GetEllipsizeMode());
+ }
+diff --git a/src/generic/datavgen.cpp b/src/generic/datavgen.cpp
+index 2e47cfbae8..5651167db1 100644
+--- a/src/generic/datavgen.cpp
++++ b/src/generic/datavgen.cpp
+@@ -5952,7 +5952,9 @@ public:
+         }
+ 
+         m_renderer->PrepareForItem(m_model, item, GetColumn());
+-        UpdateWithWidth(m_renderer->GetSize().x + indent);
++        const wxSize size = m_renderer->GetSize();
++        UpdateWithWidth(size.x + indent);
++        UpdateWithHeight(size.y);
+     }
+ 
+ private:
+@@ -5993,6 +5995,12 @@ unsigned int wxDataViewCtrl::GetBestColumnWidth(int idx) const
+     if ( max_width > 0 )
+         max_width += 2 * PADDING_RIGHTLEFT;
+ 
++    const int curHeight = m_clientArea->GetRowHeight();
++    const int rowHeight = calculator.GetMaxHeight();
++    if (rowHeight > curHeight)
++    {
++        const_cast<wxDataViewCtrl*>(this)->SetRowHeight(rowHeight);
++    }
+     const_cast<wxDataViewCtrl*>(this)->m_colsBestWidths[idx].width = max_width;
+     return max_width;
+ }
+diff --git a/src/msw/renderer.cpp b/src/msw/renderer.cpp
+index ba20d13748..371bcd821c 100644
+--- a/src/msw/renderer.cpp
++++ b/src/msw/renderer.cpp
+@@ -1089,8 +1089,13 @@ void wxRendererXP::DrawItemText(wxWindow* win,
+ 
+         if ( align & wxALIGN_BOTTOM )
+             textFlags |= DT_BOTTOM;
+-        else if ( align & wxALIGN_CENTER_VERTICAL )
+-            textFlags |= DT_VCENTER;
++        // [KLUDGE]
++        // DT_VCENTER only works with DT_SINGLELINE, but then multi-lines
++        // don't work (rendered as single-line without EOLs). So only use
++        // use DT_SINGLELINE if there's no newline in the text. This means
++        // vertical alignment for multi-line text isn't used.
++        else if ( align & wxALIGN_CENTER_VERTICAL && !text.Contains(wxS('\n')) )
++            textFlags |= DT_VCENTER | DT_SINGLELINE;
+         else
+             textFlags |= DT_TOP;
+ 

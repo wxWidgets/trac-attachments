@@ -1,0 +1,665 @@
+Index: src/gtk/filedlg.cpp
+===================================================================
+--- src/gtk/filedlg.cpp	(revision 52163)
++++ src/gtk/filedlg.cpp	(working copy)
+@@ -131,6 +131,11 @@
+ 
+ } // extern "C"
+ 
++static void wxInsertChildInFileDialog(wxWindow* WXUNUSED(parent), 
++                                      wxWindow* WXUNUSED(child))
++{
++}
++ 
+ 
+ //-----------------------------------------------------------------------------
+ // wxFileDialog
+@@ -151,6 +156,7 @@
+                            const wxString& name)
+     : wxFileDialogBase()
+ {
++    m_insertCallback = wxInsertChildInFileDialog;
+     parent = GetParentForModalDialog(parent);
+     
+     if (!wxFileDialogBase::Create(parent, message, defaultDir, defaultFileName,
+@@ -276,6 +282,7 @@
+     }
+ }
+ 
++
+ void wxFileDialog::OnFakeOk(wxCommandEvent& WXUNUSED(event))
+ {
+     EndDialog(wxID_OK);
+@@ -283,14 +290,21 @@
+ 
+ int wxFileDialog::ShowModal()
+ {
++    if (CreateExtraControl())
++    {
++        GtkWidget *control = m_extraControl->m_widget;
++
++        // see wxNotebook::InsertPage() for explaination 
++        // why gtk_widget_unparent() is not used here
++        control->parent = NULL;
++
++        gtk_widget_show(control);
++        gtk_file_chooser_set_extra_widget(GTK_FILE_CHOOSER(m_widget), control);
++    }
++
+     return wxDialog::ShowModal();
+ }
+ 
+-bool wxFileDialog::Show( bool show )
+-{
+-    return wxDialog::Show( show );
+-}
+-
+ void wxFileDialog::DoSetSize(int WXUNUSED(x), int WXUNUSED(y), 
+                              int WXUNUSED(width), int WXUNUSED(height), 
+                              int WXUNUSED(sizeFlags))
+Index: src/common/fldlgcmn.cpp
+===================================================================
+--- src/common/fldlgcmn.cpp	(revision 52163)
++++ src/common/fldlgcmn.cpp	(working copy)
+@@ -35,8 +35,10 @@
+ 
+ void wxFileDialogBase::Init()
+ {
+-    m_filterIndex =
++    m_filterIndex = 0;
+     m_windowStyle = 0;
++    m_extraControl = NULL;
++    m_extraControlCreator = NULL;
+ }
+ 
+ bool wxFileDialogBase::Create(wxWindow *parent,
+@@ -149,6 +151,24 @@
+     return filePath + ext;
+ }
+ 
++bool wxFileDialogBase::SetExtraControlCreator(t_extraControlCreator c)
++{
++    if (m_extraControlCreator) {
++        wxFAIL_MSG( wxT("wxFileDialog::SetExtraControl() called second time") );
++        return false;
++    }
++    m_extraControlCreator = c;
++    return this->SupportsExtraControl();
++}
++
++bool wxFileDialogBase::CreateExtraControl()
++{ 
++    if (!m_extraControlCreator || m_extraControl) 
++        return false;
++    m_extraControl = (*m_extraControlCreator)(this); 
++    return true;
++}
++
+ //----------------------------------------------------------------------------
+ // wxFileDialog convenience functions
+ //----------------------------------------------------------------------------
+Index: src/generic/filedlgg.cpp
+===================================================================
+--- src/generic/filedlgg.cpp	(revision 52163)
++++ src/generic/filedlgg.cpp	(working copy)
+@@ -98,7 +98,7 @@
+ #define  ID_LIST_MODE     (wxID_FILEDLGG    )
+ #define  ID_REPORT_MODE   (wxID_FILEDLGG + 1)
+ #define  ID_UP_DIR        (wxID_FILEDLGG + 2)
+-#define  ID_PARENT_DIR    (wxID_FILEDLGG + 3)
++#define  ID_HOME_DIR      (wxID_FILEDLGG + 3)
+ #define  ID_NEW_DIR       (wxID_FILEDLGG + 4)
+ #define  ID_FILE_CTRL     (wxID_FILEDLGG + 5)
+ 
+@@ -108,7 +108,7 @@
+     EVT_BUTTON(ID_LIST_MODE, wxGenericFileDialog::OnList)
+     EVT_BUTTON(ID_REPORT_MODE, wxGenericFileDialog::OnReport)
+     EVT_BUTTON(ID_UP_DIR, wxGenericFileDialog::OnUp)
+-    EVT_BUTTON(ID_PARENT_DIR, wxGenericFileDialog::OnHome)
++    EVT_BUTTON(ID_HOME_DIR, wxGenericFileDialog::OnHome)
+     EVT_BUTTON(ID_NEW_DIR, wxGenericFileDialog::OnNew)
+     EVT_BUTTON(wxID_OK, wxGenericFileDialog::OnOk)
+     EVT_FILECTRL_FILEACTIVATED(ID_FILE_CTRL, wxGenericFileDialog::OnFileActivated)
+@@ -207,54 +207,28 @@
+     wxBoxSizer *mainsizer = new wxBoxSizer( wxVERTICAL );
+ 
+     wxBoxSizer *buttonsizer = new wxBoxSizer( wxHORIZONTAL );
+-
+-    wxBitmapButton *but;
+-
+-    but = new wxBitmapButton(this, ID_LIST_MODE,
+-                             wxArtProvider::GetBitmap(wxART_LIST_VIEW, wxART_BUTTON));
+-#if wxUSE_TOOLTIPS
+-    but->SetToolTip( _("View files as a list view") );
+-#endif
+-    buttonsizer->Add( but, 0, wxALL, 5 );
+-
+-    but = new wxBitmapButton(this, ID_REPORT_MODE,
+-                             wxArtProvider::GetBitmap(wxART_REPORT_VIEW, wxART_BUTTON));
+-#if wxUSE_TOOLTIPS
+-    but->SetToolTip( _("View files as a detailed view") );
+-#endif
+-    buttonsizer->Add( but, 0, wxALL, 5 );
+-
++    AddBitmapButton( ID_LIST_MODE, wxART_LIST_VIEW, 
++                     _("View files as a list view"), buttonsizer );
++    AddBitmapButton( ID_REPORT_MODE, wxART_REPORT_VIEW, 
++                     _("View files as a detailed view"), buttonsizer );
+     buttonsizer->Add( 30, 5, 1 );
++    m_upDirButton = AddBitmapButton( ID_UP_DIR, wxART_GO_DIR_UP, 
++                                     _("Go to parent directory"), buttonsizer );
+ 
+-    m_upDirButton = new wxBitmapButton(this, ID_UP_DIR,
+-                           wxArtProvider::GetBitmap(wxART_GO_DIR_UP, wxART_BUTTON));
+-#if wxUSE_TOOLTIPS
+-    m_upDirButton->SetToolTip( _("Go to parent directory") );
+-#endif
+-    buttonsizer->Add( m_upDirButton, 0, wxALL, 5 );
+-
+ #ifndef __DOS__ // VS: Home directory is meaningless in MS-DOS...
+-    but = new wxBitmapButton(this, ID_PARENT_DIR,
+-                             wxArtProvider::GetBitmap(wxART_GO_HOME, wxART_BUTTON));
+-#if wxUSE_TOOLTIPS
+-    but->SetToolTip( _("Go to home directory") );
+-#endif
+-    buttonsizer->Add( but, 0, wxALL, 5);
+-
++    AddBitmapButton( ID_HOME_DIR, wxART_GO_HOME, 
++                     _("Go to home directory"), buttonsizer );
+     buttonsizer->Add( 20, 20 );
+ #endif //!__DOS__
+ 
+-    m_newDirButton = new wxBitmapButton(this, ID_NEW_DIR,
+-                           wxArtProvider::GetBitmap(wxART_NEW_DIR, wxART_BUTTON));
+-#if wxUSE_TOOLTIPS
+-    m_newDirButton->SetToolTip( _("Create new directory") );
+-#endif
+-    buttonsizer->Add( m_newDirButton, 0, wxALL, 5 );
++    m_newDirButton = AddBitmapButton( ID_NEW_DIR, wxART_NEW_DIR, 
++                                      _("Create new directory"), buttonsizer );
+ 
+     if (is_pda)
+-        mainsizer->Add( buttonsizer, 0, wxALL | wxEXPAND, 0 );
++        mainsizer->Add( buttonsizer, wxSizerFlags().Expand() );
+     else
+-        mainsizer->Add( buttonsizer, 0, wxALL | wxEXPAND, 5 );
++        mainsizer->Add( buttonsizer, wxSizerFlags().Expand()
++                                                   .Border( wxLEFT | wxRIGHT | wxTOP ) );
+ 
+     long style2 = 0;
+     if ( HasFdFlag(wxFD_MULTIPLE) )
+@@ -278,31 +252,21 @@
+         m_filectrl->ChangeToReportMode();
+     }
+ 
+-    if (is_pda)
+-    {
+-        // PDAs have a different screen layout
+-        mainsizer->Add(m_filectrl, wxSizerFlags(1).Expand().HorzBorder());
++    mainsizer->Add(m_filectrl, wxSizerFlags(1).Expand().HorzBorder());
+ 
+-        wxSizer *bsizer = CreateButtonSizer(wxOK | wxCANCEL);
+-        if ( bsizer )
++    wxSizer *bsizer = CreateButtonSizer(wxOK | wxCANCEL);
++    if ( bsizer ) 
++    {
++        if (is_pda)
+             mainsizer->Add(bsizer, wxSizerFlags().Expand().Border());
++        else
++            mainsizer->Add(bsizer, wxSizerFlags().Expand().DoubleBorder());
+     }
+-    else // !is_pda
+-    {
+-        mainsizer->Add(m_filectrl, wxSizerFlags(1).Expand().DoubleHorzBorder());
+ 
+-        wxBoxSizer *okcancelsizer = new wxBoxSizer( wxHORIZONTAL );
+-        okcancelsizer->Add(new wxButton(this, wxID_OK), wxSizerFlags().DoubleBorder().Centre());
+-        okcancelsizer->Add(new wxButton(this, wxID_CANCEL), wxSizerFlags().DoubleBorder().Centre());
+-        mainsizer->Add(okcancelsizer, wxSizerFlags().Center());
+-        }
+-
+-    SetAutoLayout( true );
+     SetSizer( mainsizer );
+ 
+     if (!is_pda)
+     {
+-        mainsizer->Fit( this );
+         mainsizer->SetSizeHints( this );
+ 
+         Centre( wxBOTH );
+@@ -327,8 +291,31 @@
+     }
+ }
+ 
++wxBitmapButton* wxGenericFileDialog::AddBitmapButton( wxWindowID winId, 
++                                                      const wxArtID& artId,
++                                                      const wxString& tip,
++                                                      wxSizer *sizer)
++{
++    wxBitmapButton *but = new wxBitmapButton(this, winId,
++                                         wxArtProvider::GetBitmap(artId, wxART_BUTTON));
++#if wxUSE_TOOLTIPS
++    but->SetToolTip( tip );
++#endif
++    sizer->Add( but, wxSizerFlags().Border() );
++    return but;
++}
++
+ int wxGenericFileDialog::ShowModal()
+ {
++    if (CreateExtraControl()) 
++    {
++        wxSizer *sizer = GetSizer();
++        int index = 2; // after m_filectrl 
++        sizer->Insert(index, m_extraControl, 
++                      wxSizerFlags().Expand().HorzBorder());
++        sizer->Fit(this);
++    }
++
+     m_filectrl->SetDirectory(m_dir);
+ 
+     return wxDialog::ShowModal();
+Index: src/generic/filectrlg.cpp
+===================================================================
+--- src/generic/filectrlg.cpp	(revision 52163)
++++ src/generic/filectrlg.cpp	(working copy)
+@@ -912,6 +912,7 @@
+     this->m_style = style;
+     m_inSelected = false;
+     m_noSelChgEvent = false;
++    m_check = NULL;
+ 
+     // check that the styles are not contradictory
+     wxASSERT_MSG( !( ( m_style & wxFC_SAVE ) && ( m_style & wxFC_OPEN ) ),
+@@ -947,10 +948,11 @@
+ 
+     wxBoxSizer *staticsizer = new wxBoxSizer( wxHORIZONTAL );
+     if ( is_pda )
+-        staticsizer->Add( new wxStaticText( this, wxID_ANY, _( "Current directory:" ) ), 0, wxRIGHT, 10 );
++        staticsizer->Add( new wxStaticText( this, wxID_ANY, _( "Current directory:" ) ), 
++                          wxSizerFlags().DoubleBorder(wxRIGHT) );
+     m_static = new wxStaticText( this, wxID_ANY, m_dir );
+     staticsizer->Add( m_static, 1 );
+-    mainsizer->Add( staticsizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10 );
++    mainsizer->Add( staticsizer, wxSizerFlags().Expand().Border());
+ 
+     long style2 = wxLC_LIST;
+     if ( !( m_style & wxFC_MULTIPLE ) )
+@@ -979,33 +981,25 @@
+ 
+         wxBoxSizer *textsizer = new wxBoxSizer( wxHORIZONTAL );
+         textsizer->Add( m_text, wxSizerFlags( 1 ).Centre().Border() );
++        textsizer->Add( m_choice, wxSizerFlags( 1 ).Centre().Border() );
+         mainsizer->Add( textsizer, wxSizerFlags().Expand() );
+ 
+-        m_check = NULL;
+-        textsizer->Add( m_choice, wxSizerFlags( 1 ).Centre().Border() );
+     }
+     else // !is_pda
+     {
+-        mainsizer->Add( m_list, wxSizerFlags( 1 ).Expand().DoubleHorzBorder() );
++        mainsizer->Add( m_list, wxSizerFlags( 1 ).Expand().Border() );
++        mainsizer->Add( m_text, wxSizerFlags().Expand().Border() );
+ 
+-        wxBoxSizer *textsizer = new wxBoxSizer( wxHORIZONTAL );
+-        textsizer->Add( m_text, wxSizerFlags( 1 ).Centre().
+-                        DoubleBorder( wxLEFT | wxRIGHT | wxTOP ) );
+-        mainsizer->Add( textsizer, wxSizerFlags().Expand() );
+-
+-        wxSizerFlags flagsCentre;
+-        flagsCentre.Centre().DoubleBorder();
+-
+         wxBoxSizer *choicesizer = new wxBoxSizer( wxHORIZONTAL );
+-        choicesizer->Add( m_choice, wxSizerFlags( flagsCentre ).Proportion( 1 ) );
++        choicesizer->Add( m_choice, wxSizerFlags( 1 ).Centre() );
+ 
+         if ( !( m_style & wxFC_NOSHOWHIDDEN ) )
+-            {
++        {
+             m_check = new wxCheckBox( this, ID_CHECK, _( "Show &hidden files" ) );
+-            choicesizer->Add( m_check, flagsCentre );
+-            }
++            choicesizer->Add( m_check, wxSizerFlags().Centre().DoubleBorder(wxLEFT) );
++        }
+ 
+-        mainsizer->Add( choicesizer, wxSizerFlags().Expand() );
++        mainsizer->Add( choicesizer, wxSizerFlags().Expand().Border() );
+     }
+ 
+     SetWildcard( wildCard );
+Index: docs/latex/wx/filedlg.tex
+===================================================================
+--- docs/latex/wx/filedlg.tex	(revision 52163)
++++ docs/latex/wx/filedlg.tex	(working copy)
+@@ -116,6 +116,15 @@
+ 
+ Returns the default directory.
+ 
++\membersection{wxFileDialog::GetExtraControl}\label{wxfiledialoggetextracontrol}
++
++\constfunc{wxWindow* }{GetExtraControl}{\void}
++
++If functions 
++\helpref{SetExtraControlCreator}{wxfiledialogsetextracontrolcreator} 
++and \helpref{ShowModal}{wxfiledialogshowmodal} were called, 
++returns the extra window. Otherwise returns {\tt NULL}.
++
+ \membersection{wxFileDialog::GetFilename}\label{wxfiledialoggetfilename}
+ 
+ \constfunc{wxString}{GetFilename}{\void}
+@@ -175,6 +184,26 @@
+ 
+ Sets the default directory.
+ 
++\membersection{wxFileDialog::SetExtraControlCreator}\label{wxfiledialogsetextracontrolcreator}
++
++\begin{verbatim}
++typedef wxWindow* (*t_extraControlCreator)(wxWindow*);
++\end{verbatim}
++\func{bool}{SetExtraControlCreator}{\param{t\_extraControlCreator }{creator}}
++
++Customize file dialog by adding extra window, which is typically placed
++below the list of files and above the buttons.
++
++SetExtraControlCreator can be called only once, before calling 
++\helpref{ShowModal}{wxfiledialogshowmodal}.
++The {\tt creator} function should take pointer to parent window (file dialog)
++and should return a window allocated with operator new.
++
++Supported platforms: wxGTK, wxUniv.
++
++\wxheading{Return value}
++{\tt true} if adding extra controls is supported, {\tt false} otherwise.
++
+ \membersection{wxFileDialog::SetFilename}\label{wxfiledialogsetfilename}
+ 
+ \func{void}{SetFilename}{\param{const wxString\& }{setfilename}}
+Index: include/wx/filedlg.h
+===================================================================
+--- include/wx/filedlg.h	(revision 52163)
++++ include/wx/filedlg.h	(working copy)
+@@ -85,6 +85,9 @@
+         Create(parent, message, defaultDir, defaultFile, wildCard, style, pos, sz, name);
+     }
+ 
++    virtual ~wxFileDialogBase() {}
++
++
+     bool Create(wxWindow *parent,
+                 const wxString& message = wxFileSelectorPromptStr,
+                 const wxString& defaultDir = wxEmptyString,
+@@ -113,6 +116,11 @@
+     virtual wxString GetWildcard() const { return m_wildCard; }
+     virtual int GetFilterIndex() const { return m_filterIndex; }
+ 
++    typedef wxWindow* (*t_extraControlCreator)(wxWindow*);
++    virtual bool SupportsExtraControl() const { return false; }
++    bool SetExtraControlCreator(t_extraControlCreator WXUNUSED(c)); 
++    wxWindow* GetExtraControl() const { return m_extraControl; }
++
+     // Utility functions
+ 
+ #if WXWIN_COMPATIBILITY_2_6
+@@ -137,13 +145,19 @@
+     wxString      m_fileName;
+     wxString      m_wildCard;
+     int           m_filterIndex;
++    wxWindow*     m_extraControl;
+ 
++    // returns true if control is created (if it already exists returns false)
++    bool CreateExtraControl();
++
+ private:
++    t_extraControlCreator m_extraControlCreator;
+     void Init();
+     DECLARE_DYNAMIC_CLASS(wxFileDialogBase)
+     DECLARE_NO_COPY_CLASS(wxFileDialogBase)
+ };
+ 
++
+ //----------------------------------------------------------------------------
+ // wxFileDialog convenience functions
+ //----------------------------------------------------------------------------
+Index: include/wx/gtk/filedlg.h
+===================================================================
+--- include/wx/gtk/filedlg.h	(revision 52163)
++++ include/wx/gtk/filedlg.h	(working copy)
+@@ -30,9 +30,8 @@
+                  const wxPoint& pos = wxDefaultPosition,
+                  const wxSize& sz = wxDefaultSize,
+                  const wxString& name = wxFileDialogNameStr);
++    virtual ~wxFileDialog() { delete m_extraControl; }
+ 
+-    virtual ~wxFileDialog() {}
+-
+     virtual wxString GetPath() const;
+     virtual void GetPaths(wxArrayString& paths) const;
+     virtual wxString GetDirectory() const;
+@@ -48,8 +47,8 @@
+     virtual void SetFilterIndex(int filterIndex);
+ 
+     virtual int ShowModal();
+-    virtual bool Show( bool show = true );
+ 
++    virtual bool SupportsExtraControl() const { return true; }
+ 
+ 
+ protected:
+Index: include/wx/generic/filedlgg.h
+===================================================================
+--- include/wx/generic/filedlgg.h	(revision 52163)
++++ include/wx/generic/filedlgg.h	(working copy)
+@@ -82,6 +82,7 @@
+         { return m_filectrl->GetWildcard(); }
+     virtual int GetFilterIndex() const
+         { return m_filectrl->GetFilterIndex(); }
++    virtual bool SupportsExtraControl() const { return true; }
+ 
+     // implementation only from now on
+     // -------------------------------
+@@ -113,6 +114,8 @@
+ 
+ private:
+     void Init();
++    wxBitmapButton* AddBitmapButton( wxWindowID winId, const wxArtID& artId, 
++                                     const wxString& tip, wxSizer *sizer );
+ 
+     DECLARE_DYNAMIC_CLASS(wxGenericFileDialog)
+     DECLARE_EVENT_TABLE()
+Index: samples/dialogs/dialogs.bkl
+===================================================================
+--- samples/dialogs/dialogs.bkl	(revision 52163)
++++ samples/dialogs/dialogs.bkl	(working copy)
+@@ -18,6 +18,9 @@
+             $(WXTOPDIR)src/generic/dirdlgg.cpp
+             $(WXTOPDIR)src/generic/filedlgg.cpp
+         </if>
++	<if cond="TOOLKIT=='GTK' and TOOLKIT_VERSION=='2'">
++            $(WXTOPDIR)src/generic/filedlgg.cpp
++	</if>
+         <if cond="TOOLKIT=='PM' and WXUNIV=='0' and SHARED=='0'">
+             $(WXTOPDIR)src/generic/fontdlgg.cpp
+             $(WXTOPDIR)src/generic/filedlgg.cpp
+Index: samples/dialogs/dialogs.cpp
+===================================================================
+--- samples/dialogs/dialogs.cpp	(revision 52163)
++++ samples/dialogs/dialogs.cpp	(working copy)
+@@ -337,12 +337,12 @@
+     filedlg_menu->Append(DIALOGS_FILES_OPEN,  _T("Open &files\tCtrl-Q"));
+     filedlg_menu->Append(DIALOGS_FILE_SAVE,  _T("Sa&ve file\tCtrl-S"));
+ 
+-    #if USE_FILEDLG_GENERIC
+-        filedlg_menu->AppendSeparator();
+-        filedlg_menu->Append(DIALOGS_FILE_OPEN_GENERIC,  _T("&Open file (generic)"));
+-        filedlg_menu->Append(DIALOGS_FILES_OPEN_GENERIC,  _T("Open &files (generic)"));
+-        filedlg_menu->Append(DIALOGS_FILE_SAVE_GENERIC,  _T("Sa&ve file (generic)"));
+-    #endif // USE_FILEDLG_GENERIC
++#if USE_FILEDLG_GENERIC
++    filedlg_menu->AppendSeparator();
++    filedlg_menu->Append(DIALOGS_FILE_OPEN_GENERIC, _T("&Open file (generic)"));
++    filedlg_menu->Append(DIALOGS_FILES_OPEN_GENERIC, _T("Open &files (generic)"));
++    filedlg_menu->Append(DIALOGS_FILE_SAVE_GENERIC, _T("Sa&ve file (generic)"));
++#endif // USE_FILEDLG_GENERIC
+ 
+     menuDlg->Append(wxID_ANY,_T("&File operations"),filedlg_menu);
+ 
+@@ -799,6 +799,43 @@
+ #endif // wxUSE_CHOICEDLG
+ 
+ #if wxUSE_FILEDLG
++
++// panel with custom controls for file dialog
++class MyExtraPanel : public wxPanel
++{
++public:
++    MyExtraPanel(wxWindow *parent);
++    void OnCheckBox(wxCommandEvent& event) { m_btn->Enable(event.IsChecked()); }
++    wxString GetInfo() const 
++    { 
++        return wxString::Format("checkbox value = %d", (int) m_cb->GetValue()); 
++    }
++private:
++    wxButton *m_btn;
++    wxCheckBox *m_cb;
++};
++
++MyExtraPanel::MyExtraPanel(wxWindow *parent)
++    : wxPanel(parent)
++{
++    m_btn = new wxButton(this, -1, _T(" Custom Button "));
++    m_btn->Enable(false);
++    m_cb = new wxCheckBox(this, -1, _T("Enable Custom Button"));
++    m_cb->Connect(wxID_ANY, wxEVT_COMMAND_CHECKBOX_CLICKED, 
++                  wxCommandEventHandler(MyExtraPanel::OnCheckBox), NULL, this);
++    wxBoxSizer *sizerTop = new wxBoxSizer(wxHORIZONTAL);
++    sizerTop->Add(m_cb, wxSizerFlags().Centre().Border());
++    sizerTop->AddStretchSpacer();
++    sizerTop->Add(m_btn, wxSizerFlags().Right().Border());
++    SetSizerAndFit(sizerTop);
++}
++
++// a static method can be used instead of function with most of compilers 
++static wxWindow* createMyExtraPanel(wxWindow *parent)
++{
++    return new MyExtraPanel(parent);
++}
++
+ void MyFrame::FileOpen(wxCommandEvent& WXUNUSED(event) )
+ {
+     wxFileDialog dialog
+@@ -814,18 +851,23 @@
+ #endif
+                  );
+ 
++    dialog.SetExtraControlCreator(&createMyExtraPanel);
+     dialog.CentreOnParent();
+     dialog.SetDirectory(wxGetHomeDir());
+ 
+     if (dialog.ShowModal() == wxID_OK)
+     {
+         wxString info;
++        MyExtraPanel *extra_panel 
++            = static_cast<MyExtraPanel*>(dialog.GetExtraControl());
+         info.Printf(_T("Full file name: %s\n")
+                     _T("Path: %s\n")
+-                    _T("Name: %s"),
++                    _T("Name: %s\n")
++                    _T("Custom window: %s"),
+                     dialog.GetPath().c_str(),
+                     dialog.GetDirectory().c_str(),
+-                    dialog.GetFilename().c_str());
++                    dialog.GetFilename().c_str(),
++                    extra_panel->GetInfo().c_str());
+         wxMessageDialog dialog2(this, info, _T("Selected file"));
+         dialog2.ShowModal();
+     }
+@@ -933,6 +975,7 @@
+                     _T("C++ files (*.cpp;*.h)|*.cpp;*.h")
+                  );
+ 
++    dialog.SetExtraControlCreator(&createMyExtraPanel);
+     dialog.SetDirectory(wxGetHomeDir());
+ 
+     if (dialog.ShowModal() == wxID_OK)
+@@ -1264,8 +1307,7 @@
+     if (button_sizer)
+         main_sizer->Add( button_sizer, 0, wxALL|wxGROW, 5 );
+         
+-    SetSizer( main_sizer );
+-    main_sizer->Fit( this );
++    SetSizerAndFit( main_sizer );
+ }
+     
+ void TestDefaultActionDialog::OnListBoxDClick(wxCommandEvent& event)
+@@ -1651,10 +1693,7 @@
+     sizerTop->Add(btn, 1, wxEXPAND | wxALL, 5);
+     sizerTop->Add(check, 1, wxEXPAND | wxALL, 5);
+ 
+-    SetSizer(sizerTop);
+-
+-    sizerTop->SetSizeHints(this);
+-    sizerTop->Fit(this);
++    SetSizerAndFit(sizerTop);
+ }
+ 
+ void MyModelessDialog::OnButton(wxCommandEvent& WXUNUSED(event))
+@@ -1694,11 +1733,8 @@
+     sizerTop->Add(m_btnDelete, 0, wxALIGN_CENTER | wxALL, 5);
+     sizerTop->Add(btnOk, 0, wxALIGN_CENTER | wxALL, 5);
+ 
+-    SetSizer(sizerTop);
++    SetSizerAndFit(sizerTop);
+ 
+-    sizerTop->SetSizeHints(this);
+-    sizerTop->Fit(this);
+-
+     m_btnModal->SetFocus();
+     m_btnModal->SetDefault();
+ }
+@@ -1800,9 +1836,8 @@
+ 
+     EnableDisableControls();
+ 
+-    SetSizer(sizerTop);
++    SetSizerAndFit(sizerTop);
+ 
+-    sizerTop->SetSizeHints(this);
+     wxCommandEvent ev;
+     OnEvent(ev);
+ }
+@@ -2015,8 +2050,7 @@
+ 
+     topSizer->Add( item0, 1, wxGROW|wxALIGN_CENTRE|wxALL, 5 );
+ 
+-    panel->SetSizer(topSizer);
+-    topSizer->Fit(panel);
++    panel->SetSizerAndFit(topSizer);
+ 
+     return panel;
+ }
+@@ -2074,8 +2108,7 @@
+     topSizer->Add( item0, 1, wxGROW|wxALIGN_CENTRE|wxALL, 5 );
+     topSizer->AddSpacer(5);
+ 
+-    panel->SetSizer(topSizer);
+-    topSizer->Fit(panel);
++    panel->SetSizerAndFit(topSizer);
+ 
+     return panel;
+ }
+Index: samples/dialogs/dialogs.h
+===================================================================
+--- samples/dialogs/dialogs.h	(revision 52163)
++++ samples/dialogs/dialogs.h	(working copy)
+@@ -77,7 +77,8 @@
+ #define USE_DIRDLG_GENERIC \
+     ((USE_WXMSW || USE_WXMAC) && USE_GENERIC_DIALOGS && wxUSE_DIRDLG)
+ #define USE_FILEDLG_GENERIC \
+-    ((((USE_WXMSW || USE_WXMAC || USE_WXPM) && USE_GENERIC_DIALOGS) || USE_WXWINCE) && wxUSE_FILEDLG)
++    ((((USE_WXMSW || USE_WXMAC || USE_WXPM || USE_WXGTK) \
++                    && USE_GENERIC_DIALOGS) || USE_WXWINCE) && wxUSE_FILEDLG)
+ #define USE_FONTDLG_GENERIC \
+     ((USE_WXMSW || USE_WXMACFONTDLG || USE_WXPM) && USE_GENERIC_DIALOGS && wxUSE_FONTDLG)
+ 
+
+ 	  	 

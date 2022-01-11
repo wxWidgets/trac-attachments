@@ -1,0 +1,233 @@
+diff --git a/docs/changes.txt b/docs/changes.txt
+index de8db9d..f206e27 100644
+--- a/docs/changes.txt
++++ b/docs/changes.txt
+@@ -586,6 +586,7 @@ wxMSW:
+ - Fix calling Iconize(false) on hidden top level windows (Christian Walther).
+ - Don't send any events from wxSpinCtrl::SetRange() even if the value changed.
+ - Display system drag images during drag and drop if available (PeterO).
++- Allow setting custom drag image for wxDropSource (PeterO).
+ 
+ 
+ 2.9.4: (released 2012-07-09)
+diff --git a/include/wx/dnd.h b/include/wx/dnd.h
+index ac3c9c4..62e351e 100644
+--- a/include/wx/dnd.h
++++ b/include/wx/dnd.h
+@@ -84,6 +84,17 @@ class WXDLLIMPEXP_CORE wxDropSourceBase
+             m_cursorStop = cursor;
+     }
+ 
++    // Set the image that will be used while dragging.
++    //
++    // The image can be either set explicitly or synthesized from the window
++    // contents.
++    //
++    // Currently both methods are only implemented in wxMSW.
++    virtual void SetDragImage(const wxBitmap& WXUNUSED(bitmap),
++                              const wxPoint& WXUNUSED(hotSpot) = wxPoint(0, 0),
++                              const wxColour* WXUNUSED(colourKey) = NULL) { }
++    virtual void SetDragImageFromWindow(wxWindow* WXUNUSED(win)) { }
++
+     // start drag action, see enum wxDragResult for return value description
+     //
+     // if flags contains wxDrag_AllowMove, moving (and only copying) data is
+diff --git a/include/wx/msw/ole/dropsrc.h b/include/wx/msw/ole/dropsrc.h
+index 7004d82..0584873 100644
+--- a/include/wx/msw/ole/dropsrc.h
++++ b/include/wx/msw/ole/dropsrc.h
+@@ -65,6 +65,11 @@ class WXDLLIMPEXP_CORE wxDropSource : public wxDropSourceBase
+     // too slow). Just return false if you want default feedback.
+     virtual bool GiveFeedback(wxDragResult effect);
+ 
++    virtual void SetDragImage(const wxBitmap& bitmap,
++                              const wxPoint& hotSpot = wxPoint(0, 0),
++                              const wxColour* colourKey = NULL);
++    virtual void SetDragImageFromWindow(wxWindow*);
++
+ protected:
+     void Init();
+ 
+diff --git a/interface/wx/dnd.h b/interface/wx/dnd.h
+index 182fe15..34b9a78 100644
+--- a/interface/wx/dnd.h
++++ b/interface/wx/dnd.h
+@@ -338,6 +338,44 @@ class wxDropSource
+         not delete any previously associated data.
+     */
+     void SetData(wxDataObject& data);
++
++    /**
++        Create a drag image based on the given bitmap.
++
++        Drag image is shown in addition to the normal cursor while the data is
++        being dragged.
++
++        Currently this function is only implemented under MSW and does nothing
++        under the other platforms.
++
++        @param bitmap
++            The bitmap which will be used for the drag image.
++        @param hotSpot
++            The hot spot of the image, i.e. the point determining the drop
++            location and where the cursor is positioned.
++        @param colourKey
++            All pixels in the bitmap whose color matches this colour will be
++            treated as transparent. If @a colourKey is @c NULL (default) the
++            standard window background color is used.
++
++        @since 2.9.5
++    */
++    void SetDragImage(const wxBitmap& bitmap,
++                      const wxPoint& hotSpot = wxPoint(0, 0),
++                      const wxColour* colourKey = NULL);
++
++    /**
++        Create a drag image based on the image provided by the given window.
++
++        Similar to SetDragImage() but the image is automatically synthesized by
++        the system from the provided window.
++
++        @param win
++            Window which will provide the drag image.
++
++        @since 2.9.5
++    */
++    void SetDragImageFromWindow(wxWindow* win);
+ };
+ 
+ 
+diff --git a/samples/dnd/dnd.cpp b/samples/dnd/dnd.cpp
+index 9066221..db21bd1 100644
+--- a/samples/dnd/dnd.cpp
++++ b/samples/dnd/dnd.cpp
+@@ -1229,7 +1229,7 @@ void DnDFrame::OnLeftDown(wxMouseEvent &WXUNUSED(event) )
+ #if wxUSE_DRAG_AND_DROP
+     if ( !m_strText.empty() )
+     {
+-        // start drag operation
++        // create data object
+         wxTextDataObject textData(m_strText);
+         wxDropSource source(textData, this,
+                             wxDROP_ICON(dnd_copy),
+@@ -1242,6 +1242,17 @@ void DnDFrame::OnLeftDown(wxMouseEvent &WXUNUSED(event) )
+         else if ( m_moveAllow )
+             flags |= wxDrag_AllowMove;
+ 
++        // create drag image
++        wxBitmap bitmap(200, 30);
++        {
++           wxMemoryDC dc(bitmap);
++           dc.Clear();
++           dc.DrawText(m_strText, 0, 0);
++        }
++
++        source.SetDragImage(bitmap, wxPoint(100, 10));
++
++        // start drag operation
+         LogDragResult(source.DoDragDrop(flags));
+     }
+ #endif // wxUSE_DRAG_AND_DROP
+@@ -1804,10 +1815,25 @@ void DnDShapeFrame::OnDrag(wxMouseEvent& event)
+         return;
+     }
+ 
+-    // start drag operation
++    // create data object
+     DnDShapeDataObject shapeData(m_shape);
+     wxDropSource source(shapeData, this);
+ 
++    // create drag image
++    wxPoint pos = m_shape->GetPosition();
++    wxSize size = m_shape->GetSize();
++    int x = pos.x + size.x,
++        y = pos.y + size.y;
++    wxBitmap bitmap(x, y);
++    {
++       wxMemoryDC dc(bitmap);
++       dc.Clear();
++       m_shape->Draw(dc);
++    }
++
++    source.SetDragImage(bitmap, wxPoint(pos.x + size.x/2, pos.y + size.y/2));
++
++    // start drag operation
+     const wxChar *pc = NULL;
+     switch ( source.DoDragDrop(true) )
+     {
+diff --git a/src/msw/ole/dropsrc.cpp b/src/msw/ole/dropsrc.cpp
+index 9118eec..7210b02 100644
+--- a/src/msw/ole/dropsrc.cpp
++++ b/src/msw/ole/dropsrc.cpp
+@@ -41,6 +41,7 @@
+ #endif
+ 
+ #include <oleauto.h>
++#include <shlobj.h>
+ 
+ #include "wx/msw/ole/oleutils.h"
+ 
+@@ -245,4 +246,63 @@ bool wxDropSource::GiveFeedback(wxDragResult effect)
+     }
+ }
+ 
++// Name    : wxDropSource::SetDragImageFromWindow
++// Purpose : create drag image based on image provided by the window
++// Returns : void
++// Params  : [in] wxWindow* win - window providing the image
++void wxDropSource::SetDragImageFromWindow(wxWindow* win)
++{
++    wxCHECK_RET( win, wxS("Provided window must be valid") );
++
++    // create helper
++    IDragSourceHelper* helper = NULL;
++    if ( SUCCEEDED(CoCreateInstance(CLSID_DragDropHelper, NULL, CLSCTX_INPROC_SERVER,
++                    IID_IDragSourceHelper,(void**)&helper)) )
++    {
++        // create drag image based on image provided by the window
++        POINT pt = {0,0};
++        helper->InitializeFromWindow(win->GetHWND(), &pt, GetDataObject()->GetInterface());
++    }
++}
++
++// Name    : wxDropSource::SetDragImage
++// Purpose : create drag image from bitmap
++// Returns : void
++// Params  : [in] const wxBitmap& bmp - bitmap of which a drag image will be created
++//           [in] const wxPoint& hotSpot - position of the cursor
++//           [in] const wxColour* colourKey - al pixels in the bitmap whose color matches
++//                the color-key will be treated as transparent.
++//                if colourKey is NULL (default) the background color is used.
++void wxDropSource::SetDragImage(const wxBitmap& bmp,
++                                            const wxPoint& hotSpot,
++                                            const wxColour* colourKey)
++{
++    wxCHECK_RET( bmp.IsOk(), wxS("Drag image must be valid") );
++
++    // create helper
++    IDragSourceHelper* helper = NULL;
++    if( SUCCEEDED(CoCreateInstance(CLSID_DragDropHelper, NULL, CLSCTX_INPROC_SERVER,
++                  IID_IDragSourceHelper,(void**)&helper)) )
++    {
++        // get bitmap
++        HBITMAP hBmp = bmp.GetHBITMAP();
++
++        // set color-key
++        COLORREF crColorKey =  colourKey ? wxColourToRGB(*colourKey)
++                                         : GetSysColor(COLOR_WINDOW);
++
++        // fill shell drag image structure
++        SHDRAGIMAGE di;
++        di.sizeDragImage.cx = bmp.GetWidth();
++        di.sizeDragImage.cy = bmp.GetHeight();
++        di.crColorKey = crColorKey;
++        di.hbmpDragImage = hBmp;
++        di.ptOffset.x = hotSpot.x;
++        di.ptOffset.y = hotSpot.y;
++
++        // create drag image from bitmap
++        helper->InitializeFromBitmap(&di, GetDataObject()->GetInterface());
++    }
++}
++
+ #endif  // wxUSE_OLE && wxUSE_DRAG_AND_DROP

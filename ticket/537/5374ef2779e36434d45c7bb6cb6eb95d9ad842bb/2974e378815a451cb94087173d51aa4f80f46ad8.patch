@@ -1,0 +1,200 @@
+Index: include/wx/docview.h
+===================================================================
+--- include/wx/docview.h	(revision 72940)
++++ include/wx/docview.h	(working copy)
+@@ -60,6 +60,10 @@
+ 
+ #define wxMAX_FILE_HISTORY 9
+ 
++WX_DECLARE_EXPORTED_LIST_PTR(wxDocument, wxDocList);
++WX_DECLARE_EXPORTED_LIST_PTR(wxView, wxViewList);
++WX_DECLARE_EXPORTED_LIST_PTR(wxDocTemplate, wxDocTemplateList);
++
+ class WXDLLIMPEXP_CORE wxDocument : public wxEvtHandler
+ {
+ public:
+@@ -142,6 +146,9 @@
+     virtual bool RemoveView(wxView *view);
+     wxList& GetViews() { return m_documentViews; }
+     const wxList& GetViews() const { return m_documentViews; }
++
++    void GetViews(wxViewList* list) const;
++
+     wxView *GetFirstView() const;
+ 
+     virtual void UpdateAllViews(wxView *sender = NULL, wxObject *hint = NULL);
+@@ -458,6 +465,9 @@
+     wxList& GetDocuments() { return m_docs; }
+     wxList& GetTemplates() { return m_templates; }
+ 
++    void GetDocuments(wxDocList* list) const;
++    void GetTemplates(wxDocTemplateList* list) const;
++
+     // Return the default name for a new document (by default returns strings
+     // in the form "unnamed <counter>" but can be overridden)
+     virtual wxString MakeNewDocumentName();
+Index: src/common/docview.cpp
+===================================================================
+--- src/common/docview.cpp	(revision 72940)
++++ src/common/docview.cpp	(working copy)
+@@ -76,8 +76,6 @@
+     #include "wx/wfstream.h"
+ #endif
+ 
+-typedef wxVector<wxDocTemplate *> wxDocTemplates;
+-
+ // ----------------------------------------------------------------------------
+ // wxWidgets macros
+ // ----------------------------------------------------------------------------
+@@ -89,6 +87,11 @@
+ IMPLEMENT_CLASS(wxDocChildFrame, wxFrame)
+ IMPLEMENT_CLASS(wxDocParentFrame, wxFrame)
+ 
++#include "wx/listimpl.cpp"
++WX_DEFINE_LIST(wxDocList)
++WX_DEFINE_LIST(wxViewList)
++WX_DEFINE_LIST(wxDocTemplateList)
++
+ #if wxUSE_PRINTING_ARCHITECTURE
+     IMPLEMENT_DYNAMIC_CLASS(wxDocPrintout, wxPrintout)
+ #endif
+@@ -685,6 +688,13 @@
+     return true;
+ }
+ 
++void wxDocument::GetViews(wxViewList* list) const
++{
++    for (wxList::const_iterator it = m_documentViews.begin(); it != m_documentViews.end(); it++)
++    {
++        list->push_back(wxStaticCast(*it, wxView));
++    }
++}
+ 
+ // ----------------------------------------------------------------------------
+ // Document view
+@@ -1384,21 +1394,23 @@
+ {
+ 
+ // helper function: return only the visible templates
+-wxDocTemplates GetVisibleTemplates(const wxList& allTemplates)
++wxDocTemplateList GetVisibleTemplates(const wxDocManager& docManager)
+ {
++    wxDocTemplateList allTemplates;
++    wxDocTemplateList templates;
++
++    docManager.GetTemplates(&allTemplates);
++
+     // select only the visible templates
+     const size_t totalNumTemplates = allTemplates.GetCount();
+-    wxDocTemplates templates;
+     if ( totalNumTemplates )
+     {
+-        templates.reserve(totalNumTemplates);
+-
+-        for ( wxList::const_iterator i = allTemplates.begin(),
+-                                   end = allTemplates.end();
++        for ( wxDocTemplateList::const_iterator i = allTemplates.begin(),
++                                              end = allTemplates.end();
+               i != end;
+               ++i )
+         {
+-            wxDocTemplate * const temp = (wxDocTemplate *)*i;
++            wxDocTemplate * const temp = *i;
+             if ( temp->IsVisible() )
+                 templates.push_back(temp);
+         }
+@@ -1407,6 +1419,21 @@
+     return templates;
+ }
+ 
++wxDocTemplate** MakeTemplateArray(const wxDocTemplateList& list)
++{
++    wxDocTemplate** templateArray = new wxDocTemplate*[list.size()];
++    size_t i = 0;
++
++    // move pointers to array, for compatibility
++    for (wxDocTemplateList::const_iterator it = list.begin(); it != list.end(); it++)
++    {
++        templateArray[i++] = *it;
++    }
++    wxASSERT(i == list.size());
++    return templateArray;
++    // remember to call delete[]
++}
++
+ } // anonymous namespace
+ 
+ void wxDocManager::ActivateDocument(wxDocument *doc)
+@@ -1425,7 +1452,7 @@
+     // this ought to be const but SelectDocumentType/Path() are not
+     // const-correct and can't be changed as, being virtual, this risks
+     // breaking user code overriding them
+-    wxDocTemplates templates(GetVisibleTemplates(m_templates));
++    wxDocTemplateList templates(GetVisibleTemplates(*this));
+     const size_t numTemplates = templates.size();
+     if ( !numTemplates )
+     {
+@@ -1452,12 +1479,16 @@
+     }
+     else // not silent, ask the user
+     {
++        // move pointers to array, for compatibility
++        wxDocTemplate** templateArray = MakeTemplateArray(templates);
++
+         // for the new file we need just the template, for an existing one we
+         // need the template and the path, unless it's already specified
+         if ( (flags & wxDOC_NEW) || !path.empty() )
+-            temp = SelectDocumentType(&templates[0], numTemplates);
++            temp = SelectDocumentType(templateArray, numTemplates);
+         else
+-            temp = SelectDocumentPath(&templates[0], numTemplates, path, flags);
++            temp = SelectDocumentPath(templateArray, numTemplates, path, flags);
++        delete [] templateArray;
+     }
+ 
+     if ( !temp )
+@@ -1532,15 +1563,19 @@
+ 
+ wxView *wxDocManager::CreateView(wxDocument *doc, long flags)
+ {
+-    wxDocTemplates templates(GetVisibleTemplates(m_templates));
++    wxDocTemplateList templates(GetVisibleTemplates(*this));
+     const size_t numTemplates = templates.size();
+ 
+     if ( numTemplates == 0 )
+         return NULL;
+ 
++    // move pointers to array, for compatibility
++    wxDocTemplate** templateArray = MakeTemplateArray(templates);
++
+     wxDocTemplate * const
+     temp = numTemplates == 1 ? templates[0]
+-                             : SelectViewType(&templates[0], numTemplates);
++                             : SelectViewType(templateArray, numTemplates);
++    delete [] templateArray;
+ 
+     if ( !temp )
+         return NULL;
+@@ -2005,6 +2040,22 @@
+     }
+ }
+ 
++void wxDocManager::GetDocuments(wxDocList* list) const
++{
++    for (wxList::const_iterator it = m_docs.begin(); it != m_docs.end(); it++)
++    {
++        list->push_back(wxStaticCast(*it, wxDocument));
++    }
++}
++
++void wxDocManager::GetTemplates(wxDocTemplateList* list) const
++{
++    for (wxList::const_iterator it = m_templates.begin(); it != m_templates.end(); it++)
++    {
++        list->push_back(wxStaticCast(*it, wxDocTemplate));
++    }
++}
++
+ // ----------------------------------------------------------------------------
+ // wxDocChildFrameAnyBase
+ // ----------------------------------------------------------------------------

@@ -1,0 +1,485 @@
+Index: include/wx/msgout.h
+===================================================================
+--- include/wx/msgout.h	(revision 53689)
++++ include/wx/msgout.h	(working copy)
+@@ -101,18 +101,27 @@
+ #endif
+ 
+ // ----------------------------------------------------------------------------
+-// implementation showing the message to the user in "best" possible way: uses
+-// native message box if available (currently only under Windows) and stderr
+-// otherwise; unlike wxMessageOutputMessageBox this class is always safe to use
++// implementation showing the message to the user in "best" possible way:
++// uses stderr or message box if available according of flag in ctor.
+ // ----------------------------------------------------------------------------
+ 
++enum wxMessageOutputBestType
++{
++    wxMESSAGE_OUTPUT_BEST_STDERR,   // use stderr if available and message box otherwise;
++    wxMESSAGE_OUTPUT_BEST_GUI       // use message box if available and stderr otherwise;
++};
++
+ class WXDLLIMPEXP_BASE wxMessageOutputBest : public wxMessageOutput
+ {
+ public:
+-    wxMessageOutputBest() { }
++    wxMessageOutputBest(wxMessageOutputBestType type = wxMESSAGE_OUTPUT_BEST_STDERR)
++        : m_type(type) { }
+ 
+ protected:
+     virtual void Output(const wxString& str);
++
++private:
++    wxMessageOutputBestType m_type;
+ };
+ 
+ // ----------------------------------------------------------------------------
+@@ -171,5 +180,4 @@
+     virtual void Output(const wxString& str);
+ };
+ 
+-#endif
+-    // _WX_MSGOUT_H_
++#endif // _WX_MSGOUT_H_
+Index: include/wx/msw/apptbase.h
+===================================================================
+--- include/wx/msw/apptbase.h	(revision 53689)
++++ include/wx/msw/apptbase.h	(working copy)
+@@ -65,6 +65,13 @@
+     virtual GSocketManager *GetSocketManager() { return ms_manager; }
+ #endif // wxUSE_SOCKETS
+ 
++
++    // stderr helpers
++    // ----------------
++
++    // write text to stderr, should return true if written and false otherwise
++    virtual bool WriteToStderr(const wxChar* text, size_t length) = 0;
++
+ protected:
+     // implementation of WaitForThread() for the console applications which is
+     // also used by the GUI code if it doesn't [yet|already} dispatch events
+Index: include/wx/msw/apptrait.h
+===================================================================
+--- include/wx/msw/apptrait.h	(revision 53689)
++++ include/wx/msw/apptrait.h	(working copy)
+@@ -28,10 +28,88 @@
+ #endif
+     virtual bool DoMessageFromThreadWait();
+     virtual WXDWORD WaitForThread(WXHANDLE hThread);
++    virtual bool WriteToStderr(const wxChar* text, size_t length);
+ };
+ 
+ #if wxUSE_GUI
+ 
++#ifndef __WXWINCE__
++
++#include <wx/dynlib.h>
++
++// helper class to manipulate console on GUI app
++
++// stderr is available on GUI app if:
++// - AttachConsole return TRUE
++// - exist STD_ERROR_HANDLE
++// - command history is equal commnad history on startup app
++
++// if we write "string" to console after AttachConsole and GetStdHandle,
++// the console shows:
++
++// C:\Documents and Settings\malcom>app.exe
++//
++// C:\Documents and Settings\malcom>string
++
++// so, before we write it to console, we must
++// - find an empty line, (ctor)
++// - copy chars from the epmty line position to current, (ctor)
++// - fill the area (clean), (Write)
++// - set cursor to new position (empty line) (Write)
++
++// after writing this to the console, we must
++// - write the copyed chars data (Write)
++
++class Stderr
++{
++public:
++    Stderr() : m_lib(wxT("kernel32.dll"))
++    {
++        m_stderr = INVALID_HANDLE_VALUE;
++        m_history = NULL;
++        m_historyLen = 0;
++        m_data = NULL;
++        m_dataLen = 0;
++        m_dataLine = 0;
++
++        m_ok = Init();
++    }
++
++    ~Stderr()
++    {
++        ::FreeConsole();
++        delete [] m_history;
++        delete [] m_data;
++    }
++
++
++    bool IsOk() const;
++
++    bool Write(const wxChar* text, size_t length);
++
++private:
++    bool Init();
++
++    bool m_ok;
++    HANDLE m_stderr;
++
++    char* m_history;    // command history on startup app
++    int m_historyLen;   // length command history buffer
++
++    char* m_data;       // data between empty line nad current cursor position
++    int m_dataLen;      // length data buffer
++    int m_dataLine;     // line offset
++
++    wxDynamicLibrary m_lib;
++
++    typedef DWORD (WINAPI *GetConsoleCommandHistoryA_t) (LPSTR sCommands, DWORD nBufferLength, LPSTR sExeName);
++    typedef DWORD (WINAPI *GetConsoleCommandHistoryLengthA_t) (LPSTR sExeName);
++
++    GetConsoleCommandHistoryA_t m_pfnGetConsoleCommandHistoryA;
++    GetConsoleCommandHistoryLengthA_t m_pfnGetConsoleCommandHistoryLengthA;
++};
++#endif // __WXWINCE__
++
+ class WXDLLIMPEXP_CORE wxGUIAppTraits : public wxGUIAppTraitsBase
+ {
+ public:
+@@ -45,9 +123,31 @@
+     virtual bool DoMessageFromThreadWait();
+     virtual wxPortId GetToolkitVersion(int *majVer = NULL, int *minVer = NULL) const;
+     virtual WXDWORD WaitForThread(WXHANDLE hThread);
++
++    virtual bool HasStderr()
++    {
++    #ifdef __WXWINCE__
++        return false;_
++    #else
++        return m_stderr.IsOk();
++    #endif // __WXWINCE__
++    }
++
++    virtual bool WriteToStderr(const wxChar* text, size_t length)
++    {
++    #ifdef __WXWINCE__
++        return false;_
++    #else
++        return m_stderr.Write(text, length);
++    #endif // __WXWINCE__
++    }
++
++private:
++#ifndef __WXWINCE__
++    Stderr m_stderr;
++#endif // __WXWINCE__
+ };
+ 
+ #endif // wxUSE_GUI
+ 
+ #endif // _WX_MSW_APPTRAIT_H_
+-
+Index: src/common/appcmn.cpp
+===================================================================
+--- src/common/appcmn.cpp	(revision 53689)
++++ src/common/appcmn.cpp	(working copy)
+@@ -437,7 +437,8 @@
+     // is (according to common practice):
+     //     - console apps: to stderr (on any platform)
+     //     - GUI apps: stderr on Unix platforms (!)
+-    //                 message box under Windows and others
++    //                 stderr if available and message box otherwise on others
++    //                 (currently stderr only Windows if app running from console)
+ #ifdef __UNIX__
+     return new wxMessageOutputStderr;
+ #else // !__UNIX__
+@@ -445,7 +446,7 @@
+     #ifdef __WXMOTIF__
+         return new wxMessageOutputLog;
+     #elif wxUSE_MSGDLG
+-        return new wxMessageOutputMessageBox;
++        return new wxMessageOutputBest(wxMESSAGE_OUTPUT_BEST_STDERR);
+     #else
+         return new wxMessageOutputStderr;
+     #endif
+Index: src/common/msgout.cpp
+===================================================================
+--- src/common/msgout.cpp	(revision 53689)
++++ src/common/msgout.cpp	(working copy)
+@@ -105,39 +105,86 @@
+ // wxMessageOutputBest
+ // ----------------------------------------------------------------------------
+ 
+-#ifdef __WINDOWS__
+-
+-// check if we're running in a console under Windows
+-static inline bool IsInConsole()
++void wxMessageOutputBest::Output(const wxString& str)
+ {
+-#ifdef __WXWINCE__
+-    return false;
+-#else // !__WXWINCE__
+-    HANDLE hStdErr = ::GetStdHandle(STD_ERROR_HANDLE);
+-    return hStdErr && hStdErr != INVALID_HANDLE_VALUE;
+-#endif // __WXWINCE__/!__WXWINCE__
+-}
++    bool guiApp = false;
++    bool hasStderr = false;
+ 
+-#endif // __WINDOWS__
++    if ( wxTheApp )
++    {
++        wxAppTraits* traits = wxTheApp->GetTraits();
++        wxPortId port = traits->GetToolkitVersion();
++        guiApp = port != wxPORT_UNKNOWN && port != wxPORT_BASE;
++        hasStderr = traits->HasStderr();
++    }
+ 
+-void wxMessageOutputBest::Output(const wxString& str)
+-{
+-#ifdef __WINDOWS__
+-    if ( !IsInConsole() )
++    bool useFprintf = false;
++    bool useMessageBox = false;
++
++    switch ( m_type )
+     {
+-        ::MessageBox(NULL, str.wx_str(), _T("wxWidgets"),
+-                     MB_ICONINFORMATION | MB_OK);
++        case wxMESSAGE_OUTPUT_BEST_STDERR:
++
++            if ( hasStderr )
++                useFprintf = true;
++            else if ( guiApp )
++                useMessageBox = true;
++            // else: stderr and MessageBox is not available
++            break;
++
++        case wxMESSAGE_OUTPUT_BEST_GUI:
++
++            if ( guiApp )
++                useMessageBox = true;
++            else if ( hasStderr )
++                useFprintf = true;
++            // else: stderr and MessageBox is not available
++            break;
++
++        default:
++            wxFAIL_MSG( wxT("unknown MessageOtputBest type") );
+     }
+-    else
+-#endif // __WINDOWS__/!__WINDOWS__
++
++    if ( useFprintf )
+     {
++    #ifdef __WINDOWS__
++        // we must write via WriteToStderr from AppTraits under Windows
++        // because on GUI app it uses AttachConsole etc.
++        if ( !wxTheApp->GetTraits()->WriteToStderr(str.wx_str(), str.length()) )
++        {
++            if ( guiApp )
++                useMessageBox = true;
++        }
++    #else // !__WINDOWS__
+         const wxWX2MBbuf buf = str.mb_str();
+ 
+         if ( buf )
+             fprintf(stderr, "%s", (const char*) buf);
+         else // print at least something
+             fprintf(stderr, "%s", (const char*) str.ToAscii());
++    #endif // __WINDOWS__
+     }
++
++    if ( useMessageBox )
++    {
++        wxString out(str);
++
++        // the native MSW msg box understands the TABs, others don't
++    #ifndef __WXMSW__
++        out.Replace(wxT("\t"), wxT("        "));
++    #endif
++
++        wxString title = wxTheApp ? wxTheApp->GetAppDisplayName() : wxT("wxWidgets");
++
++        ::wxMessageBox(out, title);
++    }
++
++#ifdef __WXDEBUG__
++    if ( !useFprintf && !useMessageBox)
++    {
++        wxFAIL_MSG( wxT("stderr and MessageBox is not available in MessageOtputBest") );
++    }
++#endif // __WXDEBUG__
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -204,9 +251,7 @@
+     out.Replace(wxT("\t"), wxT("        "));
+ #endif
+ 
+-    wxString title;
+-    if ( wxTheApp )
+-        title.Printf(_("%s message"), wxTheApp->GetAppDisplayName().c_str());
++    wxString title = wxTheApp ? wxTheApp->GetAppDisplayName() : wxT("wxWidgets");
+ 
+     ::wxMessageBox(out, title);
+ }
+Index: src/msw/app.cpp
+===================================================================
+--- src/msw/app.cpp	(revision 53689)
++++ src/msw/app.cpp	(working copy)
+@@ -282,6 +282,127 @@
+     return new wxEventLoop;
+ }
+ 
++// ---------------------------------------------------------------------------
++// Stderr implementation
++// ---------------------------------------------------------------------------
++
++#ifndef __WXWINCE__
++bool Stderr::Init()
++{
++    if (!m_lib.IsLoaded())
++        return false;
++
++    typedef BOOL (WINAPI *AttachConsole_t)(DWORD dwProcessId);
++    AttachConsole_t wxDL_INIT_FUNC(pfn, AttachConsole, m_lib);
++
++    wxDL_INIT_FUNC(m_pfn, GetConsoleCommandHistoryA, m_lib);
++    wxDL_INIT_FUNC(m_pfn, GetConsoleCommandHistoryLengthA, m_lib);
++
++    if (!pfnAttachConsole || !pfnAttachConsole(ATTACH_PARENT_PROCESS) ||
++        !m_pfnGetConsoleCommandHistoryA || !m_pfnGetConsoleCommandHistoryLengthA)
++        return false;
++
++
++    m_stderr = GetStdHandle(STD_ERROR_HANDLE);
++
++    if (m_stderr == INVALID_HANDLE_VALUE)
++        return false;
++
++    // get command history
++    // GetConsoleCommandHistoryLength returned lenght of the internal buffer
++    // but GetConsoleCommandHistoryA need and return 2x length, bug in xp/vista?
++    m_historyLen = m_pfnGetConsoleCommandHistoryLengthA("cmd.exe") * 2;
++    m_history = new char[m_historyLen];
++    m_historyLen = m_pfnGetConsoleCommandHistoryA(m_history, m_historyLen, "cmd.exe") / 2;
++
++    // command history always exist
++    if (m_historyLen == 0)
++        return false;
++
++    DWORD ret;
++    CONSOLE_SCREEN_BUFFER_INFO csbi;
++
++    if (!GetConsoleScreenBufferInfo(m_stderr, &csbi))
++        return false;
++
++    COORD pos;
++    pos.X = 0;
++    pos.Y = csbi.dwCursorPosition.Y + 1;
++
++    // we may institute that line is empty if first 4 characters are spaces
++    char buf[4];
++    do {
++        pos.Y--;
++        if (!ReadConsoleOutputCharacterA(m_stderr, buf, sizeof(buf), pos, &ret))
++            return false;
++    } while (strncmp("    ", buf, 4) != 0);
++
++    // calculate line offset and length of data
++    m_dataLine = csbi.dwCursorPosition.Y - pos.Y;
++    m_dataLen = m_dataLine * csbi.dwMaximumWindowSize.X + csbi.dwCursorPosition.X;
++
++    if (m_dataLen > 0)
++    {
++        m_data = new char[m_dataLen];
++        if (!ReadConsoleOutputCharacterA(m_stderr, m_data, m_dataLen, pos, &ret))
++            return false;
++    }
++
++    return true;
++}
++
++
++bool Stderr::IsOk() const {
++    bool available = false;
++
++    if (m_ok)
++    {
++        // get command history
++        int length = m_pfnGetConsoleCommandHistoryLengthA("cmd.exe") * 2;
++        char* history = new char[length];
++        length = m_pfnGetConsoleCommandHistoryA(history, length, "cmd.exe") / 2;
++
++        // and compare it
++        if (m_historyLen == length && memcmp(m_history, history, length) == 0)
++            available = true;
++
++        delete [] history;
++    }
++
++    return available;
++}
++
++bool Stderr::Write(const wxChar* text, size_t length)
++{
++    DWORD ret;
++    CONSOLE_SCREEN_BUFFER_INFO csbi;
++
++    // get current position
++    if (!GetConsoleScreenBufferInfo(m_stderr, &csbi))
++        return false;
++
++    // and calcuate new position (where is empty line)
++    csbi.dwCursorPosition.X = 0;
++    csbi.dwCursorPosition.Y -= m_dataLine;
++
++    if (!SetConsoleCursorPosition(m_stderr, csbi.dwCursorPosition))
++        return false;
++
++    if (!FillConsoleOutputCharacter(m_stderr, ' ', m_dataLen, csbi.dwCursorPosition, &ret))
++        return false;
++
++
++    WriteConsole(m_stderr, text, (DWORD)length, &ret, 0);
++
++    // write \n only if last string char isn't \n
++    if (wxStrncmp(text+length-1, wxT("\n"), 1) != 0)
++        WriteConsole(m_stderr, wxT("\n"), 1, &ret, 0);
++
++    WriteConsoleA(m_stderr, m_data, m_dataLen, &ret, 0);
++
++    return true;
++}
++#endif // !__WXWINCE__
+ // ===========================================================================
+ // wxApp implementation
+ // ===========================================================================
+Index: src/msw/basemsw.cpp
+===================================================================
+--- src/msw/basemsw.cpp	(revision 53689)
++++ src/msw/basemsw.cpp	(working copy)
+@@ -108,3 +108,16 @@
+     return DoSimpleWaitForThread(hThread);
+ }
+ 
++
++bool wxConsoleAppTraits::WriteToStderr(const wxChar* text, size_t length)
++{
++    wxString str(text, length);
++    const wxWX2MBbuf buf = str.mb_str();
++
++    if ( buf )
++        fprintf(stderr, "%s", (const char*) buf);
++    else // print at least something
++        fprintf(stderr, "%s", (const char*) str.ToAscii());
++
++    return true;
++}

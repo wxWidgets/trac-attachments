@@ -1,0 +1,922 @@
+Index: build/bakefiles/files.bkl
+===================================================================
+--- build/bakefiles/files.bkl	(revision 51253)
++++ build/bakefiles/files.bkl	(working copy)
+@@ -416,6 +416,7 @@
+     src/common/wfstream.cpp
+     src/common/wxcrt.cpp
+     src/common/wxprintf.cpp
++    src/common/xlocale.cpp
+     src/common/xti.cpp
+     src/common/xtistrm.cpp
+     src/common/zipstrm.cpp
+@@ -550,6 +551,7 @@
+     wx/wxcrtbase.h
+     wx/wxcrtvararg.h
+     wx/wxprec.h
++    wx/xlocale.h
+     wx/xti.h
+     wx/xtistrm.h
+     wx/zipstrm.h
+Index: configure.in
+===================================================================
+--- configure.in	(revision 51253)
++++ configure.in	(working copy)
+@@ -664,6 +664,7 @@
+ dnl ---------------------------------------------------------------------------
+ 
+ WX_ARG_FEATURE(intl,          [  --enable-intl           use internationalization system], wxUSE_INTL)
++WX_ARG_FEATURE(xlocale,       [  --enable-xlocale        use x-locale support (requires wxLocale)], wxUSE_XLOCALE)
+ WX_ARG_FEATURE(config,        [  --enable-config         use wxConfig (and derived) classes], wxUSE_CONFIG)
+ 
+ WX_ARG_FEATURE(protocols,     [  --enable-protocols      use wxProtocol and derived classes], wxUSE_PROTOCOL)
+@@ -5555,6 +5556,13 @@
+   fi
+ fi
+ 
++if test "$wxUSE_XLOCALE" == "yes" ; then
++  AC_DEFINE(wxUSE_XLOCALE)
++  AC_CHECK_TYPES(locale_t,,,
++            [#include <xlocale.h>
++             #include <locale.h>])
++fi
++
+ if test "$wxUSE_LOG" = "yes"; then
+   AC_DEFINE(wxUSE_LOG)
+ 
+Index: include/wx/features.h
+===================================================================
+--- include/wx/features.h	(revision 51253)
++++ include/wx/features.h	(working copy)
+@@ -74,5 +74,14 @@
+     #define wxHAS_NATIVE_TAB_TRAVERSAL
+ #endif
+ 
++/* This is defined when the compiler provides some type of extended locale
++   functions.  Otherwise, we implement them ourselves to only support the
++   'C' locale */
++#if defined(__VISUALC8__) || defined(HAVE_LOCALE_T)
++    #define wxHAS_XLOCALE_SUPPORT
++#else
++    #undef wxHAS_XLOCALE_SUPPORT
++#endif
++
+ #endif /*  _WX_FEATURES_H_ */
+ 
+Index: include/wx/setup_inc.h
+===================================================================
+--- include/wx/setup_inc.h	(revision 51253)
++++ include/wx/setup_inc.h	(working copy)
+@@ -357,6 +357,10 @@
+ // i18n support: _() macro, wxLocale class. Requires wxTextFile.
+ #define wxUSE_INTL          1
+ 
++// use xlocale support or custom "C" implementation if native implementation
++// is not available
++#define wxUSE_XLOCALE       1
++
+ // Set wxUSE_DATETIME to 1 to compile the wxDateTime and related classes which
+ // allow to manipulate dates, times and time intervals. wxDateTime replaces the
+ // old wxTime and wxDate classes which are still provided for backwards
+Index: include/wx/xlocale.h
+===================================================================
+--- include/wx/xlocale.h	(revision 0)
++++ include/wx/xlocale.h	(revision 0)
+@@ -0,0 +1,241 @@
++//////////////////////////////////////////////////////////////////////////////
++// Name:        wx/xlocale.h
++// Purpose:     Header to provide some xlocale wrappers
++// Author:      Brian Vanderburg II
++// Created:     2008-01-07
++// RCS-ID:      $Id:  $
++// Copyright:   (c) 2008 Brian Vanderburg II
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++// Portions of this code is similar to the CRT code as I used it to model most
++// of the functions after.  This code will try to provide access to the real
++// xlocale functions if possible.  It not, it will provide wrappers for the
++// functions that only work with the 'C" locale.  The main purpose of this
++// it to enable a program to use a locale for display/translations/etc, while
++// still being able to use the "C" locale for parsing other non-visual things
++// such as a code file.
++
++#ifndef _WX_XLOCALE_H_
++#define _WX_XLOCALE_H_
++
++#include "wx/defs.h" // wxUSE_XLOCALE
++
++#if wxUSE_XLOCALE
++
++#include "wx/crt.h" // Includes wx/chartype.h, wx/wxcrt.h(wx/string.h)
++
++// Function goals:
++// isXYZ_l
++// toXYZ_l
++// numeric-to-string conversions (none exist, require printf_l support)
++// string-to-numeric conversions (wxStrtod_l, etc)
++// printf
++// All of them
++
++
++// The platform-specific locale type
++// If wxXLocale_t is not defined, then only "C" locale support is provided
++#ifdef wxHAS_XLOCALE_SUPPORT
++    // Is there any reason not to use typedef instead of #define?
++    // Should this be ifdef __VISUALC8__ instead?  It would reduce warning about
++    // __VISUALC8__ not being defined
++    #ifdef(__VISUALC8__)
++        #include "something"
++        #define wxXLocale_t _locale
++        #define wxXLOCALE_IDENT(name) _ ## name
++    #elif defined(HAVE_LOCALE_T)
++        // Required headers
++        #include <locale.h>
++        #include <xlocale.h>
++
++        // Feature headers
++        #include <ctype.h>
++        
++        #if wxUSE_UNICODE
++            #include <wctype.h>
++        #endif
++        
++        // Locale type and identifier name
++        #define wxXLocale_t locale_t
++        #define wxXLOCALE_IDENT(name) name
++    #else
++        #error "Unknown xlocale support"
++    #endif
++#endif // wxHAS_XLOCALE_SUPPORT
++
++
++// This object is a wrapper around the locale type.  It is not to be confused
++// with wxLocale, which handles actually changing the locale, loading message
++// catalogs, etc.  This just stores a locale value.  It is unfortunate, but
++// perhaps by wxWidgets 4.0 better naming could be used, or this class could
++// become wxLocale (a wrapper for the value), and some other class could be
++// used to load the language catalogs or something that would be clearer
++class WXDLLIMPEXP_BASE wxXLocale
++{
++public:
++    // Construct an uninitialized locale or a C locale
++    wxXLocale(bool isC = false);
++    
++    // Copy another locale
++    wxXLocale(const wxXLocale& copy);
++
++    // Construct from a language
++    #ifdef wxHAS_XLOCALE_SUPPORT
++        wxXLocale(wxLanguage language);
++        wxXLocale(wxXLocale_t locale);
++    #endif
++    
++    // Destroy the locale
++    ~wxXLocale();
++    
++    // Assignment
++    wxXLocale& operator= (const wxXLocale& copy);
++    
++    // Get the "C" locale object
++    static wxXLocale& GetCLocale();
++    
++    // Is it ok
++    bool IsOk() const { return m_ok; }
++    operator bool() const { return IsOk(); }
++    bool operator !() const { return !IsOk(); }
++    
++    // Get the type
++    #ifdef wxHAS_XLOCALE_SUPPORT
++        wxXLocale_t Get() const { return m_locale; }
++        
++        operator wxXLocale_t() const { return Get(); }
++    #endif
++    
++private:
++    #ifdef wxHAS_XLOCALE_SUPPORT
++        wxXLocale_t m_locale;
++    #endif
++    
++    // With xlocale, it is okay if the locale value was successfully created
++    // Without xlocale, it is okay only if it is the C locale from GetCLocale
++    bool m_ok;
++};
++
++#define wxCLocale wxXLocale::GetCLocale()
++
++// Wrappers for various functions:
++
++#ifdef wxHAS_XLOCALE_SUPPORT
++
++    // ctype functions
++    #define wxCRT_Isalnum_lA wxXLOCALE_IDENT(isalnum_l)
++    #define wxCRT_Isalpha_lA wxXLOCALE_IDENT(isalpha_l)
++    #define wxCRT_Iscntrl_lA wxXLOCALE_IDENT(iscntrl_l)
++    #define wxCRT_Isdigit_lA wxXLOCALE_IDENT(isdigit_l)
++    #define wxCRT_Isgraph_lA wxXLOCALE_IDENT(isgraph_l)
++    #define wxCRT_Islower_lA wxXLOCALE_IDENT(islower_l)
++    #define wxCRT_Isprint_lA wxXLOCALE_IDENT(isprint_l)
++    #define wxCRT_Ispunct_lA wxXLOCALE_IDENT(ispunct_l)
++    #define wxCRT_Isspace_lA wxXLOCALE_IDENT(isspace_l)
++    #define wxCRT_Isupper_lA wxXLOCALE_IDENT(isupper_l)
++    #define wxCRT_Isxdigit_lA wxXLOCALE_IDENT(isxdigit_l)
++    #define wxCRT_Tolower_lA wxXLOCALE_IDENT(tolower_l)
++    #define wxCRT_Toupper_lA wxXLOCALE_IDENT(toupper_l)
++
++    // We MUST use wxXLocale::Get instead of depending on
++    // operator wxXLocale_t () because the functions
++    // (isalpha_l, isalnum_l, etc) may actually be
++    // macros and try to use the passed type directly
++    // In which case, it would be trying to follow the
++    // wxXLocale object when it does (l)->blah
++    inline int wxIsalnum_l(char c, const wxXLocale& loc)
++        { return wxCRT_Isalnum_lA(c, loc.Get()); }
++    inline int wxIsalpha_l(char c, const wxXLocale& loc)
++        { return wxCRT_Isalpha_lA(c, loc.Get()); }
++    inline int wxIscntrl_l(char c, const wxXLocale& loc)
++        { return wxCRT_Iscntrl_lA(c, loc.Get()); }
++    inline int wxIsdigit_l(char c, const wxXLocale& loc)
++        { return wxCRT_Isdigit_lA(c, loc.Get()); }
++    inline int wxIsgraph_l(char c, const wxXLocale& loc)
++        { return wxCRT_Isgraph_lA(c, loc.Get()); }
++    inline int wxIslower_l(char c, const wxXLocale& loc)
++        { return wxCRT_Islower_lA(c, loc.Get()); }
++    inline int wxIsprint_l(char c, const wxXLocale& loc)
++        { return wxCRT_Isprint_lA(c, loc.Get()); }
++    inline int wxIspunct_l(char c, const wxXLocale& loc)
++        { return wxCRT_Ispunct_lA(c, loc.Get()); }
++    inline int wxIsspace_l(char c, const wxXLocale& loc)
++        { return wxCRT_Isspace_lA(c, loc.Get()); }
++    inline int wxIsupper_l(char c, const wxXLocale& loc)
++        { return wxCRT_Isupper_lA(c, loc.Get()); }
++    inline int wxIsxdigit_l(char c, const wxXLocale& loc)
++        { return wxCRT_Isxdigit_lA(c, loc.Get()); }
++    inline char wxTolower_l(char c, const wxXLocale& loc)
++        { return wxCRT_Tolower_lA(c, loc.Get()); }
++    inline char wxToupper_l(char c, const wxXLocale& loc)
++        { return wxCRT_Toupper_lA(c, loc.Get()); }
++
++    #if wxUSE_UNICODE
++        #define wxCRT_Isalnum_lW wxXLOCALE_IDENT(iswalnum_l)
++        #define wxCRT_Isalpha_lW wxXLOCALE_IDENT(iswalpha_l)
++        #define wxCRT_Iscntrl_lW wxXLOCALE_IDENT(iswcntrl_l)
++        #define wxCRT_Isdigit_lW wxXLOCALE_IDENT(iswdigit_l)
++        #define wxCRT_Isgraph_lW wxXLOCALE_IDENT(iswgraph_l)
++        #define wxCRT_Islower_lW wxXLOCALE_IDENT(iswlower_l)
++        #define wxCRT_Isprint_lW wxXLOCALE_IDENT(iswprint_l)
++        #define wxCRT_Ispunct_lW wxXLOCALE_IDENT(iswpunct_l)
++        #define wxCRT_Isspace_lW wxXLOCALE_IDENT(iswspace_l)
++        #define wxCRT_Isupper_lW wxXLOCALE_IDENT(iswupper_l)
++        #define wxCRT_Isxdigit_lW wxXLOCALE_IDENT(iswxdigit_l)
++        #define wxCRT_Tolower_lW wxXLOCALE_IDENT(towlower_l)
++        #define wxCRT_Toupper_lW wxXLOCALE_IDENT(towupper_l)
++        
++        inline int wxIsalnum_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Isalnum_lW(c, loc.Get()); }
++        inline int wxIsalpha_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Isalpha_lW(c, loc.Get()); }
++        inline int wxIscntrl_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Iscntrl_lW(c, loc.Get()); }
++        inline int wxIsdigit_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Isdigit_lW(c, loc.Get()); }
++        inline int wxIsgraph_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Isgraph_lW(c, loc.Get()); }
++        inline int wxIslower_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Islower_lW(c, loc.Get()); }
++        inline int wxIsprint_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Isprint_lW(c, loc.Get()); }
++        inline int wxIspunct_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Ispunct_lW(c, loc.Get()); }
++        inline int wxIsspace_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Isspace_lW(c, loc.Get()); }
++        inline int wxIsupper_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Isupper_lW(c, loc.Get()); }
++        inline int wxIsxdigit_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Isxdigit_lW(c, loc.Get()); }
++        inline wchar_t wxTolower_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Tolower_lW(c, loc.Get()); }
++        inline wchar_t wxToupper_l(wchar_t c, const wxXLocale& loc)
++            { return wxCRT_Toupper_lW(c, loc.Get()); }
++
++    #endif // wxUSE_UNICDE (ctype functions)
++#else // !wxHAS_XLOCALE_SUPPORT
++
++    // ctype functions
++    int WXDLLIMPEXP_BASE wxIsalnum_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIsalpha_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIscntrl_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIsdigit_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIsgraph_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIslower_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIsprint_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIspunct_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIsspace_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIsupper_l(const wxUniChar& c, const wxXLocale& loc);
++    int WXDLLIMPEXP_BASE wxIsxdigit_l(const wxUniChar& c, const wxXLocale& loc);
++    wxUniChar WXDLLIMPEXP_BASE wxTolower_l(const wxUniChar& c, const wxXLocale& loc);
++    wxUniChar WXDLLIMPEXP_BASE wxToupper_l(const wxUniChar& c, const wxXLocale& loc);
++
++    
++#endif // wxHAS_XLOCALE_SUPPORT/!wxHAS_XLOCALE_SUPPORT
++
++
++#endif // wxUSE_XLOCALE
++
++#endif
++    // _WX_XLOCALE_H_
+Index: setup.h.in
+===================================================================
+--- setup.h.in	(revision 51253)
++++ setup.h.in	(working copy)
+@@ -1103,6 +1103,14 @@
+ /* Define if getgrgid_r is available. */
+ #undef HAVE_GETGRGID_R
+ 
++/* Define if locale_t is available */
++#undef HAVE_LOCALE_T
++
++/* Define to 1 to use xlocale functions if available and if
++   not available to use "C" locale only implementation */
++#undef wxUSE_XLOCALE
++
++
+ /* -------------------------------------------------------------------------
+    Win32 adjustments section
+    ------------------------------------------------------------------------- */
+Index: src/common/xlocale.cpp
+===================================================================
+--- src/common/xlocale.cpp	(revision 0)
++++ src/common/xlocale.cpp	(revision 0)
+@@ -0,0 +1,244 @@
++//////////////////////////////////////////////////////////////////////////////
++// Name:        src/common/xlocale.cpp
++// Purpose:     xlocale wrappers/impl to provide some xlocale wrappers
++// Author:      Brian Vanderburg II
++// Created:     2008-01-07
++// RCS-ID:      $Id:  $
++// Copyright:   (c) 2008 Brian Vanderburg II
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#if wxUSE_XLOCALE
++
++#ifndef WX_PRECOMP
++    #include "wx/module.h"
++#endif
++
++#include "wx/xlocale.h"
++
++// This is the C locale object
++static wxXLocale* gs_cLocale = NULL;
++
++// Module to do cleanup
++class wxXLocaleModule : public wxModule
++{
++public:
++    bool OnInit() { return true; }
++    void OnExit() { wxDELETE(gs_cLocale); }
++    
++DECLARE_DYNAMIC_CLASS(wxXLocaleModule)
++};
++
++IMPLEMENT_DYNAMIC_CLASS(wxXLocaleModule, wxModule)
++
++// Get the C locale
++wxXLocale& wxXLocale::GetCLocale()
++{
++    if(gs_cLocale == NULL)
++    {
++        // Init the blank object
++        gs_cLocale = new wxXLocale(true);
++    }
++    
++    return *gs_cLocale;
++}
++
++// ctor
++wxXLocale::wxXLocale(bool isC)
++{
++    if(isC)
++    {
++        #ifdef wxHAS_XLOCALE_SUPPORT
++            // If there is native xlocale support, create the
++            // item
++            #ifdef(__VISUALC8__)
++                ??
++            #elif defined(HAVE_LOCALE_T)
++                // newlocale(LC_ALL_MASK, NULL, NULL) returns NULL on Ubuntu
++                // and a NULL return means an error, so use "C" or "" for
++                // the locale parameter.  Also it is not okay to pass a
++                // NULL locale_t to isalpha_l,etc (though some docs say
++                // doing so will result in using the C locale), as it
++                // causes a segmentation fault, so doing
++                // wxIsalpha_l(c, wxCLocale) would cause a segmentation
++                // fault if the m_locale is NULL
++                gs_cLocale->m_locale = newlocale(LC_ALL_MASK, "C", NULL);
++                gs_cLocale->m_ok = (gs_cLocale->m_locale != NULL);
++                
++            #endif
++        #else // !wxHAS_XLOCALE_SUPPORT
++            // If there is no native xlocale support, the only the "C"
++            // locale is okay
++            gs_cLocale->m_ok = true;
++        #endif
++    }
++    else // !isC
++    {
++        m_ok = false;
++    }
++}
++
++// Copy another locale
++wxXLocale::wxXLocale(const wxXLocale& copy) : m_ok(false)
++{
++    *this = copy;
++}
++
++// Construct from a language
++#ifdef wxHAS_XLOCALE_SUPPORT
++wxXLocale::wxXLocale(wxLanguage language)
++{
++    #ifdef(__VISUALC8__)
++        // todo
++    #elif defined(HAVE_LOCALE_T)
++        // TODO: get locale_str from language
++        // m_locale = newlocal(LC_ALL_MASK, locale_str, NULL);
++        // m_ok = (m_locale != NULL);
++    #endif
++}
++
++wxXLocale::wxXLocale(wxXLocale_t locale)
++{
++    #ifdef(__VISUALC8__)
++        // todo
++    #elif defined(HAVE_LOCALE_T)
++        m_locale = duplocale(locale);
++        m_ok = (m_locale != NULL);
++    #endif
++}
++#endif
++
++// Destroy the locale
++wxXLocale::~wxXLocale()
++{
++#ifdef wxHAS_XLOCALE_SUPPORT
++    if(m_ok)
++    {
++        #ifdef(__VISUALC8__)
++            ?
++        #elif defined(HAVE_LOCALE_T)
++            freelocale(m_locale);
++        #endif
++    }
++#endif
++}
++
++// assignment
++wxXLocale& wxXLocale::operator= (const wxXLocale& copy)
++{
++    if(this != &copy)
++    {
++        #ifdef wxHAS_XLOCALE_SUPPORT
++            #ifdef(__VISUALC8__)
++                ?
++            #elif defined(HAVE_LOCALE_T)
++                if(m_ok)
++                    freelocale(m_locale);
++                    
++                m_locale = duplocale(copy.m_locale);
++                m_ok = (m_locale != NULL);
++            #endif
++        #else
++            m_ok = copy.m_ok;
++        #endif
++    }
++    
++    return *this;
++}
++
++// Direct implementations if needed
++#ifndef wxHAS_XLOCALE_SUPPORT
++
++// lookup table and macros for character type functions
++// generated from genxtbls.cpp
++#define CTYPE_ALNUM 0x0001
++#define CTYPE_ALPHA 0x0002
++#define CTYPE_CNTRL 0x0004
++#define CTYPE_DIGIT 0x0008
++#define CTYPE_GRAPH 0x0010
++#define CTYPE_LOWER 0x0020
++#define CTYPE_PRINT 0x0040
++#define CTYPE_PUNCT 0x0080
++#define CTYPE_SPACE 0x0100
++#define CTYPE_UPPER 0x0200
++#define CTYPE_XDIGIT 0x0400
++
++
++static unsigned int gs_lookup[] =
++{
++    0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004,
++    0x0004, 0x0104, 0x0104, 0x0104, 0x0104, 0x0104, 0x0004, 0x0004,
++    0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004,
++    0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004, 0x0004,
++    0x0140, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0,
++    0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0,
++    0x0459, 0x0459, 0x0459, 0x0459, 0x0459, 0x0459, 0x0459, 0x0459,
++    0x0459, 0x0459, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0,
++    0x00D0, 0x0653, 0x0653, 0x0653, 0x0653, 0x0653, 0x0653, 0x0253,
++    0x0253, 0x0253, 0x0253, 0x0253, 0x0253, 0x0253, 0x0253, 0x0253,
++    0x0253, 0x0253, 0x0253, 0x0253, 0x0253, 0x0253, 0x0253, 0x0253,
++    0x0253, 0x0253, 0x0253, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x00D0,
++    0x00D0, 0x0473, 0x0473, 0x0473, 0x0473, 0x0473, 0x0473, 0x0073,
++    0x0073, 0x0073, 0x0073, 0x0073, 0x0073, 0x0073, 0x0073, 0x0073,
++    0x0073, 0x0073, 0x0073, 0x0073, 0x0073, 0x0073, 0x0073, 0x0073,
++    0x0073, 0x0073, 0x0073, 0x00D0, 0x00D0, 0x00D0, 0x00D0, 0x0004
++};
++
++
++#define CTYPE_TEST(c, t) ( (c) <= 127 && (gs_lookup[(c)] & (t)) )
++
++
++// ctype functions
++#define GEN_ISFUNC(name, test) \
++int name(const wxUniChar& c, const wxXLocale& loc) \
++{ \
++    wxCHECK(loc.IsOk(), false); \
++    return CTYPE_TEST(c.GetValue(), test); \
++}
++
++GEN_ISFUNC(wxIsalnum_l, CTYPE_ALNUM)
++GEN_ISFUNC(wxIsalpha_l, CTYPE_ALPHA)
++GEN_ISFUNC(wxIscntrl_l, CTYPE_CNTRL)
++GEN_ISFUNC(wxIsdigit_l, CTYPE_DIGIT)
++GEN_ISFUNC(wxIsgraph_l, CTYPE_GRAPH)
++GEN_ISFUNC(wxIslower_l, CTYPE_LOWER)
++GEN_ISFUNC(wxIsprint_l, CTYPE_PRINT)
++GEN_ISFUNC(wxIspunct_l, CTYPE_PUNCT)
++GEN_ISFUNC(wxIsspace_l, CTYPE_SPACE)
++GEN_ISFUNC(wxIsupper_l, CTYPE_UPPER)
++GEN_ISFUNC(wxIsxdigit_l, CTYPE_XDIGIT)
++
++wxUniChar wxTolower_l(const wxUniChar& c, const wxXLocale& loc)
++{
++    wxCHECK(loc.IsOk(), false);
++    
++    if(CTYPE_TEST(c, CTYPE_UPPER))
++    {
++        return c - 'A' + 'a';
++    }
++    
++    return c;
++}
++
++wxUniChar wxToupper_l(const wxUniChar& c, const wxXLocale& loc)
++{
++    wxCHECK(loc.IsOk(), false);
++
++    if(CTYPE_TEST(c, CTYPE_LOWER))
++    {
++        return c - 'a' + 'A';
++    }
++
++    return c;
++}
++
++#endif // !defined(wxHAS_XLOCALE_SUPPORT)
++
++
++#endif // wxUSE_XLOCALE
+Index: tests/test.bkl
+===================================================================
+--- tests/test.bkl	(revision 51253)
++++ tests/test.bkl	(working copy)
+@@ -72,6 +72,7 @@
+             vectors/vectors.cpp
+             weakref/evtconnection.cpp
+             weakref/weakref.cpp
++            xlocale/xlocale.cpp
+         </sources>
+         <wx-lib>net</wx-lib>
+         <wx-lib>base</wx-lib>
+Index: tests/xlocale/xlocale.cpp
+===================================================================
+--- tests/xlocale/xlocale.cpp	(revision 0)
++++ tests/xlocale/xlocale.cpp	(revision 0)
+@@ -0,0 +1,152 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        tests/xlocale/xlocale.cpp
++// Purpose:     wxXLocale & related unit test
++// Author:      Brian Vanderburg II
++// Created:     2008-01-16
++// RCS-ID:      $Id:  $
++///////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++#include "testprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#ifndef WX_PRECOMP
++    #include "wx/wx.h"
++#endif // WX_PRECOMP
++
++#if wxUSE_XLOCALE
++
++#include "wx/xlocale.h"
++
++// --------------------------------------------------------------------------
++// test class
++// --------------------------------------------------------------------------
++
++class XLocaleTestCase : public CppUnit::TestCase
++{
++public:
++    XLocaleTestCase() { }
++
++private:
++    CPPUNIT_TEST_SUITE( XLocaleTestCase );
++        CPPUNIT_TEST( testCtypeFunctions );
++    CPPUNIT_TEST_SUITE_END();
++    
++    void testCtypeFunctions();
++
++
++    DECLARE_NO_COPY_CLASS(XLocaleTestCase)
++};
++
++// register in the unnamed registry so that these tests are run by default
++CPPUNIT_TEST_SUITE_REGISTRATION( XLocaleTestCase );
++
++// also include in it's own registry so that these tests can be run alone
++CPPUNIT_TEST_SUITE_NAMED_REGISTRATION( XLocaleTestCase, "XLocaleTestCase" );
++
++
++// test the ctype functions
++
++void XLocaleTestCase::testCtypeFunctions()
++{
++    // isalnum
++    CPPUNIT_ASSERT(wxIsalnum_l('0', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('9', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('A', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('Z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('a', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('*', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('@', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('+', wxCLocale) == 0);
++
++    // isalpha
++    CPPUNIT_ASSERT(wxIsalpha_l('0', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('9', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('A', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('Z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('a', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('*', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('@', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('+', wxCLocale) == 0);
++
++    // TODO: iscntrl
++    
++    // isdigit
++    CPPUNIT_ASSERT(wxIsdigit_l('0', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('9', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('A', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('Z', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('a', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('z', wxCLocale) == 0);
++
++    // TODO: isgraph
++    
++    // islower
++    CPPUNIT_ASSERT(wxIslower_l('A', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIslower_l('Z', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIslower_l('a', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIslower_l('z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIslower_l('0', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIslower_l('9', wxCLocale) == 0);
++
++
++    // TODO: isprint
++    // TODO: ispunct
++    
++    // isspace
++    CPPUNIT_ASSERT(wxIsspace_l(' ', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsspace_l('\t', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsspace_l('\r', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsspace_l('\n', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsspace_l('0', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsspace_l('a', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsspace_l('A', wxCLocale) == 0);
++
++    // isupper
++    CPPUNIT_ASSERT(wxIsupper_l('0', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsupper_l('9', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsupper_l('A', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsupper_l('Z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsupper_l('a', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsupper_l('z', wxCLocale) == 0);
++
++    // isxdigit
++    CPPUNIT_ASSERT(wxIsxdigit_l('0', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('9', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('A', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('F', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('Z', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('a', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('f', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('z', wxCLocale) == 0);
++
++    // tolower
++    CPPUNIT_ASSERT(wxTolower_l('A', wxCLocale) == 'a');
++    CPPUNIT_ASSERT(wxTolower_l('a', wxCLocale) == 'a');
++    CPPUNIT_ASSERT(wxTolower_l('Z', wxCLocale) == 'z');
++    CPPUNIT_ASSERT(wxTolower_l('z', wxCLocale) == 'z');
++    CPPUNIT_ASSERT(wxTolower_l('0', wxCLocale) == '0');
++    CPPUNIT_ASSERT(wxTolower_l('9', wxCLocale) == '9');
++    
++    // toupper
++    CPPUNIT_ASSERT(wxToupper_l('A', wxCLocale) == 'A');
++    CPPUNIT_ASSERT(wxToupper_l('a', wxCLocale) == 'A');
++    CPPUNIT_ASSERT(wxToupper_l('Z', wxCLocale) == 'Z');
++    CPPUNIT_ASSERT(wxToupper_l('z', wxCLocale) == 'Z');
++    CPPUNIT_ASSERT(wxToupper_l('0', wxCLocale) == '0');
++    CPPUNIT_ASSERT(wxToupper_l('9', wxCLocale) == '9');
++    
++}
++
++
++
++
++#endif // wxUSE_XLOCALE
+Index: tests/xlocale/xlocale.cpp
+===================================================================
+--- tests/xlocale/xlocale.cpp	(revision 0)
++++ tests/xlocale/xlocale.cpp	(revision 0)
+@@ -0,0 +1,152 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        tests/xlocale/xlocale.cpp
++// Purpose:     wxXLocale & related unit test
++// Author:      Brian Vanderburg II
++// Created:     2008-01-16
++// RCS-ID:      $Id:  $
++///////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++#include "testprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#ifndef WX_PRECOMP
++    #include "wx/wx.h"
++#endif // WX_PRECOMP
++
++#if wxUSE_XLOCALE
++
++#include "wx/xlocale.h"
++
++// --------------------------------------------------------------------------
++// test class
++// --------------------------------------------------------------------------
++
++class XLocaleTestCase : public CppUnit::TestCase
++{
++public:
++    XLocaleTestCase() { }
++
++private:
++    CPPUNIT_TEST_SUITE( XLocaleTestCase );
++        CPPUNIT_TEST( testCtypeFunctions );
++    CPPUNIT_TEST_SUITE_END();
++    
++    void testCtypeFunctions();
++
++
++    DECLARE_NO_COPY_CLASS(XLocaleTestCase)
++};
++
++// register in the unnamed registry so that these tests are run by default
++CPPUNIT_TEST_SUITE_REGISTRATION( XLocaleTestCase );
++
++// also include in it's own registry so that these tests can be run alone
++CPPUNIT_TEST_SUITE_NAMED_REGISTRATION( XLocaleTestCase, "XLocaleTestCase" );
++
++
++// test the ctype functions
++
++void XLocaleTestCase::testCtypeFunctions()
++{
++    // isalnum
++    CPPUNIT_ASSERT(wxIsalnum_l('0', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('9', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('A', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('Z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('a', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('*', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('@', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalnum_l('+', wxCLocale) == 0);
++
++    // isalpha
++    CPPUNIT_ASSERT(wxIsalpha_l('0', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('9', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('A', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('Z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('a', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('*', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('@', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsalpha_l('+', wxCLocale) == 0);
++
++    // TODO: iscntrl
++    
++    // isdigit
++    CPPUNIT_ASSERT(wxIsdigit_l('0', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('9', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('A', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('Z', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('a', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsdigit_l('z', wxCLocale) == 0);
++
++    // TODO: isgraph
++    
++    // islower
++    CPPUNIT_ASSERT(wxIslower_l('A', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIslower_l('Z', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIslower_l('a', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIslower_l('z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIslower_l('0', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIslower_l('9', wxCLocale) == 0);
++
++
++    // TODO: isprint
++    // TODO: ispunct
++    
++    // isspace
++    CPPUNIT_ASSERT(wxIsspace_l(' ', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsspace_l('\t', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsspace_l('\r', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsspace_l('\n', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsspace_l('0', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsspace_l('a', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsspace_l('A', wxCLocale) == 0);
++
++    // isupper
++    CPPUNIT_ASSERT(wxIsupper_l('0', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsupper_l('9', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsupper_l('A', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsupper_l('Z', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsupper_l('a', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsupper_l('z', wxCLocale) == 0);
++
++    // isxdigit
++    CPPUNIT_ASSERT(wxIsxdigit_l('0', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('9', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('A', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('F', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('Z', wxCLocale) == 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('a', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('f', wxCLocale) != 0);
++    CPPUNIT_ASSERT(wxIsxdigit_l('z', wxCLocale) == 0);
++
++    // tolower
++    CPPUNIT_ASSERT(wxTolower_l('A', wxCLocale) == 'a');
++    CPPUNIT_ASSERT(wxTolower_l('a', wxCLocale) == 'a');
++    CPPUNIT_ASSERT(wxTolower_l('Z', wxCLocale) == 'z');
++    CPPUNIT_ASSERT(wxTolower_l('z', wxCLocale) == 'z');
++    CPPUNIT_ASSERT(wxTolower_l('0', wxCLocale) == '0');
++    CPPUNIT_ASSERT(wxTolower_l('9', wxCLocale) == '9');
++    
++    // toupper
++    CPPUNIT_ASSERT(wxToupper_l('A', wxCLocale) == 'A');
++    CPPUNIT_ASSERT(wxToupper_l('a', wxCLocale) == 'A');
++    CPPUNIT_ASSERT(wxToupper_l('Z', wxCLocale) == 'Z');
++    CPPUNIT_ASSERT(wxToupper_l('z', wxCLocale) == 'Z');
++    CPPUNIT_ASSERT(wxToupper_l('0', wxCLocale) == '0');
++    CPPUNIT_ASSERT(wxToupper_l('9', wxCLocale) == '9');
++    
++}
++
++
++
++
++#endif // wxUSE_XLOCALE
+
+ 	  	 

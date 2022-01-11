@@ -1,0 +1,183 @@
+Index: include/wx/msgout.h
+===================================================================
+--- include/wx/msgout.h	(revision 53437)
++++ include/wx/msgout.h	(working copy)
+@@ -171,5 +171,23 @@
+     virtual void Output(const wxString& str);
+ };
+ 
+-#endif
+-    // _WX_MSGOUT_H_
++// ----------------------------------------------------------------------------
++// only for Windows and shows command line parameters
++// implementation which shows output in stderr if application running from
++// console and native message box otherwise;
++// ----------------------------------------------------------------------------
++
++#if wxUSE_GUI && wxUSE_MSGDLG && defined(__WINDOWS__)
++
++class WXDLLIMPEXP_CORE wxMessageOutputBestWin : public wxMessageOutput
++{
++public:
++    wxMessageOutputBestWin() { }
++
++protected:
++    virtual void Output(const wxString& str);
++};
++
++#endif // wxUSE_GUI && wxUSE_MSGDLG && defined(__WINDOWS__)
++
++#endif // _WX_MSGOUT_H_
+Index: src/common/appcmn.cpp
+===================================================================
+--- src/common/appcmn.cpp	(revision 53437)
++++ src/common/appcmn.cpp	(working copy)
+@@ -437,7 +437,9 @@
+     // is (according to common practice):
+     //     - console apps: to stderr (on any platform)
+     //     - GUI apps: stderr on Unix platforms (!)
+-    //                 message box under Windows and others
++    //                 stderr on Windows if app running from console
++    //                 message box on Windows if app running from GUI
++    //                 message box under others platform
+ #ifdef __UNIX__
+     return new wxMessageOutputStderr;
+ #else // !__UNIX__
+@@ -445,7 +447,11 @@
+     #ifdef __WXMOTIF__
+         return new wxMessageOutputLog;
+     #elif wxUSE_MSGDLG
+-        return new wxMessageOutputMessageBox;
++        #ifdef __WINDOWS__
++            return new wxMessageOutputBestWin;
++        #else
++            return new wxMessageOutputMessageBox;
++        #endif // __WINDOWS__
+     #else
+         return new wxMessageOutputStderr;
+     #endif
+@@ -537,4 +543,3 @@
+ {
+     wxPendingDelete.DeleteObject(object);
+ }
+-
+Index: src/common/msgout.cpp
+===================================================================
+--- src/common/msgout.cpp	(revision 53437)
++++ src/common/msgout.cpp	(working copy)
+@@ -125,8 +125,11 @@
+ #ifdef __WINDOWS__
+     if ( !IsInConsole() )
+     {
+-        ::MessageBox(NULL, str.wx_str(), _T("wxWidgets"),
+-                     MB_ICONINFORMATION | MB_OK);
++        wxString title;
++        if ( wxTheApp )
++            title.Printf(_("%s message"), wxTheApp->GetAppDisplayName().c_str());
++
++        ::MessageBox(NULL, str.wx_str(), title.wx_str(), MB_ICONINFORMATION | MB_OK);
+     }
+     else
+ #endif // __WINDOWS__/!__WINDOWS__
+@@ -212,3 +215,99 @@
+ }
+ 
+ #endif // wxUSE_GUI
++
++// ----------------------------------------------------------------------------
++// wxMessageOutputBestWin
++// ----------------------------------------------------------------------------
++
++#if wxUSE_GUI && wxUSE_MSGDLG && defined(__WINDOWS__)
++
++static bool WriteToStderr(const wxChar* str, size_t length)
++{
++#if !defined(__WXWINCE__) && (_WIN32_WINNT >= 0x0501)
++
++    if (!AttachConsole(ATTACH_PARENT_PROCESS))
++        return false;
++
++    HANDLE hConErr = GetStdHandle(STD_ERROR_HANDLE);
++
++    if (hConErr == INVALID_HANDLE_VALUE) {
++        FreeConsole();
++        return false;
++    }
++
++    // if we write "string" to console here, the console shows:
++
++    // C:\Documents and Settings\malcom>app.exe
++    //
++    // C:\Documents and Settings\malcom>string
++
++    // so, before we write it to console, we must
++    // - find an empty line,
++    // - copy chars from the epmty line position to current,
++    // - fill the area (clean),
++    // - set cursor to new position (empty line)
++
++    // after writing this to the console, we must
++    // - write the copyed chars data
++
++    DWORD ret;
++    int len = 0;
++    wxChar* data = 0;
++    CONSOLE_SCREEN_BUFFER_INFO csbi;
++    if (GetConsoleScreenBufferInfo(hConErr, &csbi)) {
++        COORD pos;
++        pos.X = 0;
++        pos.Y = csbi.dwCursorPosition.Y + 1;
++
++        // we may institute that line is empty if first 4 characters are spaces
++        char buf[4];
++        do {
++            pos.Y--;
++            if (!ReadConsoleOutputCharacterA(hConErr, buf, sizeof(buf), pos, &ret))
++                return false;
++        } while (strncmp("    ", buf, 4) != 0);
++
++        len = (csbi.dwCursorPosition.Y - pos.Y) * csbi.dwMaximumWindowSize.X
++                + csbi.dwCursorPosition.X;
++
++        if (len > 0) {
++            data = new wxChar[len];
++            ReadConsoleOutputCharacter(hConErr, data, len, pos, &ret);
++            FillConsoleOutputCharacter(hConErr, ' ', len, pos, &ret);
++        }
++
++        SetConsoleCursorPosition(hConErr, pos);
++    }
++
++    WriteConsole(hConErr, str, (DWORD)length, &ret, 0);
++
++    // write \n only if last string char isn't \n
++    if (wxStrncmp(str+length-1, wxT("\n"), 1) != 0)
++        WriteConsole(hConErr, wxT("\n"), 1, &ret, 0);
++
++    WriteConsole(hConErr, data, len, &ret, 0);
++
++    delete data;
++    FreeConsole();
++
++    return true;
++
++#else
++    return false;
++#endif // !__WXWINCE__ && _WIN32_WINNT >= 0x0501
++}
++
++void wxMessageOutputBestWin::Output(const wxString& str)
++{
++    if ( !WriteToStderr(str.wx_str(), str.length()) )
++    {
++        wxString title;
++        if ( wxTheApp )
++            title.Printf(_("%s message"), wxTheApp->GetAppDisplayName().c_str());
++
++        ::MessageBox(NULL, str.wx_str(), title.wx_str(), MB_ICONINFORMATION | MB_OK);
++    }
++}
++
++#endif // wxUSE_GUI && wxUSE_MSGDLG && defined(__WINDOWS__)
+
+ 	  	 

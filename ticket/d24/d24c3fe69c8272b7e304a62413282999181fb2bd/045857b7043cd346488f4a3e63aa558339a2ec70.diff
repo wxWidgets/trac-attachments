@@ -1,0 +1,155 @@
+commit ffdc625fd31c27d47079198368e84926714c5041
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Mon Apr 30 01:12:43 2012 +0200
+
+    Add children node automatically to wxGTK wxDataViewCtrl too.
+    
+    In the generic and native OS X versions of wxDataViewCtrl it was enough to add
+    a parent item to the control to have all its children appear in the tree as
+    well but this didn't work in wxGTK. Change this now and add all the items as
+    in the other ports.
+    
+    Also optimize adding many items at once.
+    
+    Closes #14068.
+
+diff --git a/src/gtk/dataview.cpp b/src/gtk/dataview.cpp
+index 31fa32f..0f030b5 100644
+--- a/src/gtk/dataview.cpp
++++ b/src/gtk/dataview.cpp
+@@ -249,6 +249,7 @@ class wxDataViewCtrlInternal
+         GtkSelectionData *selection_data );
+ 
+     // notifactions from wxDataViewModel
++    bool NodeAdded( const wxDataViewItem &parent, wxGtkTreeModelNode* node );
+     bool ItemAdded( const wxDataViewItem &parent, const wxDataViewItem &item );
+     bool ItemDeleted( const wxDataViewItem &parent, const wxDataViewItem &item );
+     bool ItemChanged( const wxDataViewItem &item );
+@@ -288,12 +289,12 @@ class wxDataViewCtrlInternal
+     int GetIndexOf( const wxDataViewItem &parent, const wxDataViewItem &item );
+ 
+     void OnInternalIdle();
++    wxGtkTreeModelNode *FindNode( const wxDataViewItem &item );
+ 
+ protected:
+     void InitTree();
+     void ScheduleRefresh();
+ 
+-    wxGtkTreeModelNode *FindNode( const wxDataViewItem &item );
+     wxGtkTreeModelNode *FindNode( GtkTreeIter *iter );
+     wxGtkTreeModelNode *FindParentNode( const wxDataViewItem &item );
+     wxGtkTreeModelNode *FindParentNode( GtkTreeIter *iter );
+@@ -367,12 +368,6 @@ class wxGtkTreeModelNode
+             void *id = child->GetItem().GetID();
+ 
+             m_children.Add( id );
+-
+-            if (m_internal->ShouldBeSorted())
+-            {
+-                gs_internal = m_internal;
+-                m_children.Sort( &wxGtkTreeModelChildCmp );
+-            }
+         }
+ 
+     void InsertNode( wxGtkTreeModelNode* child, unsigned pos )
+@@ -414,12 +409,6 @@ class wxGtkTreeModelNode
+     void InsertLeaf( void* id, unsigned pos )
+         {
+             m_children.Insert( id, pos );
+-
+-            if (m_internal->ShouldBeSorted())
+-            {
+-                gs_internal = m_internal;
+-                m_children.Sort( &wxGtkTreeModelChildCmp );
+-            }
+         }
+ 
+     void DeleteChild( void* id )
+@@ -1559,6 +1548,22 @@ bool wxGtkDataViewModelNotifier::ItemAdded( const wxDataViewItem &parent, const 
+     gtk_tree_model_row_inserted(
+         GTK_TREE_MODEL(wxgtk_model), path, &iter);
+ 
++    if ( !m_wx_model->IsVirtualListModel() )
++    {
++        if (m_internal->ShouldBeSorted())
++        {
++            wxGtkTreeModelNode* node = m_internal->FindNode(parent);
++            wxCHECK_MSG( node, false,
++                         wxS("Logic error: should have parent node") );
++
++            gs_internal = m_internal;
++            node->GetChildren().Sort( &wxGtkTreeModelChildCmp );
++        }
++
++        if (m_wx_model->IsContainer(item))
++            m_internal->NodeAdded(item, m_internal->FindNode(item));
++    }
++
+     return true;
+ }
+ 
+@@ -3458,6 +3463,12 @@ void wxDataViewCtrlInternal::BuildBranch( wxGtkTreeModelNode *node )
+ 
+             // Don't send any events here
+         }
++
++        if (ShouldBeSorted())
++        {
++           gs_internal = this;
++           node->GetChildren().Sort( &wxGtkTreeModelChildCmp );
++        }
+     }
+ }
+ 
+@@ -3637,6 +3648,51 @@ void wxDataViewCtrlInternal::Resort()
+     ScheduleRefresh();
+ }
+ 
++bool
++wxDataViewCtrlInternal::NodeAdded( const wxDataViewItem& parent,
++                                   wxGtkTreeModelNode* parent_node )
++{
++    wxCHECK_MSG( parent_node, false, wxS("parent node must be non-NULL") );
++
++    wxGtkTreeModelNode *node;
++    wxDataViewItemArray array;
++    m_wx_model->GetChildren(parent, array);
++
++    const unsigned nchildren = array.size();
++    for ( unsigned i = 0; i < nchildren; i++ )
++    {
++        if (m_wx_model->IsContainer( array[i] ))
++        {
++            node = new wxGtkTreeModelNode( parent_node, array[i], this );
++            parent_node->InsertNode( node, i );
++        }
++        else
++        {
++            node = NULL;
++            parent_node->InsertLeaf( array[i].GetID(), i );
++        }
++
++        GtkTreeIter iterc;
++        iterc.stamp = m_gtk_model->stamp;
++        iterc.user_data = array[i].GetID();
++
++        wxGtkTreePath pathc(wxgtk_tree_model_get_path(
++                    GTK_TREE_MODEL(m_gtk_model), &iterc ));
++        gtk_tree_model_row_inserted(
++                GTK_TREE_MODEL(m_gtk_model), pathc, &iterc);
++
++        if (node)
++            NodeAdded(array[i], node);
++    }
++
++    if (ShouldBeSorted())
++    {
++        parent_node->GetChildren().Sort( &wxGtkTreeModelChildCmp );
++    }
++
++    return true;
++}
++
+ bool wxDataViewCtrlInternal::ItemAdded( const wxDataViewItem &parent, const wxDataViewItem &item )
+ {
+     if (!m_wx_model->IsVirtualListModel())

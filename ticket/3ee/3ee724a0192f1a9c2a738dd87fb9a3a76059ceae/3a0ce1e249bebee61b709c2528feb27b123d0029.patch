@@ -1,0 +1,295 @@
+Index: include/wx/txtstrm.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/txtstrm.h,v
+retrieving revision 1.27
+diff -b -u -2 -r1.27 txtstrm.h
+--- include/wx/txtstrm.h	2004/11/21 18:26:36	1.27
++++ include/wx/txtstrm.h	2005/02/12 08:23:58
+@@ -32,4 +32,10 @@
+ #define wxEOT wxT('\4') // the End-Of-Text control code (used only inside wxTextInputStream)
+ 
++#if wxUSE_UNICODE
++#define wxTEXTINPUTSTREAM_BUFFERSIZE 20
++#else
++#define wxTEXTINPUTSTREAM_BUFFERSIZE 10
++#endif
++
+ // If you're scanning through a file using wxTextInputStream, you should check for EOF _before_
+ // reading the next item (word / number), because otherwise the last item may get lost.
+@@ -41,5 +47,5 @@
+ public:
+ #if wxUSE_UNICODE
+-    wxTextInputStream(wxInputStream& s, const wxString &sep=wxT(" \t"), wxMBConv& conv = wxConvUTF8 );
++    wxTextInputStream(wxInputStream& s, const wxString &sep=wxT(" \t"), wxMBConv& conv = wxConvLocal );
+ #else
+     wxTextInputStream(wxInputStream& s, const wxString &sep=wxT(" \t") );
+@@ -80,7 +86,9 @@
+     wxInputStream &m_input;
+     wxString m_separators;
+-    char m_lastBytes[10]; // stores the bytes that were read for the last character
++    char m_lastBytes[wxTEXTINPUTSTREAM_BUFFERSIZE]; // internal buffer to hold read chars
+ 
+ #if wxUSE_UNICODE
++    int m_nBytePos;
++    int m_nToUnread;
+     wxMBConv &m_conv;
+ #endif
+Index: src/common/txtstrm.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/txtstrm.cpp,v
+retrieving revision 1.35
+diff -b -u -2 -r1.35 txtstrm.cpp
+--- src/common/txtstrm.cpp	2004/11/21 18:26:33	1.35
++++ src/common/txtstrm.cpp	2005/02/12 08:18:38
+@@ -3,5 +3,5 @@
+ // Purpose:     Text stream classes
+ // Author:      Guilhem Lavaux
+-// Modified by:
++// Modified by: Ryan Norton (work properly in unicode mode)
+ // Created:     28/06/98
+ // RCS-ID:      $Id: txtstrm.cpp,v 1.35 2004/11/21 18:26:33 RN Exp $
+@@ -39,9 +39,10 @@
+ // ----------------------------------------------------------------------------
+ 
++
+ #if wxUSE_UNICODE
+ wxTextInputStream::wxTextInputStream(wxInputStream &s, const wxString &sep, wxMBConv& conv)
+-  : m_input(s), m_separators(sep), m_conv(conv)
++  : m_input(s), m_separators(sep), m_nBytePos(0), m_nToUnread(0), m_conv(conv)
+ {
+-    memset((void*)m_lastBytes, 0, 10);
++    memset((void*)m_lastBytes, 0, wxTEXTINPUTSTREAM_BUFFERSIZE);
+ }
+ #else
+@@ -49,5 +50,5 @@
+   : m_input(s), m_separators(sep)
+ {
+-    memset((void*)m_lastBytes, 0, 10);
++    memset((void*)m_lastBytes, 0, wxTEXTINPUTSTREAM_BUFFERSIZE);
+ }
+ #endif
+@@ -59,9 +60,16 @@
+ void wxTextInputStream::UngetLast()
+ {
++#if !wxUSE_UNICODE
+     size_t byteCount = 0;
+     while(m_lastBytes[byteCount]) // pseudo ANSI strlen (even for Unicode!)
+         byteCount++;
++#endif
++
++#if wxUSE_UNICODE
++    m_input.Ungetch(m_lastBytes, m_nToUnread);
++#else
+     m_input.Ungetch(m_lastBytes, byteCount);
+-    memset((void*)m_lastBytes, 0, 10);
++#endif
++    memset((void*)m_lastBytes, 0, wxTEXTINPUTSTREAM_BUFFERSIZE);
+ }
+ 
+@@ -69,7 +77,41 @@
+ {
+ #if wxUSE_UNICODE
++    //
++    // RN: OKAY - this is really complex and involved, so I'll try to 
++    // explain it the best I can
++    //
++    // Here we are reading a character at a time until either
++    // A) the end of the stream is reached
++    // B) A valid character was reached previously and an invalid character
++    //    is reached
++    //
++    // So why is B not just until a valid character is reached (this
++    // is the way it was previously done)? 
++    //
++    // This is the nasty part.  Basically this is ok for single-byte
++    // encodings (UTF8, ANSI etc).  On multi-byte (UTF16 etc), if a
++    // valid single-byte character is reached (such as an input UTF16
++    // that in single-bytes looks like 'A' 'A') it will stop at the 
++    // first character - because to convert we _have_ to end the
++    // string we pass to the converter with a null character (0/'\0'),
++    // so wxConvUTF16 thinks our input string of 'A' '\0' is perfectly
++    // valid - which it is.  However, the input stream is really trying
++    // to tell us that it is 0x4141 ('A' 'A'), not 0x0041 ('A' '\0') -
++    // resulting in a multiple of the length of the input send to output.
++    //
++    // In order to function with conditions A and B, we need to keep
++    // track of where we are in the buffer with m_nBytePos - because
++    // in the case when we don't reach the end of the stream
++    // we need to read a byte over where the last valid byte was.
++    //
++    // FIXME: Do we really need to pass 2 to MB2WC now?
++    //
+     wxChar wbuf[2];
+-    memset((void*)m_lastBytes, 0, 10);
+-    for(size_t inlen = 0; inlen < 9; inlen++)
++    wbuf[0] = wxEOT;//returned char
++    m_nToUnread = 0;
++    int retlen = 0;
++    for(size_t inlen = m_nBytePos; 
++        inlen < (wxTEXTINPUTSTREAM_BUFFERSIZE - 1); 
++        inlen++)
+     {
+         // actually read the next character
+@@ -77,12 +119,38 @@
+ 
+         if(m_input.LastRead() <= 0)
+-            return wxEOT;
++        {            
++            if (retlen)
++            {
++                //handle stray character
++                m_conv.MB2WC(wbuf, m_lastBytes, 2);
++            }
++            memset((void*)m_lastBytes, 0, m_nBytePos);
++            m_nBytePos = 0;
++            break;
++        }
+ 
+-        int retlen = (int) m_conv.MB2WC(wbuf, m_lastBytes, 2); // returns -1 for failure
+-        if(retlen >= 0) // res == 0 could happen for '\0' char
+-            return wbuf[0];
++
++        //get length of m_lastBytes
++        retlen = (int) m_conv.MB2WC(NULL, m_lastBytes, 0); // returns -1 for failure
++
++        if(retlen == 2)
++        {
++            //get the character
++            m_conv.MB2WC(wbuf, m_lastBytes, 2);
++
++            //move buffer
++            m_lastBytes[0] = m_lastBytes[m_nBytePos];
++            memset((void*) (&m_lastBytes[1]), 0, m_nBytePos);
++            m_nBytePos = 1;
++            ++m_nToUnread;
++            break;
+     }
++
++        ++m_nBytePos;
++        ++m_nToUnread;
++    }
++
+     // there should be no encoding which requires more than nine bytes for one character...
+-    return wxEOT;
++    return wbuf[0];
+ #else
+     m_lastBytes[0] = m_input.GetC();
+@@ -201,4 +269,14 @@
+         line += c;
+     }
++    //handle stray character
++    if(m_nBytePos)
++    {
++        wxChar wbuf[2];
++        int nLen = (int) m_conv.MB2WC(wbuf, m_lastBytes, 2);
++        if (nLen == 1)
++            line += wbuf[0];
++        memset((void*)m_lastBytes, 0, m_nBytePos);
++        m_nBytePos = 0;
++    }
+ 
+     return line;
+@@ -231,4 +309,14 @@
+ 
+         word += c;
++    }
++    //handle stray character
++    if(m_nBytePos)
++    {
++        wxChar wbuf[2];
++        int nLen = (int) m_conv.MB2WC(wbuf, m_lastBytes, 2);
++        if (nLen == 1)
++            word += wbuf[0];
++        memset((void*)m_lastBytes, 0, m_nBytePos);
++        m_nBytePos = 0;
+     }
+ 
+Index: docs/latex/wx/txtstrm.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/txtstrm.tex,v
+retrieving revision 1.21
+diff -b -u -2 -r1.21 txtstrm.tex
+--- docs/latex/wx/txtstrm.tex	2004/11/22 05:25:13	1.21
++++ docs/latex/wx/txtstrm.tex	2005/02/12 08:25:16
+@@ -45,5 +45,5 @@
+ 
+ \func{}{wxTextInputStream}{\param{wxInputStream\&}{ stream}, \param{const wxString\&}{ sep=" $\backslash$t"}, 
+-  \param{wxMBConv\&}{ conv = wxConvUTF8} }
++  \param{wxMBConv\&}{ conv = wxConvLocal} }
+ 
+ Constructs a text stream associated to the given input stream.
+Index: tests/streams/textstreamtest.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/tests/streams/textstreamtest.cpp,v
+retrieving revision 1.2
+diff -b -u -2 -r1.2 textstreamtest.cpp
+--- tests/streams/textstreamtest.cpp	2004/11/22 05:00:02	1.2
++++ tests/streams/textstreamtest.cpp	2005/02/12 08:23:02
+@@ -24,4 +24,5 @@
+ #include "wx/txtstrm.h"
+ #include "wx/wfstream.h"
++#include "wx/mstream.h"
+ 
+ // ----------------------------------------------------------------------------
+@@ -37,9 +38,12 @@
+     CPPUNIT_TEST_SUITE( TextStreamTestCase );
+         CPPUNIT_TEST( Endline );
++        CPPUNIT_TEST( UTF8  );
++        CPPUNIT_TEST( UTF16 );
+     CPPUNIT_TEST_SUITE_END();
+ 
+     void Endline();
++    void UTF8();
++    void UTF16();
+ 
+-
+     DECLARE_NO_COPY_CLASS(TextStreamTestCase)
+ };
+@@ -86,2 +90,44 @@
+     delete pInFile;
+ }
++
++void TextStreamTestCase::UTF8()
++{
++#if wxUSE_UNICODE
++    //
++    // Multi-byte unicode test
++    //
++    //should be length 6
++    wxChar buggy[] = { 0x4141,// 'A' 'A' 
++                       0x4141,// 'A' 'A' 
++                       0x4141 };
++    wxMemoryInputStream inStringStream ( buggy, sizeof(wxChar) * WXSIZEOF(buggy) );
++    wxMBConvUTF8 myConv;
++    wxTextInputStream inTextStream (inStringStream, wxT(" \t"), myConv);
++    wxString myString;
++    inTextStream >> myString;
++
++//    wxPrintf(wxT("\n\nTHE LENGTH: [  %i   ]\n\n"), myString.Length());
++    CPPUNIT_ASSERT( myString.Length() == 6 );
++#endif
++}
++
++void TextStreamTestCase::UTF16()
++{
++#if wxUSE_UNICODE
++    //
++    // Multi-byte unicode test
++    //
++    //should be length 3 
++    wxChar buggy[] = { 0x4141,// 'A' 'A' 
++                       0x4141,// 'A' 'A' 
++                       0x4141 };
++    wxMemoryInputStream inStringStream ( buggy, sizeof(wxChar) * WXSIZEOF(buggy) );
++    wxMBConvUTF16 myConv;
++    wxTextInputStream inTextStream (inStringStream, wxT(" \t"), myConv);
++    wxString myString;
++    inTextStream >> myString;
++
++//   wxPrintf(wxT("\n\nTHE LENGTH: [  %i   ]\n\n"), myString.Length());
++    CPPUNIT_ASSERT( myString.Length() == 3 );
++#endif
++}
+\ No newline at end of file
+
+ 	  	 

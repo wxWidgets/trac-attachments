@@ -1,0 +1,212 @@
+diff -urN wxWidgets-2.8.0-rc1.original/src/xrc/xmlres.cpp wxWidgets-2.8.0-rc1/src/xrc/xmlres.cpp
+--- wxWidgets-2.8.0-rc1.original/src/xrc/xmlres.cpp	Mon Nov 13 12:53:05 2006
++++ wxWidgets-2.8.0-rc1/src/xrc/xmlres.cpp	Sun Nov 19 03:32:52 2006
+@@ -42,6 +42,7 @@
+ #include "wx/fontenum.h"
+ #include "wx/fontmap.h"
+ #include "wx/artprov.h"
++#include "wx/dynarray.h"
+ 
+ #include "wx/xml/xml.h"
+ 
+@@ -51,6 +52,188 @@
+ 
+ wxXmlResource *wxXmlResource::ms_instance = NULL;
+ 
++/////////////////////////////////////////////////////////////////////////////
++
++class wxXrcInputStreamCache : public wxFilterInputStream
++{
++public:
++    wxXrcInputStreamCache(wxInputStream& stream);
++    wxXrcInputStreamCache(wxInputStream* stream);
++    virtual ~wxXrcInputStreamCache();
++
++    virtual bool IsSeekable(void) const { return true; }
++
++protected:
++    virtual size_t OnSysRead(void *buffer, size_t buffsize);
++    virtual wxFileOffset OnSysSeek(wxFileOffset seek, wxSeekMode mode);
++    virtual wxFileOffset OnSysTell(void) const;
++
++    bool ReadDataBlock(void);
++
++#define CACHE_BUFFER_SIZE 64
++
++    WX_DEFINE_ARRAY(char*, CacheBuffers);
++    CacheBuffers m_buffers;
++
++    size_t m_curpos;
++    size_t m_cachesize;
++
++    DECLARE_NO_COPY_CLASS(wxXrcInputStreamCache)
++};
++
++wxXrcInputStreamCache::wxXrcInputStreamCache(wxInputStream& stream)
++    : wxFilterInputStream(stream)
++    , m_curpos   (0)
++    , m_cachesize(0)
++{
++}
++
++wxXrcInputStreamCache::wxXrcInputStreamCache(wxInputStream* stream)
++    : wxFilterInputStream(stream)
++    , m_curpos   (0)
++    , m_cachesize(0)
++{
++}
++
++wxXrcInputStreamCache::~wxXrcInputStreamCache()
++{
++    size_t i, cnt;
++    cnt = m_buffers.GetCount();
++    for (i = 0; i < cnt; i++)
++        free(m_buffers.Item(i));
++
++    m_buffers.Clear();
++}
++
++bool wxXrcInputStreamCache::ReadDataBlock(void)
++{
++    size_t buffno, offset, bytesleft, bytesread;
++    char* buff;
++
++    if (wxSTREAM_NO_ERROR != m_parent_i_stream->GetLastError())
++    {
++        m_lasterror = m_parent_i_stream->GetLastError();
++        return false;
++    }
++
++    buffno    = m_cachesize / CACHE_BUFFER_SIZE;
++    bytesleft = (buffno + 1) * CACHE_BUFFER_SIZE - m_cachesize;
++    offset    = CACHE_BUFFER_SIZE - bytesleft;
++
++    if (buffno < m_buffers.GetCount())
++    {
++        buff = m_buffers.Item(buffno);
++    }
++    else
++    {
++        buff = (char*) malloc(CACHE_BUFFER_SIZE);
++        if (0 == buff)
++        {
++            m_lasterror = wxSTREAM_READ_ERROR;
++            return false;
++        }
++
++        m_buffers.Add(buff);
++        if (buffno == m_buffers.GetCount())
++        {
++            // No memory
++            free(buff);
++            m_lasterror = wxSTREAM_READ_ERROR;
++            return false;
++        }
++    }
++
++    m_parent_i_stream->Read(buff + offset, bytesleft);
++    bytesread = m_parent_i_stream->LastRead();
++    if (bytesread > 0)
++    {
++        m_cachesize += bytesread;
++        return true;
++    }
++
++    m_lasterror = m_parent_i_stream->GetLastError();
++    return false;
++}
++
++size_t wxXrcInputStreamCache::OnSysRead(void *buffer, size_t buffsize)
++{
++    size_t buffno, pos, tail, cnt;
++    size_t bytesread = 0;
++
++    m_lasterror = wxSTREAM_NO_ERROR;
++
++    while (buffsize > 0)
++    {
++        while (m_curpos >= m_cachesize)
++            if (!ReadDataBlock())
++                break;
++
++        if (m_curpos >= m_cachesize)
++            break;
++
++        buffno = m_curpos / CACHE_BUFFER_SIZE;
++        pos    = m_curpos % CACHE_BUFFER_SIZE;
++        tail   = m_cachesize - m_curpos;
++        cnt    = CACHE_BUFFER_SIZE - pos;
++
++        if (cnt > tail)     cnt = tail;
++        if (cnt > buffsize) cnt = buffsize;
++
++        memcpy(buffer, m_buffers.Item(buffno) + pos, cnt);
++        buffer     = ((char*) buffer) + cnt;
++        buffsize  -= cnt;
++        bytesread += cnt;
++        m_curpos  += cnt;
++    }
++
++    if (m_lasterror == wxSTREAM_EOF && buffsize == 0)
++        m_lasterror = wxSTREAM_NO_ERROR;
++
++    return bytesread;
++}
++
++wxFileOffset wxXrcInputStreamCache::OnSysSeek(wxFileOffset seek, wxSeekMode mode)
++{
++    ssize_t pos;
++
++    if (mode == wxFromEnd)
++    {
++        while (ReadDataBlock())
++            continue;
++
++        if (m_lasterror != wxSTREAM_EOF)
++            return wxInvalidOffset;
++
++        m_lasterror = wxSTREAM_NO_ERROR;
++    }
++
++    switch (mode)
++    {
++        case wxFromStart:   pos = seek;               break;
++        case wxFromCurrent: pos = m_curpos + seek;    break;
++        case wxFromEnd:     pos = m_cachesize + seek; break;
++
++        default:
++            wxFAIL_MSG(_("unknown seek origin"));
++            return wxInvalidOffset;
++    }
++
++    if (pos < 0)
++        return wxInvalidOffset;
++
++    m_curpos = pos;
++    m_lasterror = (m_curpos < m_cachesize) ? wxSTREAM_NO_ERROR : wxSTREAM_EOF;
++    return pos;
++}
++
++wxFileOffset wxXrcInputStreamCache::OnSysTell(void) const
++{
++    return m_curpos;
++}
++
++
++/////////////////////////////////////////////////////////////////////////////
++
+ /*static*/ wxXmlResource *wxXmlResource::Get()
+ {
+     if ( !ms_instance )
+@@ -1123,7 +1306,8 @@
+                    name.c_str());
+         return wxNullBitmap;
+     }
+-    wxImage img(*(fsfile->GetStream()));
++    wxXrcInputStreamCache cache(*fsfile->GetStream());
++    wxImage img(cache);
+     delete fsfile;
+ #else
+     wxImage img(name);
+
+ 	  	 

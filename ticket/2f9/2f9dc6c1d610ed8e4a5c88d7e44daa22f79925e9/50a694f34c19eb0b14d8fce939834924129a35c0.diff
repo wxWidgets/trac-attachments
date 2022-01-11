@@ -1,0 +1,331 @@
+Index: include/wx/filename.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/filename.h,v
+retrieving revision 1.68
+diff -u -r1.68 filename.h
+--- include/wx/filename.h	2006/08/20 09:44:41	1.68
++++ include/wx/filename.h	2006/08/24 02:31:35
+@@ -51,6 +51,7 @@
+     wxPATH_WIN = wxPATH_DOS,
+     wxPATH_OS2 = wxPATH_DOS,
+     wxPATH_VMS,
++    wxPATH_MAC_NOSPLIT, //keep Split(Volume) from chomping too much on Mac side. 
+ 
+     wxPATH_MAX // Not a valid value for specifying path format
+ };
+Index: src/common/filename.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/filename.cpp,v
+retrieving revision 1.171
+diff -u -r1.171 filename.cpp
+--- src/common/filename.cpp	2006/08/22 12:21:24	1.171
++++ src/common/filename.cpp	2006/08/24 02:31:44
+@@ -35,6 +35,18 @@
+                 Since the volume is just part of the file path, it is not
+                 treated like a separate entity as it is done under DOS and
+                 VMS, it is just treated as another dir.
++                
++                However - in order to translate between wxPATH_UNIX and wxPATH_MAC
++                on OS X, and refer to the same file or directory, we need to 
++                recognize that:
++                -   "/Volumes/volume/...." in wxPATH_UNIX refers to "volume:....
++                    on wxPATH_MAC.  Here "/Volumes" is a literal string.
++                -   "/directory/...." in wxPATH_UNIX refers to "system:....
++                    on wxPATH_MAC.  Here "system" is the name of the system volume.
++                    
++                So under __WXMAC__, we store the volume name separately.  If the 
++                volume name is empty and we want the wxPATH_MAC representation,
++                we retrieve the system volume name.
+ 
+    wxPATH_VMS:  VMS native format, absolute file names have the form
+                     <device>:[dir1.dir2.dir3]file.txt
+@@ -280,6 +292,19 @@
+         {
+             path << volume << wxFileName::GetVolumeSeparator(format);
+         }
++#ifdef __WXMAC__
++        else if ( format == wxPATH_MAC )
++        {
++            path << volume << wxFILE_SEP_PATH_MAC;
++        }
++        else if ( format == wxPATH_UNIX )
++        {
++            if (!volume.empty())    //only append Volumes if we have a vol name (on Mac OS X / still means root). WD-rpw 02-07-06
++            {
++                path << "/Volumes/" << volume;
++            }
++        }
++#endif
+         // else ignore
+     }
+ 
+@@ -311,6 +336,9 @@
+                         bool hasExt,
+                         wxPathFormat format )
+ {
++    if ((format == wxPATH_MAC) && !volume.empty())
++        format = wxPATH_MAC_NOSPLIT;
++        
+     SetPath( path, format );
+ 
+     m_volume = volume;
+@@ -324,7 +352,7 @@
+ {
+     m_dirs.Clear();
+ 
+-    if ( pathOrig.empty() )
++    if ( pathOrig.empty() && (format != wxPATH_MAC_NOSPLIT)) //an empty path with an already split mac mac might mean we were targetting the root level of the HD. WD-rpw 02-07-06 
+     {
+         // no path at all
+         m_relative = true;
+@@ -333,18 +361,28 @@
+     }
+ 
+     format = GetFormat( format );
+-
+-    // 0) deal with possible volume part first
+-    wxString volume,
+-             path;
+-    SplitVolume(pathOrig, &volume, &path, format);
+-    if ( !volume.empty() )
++    
++    wxString path;
++    
++    if (format != wxPATH_MAC_NOSPLIT)
+     {
+-        m_relative = false;
++        wxString volume;
++        // 0) deal with possible volume part first (if we haven't already)
++        SplitVolume(pathOrig, &volume, &path, format);
++        if ( !volume.empty() )
++        {
++            m_relative = false;
+ 
+-        SetVolume(volume);
++            SetVolume(volume);
++        }
+     }
+-
++    else
++    {
++        //if it IS mac path no split, a) don't split the path into its respective components AND set the format back to wxPATH_MAC. WD-rpw 8/23/06
++        format = wxPATH_MAC;
++        path = pathOrig;
++    }
++    
+     // 1) Determine if the path is relative or absolute.
+     wxChar leadingChar = path[0u];
+ 
+@@ -1222,7 +1260,7 @@
+ 
+     // If asserts, wxPathFormat has been changed. In case of a new path format
+     // addition, the following code might have to be updated.
+-    wxCOMPILE_TIME_ASSERT(wxPATH_MAX == 5, wxPathFormatChanged);
++    wxCOMPILE_TIME_ASSERT(wxPATH_MAX == 6, wxPathFormatChanged);
+     switch ( GetFormat(format) )
+     {
+         default :
+@@ -1237,7 +1275,10 @@
+             // 9.2.1 and OS X 10.2.5)
+             strForbiddenChars = wxEmptyString;
+             break;
+-
++        case wxPATH_MAC_NOSPLIT:
++            strForbiddenChars = wxEmptyString;
++            break;
++            
+         case wxPATH_DOS:
+             strForbiddenChars += wxT("\\/:\"<>|");
+             break;
+@@ -1258,7 +1299,8 @@
+     wxString sepVol;
+ 
+     if ( (GetFormat(format) == wxPATH_DOS) ||
+-         (GetFormat(format) == wxPATH_VMS) )
++         (GetFormat(format) == wxPATH_VMS) ||
++         (GetFormat(format) == wxPATH_MAC) )
+     {
+         sepVol = wxFILE_SEP_DSK;
+     }
+@@ -1729,6 +1771,59 @@
+             fullpath.erase(0, posFirstColon + sepVol.length());
+         }
+     }
++
++#ifdef __WXMAC__
++    wxString sepPath = GetPathSeparators(format);
++    if ( format == wxPATH_UNIX )
++    {
++        size_t posFirstColon = fullpath.find_first_of(sepPath);
++        size_t firstCharOffset = 0;
++        
++        if ( posFirstColon != wxString::npos )
++        {
++            wxString    test;
++            if (posFirstColon == 0) // path begins with /. Maybe it starts with /Volumes. WD-rpw 12-23-05
++            {
++                firstCharOffset = 1;
++                posFirstColon = fullpath.find_first_of(sepPath, 1); //so start at the second char and go until we find another. WD-rpw 23-05
++            }
++            test = fullpath.Mid(firstCharOffset, posFirstColon - firstCharOffset);
++            
++            if ( test == "Volumes" )
++            {
++                size_t posSecondColon = fullpath.find_first_of(sepPath, posFirstColon + 1);
++                if ( posSecondColon != wxString::npos )
++                {
++                    if ( pstrVolume )
++                    {
++                        wxString temp;
++                        temp = fullpath.Mid(posFirstColon +1, posSecondColon - posFirstColon - 1);
++                        *pstrVolume = temp;
++                    }
++
++                    // remove the volume name and the separator from the full path
++                    fullpath.erase(0, posSecondColon);
++                }
++             }
++        }
++    }
++    else if ( format == wxPATH_MAC )
++    {
++        size_t posFirstColon = fullpath.find_first_of(sepPath);
++        if ( posFirstColon != wxString::npos )
++        {
++            if ( pstrVolume )
++            {
++                *pstrVolume = fullpath.Left(posFirstColon);
++            }
++            if (posFirstColon != 0) //if colon in first stop we have relative path. don't remove it. WD-rpw 02-07-06
++            {
++                // remove the volume name and the separator from the full path
++                fullpath.erase(0, posFirstColon + sepPath.length());
++            }
++        }
++    }
++#endif
+ 
+     if ( pstrPath )
+         *pstrPath = fullpath;
+Index: tests/filename/filenametest.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/tests/filename/filenametest.cpp,v
+retrieving revision 1.10
+diff -u -r1.10 filenametest.cpp
+--- tests/filename/filenametest.cpp	2006/08/13 01:05:19	1.10
++++ tests/filename/filenametest.cpp	2006/08/24 02:31:47
+@@ -58,16 +58,12 @@
+     { _T("\\\\server\\foo.bar"), _T("server"), _T("\\"), _T("foo"), _T("bar"), true, wxPATH_DOS },
+     { _T("\\\\server\\dir\\foo.bar"), _T("server"), _T("\\dir"), _T("foo"), _T("bar"), true, wxPATH_DOS },
+ 
+-    // wxFileName support for Mac file names is broken currently
+-#if 0
+     // Mac file names
+     { _T("Volume:Dir:File"), _T("Volume"), _T("Dir"), _T("File"), _T(""), true, wxPATH_MAC },
+     { _T("Volume:Dir:Subdir:File"), _T("Volume"), _T("Dir:Subdir"), _T("File"), _T(""), true, wxPATH_MAC },
+     { _T("Volume:"), _T("Volume"), _T(""), _T(""), _T(""), true, wxPATH_MAC },
+-    { _T(":Dir:File"), _T(""), _T("Dir"), _T("File"), _T(""), false, wxPATH_MAC },
+-    { _T(":File.Ext"), _T(""), _T(""), _T("File"), _T(".Ext"), false, wxPATH_MAC },
+-    { _T("File.Ext"), _T(""), _T(""), _T("File"), _T(".Ext"), false, wxPATH_MAC },
+-#endif // 0
++    { _T(":Dir:File"), _T(""), _T(":Dir"), _T("File"), _T(""), false, wxPATH_MAC },
++    { _T(":File.Ext"), _T(""), _T(""), _T("File"), _T("Ext"), false, wxPATH_MAC },
+ 
+     // VMS file names
+     { _T("device:[dir1.dir2.dir3]file.txt"), _T("device"), _T("dir1.dir2.dir3"), _T("file"), _T("txt"), true, wxPATH_VMS },
+@@ -93,6 +89,10 @@
+ #ifdef __WINDOWS__
+         CPPUNIT_TEST( TestShortLongPath );
+ #endif // __WINDOWS__
++#ifdef __WXMAC__
++        CPPUNIT_TEST( TestMacUnixTranslation );
++#endif
++
+     CPPUNIT_TEST_SUITE_END();
+ 
+     void TestConstruction();
+@@ -100,10 +100,15 @@
+     void TestSplit();
+     void TestSetPath();
+     void TestStrip();
++    void TestSameAs();
+ #ifdef __WINDOWS__
+     void TestShortLongPath();
+ #endif // __WINDOWS__
+ 
++#ifdef __WXMAC__
++    void TestMacUnixTranslation();
++#endif
++
+     DECLARE_NO_COPY_CLASS(FileNameTestCase)
+ };
+ 
+@@ -122,7 +127,7 @@
+         wxFileName fn(fni.fullname, fni.format);
+ 
+         wxString fullname = fn.GetFullPath(fni.format);
+-        CPPUNIT_ASSERT( fullname == fni.fullname );
++        CPPUNIT_ASSERT_EQUAL( wxString(fni.fullname), fullname  );
+ 
+         CPPUNIT_ASSERT( fn.Normalize(wxPATH_NORM_ALL, _T(""), fni.format) );
+ 
+@@ -133,11 +138,10 @@
+             wxString pathWithVolume = fni.volume;
+             pathWithVolume += wxFileName::GetVolumeSeparator(fni.format);
+             pathWithVolume += fni.path;
+-
+-            CPPUNIT_ASSERT( fn == wxFileName(pathWithVolume,
+-                                             fni.name,
+-                                             fni.ext,
+-                                             fni.format) );
++            
++            wxFileName compareObj = wxFileName(pathWithVolume, fni.name, fni.ext, fni.format);
++            CPPUNIT_ASSERT_EQUAL( fn.GetFullPath(), compareObj.GetFullPath() );
++            CPPUNIT_ASSERT( fn == compareObj );
+         }
+     }
+ }
+@@ -176,6 +180,7 @@
+ {
+     wxFileName fn(_T("d:\\test\\foo.bar"), wxPATH_DOS);
+     fn.SetPath(_T("c:\\temp"), wxPATH_DOS);
++    CPPUNIT_ASSERT_EQUAL( wxString(_T("c:\\temp")), fn.GetPath(wxPATH_GET_VOLUME, wxPATH_DOS) );
+     CPPUNIT_ASSERT( fn.SameAs(wxFileName(_T("c:\\temp\\foo.bar"), wxPATH_DOS)) );
+ 
+     fn = wxFileName(_T("/usr/bin/ls"), wxPATH_UNIX);
+@@ -183,6 +188,7 @@
+     CPPUNIT_ASSERT( fn.SameAs(wxFileName(_T("/usr/local/bin/ls"), wxPATH_UNIX)) );
+ }
+ 
++
+ wxString wxTestStripExtension(wxString szFile)
+ {
+     wxStripExtension(szFile);
+@@ -214,3 +220,25 @@
+ }
+ 
+ #endif // __WINDOWS__
++
++#ifdef __WXMAC__
++
++void FileNameTestCase::TestMacUnixTranslation()
++{
++    wxFileName fn( _T("MacHD:Users:user:file.txt"), wxPATH_MAC );
++    wxFileName ufn( _T("/Users/user/file.txt"), wxPATH_UNIX );
++    wxFileName vufn( _T("/Volumes/MacHD/Users/user/file.txt"), wxPATH_UNIX );
++    
++    CPPUNIT_ASSERT_EQUAL( wxString( _T("Users:user:") ), fn.GetPath(wxPATH_GET_SEPARATOR, wxPATH_MAC) );    //an odd combination for Mac users, but valid (I guess) WD-rpw 8/23/06
++    CPPUNIT_ASSERT_EQUAL(  wxString( _T("MacHD:Users:user") ), fn.GetPath(wxPATH_GET_VOLUME, wxPATH_MAC)  );
++    
++    CPPUNIT_ASSERT_EQUAL(  wxString(_T("/Users/user/")), fn.GetPath(wxPATH_GET_SEPARATOR, wxPATH_UNIX)  );
++    CPPUNIT_ASSERT_EQUAL( wxString(_T("/Volumes/MacHD/Users/user")), fn.GetPath(wxPATH_GET_VOLUME, wxPATH_UNIX)  );
++    
++    //CPPUNIT_ASSERT_EQUAL( wxString(_T("MacHD:Users:user:")), ufn.GetPath(wxPATH_GET_SEPARATOR, wxPATH_MAC) );
++    //CPPUNIT_ASSERT_EQUAL( wxString(_T("MacHD:Users:user")), ufn.GetPath(wxPATH_GET_VOLUME, wxPATH_MAC) );
++    #warning "the test case going from unix -> mac with no volume name specified should work, but no code to (get startup volume name). WD-rpw 01-20-06"
++    
++}
++
++#endif
+
+ 	  	 

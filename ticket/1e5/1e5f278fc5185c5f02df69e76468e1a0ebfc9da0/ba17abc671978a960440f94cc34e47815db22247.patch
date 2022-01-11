@@ -1,0 +1,250 @@
+From 9a69b0fd6f4b79952a345e63747509aa9e2d0584 Mon Sep 17 00:00:00 2001
+From: oliver <oliver@vishnu.(none)>
+Date: Mon, 30 Apr 2012 15:37:15 +0200
+Subject: [PATCH 2/2] Add an extension mechanism for the JS engine of a
+ wxWebViewWebKit.
+
+---
+ build/bakefiles/files.bkl             |    6 +++-
+ include/wx/gtk/webkit_jsc_extension.h |   47 ++++++++++++++++++++++++++++
+ include/wx/gtk/webview_webkit.h       |    8 +++++
+ src/gtk/webkit_jsc_extension.cpp      |   27 ++++++++++++++++
+ src/gtk/webview_webkit.cpp            |   54 +++++++++++++++++++++++----------
+ 5 files changed, 125 insertions(+), 17 deletions(-)
+ create mode 100644 include/wx/gtk/webkit_jsc_extension.h
+ create mode 100644 src/gtk/webkit_jsc_extension.cpp
+
+diff --git a/build/bakefiles/files.bkl b/build/bakefiles/files.bkl
+index 90dc20f..15e5289 100644
+--- a/build/bakefiles/files.bkl
++++ b/build/bakefiles/files.bkl
+@@ -3294,7 +3294,10 @@ IMPORTANT: please read docs/tech/tn0016.txt before modifying this file!
+ 
+ <set var="WEBVIEW_SRC_PLATFORM">
+     <if cond="TOOLKIT=='MSW'">src/msw/webview_ie.cpp</if>
+-    <if cond="PLATFORM_UNIX=='1'">src/gtk/webview_webkit.cpp</if>
++    <if cond="PLATFORM_UNIX=='1'">
++        src/gtk/webview_webkit.cpp
++        src/gtk/webkit_jsc_extension.cpp
++    </if>
+     <if cond="PLATFORM_MACOSX=='1'">src/osx/webview_webkit.mm</if>
+ </set>
+ <set var="WEBVIEW_SRC" hints="files">
+@@ -3311,6 +3314,7 @@ IMPORTANT: please read docs/tech/tn0016.txt before modifying this file!
+     <if cond="PLATFORM_UNIX=='1'">
+         wx/gtk/webviewhistoryitem_webkit.h
+         wx/gtk/webview_webkit.h
++        wx/gtk/webkit_jsc_extension.h
+     </if>
+     <if cond="PLATFORM_MACOSX=='1'">
+         wx/osx/webviewhistoryitem_webkit.h
+diff --git a/include/wx/gtk/webkit_jsc_extension.h b/include/wx/gtk/webkit_jsc_extension.h
+new file mode 100644
+index 0000000..df487f8
+--- /dev/null
++++ b/include/wx/gtk/webkit_jsc_extension.h
+@@ -0,0 +1,47 @@
++#ifndef _WX_WEBKIT_JSC_EXTENSION_H_
++#define _WX_WEBKIT_JSC_EXTENSION_H_
++
++#include <wx/string.h>
++#include <wx/vector.h>
++#include <JavaScriptCore/JavaScript.h>
++
++typedef bool (*JSCExtensionLoader) (JSGlobalContextRef context);
++
++class WXDLLIMPEXP_WEBVIEW wxWebkitJSCExtension
++{
++
++public:
++
++    wxWebkitJSCExtension(JSCExtensionLoader extension) : loaderFunction(extension) {}
++
++    ~wxWebkitJSCExtension() {}
++
++    /**
++     * Adds a given url to the white list.
++     *
++     * It is important to restrict the domain of a JSC extension to
++     * a defined set of URLs (white list). Only for accepted URLs
++     * the JSC engine will be extended.
++     */
++    void RegisterURL(const wxString& url);
++
++    /**
++     * Checks if the extension is allowed for a given URL.
++     */
++    bool AcceptURL(const wxString& url);
++
++
++    /**
++     * Applies the JSC extension to the global context of the given webview.
++     */
++    bool ApplyExtension(WebKitWebView* web_view);
++
++private:
++
++    wxVector<wxString> acceptedUrls;
++
++    JSCExtensionLoader loaderFunction;
++
++};
++
++#endif // #ifndef _WX_WEBKIT_JSC_EXTENSION_H_
+diff --git a/include/wx/gtk/webview_webkit.h b/include/wx/gtk/webview_webkit.h
+index 816047f..e7dcfe0 100644
+--- a/include/wx/gtk/webview_webkit.h
++++ b/include/wx/gtk/webview_webkit.h
+@@ -16,6 +16,7 @@
+ 
+ #include "wx/sharedptr.h"
+ #include "wx/webview.h"
++#include "wx/gtk/webkit_jsc_extension.h"
+ 
+ typedef struct _WebKitWebView WebKitWebView;
+ 
+@@ -127,6 +128,11 @@ public:
+     virtual void RegisterHandler(wxSharedPtr<wxWebViewHandler> handler);
+     virtual wxVector<wxSharedPtr<wxWebViewHandler> > GetHandlers() { return m_handlerList; }
+ 
++    //JSC extensions
++    virtual void RegisterJSCExtension(wxSharedPtr<wxWebkitJSCExtension> extension);
++    virtual void UpdateJSEngine();
++    virtual const wxVector<wxSharedPtr<wxWebkitJSCExtension> >& GetJSCExtensions() { return m_jscExtensions; }
++
+     /** TODO: check if this can be made private
+      * The native control has a getter to check for busy state, but except in
+      * very recent versions of webkit this getter doesn't say everything we need
+@@ -160,6 +166,8 @@ private:
+ 
+     wxVector<wxSharedPtr<wxWebViewHandler> > m_handlerList;
+ 
++    wxVector<wxSharedPtr<wxWebkitJSCExtension> > m_jscExtensions;
++
+     wxDECLARE_DYNAMIC_CLASS(wxWebViewWebKit);
+ };
+ 
+diff --git a/src/gtk/webkit_jsc_extension.cpp b/src/gtk/webkit_jsc_extension.cpp
+new file mode 100644
+index 0000000..45c2d6a
+--- /dev/null
++++ b/src/gtk/webkit_jsc_extension.cpp
+@@ -0,0 +1,27 @@
++#include <wx/gtk/webkit_jsc_extension.h>
++#include <webkit/webkit.h>
++
++void wxWebkitJSCExtension::RegisterURL(const wxString& url)
++{
++    acceptedUrls.push_back(url);
++}
++
++bool wxWebkitJSCExtension::AcceptURL(const wxString& url)
++{
++    for(wxVector<wxString>::iterator it = acceptedUrls.begin();
++        it != acceptedUrls.end(); ++it )
++    {
++            if(url.StartsWith(*it))
++                return true;
++    }
++
++    return false;
++}
++
++bool wxWebkitJSCExtension::ApplyExtension(WebKitWebView* web_view)
++{
++    WebKitWebFrame * frame = webkit_web_view_get_main_frame(web_view);
++    JSGlobalContextRef globalContext = webkit_web_frame_get_global_context (frame);
++
++    return loaderFunction(globalContext);
++}
+diff --git a/src/gtk/webview_webkit.cpp b/src/gtk/webview_webkit.cpp
+index a9c1a1d..59e7194 100644
+--- a/src/gtk/webview_webkit.cpp
++++ b/src/gtk/webview_webkit.cpp
+@@ -41,6 +41,10 @@ wxgtk_webview_webkit_load_status(GtkWidget* widget,
+ 
+     if (status == WEBKIT_LOAD_FINISHED)
+     {
++        // extend the js context
++        // TODO: is that the correct place, or is it too late?
++        webKitCtrl->UpdateJSEngine();
++
+         WebKitWebBackForwardList* hist = webkit_web_view_get_back_forward_list(WEBKIT_WEB_VIEW(widget));
+         WebKitWebHistoryItem* item = webkit_web_back_forward_list_get_current_item(hist);
+         //We have to check if we are actually storing history
+@@ -377,6 +381,20 @@ wxgtk_webview_webkit_resource_req(WebKitWebView *,
+     }
+ }
+ 
++static WebKitWebView* wx_webview_webkit_create_gtk_window_for_webinspector(WebKitWebInspector *web_inspector,
++    WebKitWebView *web_view,
++    wxWebViewWebKit* inspector_view)
++{
++    inspector_view->GetParent()->Show();
++    return inspector_view->GetWebKitWebView();
++}
++
++static void wx_webview_webkit_show_inpector_window(WebKitWebInspector *web_inspector,
++    wxWebViewWebKit* inspector_view)
++{
++    inspector_view->GetParent()->Show();
++}
++
+ } // extern "C"
+ 
+ //-----------------------------------------------------------------------------
+@@ -460,24 +478,9 @@ bool wxWebViewWebKit::Enable( bool enable )
+     return true;
+ }
+ 
+-static WebKitWebView* wx_webview_webkit_create_gtk_window_for_webinspector( WebKitWebInspector *web_inspector,
+-    WebKitWebView *web_view,
+-    wxWebViewWebKit* inspector_view )
+-{
+-    inspector_view->GetParent()->Show();
+-    return inspector_view->GetWebKitWebView();
+-}
+-
+-static void wx_webview_webkit_show_inpector_window( WebKitWebInspector *web_inspector,
+-    wxWebViewWebKit* inspector_view )
+-{
+-    inspector_view->GetParent()->Show();
+-}
+-
+ wxWebViewWebKit* wxWebViewWebKit::CreateWebInspector( wxWindow* parent, wxWindowID id )
+ {
+-
+-    // developer extras enable WebInspector support
++    // activate developer extras to enable WebInspector support
+     WebKitWebSettings *settings = webkit_web_view_get_settings (m_web_view);
+     g_object_set (G_OBJECT(settings), "enable-developer-extras", TRUE, NULL);
+ 
+@@ -494,6 +497,25 @@ wxWebViewWebKit* wxWebViewWebKit::CreateWebInspector( wxWindow* parent, wxWindow
+     return inspector_view;
+ }
+ 
++void wxWebViewWebKit::RegisterJSCExtension(wxSharedPtr<wxWebkitJSCExtension> extension)
++{
++    m_jscExtensions.push_back(extension);
++    // update to have the extension instantly
++    UpdateJSEngine();
++}
++
++void wxWebViewWebKit::UpdateJSEngine()
++{
++    for(wxVector<wxSharedPtr<wxWebkitJSCExtension> >::const_iterator it = m_jscExtensions.begin();
++        it != m_jscExtensions.end(); ++it) {
++
++        // security: the extension decides whether to apply for a given URL
++        if((*it)->AcceptURL(GetCurrentURL())) {
++            (*it)->ApplyExtension(m_web_view);
++        }
++    }
++}
++
+ GdkWindow*
+ wxWebViewWebKit::GTKGetWindow(wxArrayGdkWindows& WXUNUSED(windows)) const
+ {
+-- 
+1.7.5.4
+

@@ -1,0 +1,257 @@
+--- wxWidgets/src/gtk/textctrl.cpp	2004-05-29 12:52:44.000000000 +0200
++++ zbigg_textctrl.cpp	2004-09-27 18:40:29.000000000 +0200
+@@ -149,5 +149,5 @@
+     if ( win->IgnoreTextUpdate() )
+         return;
+-
++    
+     if (!win->m_hasVMT) return;
+ 
+@@ -234,4 +234,8 @@
+     EVT_UPDATE_UI(wxID_UNDO, wxTextCtrl::OnUpdateUndo)
+     EVT_UPDATE_UI(wxID_REDO, wxTextCtrl::OnUpdateRedo)
++    
++#ifdef __WXGTK20__
++    EVT_MOUSE_EVENTS( wxTextCtrl::OnTextCtrlMouseEvent)
++#endif
+ END_EVENT_TABLE()
+ 
+@@ -259,4 +263,25 @@
+ }
+ 
++#ifdef __WXGTK20__
++// wxTE_AUTO_URL is available on gtk2.0 only
++static void au_buffer_insert_text_callback( GtkWidget *widget, 
++					GtkTextIter* iter,
++					gchar* text,
++					gint length,
++					wxTextCtrl *win );
++
++static void au_buffer_delate_range_callback( GtkWidget *widget, 
++					GtkTextIter* begin,
++					GtkTextIter* end,
++					wxTextCtrl *win );
++
++static void au_check_range(GtkTextBuffer *widget,GtkTextIter* iter,
++					GtkTextIter* eiter);
++
++
++
++#define AUTO_URL_ENABLED(win) (((win)->GetWindowStyle() & wxTE_AUTO_URL) == wxTE_AUTO_URL)
++#endif
++
+ bool wxTextCtrl::Create( wxWindow *parent,
+                          wxWindowID id,
+@@ -461,4 +486,20 @@
+     }
+ 
++#ifdef __WXGTK20__
++    if (multi_line && AUTO_URL_ENABLED(this) ) {
++
++
++	g_signal_connect_after ( G_OBJECT(buffer), "delete-range",
++			     GTK_SIGNAL_FUNC(au_buffer_delate_range_callback), (gpointer)this);
++	g_signal_connect_after ( G_OBJECT(buffer), "insert-text",
++			     GTK_SIGNAL_FUNC(au_buffer_insert_text_callback), (gpointer)this);
++		
++	GtkTextIter begin,end;
++	gtk_text_buffer_get_start_iter(GTK_TEXT_BUFFER(buffer), &begin);
++	gtk_text_buffer_get_end_iter(GTK_TEXT_BUFFER(buffer), &end);
++	
++	au_check_range(GTK_TEXT_BUFFER(buffer),&begin,&end);
++    }
++#endif
+     m_cursor = wxCursor( wxCURSOR_IBEAM );
+ 
+@@ -1740,2 +1781,179 @@
+     return GetDefaultAttributesFromGTKWidget(gtk_entry_new, true);
+ }
++
++
++//
++// wxTE_AUTO_URL implementation
++//
++#ifdef __WXGTK20__
++static GtkTextTag* au_get_tag(GtkTextBuffer *tb)
++{
++    GtkTextTag* tag;
++    static char* tag_name = "__wx_auto_url_tag";
++    GtkTextTagTable* table = gtk_text_buffer_get_tag_table(tb);
++    tag = gtk_text_tag_table_lookup(table,tag_name);
++    if( !tag ) 
++	tag = gtk_text_buffer_create_tag( tb, tag_name, 
++				     "foreground-gdk", wxBLUE->GetColor(),
++				     "underline-set", 1,
++				     "underline", PANGO_UNDERLINE_SINGLE,
++				     NULL );
++    return tag;
++}
++static void mark_as_anchor(GtkTextBuffer *text_buffer, GtkTextIter* begin, GtkTextIter* end,bool set=true)
++{		   
++    GtkTextTag *tag = au_get_tag(text_buffer);
++    if( set )
++	gtk_text_buffer_apply_tag( text_buffer, tag, begin, end );
++    else
++	gtk_text_buffer_remove_tag( text_buffer, tag, begin, end );
++}
++
++static gboolean au_isspace(gunichar ch, gpointer udata)
++{
++    if( ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' )
++	return TRUE;
++    return FALSE;
++}
++
++static gboolean au_check_text(gchar* s)
++{
++    // TODO: be more compatible with
++    //       http://www.netspace.org/users/dwb/url-guide.html
++    return
++    	strncmp(s,"http://",7) == 0	||
++    	strncmp(s,"https://",8) == 0	||
++        strncmp(s,"mailto:",7) == 0	||
++        strncmp(s,"ftp://",6) == 0	||
++	strncmp(s,"gopher://",9) == 0	|| 
++	strncmp(s,"nntp://",7) == 0 	||
++	strncmp(s,"news:",5) == 0	;
++}
++
++static void au_iter_eatspace(GtkTextIter* iter)
++{
++    while( au_isspace(gtk_text_iter_get_char(iter),NULL) )
++	  gtk_text_iter_forward_char(iter);
++}
++
++static void au_check_range(GtkTextBuffer *widget,GtkTextIter* iter,
++					GtkTextIter* eiter) {
++    // move start and end iterator to word bound
++    
++    if( gtk_text_iter_backward_find_char(iter,au_isspace,NULL,NULL) )
++	gtk_text_iter_forward_char(iter); // eat the one found space
++       
++    if( gtk_text_iter_forward_find_char(eiter,au_isspace,NULL,NULL) )
++	gtk_text_iter_backward_char(eiter); // eat the one found space
++        
++    gchar* xxtext = gtk_text_iter_get_text(iter,eiter);
++    
++    wxString s = wxConvLocal.cWC2WX( wxConvUTF8.cMB2WC( xxtext ) );
++    
++    //wxLogMessage(wxT("check text ! ... '%s'\n"), s.c_str());
++    
++    while( gtk_text_iter_compare( iter, eiter ) < 0 ) {
++	// eat up white space at begin
++	au_iter_eatspace(iter);
++	
++	GtkTextIter begin = *iter;
++	
++	gtk_text_iter_forward_find_char(iter,au_isspace,NULL,eiter);
++
++	gchar* xtext = gtk_text_iter_get_text(&begin,iter);
++    
++	//wxLogMessage("    checking word '%s'\n",wxString(wxConvLocal.cWC2WX( wxConvUTF8.cMB2WC( xtext ) )).c_str());
++	
++	mark_as_anchor(widget, &begin, iter,au_check_text(xtext));
++    }
++}
++static void au_buffer_insert_text_callback(GtkWidget *widget, 
++				GtkTextIter* oiter,
++				gchar* text,
++				gint length,
++				wxTextCtrl *win )
++{
++    if( !AUTO_URL_ENABLED(win) ) return;
++    GtkTextIter* iter = gtk_text_iter_copy(oiter),
++               *eiter = gtk_text_iter_copy(oiter);
++    gtk_text_iter_backward_chars(iter,g_utf8_strlen(text,length));
++    
++    au_check_range(GTK_TEXT_BUFFER(widget), iter, eiter);
++    
++    gtk_text_iter_free(iter);
++    gtk_text_iter_free(eiter);
++}
++
++static void au_buffer_delate_range_callback( GtkWidget *widget, 
++					GtkTextIter* begin,
++					GtkTextIter* end,
++					wxTextCtrl *win )
++{
++    if( !AUTO_URL_ENABLED(win) ) return;
++    au_check_range(GTK_TEXT_BUFFER(widget), begin, end);    
++}
++
++static gboolean	   au_text_hitest(GtkWidget *widget, 
++					 double mx,double my,
++					 GtkTextIter* begin,
++					 GtkTextIter* end)
++{
++
++    int bx,by;
++    
++    GtkTextIter iter;
++    gtk_text_view_window_to_buffer_coords(GTK_TEXT_VIEW(widget),
++					  GTK_TEXT_WINDOW_WIDGET,
++					  (int)mx,(int)my,
++					  &bx,&by);
++    gtk_text_view_get_iter_at_location(GTK_TEXT_VIEW(widget),
++				       &iter,bx,by);
++    GtkTextTag* url_tag = au_get_tag( gtk_text_view_get_buffer (GTK_TEXT_VIEW( widget)) );
++    GSList* active_tags = gtk_text_iter_get_tags(&iter);
++    
++    bool is_url = g_slist_index( active_tags, url_tag ) != -1;
++    if( is_url && begin ) {
++	*begin = iter;
++	if( gtk_text_iter_backward_find_char(begin,au_isspace,NULL,NULL) )
++	    gtk_text_iter_forward_char(begin); // eat the one found space
++	   
++	if( end ) {
++	    *end = iter;
++	    gtk_text_iter_forward_find_char(end,au_isspace,NULL,NULL);
++		//gtk_text_iter_backward_char(end); // eat the one found space
++	}
++    }
++    return is_url;
++}
++
++#endif // #ifdef __WXGTK20__
++
++void wxTextCtrl::OnTextCtrlMouseEvent(wxMouseEvent& ev)
++{
++    ev.Skip();
++#ifdef __WXGTK20__
++    if( !m_text || !AUTO_URL_ENABLED(this) ) return;
++    
++    GtkTextIter url_start,url_end;
++    GdkCursor* cur;
++    bool is_url = au_text_hitest(GTK_WIDGET(m_text)
++				 , ev.GetX(), ev.GetY(),&url_start,&url_end);
++    if( is_url ) {
++	wxTextUrlEvent uev((int)GetId(),
++		      ev, 
++		      gtk_text_iter_get_offset(&url_start),
++		      gtk_text_iter_get_offset(&url_end));
++    	GetEventHandler()->ProcessEvent(uev);
++	cur = gdk_cursor_new(GDK_HAND2);
++    } else
++    	cur = gdk_cursor_new(GDK_XTERM);
++    
++    gdk_window_set_cursor(gtk_text_view_get_window(GTK_TEXT_VIEW(m_text), GTK_TEXT_WINDOW_TEXT), cur);
++    gdk_cursor_unref(cur);
++#else
++    
++#endif
++    
++}
++
++
+--- wxWidgets/include/wx/gtk/textctrl.h	2004-07-23 22:26:25.000000000 +0200
++++ zbigg_textctrl.h	2004-09-27 16:52:40.000000000 +0200
+@@ -202,5 +186,5 @@
+     // change the font for everything in this control
+     void ChangeFontGlobally();
+-
++    void OnTextCtrlMouseEvent(wxMouseEvent& ev);
+     GtkWidget  *m_text;
+     GtkWidget  *m_vScrollbar;
+
+
+ 	  	 

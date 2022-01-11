@@ -1,0 +1,323 @@
+Index: src/generic/treectlg.cpp
+===================================================================
+--- src/generic/treectlg.cpp	(revision 55580)
++++ src/generic/treectlg.cpp	(working copy)
+@@ -137,7 +137,7 @@
+ {
+ public:
+     // ctors & dtor
+-    wxGenericTreeItem() { m_data = NULL; }
++    wxGenericTreeItem() { m_data = NULL; m_text_width = -1; m_text_height = -1; }
+     wxGenericTreeItem( wxGenericTreeItem *parent,
+                        const wxString& text,
+                        int image,
+@@ -159,12 +159,12 @@
+     int GetCurrentImage() const;
+ 
+     void SetText( const wxString &text );
+-    void SetImage(int image, wxTreeItemIcon which) { m_images[which] = image; }
++    void SetImage(int image, wxTreeItemIcon which) { m_images[which] = image; m_width = 0; }
+     void SetData(wxTreeItemData *data) { m_data = data; }
+ 
+     void SetHasPlus(bool has = true) { m_hasPlus = has; }
+ 
+-    void SetBold(bool bold) { m_isBold = bold; }
++    void SetBold(bool bold) { m_isBold = bold; m_width = 0; m_text_width = -1; }
+ 
+     int GetX() const { return m_x; }
+     int GetY() const { return m_y; }
+@@ -175,8 +175,8 @@
+     int  GetHeight() const { return m_height; }
+     int  GetWidth()  const { return m_width; }
+ 
+-    void SetHeight(int h) { m_height = h; }
+-    void SetWidth(int w) { m_width = w; }
++    int  GetTextHeight() const { return m_text_height; }
++    int  GetTextWidth()  const { return m_text_width; }
+ 
+     wxGenericTreeItem *GetParent() const { return m_parent; }
+ 
+@@ -191,8 +191,15 @@
+     void Insert(wxGenericTreeItem *child, size_t index)
+     { m_children.Insert(child, index); }
+ 
++    void CalculateSize(wxGenericTreeCtrl* control, wxDC &dc, bool set_normal_font);
++
+     void GetSize( int &x, int &y, const wxGenericTreeCtrl* );
+ 
++    void ResetSize() { m_width = 0; }
++    void ResetTextSize() { m_width = 0; m_text_width = -1; }
++    void RecursiveResetSize();
++    void RecursiveResetTextSize();
++
+         // return the item at given position (or NULL if no item), onButton is
+         // true if the point belongs to the item's button, otherwise it lies
+         // on the item's label
+@@ -232,12 +239,16 @@
+         if ( m_ownsAttr ) delete m_attr;
+         m_attr = attr;
+         m_ownsAttr = false;
++        m_width = 0;
++        m_text_width = -1;
+     }
+         // set them and delete when done
+     void AssignAttributes(wxTreeItemAttr *attr)
+     {
+         SetAttributes(attr);
+         m_ownsAttr = true;
++        m_width = 0;
++        m_text_width = -1;
+     }
+ 
+ private:
+@@ -245,6 +256,8 @@
+     // the smallest representation for the elements and by ordering
+     // the members to avoid padding.
+     wxString            m_text;         // label to be rendered for item
++    int                 m_text_width;
++    int                 m_text_height;
+ 
+     wxTreeItemData     *m_data;         // user-provided data
+ 
+@@ -524,6 +537,9 @@
+     // We don't know the height here yet.
+     m_width = 0;
+     m_height = 0;
++
++    m_text_width = -1;
++    m_text_height = -1;
+ }
+ 
+ wxGenericTreeItem::~wxGenericTreeItem()
+@@ -556,6 +572,8 @@
+ void wxGenericTreeItem::SetText( const wxString &text )
+ {
+     m_text = text;
++    m_width = 0;
++    m_text_width = -1;
+ }
+ 
+ size_t wxGenericTreeItem::GetChildrenCount(bool recursively) const
+@@ -702,6 +720,79 @@
+     return image;
+ }
+ 
++void wxGenericTreeItem::CalculateSize(wxGenericTreeCtrl* control, wxDC& dc, bool set_normal_font)
++{
++    if (m_width != 0) // Size known, nothing to do
++        return;
++
++    if (m_text_width == -1)
++    {
++        // We assume normal font is set initially
++        bool reset_font = true;
++        wxTreeItemAttr *attr = GetAttributes();
++        if ( attr && attr->HasFont() )
++            dc.SetFont(attr->GetFont());
++        else if ( IsBold() )
++            dc.SetFont(control->m_boldFont);
++        else
++        {
++           if ( set_normal_font )
++               dc.SetFont(control->m_normalFont);
++           reset_font = false;
++        }
++
++        dc.GetTextExtent( GetText(), &m_text_width, &m_text_height );
++
++        // restore normal font
++        if (reset_font)
++             dc.SetFont( control->m_normalFont );
++    }
++    int text_h = m_text_height + 2;
++
++    int image_h = 0;
++    int image_w = 0;
++    int image = GetCurrentImage();
++    if ( image != NO_IMAGE )
++    {
++        if ( control->m_imageListNormal )
++        {
++            control->m_imageListNormal->GetSize( image, image_w, image_h );
++            image_w += MARGIN_BETWEEN_IMAGE_AND_TEXT;
++        }
++    }
++
++    m_height = (image_h > text_h) ? image_h : text_h;
++
++    if (m_height < 30)
++        m_height += 2;            // at least 2 pixels
++    else
++        m_height += m_height / 10;   // otherwise 10% extra spacing
++
++    if (m_height > control->m_lineHeight)
++        control->m_lineHeight = m_height;
++
++    m_width = image_w + m_text_width + 2;
++}
++
++void wxGenericTreeItem::RecursiveResetSize()
++{
++    m_width = 0;
++
++    const size_t count = m_children.Count();
++    for (size_t i = 0; i < count; i++ )
++        m_children[i]->RecursiveResetSize();
++}
++
++void wxGenericTreeItem::RecursiveResetTextSize()
++{
++    m_width = 0;
++    m_text_width = -1;
++
++    const size_t count = m_children.Count();
++    for (size_t i = 0; i < count; i++ )
++        m_children[i]->RecursiveResetTextSize();
++}
++
+ // -----------------------------------------------------------------------------
+ // wxGenericTreeCtrl implementation
+ // -----------------------------------------------------------------------------
+@@ -970,10 +1061,10 @@
+ {
+     wxCHECK_RET( item.IsOk(), wxT("invalid tree item") );
+ 
+-    wxClientDC dc(this);
+     wxGenericTreeItem *pItem = (wxGenericTreeItem*) item.m_pItem;
+     pItem->SetText(text);
+-    CalculateSize(pItem, dc);
++    wxClientDC dc(this);
++    pItem->CalculateSize(this, dc, true);
+     RefreshLine(pItem);
+ }
+ 
+@@ -987,7 +1078,7 @@
+     pItem->SetImage(image, which);
+ 
+     wxClientDC dc(this);
+-    CalculateSize(pItem, dc);
++    pItem->CalculateSize(this, dc, true);
+     RefreshLine(pItem);
+ }
+ 
+@@ -1023,7 +1114,7 @@
+         // recalculate the item size as bold and non bold fonts have different
+         // widths
+         wxClientDC dc(this);
+-        CalculateSize(pItem, dc);
++        pItem->CalculateSize(this, dc, true);
+ 
+         RefreshLine(pItem);
+     }
+@@ -1074,6 +1165,10 @@
+ 
+     wxGenericTreeItem *pItem = (wxGenericTreeItem*) item.m_pItem;
+     pItem->Attr().SetFont(font);
++    pItem->ResetTextSize();
++
++    wxClientDC dc(this);
++    pItem->CalculateSize(this, dc, true);
+     RefreshLine(pItem);
+ }
+ 
+@@ -1090,6 +1185,9 @@
+                         m_normalFont.GetFaceName(),
+                         m_normalFont.GetEncoding());
+ 
++    if (m_anchor)
++        m_anchor->RecursiveResetTextSize();
++
+     return true;
+ }
+ 
+@@ -2100,6 +2198,10 @@
+     m_imageListNormal = imageList;
+     m_ownsImageListNormal = false;
+     m_dirty = true;
++
++    if (m_anchor)
++        m_anchor->RecursiveResetSize();
++
+     // Don't do any drawing if we're setting the list to NULL,
+     // since we may be in the process of deleting the tree control.
+     if (imageList)
+@@ -2119,6 +2221,10 @@
+     m_imageListButtons = imageList;
+     m_ownsImageListButtons = false;
+     m_dirty = true;
++
++    if (m_anchor)
++        m_anchor->RecursiveResetSize();
++
+     CalculateLineHeight();
+ }
+ 
+@@ -2168,8 +2274,7 @@
+     else if (item->IsBold())
+         dc.SetFont(m_boldFont);
+ 
+-    long text_w = 0, text_h = 0;
+-    dc.GetTextExtent( item->GetText(), &text_w, &text_h );
++    long text_h = item->GetTextHeight();
+ 
+     int image_h = 0, image_w = 0;
+     int image = item->GetCurrentImage();
+@@ -3394,47 +3499,8 @@
+ 
+ void wxGenericTreeCtrl::CalculateSize( wxGenericTreeItem *item, wxDC &dc )
+ {
+-    wxCoord text_w = 0;
+-    wxCoord text_h = 0;
+-
+-    wxTreeItemAttr *attr = item->GetAttributes();
+-    if ( attr && attr->HasFont() )
+-        dc.SetFont(attr->GetFont());
+-    else if ( item->IsBold() )
+-        dc.SetFont(m_boldFont);
+-    else
+-        dc.SetFont(m_normalFont);
+-
+-    dc.GetTextExtent( item->GetText(), &text_w, &text_h );
+-    text_h+=2;
+-
+-    // restore normal font
+-    dc.SetFont( m_normalFont );
+-
+-    int image_h = 0;
+-    int image_w = 0;
+-    int image = item->GetCurrentImage();
+-    if ( image != NO_IMAGE )
+-    {
+-        if ( m_imageListNormal )
+-        {
+-            m_imageListNormal->GetSize( image, image_w, image_h );
+-            image_w += MARGIN_BETWEEN_IMAGE_AND_TEXT;
+-        }
+-    }
+-
+-    int total_h = (image_h > text_h) ? image_h : text_h;
+-
+-    if (total_h < 30)
+-        total_h += 2;            // at least 2 pixels
+-    else
+-        total_h += total_h/10;   // otherwise 10% extra spacing
+-
+-    item->SetHeight(total_h);
+-    if (total_h>m_lineHeight)
+-        m_lineHeight=total_h;
+-
+-    item->SetWidth(image_w+text_w+2);
++    // Should not be called anymore
++    // Does this function need to stay for ABI compatibility?
+ }
+ 
+ // -----------------------------------------------------------------------------
+@@ -3454,7 +3520,7 @@
+         goto Recurse;
+     }
+ 
+-    CalculateSize( item, dc );
++    item->CalculateSize( this, dc, false);
+ 
+     // set its position
+     item->SetX( x+m_spacing );

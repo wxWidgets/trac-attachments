@@ -1,0 +1,61 @@
+diff -uNrBb -x setup.h wxWidgets-trunk\include/wx/msw/textctrl.h wxWidgets-work\include/wx/msw/textctrl.h
+--- wxWidgets-trunk\include/wx/msw/textctrl.h	2013-12-29
++++ wxWidgets-work\include/wx/msw/textctrl.h	2014-02-18
+@@ -285,6 +285,8 @@
+     int  m_isInkEdit;
+ #endif
+ 
++    // store the expected length of the whole text after append/insert operation
++    int m_expectedTextLen;
+ };
+ 
+ #endif // _WX_TEXTCTRL_H_
+diff -uNrb wxWidgets-trunk\src/msw/textctrl.cpp wxWidgets-work\src/msw/textctrl.cpp
+--- wxWidgets-trunk\src/msw/textctrl.cpp	2013-12-29
++++ wxWidgets-work\src/msw/textctrl.cpp	2014-02-18
+@@ -226,6 +226,7 @@
+     m_privateContextMenu = NULL;
+     m_updatesCount = -1;
+     m_isNativeCaretShown = true;
++    m_expectedTextLen = 0;
+ }
+ 
+ wxTextCtrl::~wxTextCtrl()
+@@ -1137,9 +1138,24 @@
+ 
+         UpdatesCountFilter ucf(m_updatesCount);
+ 
++        // Expected text length after the operation.
++        m_expectedTextLen = ::GetWindowTextLength(GetHwnd()) + valueDos.length();
+         ::SendMessage(GetHwnd(), selectionOnly ? EM_REPLACESEL : WM_SETTEXT,
+                       // EM_REPLACESEL takes 1 to indicate the operation should be redoable
+                       selectionOnly ? 1 : 0, wxMSW_CONV_LPARAM(valueDos));
++        if( ::GetWindowTextLength(GetHwnd()) < m_expectedTextLen )
++        {
++            // Text size limit has been hit and added text has been truncated.
++            // Text buffer has been increased in the background (EN_MAXTEXT message)
++            // so we can undo the operation and try to add the text again.
++            if( selectionOnly )
++                Undo();
++            ::SendMessage(GetHwnd(), selectionOnly ? EM_REPLACESEL : WM_SETTEXT,
++                          // EM_REPLACESEL takes 1 to indicate the operation should be redoable
++                          selectionOnly ? 1 : 0, wxMSW_CONV_LPARAM(valueDos));
++        }
++        wxASSERT_MSG( ::GetWindowTextLength(GetHwnd()) >= m_expectedTextLen,
++                      wxT("Insufficient text buffer: appended text has been trucated") );
+ 
+         if ( !ucf.GotUpdate() && (flags & SetValue_SendEvent) )
+         {
+@@ -2119,8 +2135,10 @@
+     unsigned int len = ::GetWindowTextLength(GetHwnd());
+     if ( len >= limit )
+     {
+-        // increment in 32Kb chunks
+-        SetMaxLength(len + 0x8000);
++        unsigned long chunkSize = wxMax(0x8000, m_expectedTextLen - limit);  // at least 32KB
++        chunkSize = (chunkSize + 0x7FFF) & ~0x7FFF; // round up to the nearest 32KB block
++
++        SetMaxLength(len + chunkSize);
+     }
+ 
+     // we changed the limit

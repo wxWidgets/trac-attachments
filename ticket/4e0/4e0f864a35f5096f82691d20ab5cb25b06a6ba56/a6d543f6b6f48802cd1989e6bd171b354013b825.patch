@@ -1,0 +1,262 @@
+diff --git a/include/wx/weakref.h b/include/wx/weakref.h
+index 0aa0290..bfb2497 100644
+--- a/include/wx/weakref.h
++++ b/include/wx/weakref.h
+@@ -41,76 +41,59 @@ struct wxIsStaticTrackable
+ #endif // !USE_ONLY_STATIC_WEAKREF
+ 
+ 
+-// Weak ref implementation when T has wxTrackable as a known base class
++// A weak reference to an object of type T, where T has base wxTrackable
++// (statically, at least when assigning a raw pointer).
+ template <class T>
+-class wxWeakRefStatic : public wxTrackerNode
++class wxWeakRef : public wxTrackerNode
+ {
+ public:
+-    wxWeakRefStatic() : m_pobj(NULL) { }
++    typedef T element_type;
+ 
+-    void Release()
++    // Default ctor
++    wxWeakRef() : m_pobj(NULL), m_ptbase(NULL) { }
++
++    // Enabling this ctor for VC6 results in mysterious compilation failures in
++    // wx/window.h when assigning wxWindow pointers (FIXME-VC6)
++#ifndef __VISUALC6__
++    // Ctor from the object of this type: this is needed as the template ctor
++    // below is not used by at least g++4 when a literal NULL is used
++    wxWeakRef(T *pobj) : m_pobj(NULL), m_ptbase(NULL)
+     {
+-        // Release old object if any
+-        if ( m_pobj )
+-        {
+-            // Remove ourselves from object tracker list
+-            wxTrackable *pt = static_cast<wxTrackable*>(m_pobj);
+-            pt->RemoveNode(this);
+-            m_pobj = NULL;
+-        }
++        this->Assign(pobj);
+     }
++#endif // !__VISUALC6__
+ 
+-    virtual void OnObjectDestroy() wxOVERRIDE
++    // When we have the full type here, static_cast<> will always work
++    // (or give a straight compiler error).
++    template <class TDerived>
++    wxWeakRef(TDerived* pobj) : m_pobj(NULL), m_ptbase(NULL)
+     {
+-        // Tracked object itself removes us from list of trackers
+-        wxASSERT(m_pobj != NULL);
+-        m_pobj = NULL;
++        this->Assign(pobj);
+     }
+ 
+-protected:
+-    void Assign(T* pobj)
++    // We need this copy ctor, since otherwise a default compiler (binary) copy
++    // happens (if embedded as an object member).
++    wxWeakRef(const wxWeakRef<T>& wr) : m_pobj(NULL), m_ptbase(NULL)
+     {
+-        if ( m_pobj == pobj )
+-            return;
+-
+-        Release();
+-
+-        // Now set new trackable object
+-        if ( pobj )
+-        {
+-            // Add ourselves to object tracker list
+-            wxTrackable *pt = static_cast<wxTrackable*>(pobj);
+-            pt->AddNode(this);
+-            m_pobj = pobj;
+-        }
++        this->Assign(wr.get());
+     }
+ 
+-    void AssignCopy(const wxWeakRefStatic& wr)
++    wxWeakRef<T>& operator=(const wxWeakRef<T>& wr)
+     {
+-        Assign( wr.m_pobj );
++        this->AssignCopy(wr);
++        return *this;
+     }
+ 
+-    T *m_pobj;
+-};
+-
+-
+-
+-#ifndef USE_ONLY_STATIC_WEAKREF
++    virtual ~wxWeakRef() { this->Release(); }
+ 
+-template<class T,bool use_static>
+-struct wxWeakRefImpl;
++    // Smart pointer functions
++    T& operator*() const    { return *this->m_pobj; }
++    T* operator->() const   { return this->m_pobj; }
+ 
+-// Intermediate class, to select the static case above.
+-template <class T>
+-struct wxWeakRefImpl<T, true> : public wxWeakRefStatic<T>
+-{
+-    enum { value = 1 };
+-};
++    T* get() const          { return this->m_pobj; }
++    operator T*() const     { return this->m_pobj; }
+ 
+-// Weak ref implementation when T does not have wxTrackable as known base class
+-template<class T>
+-struct wxWeakRefImpl<T, false> : public wxTrackerNode
+-{
++public:
+     void Release()
+     {
+         // Release old object if any
+@@ -132,41 +115,16 @@ struct wxWeakRefImpl<T, false> : public wxTrackerNode
+     }
+ 
+ protected:
+-    wxWeakRefImpl() : m_pobj(NULL), m_ptbase(NULL) { }
+-
+     // Assign receives most derived class here and can use that
+     template <class TDerived>
+     void Assign( TDerived* pobj )
+     {
+-        AssignHelper( pobj, wxInt2Type<wxIsStaticTrackable<TDerived>::value>() );
+-    }
+-
+-    template <class TDerived>
+-    void AssignHelper(TDerived* pobj, wxInt2Type<true>)
+-    {
++        wxCOMPILE_TIME_ASSERT( wxIsStaticTrackable<TDerived>::value, Tracked_class_should_inherit_from_wxTrackable );
+         wxTrackable *ptbase = static_cast<wxTrackable*>(pobj);
+         DoAssign( pobj, ptbase );
+     }
+ 
+-#ifndef wxNO_RTTI
+-    void AssignHelper(T* pobj, wxInt2Type<false>)
+-    {
+-        // A last way to get a trackable pointer
+-        wxTrackable *ptbase = dynamic_cast<wxTrackable*>(pobj);
+-        if ( ptbase )
+-        {
+-            DoAssign( pobj, ptbase );
+-        }
+-        else
+-        {
+-            wxFAIL_MSG( "Tracked class should inherit from wxTrackable" );
+-
+-            Release();
+-        }
+-    }
+-#endif // RTTI enabled
+-
+-    void AssignCopy(const wxWeakRefImpl& wr)
++    void AssignCopy(const wxWeakRef& wr)
+     {
+         DoAssign(wr.m_pobj, wr.m_ptbase);
+     }
+@@ -190,68 +148,6 @@ protected:
+     wxTrackable *m_ptbase;
+ };
+ 
+-#endif // #ifndef USE_ONLY_STATIC_WEAKREF
+-
+-
+-
+-// A weak reference to an object of type T, where T has base wxTrackable
+-// (usually statically but if not dynamic_cast<> is tried).
+-template <class T>
+-class wxWeakRef : public
+-#ifdef USE_ONLY_STATIC_WEAKREF
+-                  wxWeakRefStatic<T>
+-#else
+-                  wxWeakRefImpl<T, wxIsStaticTrackable<T>::value != 0>
+-#endif
+-{
+-public:
+-    typedef T element_type;
+-
+-    // Default ctor
+-    wxWeakRef() { }
+-
+-    // Enabling this ctor for VC6 results in mysterious compilation failures in
+-    // wx/window.h when assigning wxWindow pointers (FIXME-VC6)
+-#ifndef __VISUALC6__
+-    // Ctor from the object of this type: this is needed as the template ctor
+-    // below is not used by at least g++4 when a literal NULL is used
+-    wxWeakRef(T *pobj)
+-    {
+-        this->Assign(pobj);
+-    }
+-#endif // !__VISUALC6__
+-
+-    // When we have the full type here, static_cast<> will always work
+-    // (or give a straight compiler error).
+-    template <class TDerived>
+-    wxWeakRef(TDerived* pobj)
+-    {
+-        this->Assign(pobj);
+-    }
+-
+-    // We need this copy ctor, since otherwise a default compiler (binary) copy
+-    // happens (if embedded as an object member).
+-    wxWeakRef(const wxWeakRef<T>& wr)
+-    {
+-        this->Assign(wr.get());
+-    }
+-
+-    wxWeakRef<T>& operator=(const wxWeakRef<T>& wr)
+-    {
+-        this->AssignCopy(wr);
+-        return *this;
+-    }
+-
+-    virtual ~wxWeakRef() { this->Release(); }
+-
+-    // Smart pointer functions
+-    T& operator*() const    { return *this->m_pobj; }
+-    T* operator->() const   { return this->m_pobj; }
+-
+-    T* get() const          { return this->m_pobj; }
+-    operator T*() const     { return this->m_pobj; }
+-};
+-
+ 
+ #ifndef wxNO_RTTI
+ 
+diff --git a/tests/weakref/weakref.cpp b/tests/weakref/weakref.cpp
+index 4922daa..3dfa743 100644
+--- a/tests/weakref/weakref.cpp
++++ b/tests/weakref/weakref.cpp
+@@ -83,6 +83,9 @@ wxWeakRef<ForwardDeclaredClass> g_incompleteWeakRef;
+ 
+ struct ForwardDeclaredClass : wxEvtHandler { };
+ 
++// A incomplete class that would be defined in other compilation units
++struct IncompleteClass;
++
+ void WeakRefTestCase::DeclareTest()
+ {
+     {
+@@ -128,6 +131,19 @@ void WeakRefTestCase::DeclareTest()
+ 
+     CPPUNIT_ASSERT( !g_incompleteWeakRef );
+ #endif // RTTI enabled
++
++    {
++        // Construction of a wxWeakRef to an incomplete class should be fine
++        wxWeakRef<IncompleteClass> p;
++
++        // Copying should be also OK
++        p = p;
++
++        // Assigning a raw pointer should cause compile error
++        //p = static_cast<IncompleteClass*>(0);
++
++        // Releasing should be OK
++    }
+ }
+ 
+ void WeakRefTestCase::AssignTest()

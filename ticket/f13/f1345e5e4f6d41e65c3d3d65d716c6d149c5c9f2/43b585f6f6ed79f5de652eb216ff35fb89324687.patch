@@ -1,0 +1,149 @@
+Index: include/wx/msw/filedlg.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/msw/filedlg.h,v
+retrieving revision 1.18
+diff -u -r1.18 filedlg.h
+--- include/wx/msw/filedlg.h	2004/05/23 20:51:28	1.18
++++ include/wx/msw/filedlg.h	2004/07/23 10:04:22
+@@ -36,9 +36,15 @@
+     virtual void GetFilenames(wxArrayString& files) const;
+ 
+     virtual int ShowModal();
++    static wxRect ms_rectDiagPos;// must be public, read & written to by the global hook function
++protected:
++    virtual void DoMoveWindow(int x, int y, int width, int height);
++    virtual void DoGetSize( int *width, int *height ) const;
++    virtual void DoGetPosition( int *x, int *y ) const;
+ 
+ private:
+     wxArrayString m_fileNames;
++     bool m_bMovedWindow;
+ 
+     DECLARE_DYNAMIC_CLASS(wxFileDialog)
+     DECLARE_NO_COPY_CLASS(wxFileDialog)
+Index: src/msw/filedlg.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/filedlg.cpp,v
+retrieving revision 1.67
+diff -u -r1.67 filedlg.cpp
+--- src/msw/filedlg.cpp	2004/06/22 16:58:18	1.67
++++ src/msw/filedlg.cpp	2004/07/23 10:12:33
+@@ -93,8 +93,15 @@
+ {
+     if ( ( m_dialogStyle & wxMULTIPLE ) && ( m_dialogStyle & wxSAVE ) )
+         m_dialogStyle &= ~wxMULTIPLE;
++    m_bMovedWindow = false; 
++    // Must set to zero, otherwise the wx routines won't size the window
++    // the second time you call the file dialog, because it thinks it is
++    // already at the requested size.. (when centering)
++    wxFileDialog::ms_rectDiagPos.x=0; 
++    wxFileDialog::ms_rectDiagPos.y=0; 
++    
+ }
+-
++wxRect wxFileDialog::ms_rectDiagPos(0,0,428,266); 
+ void wxFileDialog::GetPaths(wxArrayString& paths) const
+ {
+     paths.Empty();
+@@ -125,7 +132,69 @@
+     if ( !ext.empty() )
+         m_fileName << _T('.') << ext;
+ }
++UINT APIENTRY FileDialogHookFunction( HWND      hDlg,
++                                 UINT      iMsg,
++                                 WPARAM    WXUNUSED(wParam),
++                                 LPARAM    lParam )
++{
++    HWND   hwndDialog;
++    hwndDialog = ::GetParent( hDlg );
++    switch (iMsg)
++    {
++        case WM_DESTROY:
++        {
++            RECT dlgRect;
++            GetWindowRect( hwndDialog, & dlgRect );
++            wxFileDialog::ms_rectDiagPos.x = dlgRect.left;
++            wxFileDialog::ms_rectDiagPos.y = dlgRect.top;
++            wxFileDialog::ms_rectDiagPos.width = dlgRect.right - dlgRect.left;
++            wxFileDialog::ms_rectDiagPos.height = dlgRect.bottom - dlgRect.top;
++            return 0; // Do the default processing
++        }    
++        case WM_NOTIFY:
++        {
++            OFNOTIFY *   pNotifyCode;
++            pNotifyCode = (LPOFNOTIFY) lParam;
++            if (CDN_INITDONE == (pNotifyCode->hdr).code)
++            {
++                SetWindowPos( hwndDialog, HWND_TOP,
++                              wxFileDialog::ms_rectDiagPos.x,
++                              wxFileDialog::ms_rectDiagPos.y,
++                              wxFileDialog::ms_rectDiagPos.width,
++                              wxFileDialog::ms_rectDiagPos.height,
++                              SWP_NOZORDER|SWP_NOSIZE);   
++                return 0; // do default processing
++             } //end if       
++        } //end case
++    } // end switch
++    return 0; // do the default processing
++}//end function
++
+ 
++void wxFileDialog::DoGetPosition( int *x, int *y ) const
++{
++    *x = ms_rectDiagPos.x;
++    *y = ms_rectDiagPos.y;
++}
++
++
++void wxFileDialog::DoGetSize(int *width, int *height) const
++{
++    *width  = ms_rectDiagPos.width;
++    *height = ms_rectDiagPos.height;
++}
++void wxFileDialog::DoMoveWindow(int x, int y, int WXUNUSED(width), int WXUNUSED(height))
++{ 
++    m_bMovedWindow = true;
++    ms_rectDiagPos.x=x;
++    ms_rectDiagPos.y=y;
++    /*
++        The width and height can not be set by the programmer
++        its just not possible.  But the program can get the 
++        size of the Dlg after it has been shown, in case they need
++        that data.
++    */
++}
+ int wxFileDialog::ShowModal()
+ {
+     HWND hWnd = 0;
+@@ -149,6 +218,21 @@
+ 
+     if ( m_dialogStyle & wxFILE_MUST_EXIST )
+         msw_flags |= OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
++    /*
++        If the window has been moved the programmer is probably 
++        trying to center or position it.  Thus we set the callback
++        or hook function so that we can actually adjust the position.
++        Without moving or centering the dlg, it will just stay 
++        in the upper left of the frame, it does not center
++        automatically..  One additional note, when the hook is
++        enabled, the PLACES BAR in the dlg (shown on later versions 
++        of windows (2000 and XP) will automatically be turned off
++        according to the MSDN docs.  This is normal.  If the 
++        programmer needs the PLACES BAR (left side of dlg) they
++        just shouldn't move or center the dlg.
++    */
++    if (m_bMovedWindow) // we need the these flags.
++        msw_flags |= OFN_EXPLORER|OFN_ENABLEHOOK|OFN_ENABLESIZING;
+ 
+     if (m_dialogStyle & wxMULTIPLE )
+     {
+@@ -229,6 +313,7 @@
+     of.lpstrInitialDir   = dir.c_str();
+ 
+     of.Flags             = msw_flags;
++    of.lpfnHook          = &FileDialogHookFunction;
+ 
+     wxArrayString wildDescriptions, wildFilters;
+ 
+
+ 	  	 

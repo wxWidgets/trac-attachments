@@ -1,0 +1,272 @@
+Index: src/msw/dc.cpp
+===================================================================
+--- src/msw/dc.cpp	(revision 51611)
++++ src/msw/dc.cpp	(working copy)
+@@ -776,7 +776,7 @@
+     rect.bottom = y2;
+ 
+ #ifdef __WXWINCE__
+-    DrawFrameControl(GetHdc(), &rect, DFC_BUTTON, DFCS_BUTTONCHECK);
++    DrawFrameControl(GetHdc(), &rect, DFC_BUTTON, DFCS_BUTTONCHECK | DFCS_CHECKED);
+ #else
+     DrawFrameControl(GetHdc(), &rect, DFC_MENU, DFCS_MENUCHECK);
+ #endif
+Index: src/msw/menuitem.cpp
+===================================================================
+--- src/msw/menuitem.cpp	(revision 51611)
++++ src/msw/menuitem.cpp	(working copy)
+@@ -175,6 +175,12 @@
+ 
+     // tell the owner drawing code to show the accel string as well
+     SetAccelString(m_text.AfterFirst(_T('\t')));
++
++    if ( GetKind() == wxITEM_RADIO )
++    {
++        // owner drawn radio items haven't been implemented yet
++        ResetOwnerDrawn();
++    }
+ #endif // wxUSE_OWNER_DRAWN
+ }
+ 
+@@ -385,21 +391,6 @@
+             flagsOld |= MF_POPUP;
+         }
+ 
+-        LPCTSTR data;
+-
+-#if wxUSE_OWNER_DRAWN
+-        if ( IsOwnerDrawn() )
+-        {
+-            flagsOld |= MF_OWNERDRAW;
+-            data = (LPCTSTR)this;
+-        }
+-        else
+-#endif  //owner drawn
+-        {
+-            flagsOld |= MF_STRING;
+-            data = (wxChar*) m_text.wx_str();
+-        }
+-
+ #ifdef __WXWINCE__
+         // FIXME: complete this, applying the old
+         // flags.
+@@ -410,14 +401,39 @@
+         wxZeroMemory(info);
+         info.cbSize = sizeof(info);
+         info.fMask = MIIM_TYPE;
+-        info.fType = MFT_STRING;
+-        info.cch = m_text.length();
+-        info.dwTypeData = (LPTSTR) data ;
++#if wxUSE_OWNER_DRAWN
++        if ( IsOwnerDrawn() )
++        {
++            info.fMask |= MIIM_DATA;
++            info.fType      = MFT_OWNERDRAW;
++            info.dwItemData = (DWORD)this;
++        }
++        else
++#endif  //owner drawn
++        {
++            info.fType = MFT_STRING;
++            info.dwTypeData = (LPTSTR)m_text.wx_str();
++            info.cch = m_text.length();
++        }
+         if ( !::SetMenuItemInfo(hMenu, id, FALSE, & info) )
+         {
+             wxLogLastError(wxT("SetMenuItemInfo"));
+         }
+ #else
++#if wxUSE_OWNER_DRAWN
++        LPCTSTR data;
++        if ( IsOwnerDrawn() )
++        {
++            flagsOld |= MF_OWNERDRAW;
++            data = (LPCTSTR)this;
++        }
++        else
++#endif  //owner drawn
++        {
++            flagsOld |= MF_STRING;
++            data = (wxChar*) m_text.wx_str();
++        }
++
+         if ( ::ModifyMenu(hMenu, id,
+                           MF_BYCOMMAND | flagsOld,
+                           id, data) == (int)0xFFFFFFFF )
+Index: src/msw/ownerdrw.cpp
+===================================================================
+--- src/msw/ownerdrw.cpp	(revision 51611)
++++ src/msw/ownerdrw.cpp	(working copy)
+@@ -36,6 +36,11 @@
+ 
+ #include "wx/msw/private.h"
+ 
++#if defined(__WXWINCE__)
++    #include "wx/msw/registry.h"
++    #define MulDiv(a,b,c)       (((a)*(b))/(c))
++#endif
++
+ #ifndef SPI_GETKEYBOARDCUES
+ #define SPI_GETKEYBOARDCUES 0x100A
+ #endif
+@@ -128,7 +133,69 @@
+ 
+     static void DoInitFont()
+     {
++#ifdef __WXWINCE__
++        // create menu font
++        wxScreenDC dc;
++        const int dpi = dc.GetPPI().GetY();
++
++        // http://msdn2.microsoft.com/en-us/library/ms901091.aspx
++        // "System Font Registry Settings"
++        wxString name( wxT("Tahoma") );
++        long height = 14;
++        long heightInPoints = 0;
++        long italic = 0;
++        long weight = FW_BOLD;
++        long charSet = 0;
++
++        wxRegKey regKey(wxT("HKEY_LOCAL_MACHINE\\System\\GWE\\Menu\\PopFnt"));
++        regKey.QueryValue(wxT("Nm"),name); // default Tahoma
++        regKey.QueryValue(wxT("Ht"),&height);
++        if ( regKey.HasValue( wxT("HtInPts") ) )
++        {
++            regKey.QueryValue(wxT("HtInPts"),&heightInPoints);
++        }
++        regKey.QueryValue(wxT("It"),&italic);
++        regKey.QueryValue(wxT("Wt"),&weight);
++        regKey.QueryValue(wxT("CS"),&charSet);
++
++        wxNativeFontInfo info;
++        memset(&info.lf, 0, sizeof(LOGFONT));
++        if ( heightInPoints )
++        {
++            // From MSDN:
++            // If HtInPts value of this registry key is 1, that indicates font 
++            // height in hundredths of a point and must be positive. iI will be 
++            // scaled by the display driver's DPI setting (LogicalPixelsX).
++
++            // http://msdn2.microsoft.com/en-us/library/ms901140.aspx
++            // this is the recommended conversion formula
++
++            // info.lf.lfHeight = (-MulDiv(height, dpi, 72))/100;
++
++            // However, it can't be used because it returns a height of 
++            // -10 when dpi==96 && height==800 and that doesn't look right
++            // -11 is what looks right
++            // - (800.0f/100.0f) * (96.0f/72.0f) = -10.666666666666666666666666666667f
++
++            // I'm not sure how they're getting -11
++            // They could be rounding away from zero
++            // They could be rounding to the nearest whole number
++            // Rounding to the nearest whole number makes the most sense so I'll try that
++            info.lf.lfHeight = -((height*dpi)+3600)/7200;
++        }
++        else
++        {
++            info.lf.lfHeight = height;
++        }
++        info.lf.lfWeight = weight;
++        info.lf.lfItalic = (BYTE)italic;
++        info.lf.lfCharSet = (BYTE)charSet;
++        wxStrcpy( info.lf.lfFaceName, name.c_str() );
++        ms_systemMenuFont = new wxFont;
++        ms_systemMenuFont->Create(info);
++#else
+         ms_systemMenuFont = new wxFont(wxNativeFontInfo(GetNCM().lfMenuFont));
++#endif
+     }
+ 
+     static wxFont* ms_systemMenuFont;
+@@ -185,9 +252,14 @@
+ {
+     if ( ms_nDefaultMarginWidth == 0 )
+     {
+-       ms_nDefaultMarginWidth = ::GetSystemMetrics(SM_CXMENUCHECK) +
+-                                wxSystemSettings::GetMetric(wxSYS_EDGE_X);
+-       ms_nLastMarginWidth = ms_nDefaultMarginWidth;
++#ifdef __WXWINCE__
++        // VH: not sure what to use here
++        const int sm_cxmenucheck = 15;
++#else
++        const int sm_cxmenucheck = ::GetSystemMetrics(SM_CXMENUCHECK);
++#endif
++        ms_nDefaultMarginWidth = sm_cxmenucheck + wxSystemSettings::GetMetric(wxSYS_EDGE_X);
++        ms_nLastMarginWidth = ms_nDefaultMarginWidth;
+     }
+ 
+     m_bCheckable   = bCheckable;
+@@ -243,6 +315,7 @@
+ 
+         wxString str = wxStripMenuCodes(m_strName);
+ 
++#ifndef __WXWINCE__
+         // if we have a valid accel string, then pad out
+         // the menu string so that the menu and accel string are not
+         // placed on top of each other.
+@@ -251,6 +324,7 @@
+             str.Pad(str.length()%8);
+             str += m_strAccel;
+         }
++#endif
+ 
+         dc.SetFont(GetFontToUse());
+ 
+@@ -348,6 +422,12 @@
+                                  : GetSysColor(COLOR_MENU);
+         colText = m_colText.Ok() ? wxColourToPalRGB(m_colText)
+                                  : GetSysColor(COLOR_MENUTEXT);
++#ifdef __WXWINCE__
++        if (st & wxODGrayed)
++        {
++            colText = GetSysColor(COLOR_GRAYTEXT);
++        }
++#endif
+     }
+ 
+     if ( IsOwnerDrawn() )
+@@ -415,6 +495,15 @@
+         SIZE sizeRect;
+         ::GetTextExtentPoint32(hdc, strMenuText.c_str(), strMenuText.length(), &sizeRect);
+ 
++#ifdef __WXWINCE__
++        int x = xText;
++        int y = rc.y + (int) ((rc.GetHeight()-sizeRect.cy)/2.0);
++        int cx = rc.GetWidth()-margin;
++        int cy = sizeRect.cy;
++        RECT rect = { x, y, x+cx, y+cy };
++        ::DrawText(hdc, strMenuText.c_str(), strMenuText.length(), &rect, 0 );
++#else
++
+         int flags = DST_PREFIXTEXT;
+         if ( (st & wxODDisabled) && !(st & wxODSelected) )
+             flags |= DSS_DISABLED;
+@@ -454,6 +543,7 @@
+                     DST_TEXT |
+                     (((st & wxODDisabled) && !(st & wxODSelected)) ? DSS_DISABLED : 0));
+         }
++#endif
+ 
+         (void)SetBkMode(hdc, nPrevMode);
+     }
+@@ -477,7 +567,17 @@
+             RECT rect = { 0, 0, margin, m_nHeight };
+             if ( m_nHeight > 0 )
+             {
++#ifdef __WXWINCE__
++                // clear the memory dc
++                AutoHBRUSH hbr(0xffffff);
++                SelectInHDC selBrush(hdcMem, hbr);
++                FillRect(hdcMem, &rect, hbr);
++
++                // this draws a checked checkbox but that's good enough for today
++                ::DrawFrameControl(hdcMem, &rect, DFC_BUTTON, DFCS_BUTTONCHECK | DFCS_CHECKED);
++#else
+                 ::DrawFrameControl(hdcMem, &rect, DFC_MENU, DFCS_MENUCHECK);
++#endif
+             }
+ 
+             // finally copy it to screen DC and clean up
+
+ 	  	 

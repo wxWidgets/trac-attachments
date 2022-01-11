@@ -1,0 +1,224 @@
+--- ftpOrig.h	Sun Mar 19 20:46:55 2000
++++ ftp.h	Mon Dec 18 10:20:00 2000
+@@ -2,7 +2,8 @@
+ // Name:        ftp.h
+ // Purpose:     FTP protocol
+ // Author:      Vadim Zeitlin
+-// Modified by:
++// Modified by: Mark Johnson, wxWindows@mj10777.de 
++//              20000917 : RmDir, GetLastResult, GetList 
+ // Created:     07/07/1997
+ // RCS-ID:      $Id: ftp.h,v 1.4 2000/03/19 18:46:55 VZ Exp $
+ // Copyright:   (c) 1997, 1998 Guilhem Lavaux
+@@ -52,15 +53,15 @@
+   wxOutputStream *GetOutputStream(const wxString& path);
+ 
+   // List method
+-  bool GetList(wxArrayString& files, const wxString& wildcard = wxEmptyString);
++  bool GetList(wxArrayString& files, const wxString& wildcard = wxEmptyString, bool details = FALSE);
+ 
+   // Low-level methods
+   bool SendCommand(const wxString& command, char exp_ret);
+   virtual wxProtocolError GetError() { return m_lastError; }
+-  const wxString& GetLastResult();		// Get the complete return 
++  const wxString& GetLastResult(){ return m_lastResult; }    // Get the complete return 
+ 
+   // deprecated
+-  wxList *GetList(const wxString& wildcard);
++  wxList *GetList(const wxString& wildcard, bool details = FALSE);
+ 
+ protected:
+   wxString m_user, m_passwd;
+--- ftpOrig.cpp	Sat Jul 15 22:50:26 2000
++++ ftp.cpp	Mon Dec 18 10:20:30 2000
+@@ -2,13 +2,14 @@
+ // Name:        ftp.cpp
+ // Purpose:     FTP protocol
+ // Author:      Guilhem Lavaux
+-// Modified by:
++// Modified by: Mark Johnson, wxWindows@mj10777.de 
++//              20000917 : RmDir, GetLastResult, GetList
+ // Created:     07/07/1997
+ // RCS-ID:      $Id: ftp.cpp,v 1.32 2000/07/15 19:50:26 cvsuser Exp $
+ // Copyright:   (c) 1997, 1998 Guilhem Lavaux
+ // Licence:     wxWindows license
+ /////////////////////////////////////////////////////////////////////////////
+-
++  
+ #ifdef __GNUG__
+   #pragma implementation "ftp.h"
+ #endif
+@@ -40,6 +41,7 @@
+ #include "wx/sckstrm.h"
+ #include "wx/protocol/protocol.h"
+ #include "wx/protocol/ftp.h"
++#include "wx/wfstream.h"           // for wxFTP::Get/PutFile() mj10777
+ #include "wx/log.h"
+ 
+ #ifdef __BORLANDC__
+@@ -300,10 +302,9 @@
+ 
+ bool wxFTP::RmDir(const wxString& dir)
+ {
+-  wxString str = dir;
+-  
+-  str.Prepend(wxT("PWD "));
+-  return SendCommand(str, '2');
++ wxString str = dir;
++ str.Prepend(wxT("RMD "));       // mj10777 : was PWD
++ return SendCommand(str, '2');   // 250 RMD command successful
+ }
+ 
+ wxString wxFTP::Pwd()
+@@ -369,7 +370,6 @@
+   str += path;
+   return SendCommand(str, '2');
+ }
+-
+ ////////////////////////////////////////////////////////////////
+ ////// wxFTP download*upload ///////////////////////////////////
+ ////////////////////////////////////////////////////////////////
+@@ -518,70 +518,77 @@
+ 
+   return new wxOutputFTPStream(this, sock);
+ }
+-
+-bool wxFTP::GetList(wxArrayString& files, const wxString& wildcard)
+-{
+-    wxSocketBase *sock = GetPort();
+-    if ( !sock )
+-    {
+-        return FALSE;
+-    }
+-
+-    wxString line = _T("NLST");
+-    if ( !!wildcard )
+-    {
+-        // notice that there is no space here
+-        line += wildcard;
+-    }
+-
+-    if ( !SendCommand(line, '1') )
+-    {
+-        return FALSE;
+-    }
+-
+-    files.Empty();
+-
+-    while ( ReadLine(sock, line) == wxPROTO_NOERR )
+-    {
+-        files.Add(line);
+-    }
+-
+-    delete sock;
+-
+-    // the file list should be terminated by "226 Transfer complete""
+-    if ( !GetResult('2') )
+-        return FALSE;
+-
+-    return TRUE;
+-}
+-
+-wxList *wxFTP::GetList(const wxString& wildcard)
+-{
+-  wxList *file_list = new wxList;
+-  wxSocketBase *sock = GetPort();
+-  wxString tmp_str = wxT("NLST");
+-
+-  if (!wildcard.IsNull())
+-    tmp_str += wildcard;
+-
+-  if (!SendCommand(tmp_str, '1')) {
+-    delete sock;
+-    delete file_list;
+-    return NULL;
+-  }
+-
+-  while (GetLine(sock, tmp_str) == wxPROTO_NOERR) {
+-    file_list->Append((wxObject *)(new wxString(tmp_str)));
+-  }
+-
+-  if (!GetResult('2')) {
+-    delete sock;
+-    file_list->DeleteContents(TRUE);
+-    delete file_list;
+-    return NULL;
+-  }
+-
+-  return file_list;
++bool wxFTP::GetList(wxArrayString& files, const wxString& wildcard, bool details)
++{ 
++ wxSocketBase *sock = GetPort();
++ if (!sock)
++  return FALSE;
++ wxString line;
++ // NLST : List of Filenames (including Directory's !)
++ // LIST : depending on BS of FTP-Server
++ //        - Unix    : result like "ls" command
++ //        - Windows : like "dir" command 
++ //        - others  : ?
++ if (!details)
++  line = _T("NLST");   // Default
++ else               
++  line = _T("LIST");
++ if ( !!wildcard )
++ {
++  // notice that there is no space here
++  line += wildcard;
++ }
++ if (!SendCommand(line, '1'))
++ {
++  return FALSE;
++ }
++ files.Empty();
++ while ( ReadLine(sock, line) == wxPROTO_NOERR )
++ {
++  files.Add(line);
++ }
++ delete sock;
++ // the file list should be terminated by "226 Transfer complete""
++ if ( !GetResult('2') )
++  return FALSE;
++ return TRUE;
++}
++wxList *wxFTP::GetList(const wxString& wildcard, bool details)
++{ 
++ wxSocketBase *sock = GetPort();
++ if (!sock)
++  return FALSE;
++ wxList *file_list = new wxList;
++ wxString line;
++ // NLST : List of Filenames (including Directory's !)
++ // LIST : depending on BS of FTP-Server
++ //        - Unix    : result like "ls" command
++ //        - Windows : like "dir" command 
++ //        - others  : ?
++ if (!details)
++  line = _T("NLST");   // Default
++ else               
++  line = _T("LIST");
++ if (!wildcard.IsNull())
++  line += wildcard;
++ if (!SendCommand(line, '1'))
++ {
++  delete sock;
++  delete file_list;
++  return NULL;
++ }
++ while (GetLine(sock, line) == wxPROTO_NOERR)
++ {
++  file_list->Append((wxObject *)(new wxString(line)));
++ }
++ if (!GetResult('2'))
++ {
++  delete sock;
++  file_list->DeleteContents(TRUE);
++  delete file_list;
++  return NULL;
++ }
++ return file_list;
+ }
+ #endif
+   // wxUSE_SOCKETS
+
+ 	  	 

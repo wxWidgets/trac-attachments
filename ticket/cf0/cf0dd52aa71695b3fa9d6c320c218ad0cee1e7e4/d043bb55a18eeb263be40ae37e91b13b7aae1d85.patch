@@ -1,0 +1,181 @@
+Index: include/wx/msw/taskbar.h
+===================================================================
+--- include/wx/msw/taskbar.h	(revision 50121)
++++ include/wx/msw/taskbar.h	(working copy)
+@@ -29,14 +29,34 @@
+     bool IsIconInstalled() const { return m_iconAdded; }
+ 
+     // Operations
+-    bool SetIcon(const wxIcon& icon, const wxString& tooltip = wxEmptyString);
+-    bool RemoveIcon(void);
+-    bool PopupMenu(wxMenu *menu);
++    virtual bool SetIcon(const wxIcon& icon, const wxString& tooltip = wxEmptyString);
++    virtual bool RemoveIcon(void);
++    virtual bool PopupMenu(wxMenu *menu);
+ 
+ protected:
++    struct NotifyIconData : public NOTIFYICONDATA
++    {
++        NotifyIconData(WXHWND hwnd);
++    };
++
++    // NB: this class serves two purposes:
++    //     1. win32 needs a HWND associated with taskbar icon, this provides it
++    //     2. we need wxTopLevelWindow so that the app doesn't exit when
++    //        last frame is closed but there still is a taskbar icon
++    class wxTaskBarIconWindow : public wxFrame
++    {
++    public:
++        wxTaskBarIconWindow(wxTaskBarIcon *icon);
++
++        WXLRESULT MSWWindowProc(WXUINT msg,
++                                WXWPARAM wParam, WXLPARAM lParam);
++
++    private:
++        wxTaskBarIcon *m_icon;
++    };
+     friend class wxTaskBarIconWindow;
+ 
+-    long WindowProc(unsigned int msg, unsigned int wParam, long lParam);
++    virtual long WindowProc(unsigned int msg, unsigned int wParam, long lParam);
+     void RegisterWindowMessages();
+ 
+ 
+@@ -45,6 +65,9 @@
+     wxIcon               m_icon;
+     wxString             m_strTooltip;
+ 
++    static UINT   ms_msgTaskbar;
++    static UINT   ms_msgRestartTaskbar;
++
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxTaskBarIcon)
+ };
+ 
+Index: src/msw/taskbar.cpp
+===================================================================
+--- src/msw/taskbar.cpp	(revision 50121)
++++ src/msw/taskbar.cpp	(working copy)
+@@ -33,8 +33,8 @@
+ #include "wx/dynlib.h"
+ 
+ // initialized on demand
+-static UINT gs_msgTaskbar = 0;
+-static UINT gs_msgRestartTaskbar = 0;
++UINT wxTaskBarIcon::ms_msgTaskbar = 0;
++UINT wxTaskBarIcon::ms_msgRestartTaskbar = 0;
+ 
+ 
+ IMPLEMENT_DYNAMIC_CLASS(wxTaskBarIcon, wxEvtHandler)
+@@ -79,56 +79,41 @@
+ // wxTaskBarIconWindow: helper window
+ // ----------------------------------------------------------------------------
+ 
+-// NB: this class serves two purposes:
+-//     1. win32 needs a HWND associated with taskbar icon, this provides it
+-//     2. we need wxTopLevelWindow so that the app doesn't exit when
+-//        last frame is closed but there still is a taskbar icon
+-class wxTaskBarIconWindow : public wxFrame
++wxTaskBarIcon::wxTaskBarIconWindow::wxTaskBarIconWindow(wxTaskBarIcon *icon)
++    : wxFrame(NULL, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0),
++      m_icon(icon)
+ {
+-public:
+-    wxTaskBarIconWindow(wxTaskBarIcon *icon)
+-        : wxFrame(NULL, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0),
+-          m_icon(icon)
++}
++
++WXLRESULT wxTaskBarIcon::wxTaskBarIconWindow::MSWWindowProc(WXUINT msg,
++                        WXWPARAM wParam, WXLPARAM lParam)
++{
++    if (msg == ms_msgRestartTaskbar || msg == ms_msgTaskbar)
+     {
++        return m_icon->WindowProc(msg, wParam, lParam);
+     }
+-
+-    WXLRESULT MSWWindowProc(WXUINT msg,
+-                            WXWPARAM wParam, WXLPARAM lParam)
++    else
+     {
+-        if (msg == gs_msgRestartTaskbar || msg == gs_msgTaskbar)
+-        {
+-            return m_icon->WindowProc(msg, wParam, lParam);
+-        }
+-        else
+-        {
+-            return wxFrame::MSWWindowProc(msg, wParam, lParam);
+-        }
++        return wxFrame::MSWWindowProc(msg, wParam, lParam);
+     }
++}
+ 
+-private:
+-    wxTaskBarIcon *m_icon;
+-};
+-
+-
+ // ----------------------------------------------------------------------------
+ // NotifyIconData: wrapper around NOTIFYICONDATA
+ // ----------------------------------------------------------------------------
+ 
+-struct NotifyIconData : public NOTIFYICONDATA
++wxTaskBarIcon::NotifyIconData::NotifyIconData(WXHWND hwnd)
+ {
+-    NotifyIconData(WXHWND hwnd)
+-    {
+-        memset(this, 0, sizeof(NOTIFYICONDATA));
+-        cbSize = sizeof(NOTIFYICONDATA);
+-        hWnd = (HWND) hwnd;
+-        uCallbackMessage = gs_msgTaskbar;
+-        uFlags = NIF_MESSAGE;
++    memset(this, 0, sizeof(NOTIFYICONDATA));
++    cbSize = sizeof(NOTIFYICONDATA);
++    hWnd = (HWND) hwnd;
++    uCallbackMessage = ms_msgTaskbar;
++    uFlags = NIF_MESSAGE;
+ 
+-        // we use the same id for all taskbar icons as we don't need it to
+-        // distinguish between them
+-        uID = 99;
+-    }
+-};
++    // we use the same id for all taskbar icons as we don't need it to
++    // distinguish between them
++    uID = 99;
++}
+ 
+ // ----------------------------------------------------------------------------
+ // wxTaskBarIcon
+@@ -246,10 +231,10 @@
+     if ( !s_registered )
+     {
+         // Taskbar restart msg will be sent to us if the icon needs to be redrawn
+-        gs_msgRestartTaskbar = RegisterWindowMessage(wxT("TaskbarCreated"));
++        ms_msgRestartTaskbar = RegisterWindowMessage(wxT("TaskbarCreated"));
+ 
+         // Also register the taskbar message here
+-        gs_msgTaskbar = ::RegisterWindowMessage(wxT("wxTaskBarIconMessage"));
++        ms_msgTaskbar = ::RegisterWindowMessage(wxT("wxTaskBarIconMessage"));
+ 
+         s_registered = true;
+     }
+@@ -265,14 +250,15 @@
+ {
+     wxEventType eventType = 0;
+ 
+-    if (msg == gs_msgRestartTaskbar)   // does the icon need to be redrawn?
++    if (msg == ms_msgRestartTaskbar)   // does the icon need to be redrawn?
+     {
+         m_iconAdded = false;
+         SetIcon(m_icon, m_strTooltip);
++        return 0;
+     }
+ 
+     // this function should only be called for gs_msg(Restart)Taskbar messages
+-    wxASSERT(msg == gs_msgTaskbar);
++    wxASSERT(msg == ms_msgTaskbar);
+ 
+     switch (lParam)
+     {
+
+ 	  	 

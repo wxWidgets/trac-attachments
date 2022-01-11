@@ -1,0 +1,183 @@
+diff -uNr wxWidgets-3.1.4-orig/include/wx/osx/cocoa/dataview.h wxWidgets-3.1.4-mine/include/wx/osx/cocoa/dataview.h
+--- wxWidgets-3.1.4-orig/include/wx/osx/cocoa/dataview.h	2020-07-22 20:20:06.000000000 +0200
++++ wxWidgets-3.1.4-mine/include/wx/osx/cocoa/dataview.h	2020-12-08 17:40:01.000000000 +0100
+@@ -556,6 +556,8 @@
+     wxCocoaOutlineDataSource* m_DataSource;
+ 
+     wxCocoaOutlineView* m_OutlineView;
++
++    int m_ExpanderWidth;
+ };
+ 
+ #endif // _WX_DATAVIEWCTRL_COCOOA_H_
+diff -uNr wxWidgets-3.1.4-orig/include/wx/osx/dataview.h wxWidgets-3.1.4-mine/include/wx/osx/dataview.h
+--- wxWidgets-3.1.4-orig/include/wx/osx/dataview.h	2020-07-22 20:20:06.000000000 +0200
++++ wxWidgets-3.1.4-mine/include/wx/osx/dataview.h	2020-12-08 17:46:15.000000000 +0100
+@@ -270,6 +270,8 @@
+ 
+   static wxVisualAttributes
+   GetClassDefaultAttributes(wxWindowVariant variant = wxWINDOW_VARIANT_NORMAL);
++        
++  void AdjustAutosizedColumns() const;
+ 
+ protected:
+  // inherited methods from wxDataViewCtrlBase
+diff -uNr wxWidgets-3.1.4-orig/src/osx/cocoa/dataview.mm wxWidgets-3.1.4-mine/src/osx/cocoa/dataview.mm
+--- wxWidgets-3.1.4-orig/src/osx/cocoa/dataview.mm	2020-07-22 20:20:06.000000000 +0200
++++ wxWidgets-3.1.4-mine/src/osx/cocoa/dataview.mm	2020-12-08 17:42:25.000000000 +0100
+@@ -1892,6 +1892,12 @@
+     dvc->GetEventHandler()->ProcessEvent(event);
+ }
+ 
++-(void) adjustAutosizedColumns
++{
++    wxDataViewCtrl* const dvc = implementation->GetDataViewCtrl();
++    dvc->AdjustAutosizedColumns();
++}
++
+ -(void) outlineViewItemDidCollapse:(NSNotification*)notification
+ {
+     wxDataViewCtrl* const dvc = implementation->GetDataViewCtrl();
+@@ -1900,6 +1906,10 @@
+                     [[notification userInfo] objectForKey:@"NSObject"]);
+     wxDataViewEvent event(wxEVT_DATAVIEW_ITEM_COLLAPSED, dvc, item);
+     dvc->GetEventHandler()->ProcessEvent(event);
++        
++    // for some reason we can't change the width right here (probably because of UI animation
++    // still in progress) so let's just postpone it to the next cycle of the UI loop
++    [self performSelector:@selector(adjustAutosizedColumns) withObject:nil afterDelay:0.0];
+ }
+ 
+ -(void) outlineViewItemDidExpand:(NSNotification*)notification
+@@ -1910,6 +1920,10 @@
+                     [[notification userInfo] objectForKey:@"NSObject"]);
+     wxDataViewEvent event(wxEVT_DATAVIEW_ITEM_EXPANDED, dvc, item);
+     dvc->GetEventHandler()->ProcessEvent(event);
++        
++    // for some reason we can't change the width right here (probably because of UI animation
++    // still in progress) so let's just postpone it to the next cycle of the UI loop
++    [self performSelector:@selector(adjustAutosizedColumns) withObject:nil afterDelay:0.0];
+ }
+ 
+ -(void) outlineViewSelectionDidChange:(NSNotification*)notification
+@@ -2045,7 +2059,8 @@
+         [[NSScrollView alloc] initWithFrame:wxOSXGetFrameForControl(peer,pos,size)]
+       ),
+       m_DataSource(NULL),
+-      m_OutlineView([[wxCocoaOutlineView alloc] init])
++      m_OutlineView([[wxCocoaOutlineView alloc] init]),
++      m_ExpanderWidth(0)
+ {
+     // initialize scrollview (the outline view is part of a scrollview):
+     NSScrollView* scrollview = (NSScrollView*) GetWXWidget();
+@@ -2175,7 +2190,9 @@
+             : m_width(0),
+               m_view(view),
+               m_column(columnIndex),
+-              m_indent(0)
++              m_indent(0),
++              m_expander(0),
++              m_tableColumn(column)
+         {
+             // account for indentation in the column with expander
+             if ( column == [m_view outlineTableColumn] )
+@@ -2193,18 +2210,27 @@
+             unsigned cellWidth = [cell cellSize].width + 1/*round the float up*/;
+ 
+             if ( m_indent )
+-                cellWidth += m_indent * ([m_view levelForRow:row] + 1);
++                cellWidth += m_indent * [m_view levelForRow:row];
+ 
++            if ( m_expander == 0 && m_tableColumn == [m_view outlineTableColumn] )
++            {
++                NSRect rc = [m_view frameOfOutlineCellAtRow:row];
++                m_expander = ceil(rc.origin.x + rc.size.width);
++            }
++                
+             m_width = wxMax(m_width, cellWidth);
+         }
+ 
+         int GetMaxWidth() const { return m_width; }
++        int GetExpanderWidth() const { return m_expander; }
+ 
+     private:
+         int m_width;
+         wxCocoaOutlineView *m_view;
+         unsigned m_column;
+         int m_indent;
++        int m_expander;
++        NSTableColumn *m_tableColumn;
+     };
+ 
+     MaxWidthCalculator calculator(m_OutlineView, column, pos);
+@@ -2237,7 +2263,7 @@
+ #endif // wxUSE_STOPWATCH/!wxUSE_STOPWATCH
+ 
+     int row = 0;
+-
++    
+     for ( row = 0; row < top_part_end; row++ )
+     {
+ #if wxUSE_STOPWATCH
+@@ -2275,7 +2301,12 @@
+                    count);
+     }
+ 
+-    [column setWidth:calculator.GetMaxWidth()];
++    // there might not necessarily be an expander in the rows we've examined above so let's
++    // globally store the expander width for re-use because it should always be the same
++    if ( m_ExpanderWidth == 0 )
++        m_ExpanderWidth = calculator.GetExpanderWidth();
++        
++    [column setWidth:calculator.GetMaxWidth() + m_ExpanderWidth];
+ }
+ 
+ //
+diff -uNr wxWidgets-3.1.4-orig/src/osx/dataview_osx.cpp wxWidgets-3.1.4-mine/src/osx/dataview_osx.cpp
+--- wxWidgets-3.1.4-orig/src/osx/dataview_osx.cpp	2020-07-22 20:20:06.000000000 +0200
++++ wxWidgets-3.1.4-mine/src/osx/dataview_osx.cpp	2020-12-08 17:43:53.000000000 +0100
+@@ -73,14 +73,15 @@
+   virtual bool Cleared() wxOVERRIDE;
+   virtual void Resort() wxOVERRIDE;
+ 
++ // adjust wxCOL_WIDTH_AUTOSIZE columns to fit the data
++  void AdjustAutosizedColumns();
++        
+ protected:
+  // if the dataview control can have a variable row height this method sets the dataview's control row height of
+  // the passed item to the maximum value occupied by the item in all columns
+   void AdjustRowHeight(wxDataViewItem const& item);
+  // ... and the same method for a couple of items:
+   void AdjustRowHeights(wxDataViewItemArray const& items);
+- // adjust wxCOL_WIDTH_AUTOSIZE columns to fit the data
+-  void AdjustAutosizedColumns();
+ 
+ private:
+   wxDataViewCtrl* m_DataViewCtrlPtr;
+@@ -502,9 +503,16 @@
+   return GetDataViewPeer()->GetColumnPosition(columnPtr);
+ }
+ 
++void wxDataViewCtrl::AdjustAutosizedColumns() const
++{
++  if ( m_ModelNotifier )
++    ((wxOSXDataViewModelNotifier *) m_ModelNotifier)->AdjustAutosizedColumns();
++}
++
+ void wxDataViewCtrl::Collapse(wxDataViewItem const& item)
+ {
+   GetDataViewPeer()->Collapse(item);
++  AdjustAutosizedColumns();
+ }
+ 
+ void wxDataViewCtrl::EnsureVisible(wxDataViewItem const& item, wxDataViewColumn const* columnPtr)
+@@ -518,7 +526,8 @@
+ 
+ void wxDataViewCtrl::DoExpand(wxDataViewItem const& item)
+ {
+-  return GetDataViewPeer()->DoExpand(item);
++  GetDataViewPeer()->DoExpand(item);
++  AdjustAutosizedColumns();
+ }
+ 
+ bool wxDataViewCtrl::IsExpanded( const wxDataViewItem & item ) const

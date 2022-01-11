@@ -1,0 +1,590 @@
+Index: include/wx/graphics.h
+===================================================================
+--- include/wx/graphics.h	(revision 67664)
++++ include/wx/graphics.h	(working copy)
+@@ -20,7 +20,7 @@
+ #include "wx/dynarray.h"
+ #include "wx/dc.h"
+ #include "wx/vector.h"
+-
++#include "wx/affinematrix2dbase.h"
+ enum wxAntialiasMode
+ {
+     wxANTIALIAS_NONE, // should be 0
+@@ -157,7 +157,7 @@
+ 
+ extern WXDLLIMPEXP_DATA_CORE(wxGraphicsBitmap) wxNullGraphicsBitmap;
+ 
+-class WXDLLIMPEXP_CORE wxGraphicsMatrix : public wxGraphicsObject
++class WXDLLIMPEXP_CORE wxGraphicsMatrix : public wxGraphicsObject, public wxAffineMatrix2DBase
+ {
+ public:
+     wxGraphicsMatrix() {}
+@@ -165,23 +165,21 @@
+     virtual ~wxGraphicsMatrix() {}
+ 
+     // concatenates the matrix
+-    virtual void Concat( const wxGraphicsMatrix *t );
+-    void Concat( const wxGraphicsMatrix &t ) { Concat( &t ); }
++    virtual void Concat(const wxGraphicsMatrix& t);
++    virtual void Concat(const wxAffineMatrix2DBase& t);
+ 
+     // sets the matrix to the respective values
+-    virtual void Set(wxDouble a=1.0, wxDouble b=0.0, wxDouble c=0.0, wxDouble d=1.0,
+-        wxDouble tx=0.0, wxDouble ty=0.0);
++    virtual void Set(const wxMatrix2D& mat2D, const wxPoint2DDouble& tr);
+ 
+-    // gets the component valuess of the matrix
+-    virtual void Get(wxDouble* a=NULL, wxDouble* b=NULL,  wxDouble* c=NULL,
+-                     wxDouble* d=NULL, wxDouble* tx=NULL, wxDouble* ty=NULL) const;
++    // gets the component values of the matrix
++    virtual void Get(wxMatrix2D* mat2D, wxPoint2DDouble* tr) const;
+ 
+     // makes this the inverse matrix
+-    virtual void Invert();
++    virtual bool Invert();
+ 
+-    // returns true if the elements of the transformation matrix are equal ?
+-    virtual bool IsEqual( const wxGraphicsMatrix* t) const;
+-    bool IsEqual( const wxGraphicsMatrix& t) const { return IsEqual( &t ); }
++    // returns true if the elements of the transformation matrix are equal
++    bool IsEqual(const wxGraphicsMatrix& t) const;
++    bool IsEqual(const wxAffineMatrix2DBase& t) const;
+ 
+     // return true if this is the identity matrix
+     virtual bool IsIdentity() const;
+@@ -203,12 +201,6 @@
+     // apply the transforms
+     //
+ 
+-    // applies that matrix to the point
+-    virtual void TransformPoint( wxDouble *x, wxDouble *y ) const;
+-
+-    // applies the matrix except for translations
+-    virtual void TransformDistance( wxDouble *dx, wxDouble *dy ) const;
+-
+     // returns the native representation
+     virtual void * GetNativeMatrix() const;
+ 
+@@ -217,6 +209,18 @@
+     wxGraphicsMatrixData* GetMatrixData()
+     { return (wxGraphicsMatrixData*) GetRefData(); }
+ 
++    // deprecated methods
++    wxDEPRECATED(virtual void Set(wxDouble a=1.0, wxDouble b=0.0, wxDouble c=0.0, wxDouble d=1.0,
++                                  wxDouble tx=0.0, wxDouble ty=0.0));
++    wxDEPRECATED(virtual void Get(wxDouble* a=NULL, wxDouble* b=NULL,  wxDouble* c=NULL,
++                                  wxDouble* d=NULL, wxDouble* tx=NULL, wxDouble* ty=NULL) const);
++    wxDEPRECATED(virtual void Concat(const wxGraphicsMatrix* t )) { Concat(*t); }
++    wxDEPRECATED(virtual bool IsEqual(const wxGraphicsMatrix* t) const) { return IsEqual(*t); }
++
++protected:
++    virtual        wxPoint2DDouble DoTransformPoint(const wxPoint2DDouble& p) const;
++    virtual        wxPoint2DDouble DoTransformDistance(const wxPoint2DDouble& p) const;
++
+ private:
+     DECLARE_DYNAMIC_CLASS(wxGraphicsMatrix)
+ };
+Index: include/wx/private/graphics.h
+===================================================================
+--- include/wx/private/graphics.h	(revision 67664)
++++ include/wx/private/graphics.h	(working copy)
+@@ -37,7 +37,8 @@
+        virtual ~wxGraphicsMatrixData() {}
+ 
+        // concatenates the matrix
+-       virtual void Concat( const wxGraphicsMatrixData *t ) = 0;
++       virtual void Concat(const wxGraphicsMatrixData* t) = 0;
++       virtual void Concat(const wxAffineMatrix2DBase& t) = 0;
+ 
+        // sets the matrix to the respective values
+        virtual void Set(wxDouble a=1.0, wxDouble b=0.0, wxDouble c=0.0, wxDouble d=1.0,
+@@ -48,10 +49,11 @@
+                         wxDouble* d=NULL, wxDouble* tx=NULL, wxDouble* ty=NULL) const = 0;
+ 
+        // makes this the inverse matrix
+-       virtual void Invert() = 0;
++       virtual bool Invert() = 0;
+ 
+-       // returns true if the elements of the transformation matrix are equal ?
+-       virtual bool IsEqual( const wxGraphicsMatrixData* t) const  = 0;
++       // returns true if the elements of the transformation matrix are equal
++       virtual bool IsEqual(const wxGraphicsMatrixData* t) const = 0;
++       virtual bool IsEqual(const wxAffineMatrix2DBase& t) const = 0;
+ 
+        // return true if this is the identity matrix
+        virtual bool IsIdentity() const = 0;
+@@ -75,9 +77,11 @@
+ 
+        // applies that matrix to the point
+        virtual void TransformPoint( wxDouble *x, wxDouble *y ) const = 0;
++       virtual wxPoint2DDouble TransformPoint( const wxPoint2DDouble& p ) const = 0;
+ 
+        // applies the matrix except for translations
+-       virtual void TransformDistance( wxDouble *dx, wxDouble *dy ) const =0;
++       virtual void TransformDistance( wxDouble *dx, wxDouble *dy ) const = 0;
++       virtual wxPoint2DDouble TransformDistance( const wxPoint2DDouble& p ) const = 0;
+ 
+        // returns the native representation
+        virtual void * GetNativeMatrix() const = 0;
+Index: src/common/graphcmn.cpp
+===================================================================
+--- src/common/graphcmn.cpp	(revision 67664)
++++ src/common/graphcmn.cpp	(working copy)
+@@ -127,13 +127,25 @@
+ WXDLLIMPEXP_DATA_CORE(wxGraphicsMatrix) wxNullGraphicsMatrix;
+ 
+ // concatenates the matrix
+-void wxGraphicsMatrix::Concat( const wxGraphicsMatrix *t )
++void wxGraphicsMatrix::Concat(const wxAffineMatrix2DBase& t)
+ {
+     AllocExclusive();
+-    GetMatrixData()->Concat(t->GetMatrixData());
++    GetMatrixData()->Concat(t);
+ }
+ 
++void wxGraphicsMatrix::Concat(const wxGraphicsMatrix& t)
++{
++    AllocExclusive();
++    GetMatrixData()->Concat(t.GetMatrixData());
++}
++
+ // sets the matrix to the respective values
++void wxGraphicsMatrix::Set(const wxMatrix2D& mat2D, const wxPoint2DDouble& tr)
++{
++    AllocExclusive();
++    GetMatrixData()->Set(mat2D.m_11, mat2D.m_12, mat2D.m_21, mat2D.m_22, tr.m_x, tr.m_y);
++}
++
+ void wxGraphicsMatrix::Set(wxDouble a, wxDouble b, wxDouble c, wxDouble d,
+                            wxDouble tx, wxDouble ty)
+ {
+@@ -141,7 +153,12 @@
+     GetMatrixData()->Set(a,b,c,d,tx,ty);
+ }
+ 
+-// gets the component valuess of the matrix
++// gets the component values of the matrix
++void wxGraphicsMatrix::Get(wxMatrix2D* mat2D, wxPoint2DDouble* tr) const
++{
++    GetMatrixData()->Get(&mat2D->m_11, &mat2D->m_12, &mat2D->m_21, &mat2D->m_22, &tr->m_x, &tr->m_y);
++}
++
+ void wxGraphicsMatrix::Get(wxDouble* a, wxDouble* b,  wxDouble* c,
+                            wxDouble* d, wxDouble* tx, wxDouble* ty) const
+ {
+@@ -149,18 +166,23 @@
+ }
+ 
+ // makes this the inverse matrix
+-void wxGraphicsMatrix::Invert()
++bool wxGraphicsMatrix::Invert()
+ {
+     AllocExclusive();
+-    GetMatrixData()->Invert();
++    return GetMatrixData()->Invert();
+ }
+ 
+-// returns true if the elements of the transformation matrix are equal ?
+-bool wxGraphicsMatrix::IsEqual( const wxGraphicsMatrix* t) const
++// returns true if the elements of the transformation matrix are equal
++bool wxGraphicsMatrix::IsEqual(const wxAffineMatrix2DBase& t) const
+ {
+-    return GetMatrixData()->IsEqual(t->GetMatrixData());
++    return GetMatrixData()->IsEqual(t);
+ }
+ 
++bool wxGraphicsMatrix::IsEqual(const wxGraphicsMatrix& t) const
++{
++    return GetMatrixData()->IsEqual(t.GetMatrixData());
++}
++
+ // return true if this is the identity matrix
+ bool wxGraphicsMatrix::IsIdentity() const
+ {
+@@ -193,15 +215,19 @@
+ //
+ 
+ // applies that matrix to the point
+-void wxGraphicsMatrix::TransformPoint( wxDouble *x, wxDouble *y ) const
++wxPoint2DDouble wxGraphicsMatrix::DoTransformPoint(const wxPoint2DDouble& p) const
+ {
+-    GetMatrixData()->TransformPoint(x,y);
++    wxPoint2DDouble result(p);
++    GetMatrixData()->TransformPoint(&result.m_x, &result.m_y);
++    return result;
+ }
+ 
+ // applies the matrix except for translations
+-void wxGraphicsMatrix::TransformDistance( wxDouble *dx, wxDouble *dy ) const
++wxPoint2DDouble wxGraphicsMatrix::DoTransformDistance(const wxPoint2DDouble& p) const
+ {
+-    GetMatrixData()->TransformDistance(dx,dy);
++    wxPoint2DDouble result(p);
++    GetMatrixData()->TransformDistance(&result.m_x, &result.m_y);
++    return result;
+ }
+ 
+ // returns the native representation
+Index: src/generic/graphicc.cpp
+===================================================================
+--- src/generic/graphicc.cpp	(revision 67664)
++++ src/generic/graphicc.cpp	(working copy)
+@@ -165,6 +165,7 @@
+ 
+     // concatenates the matrix
+     virtual void Concat( const wxGraphicsMatrixData *t );
++    virtual void Concat(const wxAffineMatrix2DBase& t);
+ 
+     // sets the matrix to the respective values
+     virtual void Set(wxDouble a=1.0, wxDouble b=0.0, wxDouble c=0.0, wxDouble d=1.0,
+@@ -175,10 +176,11 @@
+                      wxDouble* d=NULL, wxDouble* tx=NULL, wxDouble* ty=NULL) const;
+ 
+     // makes this the inverse matrix
+-    virtual void Invert();
++    virtual bool Invert();
+ 
+-    // returns true if the elements of the transformation matrix are equal ?
++    // returns true if the elements of the transformation matrix are equal
+     virtual bool IsEqual( const wxGraphicsMatrixData* t) const ;
++    virtual bool IsEqual(const wxAffineMatrix2DBase& t) const;
+ 
+     // return true if this is the identity matrix
+     virtual bool IsIdentity() const;
+@@ -201,9 +203,11 @@
+     //
+ 
+     // applies that matrix to the point
++    virtual wxPoint2DDouble TransformPoint( const wxPoint2DDouble& p ) const;
+     virtual void TransformPoint( wxDouble *x, wxDouble *y ) const;
+ 
+     // applies the matrix except for translations
++    virtual wxPoint2DDouble TransformDistance( const wxPoint2DDouble& p ) const;
+     virtual void TransformDistance( wxDouble *dx, wxDouble *dy ) const;
+ 
+     // returns the native representation
+@@ -963,6 +967,22 @@
+ }
+ 
+ // concatenates the matrix
++void wxCairoMatrixData::Concat( const wxAffineMatrix2DBase& t )
++{
++    wxMatrix2D mat;
++    wxPoint2DDouble tr;
++    t.Get(&mat, &tr);
++    cairo_matrix_t temp;
++    temp.xx = mat.m_11;
++    temp.yx = mat.m_12;
++    temp.xy = mat.m_21;
++    temp.yy = mat.m_22;
++    temp.x0 = tr.m_x;
++    temp.y0 = tr.m_y;
++
++    cairo_matrix_multiply( &m_matrix, &m_matrix, &temp );
++}
++
+ void wxCairoMatrixData::Concat( const wxGraphicsMatrixData *t )
+ {
+     cairo_matrix_multiply( &m_matrix, &m_matrix, (cairo_matrix_t*) t->GetNativeMatrix());
+@@ -988,14 +1008,29 @@
+ }
+ 
+ // makes this the inverse matrix
+-void wxCairoMatrixData::Invert()
++bool wxCairoMatrixData::Invert()
+ {
+-    cairo_matrix_invert( &m_matrix );
++    return cairo_matrix_invert( &m_matrix ) == CAIRO_STATUS_SUCCESS;
+ }
+ 
+-// returns true if the elements of the transformation matrix are equal ?
+-bool wxCairoMatrixData::IsEqual( const wxGraphicsMatrixData* t) const
++// returns true if the elements of the transformation matrix are equal
++bool wxCairoMatrixData::IsEqual(const wxAffineMatrix2DBase& t) const
+ {
++    wxMatrix2D mat;
++    wxPoint2DDouble tr;
++    t.Get(&mat, &tr);
++
++    return (
++        m_matrix.xx == mat.m_11 &&
++        m_matrix.yx == mat.m_12 &&
++        m_matrix.xy == mat.m_21 &&
++        m_matrix.yy == mat.m_22 &&
++        m_matrix.x0 == tr.m_x &&
++        m_matrix.y0 == tr.m_y );
++}
++
++bool wxCairoMatrixData::IsEqual(const wxGraphicsMatrixData* t) const
++{
+     const cairo_matrix_t* tm = (cairo_matrix_t*) t->GetNativeMatrix();
+     return (
+         m_matrix.xx == tm->xx &&
+@@ -1040,6 +1075,13 @@
+ //
+ 
+ // applies that matrix to the point
++wxPoint2DDouble wxCairoMatrixData::TransformPoint( const wxPoint2DDouble& p ) const
++{
++    wxPoint2DDouble result(p);
++    cairo_matrix_transform_point(&m_matrix, &result.m_x, &result.m_y);
++    return result;
++}
++
+ void wxCairoMatrixData::TransformPoint( wxDouble *x, wxDouble *y ) const
+ {
+     double lx = *x, ly = *y ;
+@@ -1049,6 +1091,13 @@
+ }
+ 
+ // applies the matrix except for translations
++wxPoint2DDouble wxCairoMatrixData::TransformDistance( const wxPoint2DDouble& p ) const
++{
++    wxPoint2DDouble result(p);
++    cairo_matrix_transform_distance(&m_matrix, &result.m_x, &result.m_y);
++    return result;
++}
++
+ void wxCairoMatrixData::TransformDistance( wxDouble *dx, wxDouble *dy ) const
+ {
+     double lx = *dx, ly = *dy ;
+Index: src/msw/graphics.cpp
+===================================================================
+--- src/msw/graphics.cpp	(revision 67664)
++++ src/msw/graphics.cpp	(working copy)
+@@ -176,6 +176,7 @@
+ 
+     // concatenates the matrix
+     virtual void Concat( const wxGraphicsMatrixData *t );
++    virtual void Concat(const wxAffineMatrix2DBase& t);
+ 
+     // sets the matrix to the respective values
+     virtual void Set(wxDouble a=1.0, wxDouble b=0.0, wxDouble c=0.0, wxDouble d=1.0,
+@@ -186,10 +187,11 @@
+                      wxDouble* d=NULL, wxDouble* tx=NULL, wxDouble* ty=NULL) const;
+ 
+     // makes this the inverse matrix
+-    virtual void Invert();
++    virtual bool Invert();
+ 
+-    // returns true if the elements of the transformation matrix are equal ?
++    // returns true if the elements of the transformation matrix are equal
+     virtual bool IsEqual( const wxGraphicsMatrixData* t) const ;
++    virtual bool IsEqual(const wxAffineMatrix2DBase& t) const;
+ 
+     // return true if this is the identity matrix
+     virtual bool IsIdentity() const;
+@@ -212,9 +214,11 @@
+     //
+ 
+     // applies that matrix to the point
++    virtual wxPoint2DDouble TransformPoint( const wxPoint2DDouble& p ) const;
+     virtual void TransformPoint( wxDouble *x, wxDouble *y ) const;
+ 
+     // applies the matrix except for translations
++    virtual wxPoint2DDouble TransformDistance( const wxPoint2DDouble& p ) const;
+     virtual void TransformDistance( wxDouble *dx, wxDouble *dy ) const;
+ 
+     // returns the native representation
+@@ -1147,6 +1151,16 @@
+ }
+ 
+ // concatenates the matrix
++void wxGDIPlusMatrixData::Concat( const wxAffineMatrix2DBase& t )
++{
++    wxMatrix2D mat;
++    wxPoint2DDouble tr;
++    t.Get(&mat, &tr);
++    Matrix temp(mat.m_11, mat.m_12, mat.m_21, mat.m_22, tr.m_x, tr.m_y);
++
++    m_matrix->Multiply(&temp);
++}
++
+ void wxGDIPlusMatrixData::Concat( const wxGraphicsMatrixData *t )
+ {
+     m_matrix->Multiply( (Matrix*) t->GetNativeMatrix());
+@@ -1174,17 +1188,27 @@
+ }
+ 
+ // makes this the inverse matrix
+-void wxGDIPlusMatrixData::Invert()
++bool wxGDIPlusMatrixData::Invert()
+ {
+-    m_matrix->Invert();
++    return m_matrix->Invert() == Ok;
+ }
+ 
+-// returns true if the elements of the transformation matrix are equal ?
+-bool wxGDIPlusMatrixData::IsEqual( const wxGraphicsMatrixData* t) const
++// returns true if the elements of the transformation matrix are equal
++bool wxGDIPlusMatrixData::IsEqual(const wxAffineMatrix2DBase& t) const
+ {
+-    return m_matrix->Equals((Matrix*) t->GetNativeMatrix())== TRUE ;
++    wxMatrix2D mat;
++    wxPoint2DDouble tr;
++    t.Get(&mat, &tr);
++    Matrix temp(mat.m_11, mat.m_12, mat.m_21, mat.m_22, tr.m_x, tr.m_y);
++
++    return m_matrix->Equals(&temp)== TRUE;
+ }
+ 
++bool wxGDIPlusMatrixData::IsEqual(const wxGraphicsMatrixData* t) const
++{
++    return m_matrix->Equals((Matrix*) t->GetNativeMatrix())== TRUE;
++}
++
+ // return true if this is the identity matrix
+ bool wxGDIPlusMatrixData::IsIdentity() const
+ {
+@@ -1218,6 +1242,14 @@
+ //
+ 
+ // applies that matrix to the point
++wxPoint2DDouble wxGDIPlusMatrixData::TransformPoint( const wxPoint2DDouble& p ) const
++{
++    PointF pt(p.m_x, p.m_y);
++    m_matrix->TransformPoints(&pt);
++
++    return wxPoint2DDouble(pt.X, pt.Y);
++}
++
+ void wxGDIPlusMatrixData::TransformPoint( wxDouble *x, wxDouble *y ) const
+ {
+     PointF pt(*x,*y);
+@@ -1227,6 +1259,14 @@
+ }
+ 
+ // applies the matrix except for translations
++wxPoint2DDouble wxGDIPlusMatrixData::TransformDistance( const wxPoint2DDouble& p ) const
++{
++    PointF pt(p.m_x, p.m_y);
++    m_matrix->TransformVectors(&pt);
++
++    return wxPoint2DDouble(pt.X, pt.Y);
++}
++
+ void wxGDIPlusMatrixData::TransformDistance( wxDouble *dx, wxDouble *dy ) const
+ {
+     PointF pt(*dx,*dy);
+Index: src/osx/carbon/graphics.cpp
+===================================================================
+--- src/osx/carbon/graphics.cpp	(revision 67664)
++++ src/osx/carbon/graphics.cpp	(working copy)
+@@ -1012,6 +1012,7 @@
+ 
+     // concatenates the matrix
+     virtual void Concat( const wxGraphicsMatrixData *t );
++    virtual void Concat(const wxAffineMatrix2DBase& t);
+ 
+     // sets the matrix to the respective values
+     virtual void Set(wxDouble a=1.0, wxDouble b=0.0, wxDouble c=0.0, wxDouble d=1.0,
+@@ -1022,10 +1023,11 @@
+                      wxDouble* d=NULL, wxDouble* tx=NULL, wxDouble* ty=NULL) const;
+ 
+     // makes this the inverse matrix
+-    virtual void Invert();
++    virtual bool Invert();
+ 
+-    // returns true if the elements of the transformation matrix are equal ?
++    // returns true if the elements of the transformation matrix are equal
+     virtual bool IsEqual( const wxGraphicsMatrixData* t) const ;
++    virtual bool IsEqual(const wxAffineMatrix2DBase& t) const;
+ 
+     // return true if this is the identity matrix
+     virtual bool IsIdentity() const;
+@@ -1048,9 +1050,11 @@
+     //
+ 
+     // applies that matrix to the point
++    virtual wxPoint2DDouble TransformPoint( const wxPoint2DDouble& p ) const;
+     virtual void TransformPoint( wxDouble *x, wxDouble *y ) const;
+ 
+     // applies the matrix except for translations
++    virtual wxPoint2DDouble TransformDistance( const wxPoint2DDouble& p ) const;
+     virtual void TransformDistance( wxDouble *dx, wxDouble *dy ) const;
+ 
+     // returns the native representation
+@@ -1080,6 +1084,16 @@
+ }
+ 
+ // concatenates the matrix
++void wxMacCoreGraphicsMatrixData::Concat( const wxAffineMatrix2DBase& t )
++{
++    wxMatrix2D mat;
++    wxPoint2DDouble tr;
++    t.Get(&mat, &tr);
++    CGAffineTransform temp = CGAffineTransformMake(mat.m_11, mat.m_12, mat.m_21, mat.m_22, tr.m_x, tr.m_y);
++
++    m_matrix = CGAffineTransformConcat(temp, m_matrix);
++}
++
+ void wxMacCoreGraphicsMatrixData::Concat( const wxGraphicsMatrixData *t )
+ {
+     m_matrix = CGAffineTransformConcat(*((CGAffineTransform*) t->GetNativeMatrix()), m_matrix );
+@@ -1105,14 +1119,33 @@
+ }
+ 
+ // makes this the inverse matrix
+-void wxMacCoreGraphicsMatrixData::Invert()
++bool wxMacCoreGraphicsMatrixData::Invert()
+ {
+-    m_matrix = CGAffineTransformInvert( m_matrix );
++    if(IsIdentity())
++        return true;
++
++    CGAffineTransform temp = CGAffineTransformInvert( m_matrix );
++
++    if(CGAffineTransformEqualToTransform(m_matrix, temp))
++        return false;
++
++    m_matrix = temp;
++    return true;
+ }
+ 
+-// returns true if the elements of the transformation matrix are equal ?
+-bool wxMacCoreGraphicsMatrixData::IsEqual( const wxGraphicsMatrixData* t) const
++// returns true if the elements of the transformation matrix are equal
++void wxMacCoreGraphicsMatrixData::IsEqual(const wxAffineMatrix2DBase& t) const
+ {
++    wxMatrix2D mat;
++    wxPoint2DDouble tr;
++    t.Get(&mat, &tr);
++    CGAffineTransform temp = CGAffineTransformMake(mat.m_11, mat.m_12, mat.m_21, mat.m_22, tr.m_x, tr.m_y);
++
++    return CGAffineTransformEqualToTransform(m_matrix, temp);
++}
++
++bool wxMacCoreGraphicsMatrixData::IsEqual(const wxGraphicsMatrixData* t) const
++{
+     return CGAffineTransformEqualToTransform(m_matrix, *((CGAffineTransform*) t->GetNativeMatrix()));
+ }
+ 
+@@ -1150,6 +1183,13 @@
+ //
+ 
+ // applies that matrix to the point
++wxPoint2DDouble wxMacCoreGraphicsMatrixData::TransformPoint( const wxPoint2DDouble& p ) const
++{
++    CGPoint pt = CGPointApplyAffineTransform( CGPointMake((CGFloat) p.m_x, (CGFloat) p.m_y), m_matrix);
++
++    return wxPoint2DDouble(pt.x, pt.y);
++}
++
+ void wxMacCoreGraphicsMatrixData::TransformPoint( wxDouble *x, wxDouble *y ) const
+ {
+     CGPoint pt = CGPointApplyAffineTransform( CGPointMake((CGFloat) *x,(CGFloat) *y), m_matrix);
+@@ -1159,6 +1199,13 @@
+ }
+ 
+ // applies the matrix except for translations
++wxPoint2DDouble wxMacCoreGraphicsMatrixData::TransformDistance( const wxPoint2DDouble& p ) const
++{
++    CGSize sz = CGSizeApplyAffineTransform( CGSizeMake((CGFloat) p.m_x, (CGFloat) p.m_y) , m_matrix );
++
++    return wxPoint2DDouble(sz.width, sz.height);
++}
++
+ void wxMacCoreGraphicsMatrixData::TransformDistance( wxDouble *dx, wxDouble *dy ) const
+ {
+     CGSize sz = CGSizeApplyAffineTransform( CGSizeMake((CGFloat) *dx,(CGFloat) *dy) , m_matrix );

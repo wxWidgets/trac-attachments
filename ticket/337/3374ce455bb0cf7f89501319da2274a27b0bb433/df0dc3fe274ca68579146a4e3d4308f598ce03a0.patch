@@ -1,0 +1,457 @@
+--- agw/floatspin.py	Sat Jan 04 14:22:42 2014
++++ agw/floatspin.py	Mon Aug 18 19:39:57 2014
+@@ -167,6 +167,9 @@
+ 
+ """
+ 
++def Property(func):
++    return property(**func())
++
+ 
+ #----------------------------------------------------------------------
+ # Beginning Of FLOATSPIN wxPython Code
+@@ -269,8 +272,11 @@
+         wx.TextCtrl.__init__(self, parent, id, value, pos, size, style, validator, name)
+ 
+         self._parent = parent
++        self._selection = (-1, -1)
++        self._value = value
+         self.Bind(wx.EVT_WINDOW_DESTROY, self.OnDestroy)
+-        self.Bind(wx.EVT_CHAR, self.OnChar)
++        self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
++        self.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+         self.Bind(wx.EVT_KILL_FOCUS, self.OnKillFocus)
+ 
+ 
+@@ -288,15 +294,21 @@
+             self._parent = None
+ 
+ 
+-    def OnChar(self, event):
++    def OnKeyDown(self, event):
+         """
+-        Handles the ``wx.EVT_CHAR`` event for :class:`FloatTextCtrl`.
++        Handles the ``wx.EVT_KEYDOWN`` event for :class:`FloatTextCtrl`.
+ 
+         :param `event`: a :class:`KeyEvent` event to be processed.
+         """
+ 
+         if self._parent:
+-            self._parent.OnChar(event)
++            self._parent.OnKeyDown(event)
++
++
++    def OnFocus(self, event):
++        self._value = self.Value
++        self.RestoreSelection()
++        event.Skip()
+ 
+ 
+     def OnKillFocus(self, event):
+@@ -309,11 +321,25 @@
+          when focus is lost.
+          """
+ 
+-        if self._parent:
++        self._selection = self.GetSelection()
++        if self._parent and self.Value != self._value:
+             self._parent.SyncSpinToText(True)
++        self.SetSelection(0, 0)
+ 
+         event.Skip()
+ 
++    def RestoreSelection(self):
++        """
++        Restores the selection under Mac OS X, selects all under other platforms
++        (consistent with default wx.TextCtrl behaviour)
++        
++        """
++
++        if "__WXMAC__" in wx.PlatformInfo and self._selection != (-1, -1):
++            self.SetSelection(*self._selection)
++        else:
++            self.SelectAll()
++
+ 
+ #---------------------------------------------------------------------------- #
+ # FloatSpin
+@@ -377,8 +403,10 @@
+         self._digits = digits
+         self._snapticks = False
+         self._spinbutton = None
++        self._ignore_spin_event = False
+         self._textctrl = None
+         self._spinctrl_bestsize = wx.Size(-999, -999)
++        self._enabled = True
+ 
+         # start Philip Semanchuk addition
+         # The textbox & spin button are drawn slightly differently 
+@@ -414,15 +442,25 @@
+         if height == -1:
+             height = best_size.GetHeight()
+ 
+-        self._validkeycode = [43, 44, 45, 46, 69, 101, 127, 314]
++        self._validkeycode = [43, 44, 45, 46, 69, 101]
+         self._validkeycode.extend(range(48, 58))
+-        self._validkeycode.extend([wx.WXK_RETURN, wx.WXK_TAB, wx.WXK_BACK,
+-                                   wx.WXK_LEFT, wx.WXK_RIGHT])
++        self._validkeycode.extend([wx.WXK_BACK, wx.WXK_DELETE, wx.WXK_LEFT,
++                                   wx.WXK_RIGHT,
++                                   wx.WXK_NUMPAD0, wx.WXK_NUMPAD1,
++                                   wx.WXK_NUMPAD2, wx.WXK_NUMPAD3,
++                                   wx.WXK_NUMPAD4, wx.WXK_NUMPAD5,
++                                   wx.WXK_NUMPAD6, wx.WXK_NUMPAD7,
++                                   wx.WXK_NUMPAD8, wx.WXK_NUMPAD9,
++                                   wx.WXK_NUMPAD_ADD, wx.WXK_NUMPAD_DECIMAL,
++                                   wx.WXK_NUMPAD_SEPARATOR,
++                                   wx.WXK_NUMPAD_SUBTRACT])
+ 
+         self._spinbutton = wx.SpinButton(self, wx.ID_ANY, wx.DefaultPosition,
+                                          size=(-1, height),
+                                          style=wx.SP_ARROW_KEYS | wx.SP_VERTICAL |
+                                          wx.SP_WRAP)
++        self._spinbutton.SetRange(-2 ** 32 / 2.0, 2 ** 32 / 2.0 - 1)
++        self._spinbutton.AcceptsFocusFromKeyboard = lambda: False
+ 
+         txtstyle = wx.TE_NOHIDESEL | wx.TE_PROCESS_ENTER
+ 
+@@ -434,8 +472,7 @@
+         if agwStyle & FS_READONLY:
+             txtstyle = txtstyle | wx.TE_READONLY
+ 
+-        self._textctrl = FloatTextCtrl(self, wx.ID_ANY, str(self._value),
+-                                       wx.DefaultPosition,
++        self._textctrl = FloatTextCtrl(self, wx.ID_ANY, "", wx.DefaultPosition,
+                                        (width-self._spinbutton.GetSize().GetWidth(), height),
+                                        txtstyle)
+ 
+@@ -465,30 +502,18 @@
+         self._mainsizer.Layout()
+ 
+         self.SetFormat()
+-        self.SetDigits(digits)
+-
+-        # set the value here without generating an event
+-
+-        decimal = locale.localeconv()["decimal_point"]
+-        strs = ("%100." + str(self._digits) + self._textformat[1])%self._value
+-        strs = strs.replace(".", decimal)
+-
+-        strs = strs.strip()
+-        strs = self.ReplaceDoubleZero(strs)
+-
+-        self._textctrl.SetValue(strs)
+ 
+         if not (agwStyle & FS_READONLY):
+             self.Bind(wx.EVT_SPIN_UP, self.OnSpinUp)
+             self.Bind(wx.EVT_SPIN_DOWN, self.OnSpinDown)
+             self._spinbutton.Bind(wx.EVT_LEFT_DOWN, self.OnSpinMouseDown)
++            self._spinbutton.Bind(wx.EVT_LEFT_UP, self.OnSpinMouseUp)
+             
+         self._textctrl.Bind(wx.EVT_TEXT_ENTER, self.OnTextEnter)
+         self._textctrl.Bind(wx.EVT_MOUSEWHEEL, self.OnMouseWheel)
+         self._spinbutton.Bind(wx.EVT_MOUSEWHEEL, self.OnMouseWheel)
+ 
+         self.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+-        self.Bind(wx.EVT_KILL_FOCUS, self.OnKillFocus)
+         self.Bind(wx.EVT_SIZE, self.OnSize)
+ 
+         # start Philip Semanchuk move
+@@ -558,6 +583,36 @@
+         self.GetEventHandler().ProcessEvent(eventOut)
+ 
+ 
++    def Disable(self):
++        self.Enable(False)
++
++
++    def Enable(self, enable=True):
++        """ Enable the child controls. This is needed under wxMac """
++
++        wx.PyControl.Enable(self, enable)
++        self._enabled = enable
++        
++        if self._textctrl:
++            self._textctrl.Enable(enable)
++        self._spinbutton.Enable(enable)
++
++
++    @Property
++    def Enabled():
++        def fget(self):
++            return self._enabled
++
++        def fset(self, enable=True):
++            self.Enable(enable)
++
++        return locals()
++
++
++    def IsEnabled(self):
++        return self._enabled
++
++
+     def OnSpinMouseDown(self, event):
+         """
+         Handles the ``wx.EVT_LEFT_DOWN`` event for :class:`FloatSpin`.
+@@ -577,6 +632,28 @@
+ 
+         self._spinmodifier = modifier
+ 
++        self._ignore_spin_event = False
++        event.Skip()
++
++
++    def OnSpinMouseUp(self, event):
++        """
++        Handles the ``wx.EVT_LEFT_UP`` event for :class:`FloatSpin`.
++
++        :param `event`: a :class:`MouseEvent` event to be processed.
++
++        :note: This method works on the underlying :class:`SpinButton`.
++        """
++
++        if self._textctrl:
++            if "__WXMSW__" in wx.PlatformInfo:
++                self._textctrl.SetFocus()
++                self._textctrl.SelectAll()
++            elif not "__WXMAC__" in wx.PlatformInfo:
++                self._textctrl.SetFocus()
++                self._textctrl.SetSelection(0, 0)
++
++        self._ignore_spin_event = False
+         event.Skip()
+ 
+ 
+@@ -587,14 +664,22 @@
+         :param `event`: a :class:`SpinEvent` event to be processed.
+         """
+ 
++        if self._ignore_spin_event:
++            self._ignore_spin_event = False
++            return
++
+         if self._textctrl and self._textctrl.IsModified():
+             self.SyncSpinToText(False)
+ 
+         if self.InRange(self._value + self._increment*self._spinmodifier):
+ 
+             self._value = self._value + self._increment*self._spinmodifier
+-            self.SetValue(self._value)
+-            self.DoSendEvent()
++        elif self._max is not None:
++            self._value = self._max
++        self.SetValue(self._value)
++        if "__WXMAC__" in wx.PlatformInfo:
++            self._textctrl.SelectAll()
++        self.DoSendEvent()
+ 
+ 
+     def OnSpinDown(self, event):
+@@ -604,14 +689,22 @@
+         :param `event`: a :class:`SpinEvent` event to be processed.
+         """
+ 
++        if self._ignore_spin_event:
++            self._ignore_spin_event = False
++            return
++
+         if self._textctrl and self._textctrl.IsModified():
+             self.SyncSpinToText(False)
+ 
+         if self.InRange(self._value - self._increment*self._spinmodifier):
+ 
+             self._value = self._value - self._increment*self._spinmodifier
+-            self.SetValue(self._value)
+-            self.DoSendEvent()
++        elif self._min is not None:
++            self._value = self._min
++        self.SetValue(self._value)
++        if "__WXMAC__" in wx.PlatformInfo:
++            self._textctrl.SelectAll()
++        self.DoSendEvent()
+ 
+ 
+     def OnTextEnter(self, event):
+@@ -627,9 +720,9 @@
+         event.Skip()
+ 
+ 
+-    def OnChar(self, event):
++    def OnKeyDown(self, event):
+         """
+-        Handles the ``wx.EVT_CHAR`` event for :class:`FloatSpin`.
++        Handles the ``wx.EVT_KEYDOWN`` event for :class:`FloatSpin`.
+ 
+         :param `event`: a :class:`KeyEvent` event to be processed.
+ 
+@@ -681,25 +774,33 @@
+         elif keycode == wx.WXK_SPACE:
+ 
+             self.SetValue(self._value)
++            if self._textctrl:
++                self._textctrl.SelectAll()
+             event.Skip(False)
+ 
+         elif keycode == wx.WXK_ESCAPE:
+ 
+             self.SetToDefaultValue()
++            if self._textctrl:
++                self._textctrl.SelectAll()
+             self.DoSendEvent()
+ 
+         elif keycode == wx.WXK_TAB:
+ 
+-            new_event = wx.NavigationKeyEvent()
+-            new_event.SetEventObject(self.GetParent())
+-            new_event.SetDirection(not event.ShiftDown())
+-            # CTRL-TAB changes the (parent) window, i.e. switch notebook page
+-            new_event.SetWindowChange(event.ControlDown())
+-            new_event.SetCurrentFocus(self)
+-            self.GetParent().GetEventHandler().ProcessEvent(new_event)
++            # The original event code doesn't work under wxGTK
++            focus_next_keyboard_focusable_control(event.EventObject)
++
++        elif keycode in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
++
++            default = self.TopLevelParent.DefaultItem
++            if (default and default.Enabled and default.IsShownOnScreen() and
++                isinstance(default, wx.Button)):
++                default.ProcessEvent(wx.PyCommandEvent(wx.EVT_BUTTON.typeId,
++                                                       default.GetId()))
+ 
+         else:
+-            if keycode not in self._validkeycode:
++            if (not event.CmdDown() and not event.ControlDown() and
++                keycode not in self._validkeycode):
+                 return
+ 
+             event.Skip()
+@@ -725,12 +826,19 @@
+ 
+         if event.GetWheelRotation() > 0:
+             self.SetValue(self._value + self._increment*modifier)
+-            self.DoSendEvent()
+ 
+         else:
+ 
+             self.SetValue(self._value - self._increment*modifier)
+-            self.DoSendEvent()
++
++        if self._textctrl:
++            if "__WXMAC__" in wx.PlatformInfo:
++                self._textctrl.SelectAll()
++            else:
++                self._textctrl.SetFocus()
++                self._textctrl.SetSelection(0, 0)
++
++        self.DoSendEvent()
+ 
+ 
+     def OnSize(self, event):
+@@ -811,6 +919,23 @@
+         strs = strs.strip()
+         strs = self.ReplaceDoubleZero(strs)
+ 
++        # Sync spinbutton so that events generated by it match up with the
++        # actual spin direction.
++        # This fixes an issue under GTK and Mac OS X where the EVT_SPIN event
++        # generated by pressing the spin up/down buttons is dependent on the
++        # spin button value (e.g. if the down button is pressed when the button
++        # value is at its minimum, there will always be a EVT_SPIN_UP generated
++        # under GTK, and no event at all under Mac OS X).
++        min_val = self._min if self._min is not None else self._spinbutton.Min
++        max_val = self._max if self._max is not None else self._spinbutton.Max
++        # Scale the value to the spinbutton range
++        spinvalue = int(round(((value - min_val) / float(max_val - min_val)) *
++                              self._spinbutton.Max))
++        # Setting the spin button value causes a EVT_SPIN event to be generated
++        # under GTK, which we need to ignore
++        self._ignore_spin_event = True
++        self._spinbutton.SetValue(spinvalue)
++
+         if value != self._value or strs != self._textctrl.GetValue():
+ 
+             self._textctrl.SetValue(strs)
+@@ -973,8 +1098,8 @@
+ 
+         if self._digits < 0:
+             self.SetDigits()
+-
+-        self.SetValue(self._value)
++        else:
++            self.SetValue(self._value)
+ 
+ 
+     def GetFormat(self):
+@@ -1053,17 +1178,6 @@
+         event.Skip()
+ 
+ 
+-    def OnKillFocus(self, event):
+-        """
+-        Handles the ``wx.EVT_KILL_FOCUS`` event for :class:`FloatSpin`.
+-
+-        :param `event`: a :class:`FocusEvent` event to be processed.
+-        """
+-
+-        self.SyncSpinToText(True)
+-        event.Skip()
+-
+-
+     def SyncSpinToText(self, send_event=True, force_valid=True):
+         """
+         Synchronize the underlying :class:`TextCtrl` with :class:`SpinButton`.
+@@ -1710,3 +1824,52 @@
+         i = -i
+ 
+     return i, exp
++
++def get_all_keyboard_focusable_children(parent):
++    """
++    Get all keyboard focusable children of parent
++    
++    """
++
++    children = []
++    try:
++        iter(parent.Children)
++        # Under Mac OS X panels may have non-iterator children
++    except:
++        pass
++    else:
++        for child in parent.Children:
++            if child.Enabled and child.IsShownOnScreen():
++                if child.AcceptsFocusFromKeyboard():
++                    if not isinstance(child, wx.RadioButton) or child.Value:
++                        children.append(child)
++                if child.Children:
++                    children.extend(get_all_keyboard_focusable_children(child))
++    return children
++
++def focus_next_keyboard_focusable_control(control):
++    """
++    Focus the next control in tab order that can gain focus.
++    
++    If the shift key is held down, tab order is reversed.
++    
++    """
++
++    # Find the last panel in the hierarchy of parents
++    parent = control.Parent
++    focusparent = None
++    while parent:
++        if isinstance(parent, (wx.Panel, wx.PyPanel)):
++            focusparent = parent
++        parent = parent.Parent
++    if focusparent:
++        children = get_all_keyboard_focusable_children(focusparent)
++        if wx.GetKeyState(wx.WXK_SHIFT):
++            children = list(reversed(children))
++        for i, child in enumerate(children):
++            if child is control:
++                for next in children[i + 1:] + children[:i]:
++                    if next is not child.Parent:
++                        next.SetFocus()
++                        break
++                break

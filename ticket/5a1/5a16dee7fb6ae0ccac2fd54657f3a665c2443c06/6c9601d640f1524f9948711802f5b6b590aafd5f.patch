@@ -1,0 +1,265 @@
+diff --git include/wx/vscroll.h include/wx/vscroll.h
+index 6b9fba2..bfa13c7 100644
+--- include/wx/vscroll.h
++++ include/wx/vscroll.h
+@@ -77,6 +77,18 @@ public:
+     void EnablePhysicalScrolling(bool scrolling = true)
+         { m_physicalScrolling = scrolling; }
+ 
++    // Disable use of keyboard keys for scrolling. By default cursor movement
++    // keys (including Home, End, Page Up and Down) are used to scroll the
++    // window appropriately. If the derived class uses these keys for something
++    // else, e.g. changing the currently selected item, this function can be
++    // used to disable this behaviour as it's not only not necessary then but
++    // can actually be actively harmful if another object forwards a keyboard
++    // event corresponding to one of the above keys to us using
++    // ProcessWindowEvent() because the event will always be processed which
++    // can be undesirable.
++    void DisableKeyboardScrolling() { m_kbdScrollingEnabled = false; }
++
++
+     // wxNOT_FOUND if none, i.e. if it is below the last item
+     int VirtualHitTest(wxCoord coord) const;
+ 
+@@ -118,7 +130,7 @@ public:
+     virtual wxWindow *GetTargetWindow() const { return m_targetWindow; }
+ 
+     // Override this function to draw the graphic (or just process EVT_PAINT)
+-    //virtual void OnDraw(wxDC& WXUNUSED(dc)) { }
++    virtual void OnDraw(wxDC& WXUNUSED(dc)) { }
+ 
+     // change the DC origin according to the scroll position. To properly
+     // forward calls to wxWindow::Layout use WX_FORWARD_TO_SCROLL_HELPER()
+@@ -128,6 +140,8 @@ public:
+     // the methods to be called from the window event handlers
+     void HandleOnScroll(wxScrollWinEvent& event);
+     void HandleOnSize(wxSizeEvent& event);
++    void HandleOnPaint(wxPaintEvent& event);
++    void HandleOnChar(wxKeyEvent& event);
+ #if wxUSE_MOUSEWHEEL
+     void HandleOnMouseWheel(wxMouseEvent& event);
+ #endif // wxUSE_MOUSEWHEEL
+@@ -284,6 +298,8 @@ private:
+     // do child scrolling (used in DoPrepareDC())
+     bool m_physicalScrolling;
+ 
++    bool m_kbdScrollingEnabled;
++
+     // handler injected into target window to forward some useful events to us
+     wxVarScrollHelperEvtHandler *m_handler;
+ };
+diff --git src/generic/vscroll.cpp src/generic/vscroll.cpp
+index 5894517..545e072 100644
+--- src/generic/vscroll.cpp
++++ src/generic/vscroll.cpp
+@@ -66,8 +66,13 @@ bool wxVarScrollHelperEvtHandler::ProcessEvent(wxEvent& event)
+ {
+     wxEventType evType = event.GetEventType();
+ 
+-    // pass it on to the real handler
+-    bool processed = wxEvtHandler::ProcessEvent(event);
++    // Pass it on to the real handler: notice that we must not call
++    // ProcessEvent() on this object itself as it wouldn't pass it to the next
++    // handler (i.e. the real window) if we're called from a previous handler
++    // (as indicated by "process here only" flag being set) and we do want to
++    // execute the handler defined in the window we're associated with right
++    // now, without waiting until TryAfter() is called from wxEvtHandler.
++    bool processed = m_nextHandler->ProcessEvent(event);
+ 
+     // always process the size events ourselves, even if the user code handles
+     // them as well, as we need to AdjustScrollbars()
+@@ -79,18 +84,28 @@ bool wxVarScrollHelperEvtHandler::ProcessEvent(wxEvent& event)
+     if ( evType == wxEVT_SIZE )
+     {
+         m_scrollHelper->HandleOnSize((wxSizeEvent &)event);
+-
+-        return !event.GetSkipped();
++        return true;
+     }
+ 
+-    if ( processed )
++    if ( processed && event.IsCommandEvent())
++        return true;
++
++    // For wxEVT_PAINT the user code can either handle this event as usual or
++    // override virtual OnDraw(), so if the event hasn't been handled we need
++    // to call this virtual function ourselves.
++    if (
++#ifndef __WXUNIVERSAL__
++          // in wxUniversal "processed" will always be true, because
++          // all windows use the paint event to draw themselves.
++          // In this case we can't use this flag to determine if a custom
++          // paint event handler already drew our window and we just
++          // call OnDraw() anyway.
++          !processed &&
++#endif // !__WXUNIVERSAL__
++            evType == wxEVT_PAINT )
+     {
+-        // normally, nothing more to do here - except if we have a command
+-        // event
+-        if ( event.IsCommandEvent() )
+-        {
+-            return true;
+-        }
++        m_scrollHelper->HandleOnPaint((wxPaintEvent &)event);
++        return true;
+     }
+ 
+     // reset the skipped flag (which might have been set to true in
+@@ -113,20 +128,46 @@ bool wxVarScrollHelperEvtHandler::ProcessEvent(wxEvent& event)
+         {
+             // it makes sense to indicate that we processed the message as we
+             // did scroll the window (and also notice that wxAutoScrollTimer
+-            // relies on our return value for continuous scrolling)
++            // relies on our return value to stop scrolling when we are at top
++            // or bottom already)
+             processed = true;
+             wasSkipped = false;
+         }
+     }
++
+ #if wxUSE_MOUSEWHEEL
+-    else if ( evType == wxEVT_MOUSEWHEEL )
++    // Use GTK's own scroll wheel handling in GtkScrolledWindow
++#ifndef __WXGTK20__
++    if ( evType == wxEVT_MOUSEWHEEL )
+     {
+         m_scrollHelper->HandleOnMouseWheel((wxMouseEvent &)event);
++        return true;
+     }
++#endif
+ #endif // wxUSE_MOUSEWHEEL
++    else if ( evType == wxEVT_CHAR )
++    {
++        m_scrollHelper->HandleOnChar((wxKeyEvent &)event);
++        if ( !event.GetSkipped() )
++        {
++            processed = true;
++            wasSkipped = false;
++        }
++    }
+ 
+     event.Skip(wasSkipped);
+ 
++    // We called ProcessEvent() on the next handler, meaning that we explicitly
++    // worked around the request to process the event in this handler only. As
++    // explained above, this is unfortunately really necessary but the trouble
++    // is that the event will continue to be post-processed by the previous
++    // handler resulting in duplicate calls to event handlers. Call the special
++    // function below to prevent this from happening, base class DoTryChain()
++    // will check for it and behave accordingly.
++    //
++    // And if we're not called from DoTryChain(), this won't do anything anyhow.
++    event.DidntHonourProcessOnlyIn();
++
+     return processed;
+ }
+ 
+@@ -155,6 +196,7 @@ wxVarScrollHelperBase::wxVarScrollHelperBase(wxWindow *win)
+     m_targetWindow = NULL;
+ 
+     m_physicalScrolling = true;
++    m_kbdScrollingEnabled = true;
+     m_handler = NULL;
+ 
+     m_win = win;
+@@ -727,6 +769,99 @@ void wxVarScrollHelperBase::HandleOnScroll(wxScrollWinEvent& event)
+ #endif // __WXMAC__
+ }
+ 
++// This calls OnDraw, having adjusted the origin according to the current
++// scroll position
++void wxVarScrollHelperBase::HandleOnPaint(wxPaintEvent& WXUNUSED(event))
++{
++    // don't use m_targetWindow here, this is always called for ourselves
++    wxPaintDC dc(m_win);
++    DoPrepareDC(dc);
++
++    OnDraw(dc);
++}
++
++// kbd handling: notice that we use OnChar() and not OnKeyDown() for
++// compatibility here - if we used OnKeyDown(), the programs which process
++// arrows themselves in their OnChar() would never get the message and like
++// this they always have the priority
++void wxVarScrollHelperBase::HandleOnChar(wxKeyEvent& event)
++{
++	// Only process in vertical orientations to prevent two events being fired
++    if ( !m_kbdScrollingEnabled || GetOrientation() != wxVERTICAL)
++    {
++        event.Skip();
++        return;
++    }
++
++    // prepare the event this key press maps to
++    wxScrollWinEvent newEvent;
++
++    newEvent.SetPosition(0);
++    newEvent.SetEventObject(m_win);
++    newEvent.SetId(m_win->GetId());
++
++    // this is the default, it's changed to wxHORIZONTAL below if needed
++    newEvent.SetOrientation(wxVERTICAL);
++
++    // some key events result in scrolling in both horizontal and vertical
++    // direction, e.g. Ctrl-{Home,End}, if this flag is true we should generate
++    // a second event in horizontal direction in addition to the primary one
++    bool sendHorizontalToo = false;
++
++    switch ( event.GetKeyCode() )
++    {
++        case WXK_PAGEUP:
++            newEvent.SetEventType(wxEVT_SCROLLWIN_PAGEUP);
++            break;
++
++        case WXK_PAGEDOWN:
++            newEvent.SetEventType(wxEVT_SCROLLWIN_PAGEDOWN);
++            break;
++
++        case WXK_HOME:
++            newEvent.SetEventType(wxEVT_SCROLLWIN_TOP);
++
++            sendHorizontalToo = event.ControlDown();
++            break;
++
++        case WXK_END:
++            newEvent.SetEventType(wxEVT_SCROLLWIN_BOTTOM);
++
++            sendHorizontalToo = event.ControlDown();
++            break;
++
++        case WXK_LEFT:
++            newEvent.SetOrientation(wxHORIZONTAL);
++            // fall through
++
++        case WXK_UP:
++            newEvent.SetEventType(wxEVT_SCROLLWIN_LINEUP);
++            break;
++
++        case WXK_RIGHT:
++            newEvent.SetOrientation(wxHORIZONTAL);
++            // fall through
++
++        case WXK_DOWN:
++            newEvent.SetEventType(wxEVT_SCROLLWIN_LINEDOWN);
++            break;
++
++        default:
++            // not a scrolling key
++            event.Skip();
++            return;
++    }
++
++    m_win->ProcessWindowEvent(newEvent);
++
++    if ( sendHorizontalToo )
++    {
++        newEvent.SetOrientation(wxHORIZONTAL);
++        m_win->ProcessWindowEvent(newEvent);
++    }
++}
++
++
+ void wxVarScrollHelperBase::DoPrepareDC(wxDC& dc)
+ {
+     if ( m_physicalScrolling )

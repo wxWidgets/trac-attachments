@@ -1,0 +1,368 @@
+diff -ru2 wxWindows-cvs-orig/include/msw/frame.h wxWindows-cvs-patch/include/msw/frame.h
+--- wxWindows-cvs-orig/include/msw/frame.h	Thu Feb 12 22:21:38 2004
++++ wxWindows-cvs-patch/include/msw/frame.h	Thu Feb 12 22:15:50 2004
+@@ -154,4 +154,10 @@
+     bool m_wasMinimized;
+ 
++#if wxUSE_OWNER_DRAWN
++    // we need the information on the index of the current item for WM_MENUCHAR
++    int m_lastSelectedMenuItemIndex;
++    WXHMENU m_lastmenu;
++#endif
++
+     DECLARE_EVENT_TABLE()
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxFrame)
+diff -ru2 wxWindows-cvs-orig/include/msw/menu.h wxWindows-cvs-patch/include/msw/menu.h
+--- wxWindows-cvs-orig/include/msw/menu.h	Thu Feb 12 22:22:12 2004
++++ wxWindows-cvs-patch/include/msw/menu.h	Thu Feb 12 22:18:40 2004
+@@ -93,4 +93,21 @@
+ #endif // wxUSE_ACCEL
+ 
++#if wxUSE_OWNER_DRAWN
++    // return a pointer to this or to the submenu that is hMenu, or NULL on failure
++    wxMenu *FindMenuByHandler( WXHMENU hMenu );
++
++    // the functionality of FindNextItemForAccel() is very similar to
++    // wxMenuBar::FindNextItemForAccel() in src/univ/menu.cpp
++
++    // get the next item for the given accel letter (used by wxFrame), return
++    // -1 if none or if the only one item with this accel is disabled.
++    //
++    // if unique is not NULL, filled with TRUE if there is only one item with
++    // this accel, FALSE if two or more
++    int FindNextItemForAccel(int startId, // id of the menu item after which the search starts
++                             int keycode,  // accel letter
++                             bool *unique = NULL) const;
++#endif // wxUSE_OWNER_DRAWN
++
+ private:
+     // common part of all ctors
+@@ -197,4 +214,9 @@
+     void Refresh( bool eraseBackground,
+                           const wxRect *rect = (const wxRect *) NULL ) { wxWindow::Refresh(eraseBackground, rect); }
++
++#if wxUSE_OWNER_DRAWN
++    // find menu by its Handler, return NULL on failure
++    wxMenu *FindMenuByHandler( WXHMENU hMenu );
++#endif // wxUSE_OWNER_DRAWN
+ 
+ protected:
+diff -ru2 wxWindows-cvs-orig/include/msw/menuitem.h wxWindows-cvs-patch/include/msw/menuitem.h
+--- wxWindows-cvs-orig/include/msw/menuitem.h	Thu Feb 12 22:22:32 2004
++++ wxWindows-cvs-patch/include/msw/menuitem.h	Thu Feb 12 22:17:06 2004
+@@ -74,4 +74,25 @@
+                wxMenu *subMenu = (wxMenu *)NULL);
+ 
++#if wxUSE_OWNER_DRAWN
++public:
++    // wxMenuItem::FindAccelIndex() is a copy of wxControl::FindAccelIndex() in
++    // src/univ/control.cpp
++
++    // return the accel index in the string or -1 if none and puts the modified
++    // string into second parameter if non NULL
++    static int FindAccelIndex(const wxString& label,
++                              wxString *labelOnly = NULL);
++
++    // get the accel index of our label or -1 if none
++    int GetAccelIndex() const { return m_indexAccel; }
++
++protected:
++    // set the accel index and string from text
++    void UpdateAccelInfo();
++
++    // the position of the accelerator in our label, -1 if none
++    int m_indexAccel;
++#endif // wxUSE_OWNER_DRAWN
++
+ private:
+     // common part of all ctors
+diff -ru2 wxWindows-cvs-orig/src/msw/frame.cpp wxWindows-cvs-patch/src/msw/frame.cpp
+--- wxWindows-cvs-orig/src/msw/frame.cpp	Tue Feb 10 23:46:54 2004
++++ wxWindows-cvs-patch/src/msw/frame.cpp	Thu Feb 12 22:30:34 2004
+@@ -180,4 +180,9 @@
+ 
+     m_wasMinimized = FALSE;
++
++#if wxUSE_OWNER_DRAWN
++    m_lastSelectedMenuItemIndex = -1;
++    m_lastmenu = 0;
++#endif
+ }
+ 
+@@ -848,4 +853,9 @@
+     event.SetEventObject(this);
+ 
++#if wxUSE_OWNER_DRAWN
++    m_lastSelectedMenuItemIndex = item;
++    m_lastmenu = hMenu;
++#endif
++
+     return GetEventHandler()->ProcessEvent(event);
+ }
+@@ -926,4 +936,38 @@
+             break;
+ #endif // !__WXMICROWIN__
++
++#if wxUSE_OWNER_DRAWN
++// In an ownerdrawn menuitem the key-accelerator (the key after the '&')
++// does not work automatically, it must be handled by the program by
++// intercepting WM_MENUCHAR messages.
++        case WM_MENUCHAR:
++            {
++                wxMenuBar* pMB = GetMenuBar();
++
++                if ( pMB )
++                {
++                    int iSelectedMenuItem = -1;
++                    bool unique;
++
++                    wxMenu* menu = pMB->FindMenuByHandler( (WXHMENU)lParam );
++
++                    if ( menu ) // to be on the safe side
++                    {
++                        iSelectedMenuItem = menu->FindNextItemForAccel(
++                                  m_lastmenu == (WXHMENU)lParam ? m_lastSelectedMenuItemIndex : -1,
++                                  (wxChar)LOWORD(wParam),
++                                  &unique );
++                    }
++                    if ( iSelectedMenuItem != -1 )
++                    {
++                        long action = unique ? 0x00020000   // choose the item
++                                             : 0x00030000;  // only select the item
++                        rc = ( action | iSelectedMenuItem );
++                        processed = TRUE;
++                    }
++                }
++            }
++            break;
++#endif // wxUSE_OWNER_DRAWN
+     }
+ 
+diff -ru2 wxWindows-cvs-orig/src/msw/menu.cpp wxWindows-cvs-patch/src/msw/menu.cpp
+--- wxWindows-cvs-orig/src/msw/menu.cpp	Tue Feb 10 23:51:16 2004
++++ wxWindows-cvs-patch/src/msw/menu.cpp	Thu Feb 12 22:31:46 2004
+@@ -428,4 +428,118 @@
+ }
+ 
++#if wxUSE_OWNER_DRAWN
++wxMenu *wxMenu::FindMenuByHandler( WXHMENU hMenu )
++{
++    wxMenuItem *item;
++    int index;
++    wxMenuItemList::Node* node;
++    wxMenu* menu;
++
++    // first check the Menu itself
++
++    if ( GetHMenu() == hMenu )
++    {
++        return this;
++    }
++
++    // now check all submenus
++    for ( index = 0, node = m_items.GetFirst();
++          node;
++          node = node->GetNext(), index++
++        )
++    {
++        item = (wxMenuItem*)(node->GetData());
++
++        if ( item->IsSubMenu() )
++        {
++            menu = item->GetSubMenu()->FindMenuByHandler( hMenu );
++            if ( menu != NULL )
++            {
++                return menu;
++            }
++        }
++    }
++
++    return NULL;
++}
++
++int wxMenu::FindNextItemForAccel(int startId, int key, bool *unique) const
++{
++    if ( !wxIsalnum(key) )
++    {
++        // we only support letters/digits as accels
++        return -1;
++    }
++
++    // translate everything to lower case before comparing
++    wxChar chAccel = wxTolower(key);
++
++    int idxFound = -1;              // the index of the item we are looking for
++    bool foundItemIsEnabled = 1;    // the item we found is enabled
++    bool startIdwasfound = 0;       // we found the idem with the id startId
++    int countfound = 0;             // counts the items with the right key
++    int takenextresult = 1;         // tells us that the search has started or restarted
++    int count = GetMenuItemCount();
++
++    // loop through all items searching for the item with chAccel as accel.
++    // Because we do not know the index of the item with the id startId,
++    // the search begins at the index 0, but we start a new search
++    // right after the item with the id startId
++    for ( int n = 0; n < count; n++ )
++    {
++        wxMenuItem* menuitem = FindItemByPosition(n);
++        wxASSERT( menuitem );
++        int idxAccel = menuitem->GetAccelIndex();
++
++        if (    idxAccel != -1
++             && wxTolower(menuitem->GetLabel()[(size_t)idxAccel]) == chAccel )
++        {
++            ++countfound;
++
++            if ( takenextresult )
++            {
++                takenextresult = 0;
++
++                idxFound = n;
++                if ( !menuitem->IsEnabled() )
++                {
++                    foundItemIsEnabled = 0;
++                }
++            }
++        }
++
++                                  // we can stop
++        if (    !takenextresult   // if we have found a result
++             && startIdwasfound   // and we are after the item with the start-id
++             && countfound >= 2 ) // and if we know that the accel is not unique
++        {
++            break;
++        }
++
++        if (    startId == menuitem->GetId()
++             && startId != -1 )
++        {
++            startIdwasfound = 1;
++            // start a new search: take the next item with the right accel
++            takenextresult = 1;
++        }
++    }
++
++    // do we have more than one item with this accel?
++    if ( unique )
++    {
++        *unique = countfound >= 2 ? FALSE : TRUE;
++    }
++
++    // do we have a unique item with this accel that is disabled?
++    if ( countfound == 1 && !foundItemIsEnabled )
++    {
++        return -1;
++    }
++
++    return idxFound;
++}
++#endif // wxUSE_OWNER_DRAWN
++
+ void wxMenu::EndRadioGroup()
+ {
+@@ -854,4 +968,22 @@
+     return -1;
+ }
++
++#if wxUSE_OWNER_DRAWN
++wxMenu *wxMenuBar::FindMenuByHandler( WXHMENU hMenu )
++{
++    size_t count = GetMenuCount();
++    wxMenu* menu;
++
++    for ( size_t i = 0; i < count; i++ )
++    {
++        if ( ( menu = m_menus[i]->FindMenuByHandler( hMenu ) ) != NULL )
++        {
++            return menu;
++        }
++    }
++
++    return NULL;
++}
++#endif // wxUSE_OWNER_DRAWN
+ 
+ // ---------------------------------------------------------------------------
+diff -ru2 wxWindows-cvs-orig/src/msw/menuitem.cpp wxWindows-cvs-patch/src/msw/menuitem.cpp
+--- wxWindows-cvs-orig/src/msw/menuitem.cpp	Tue Feb 10 23:53:30 2004
++++ wxWindows-cvs-patch/src/msw/menuitem.cpp	Thu Feb 12 22:27:12 2004
+@@ -128,6 +128,6 @@
+     ResetOwnerDrawn();
+ 
+-    // tell the owner drawing code to to show the accel string as well
+-    SetAccelString(m_text.AfterFirst(_T('\t')));
++    // update the accel keys
++    UpdateAccelInfo();
+ #endif // wxUSE_OWNER_DRAWN
+ }
+@@ -302,6 +302,6 @@
+     OWNER_DRAWN_ONLY( wxOwnerDrawn::SetName(text) );
+ #if wxUSE_OWNER_DRAWN
+-    // tell the owner drawing code to to show the accel string as well
+-    SetAccelString(text.AfterFirst(_T('\t')));
++    // update the accel keys
++    UpdateAccelInfo();
+ #endif
+ 
+@@ -357,4 +357,59 @@
+     OWNER_DRAWN_ONLY( wxOwnerDrawn::SetCheckable(checkable) );
+ }
++
++#if wxUSE_OWNER_DRAWN
++void wxMenuItem::UpdateAccelInfo( void )
++{
++    m_indexAccel = FindAccelIndex(m_text);
++
++    // tell the owner drawing code to to show the accel string as well
++    SetAccelString(m_text.AfterFirst(_T('\t')));
++}
++
++// wxMenuItem::FindAccelIndex() is a copy of wxControl::FindAccelIndex() in
++// src/univ/control.cpp
++/* static */
++int wxMenuItem::FindAccelIndex(const wxString& label, wxString *labelOnly)
++{
++    // the character following MNEMONIC_PREFIX is the accelerator for this
++    // control unless it is MNEMONIC_PREFIX too - this allows to insert
++    // literal MNEMONIC_PREFIX chars into the label
++    static const wxChar MNEMONIC_PREFIX = _T('&');
++
++    if ( labelOnly )
++    {
++        labelOnly->Empty();
++        labelOnly->Alloc(label.length());
++    }
++
++    int indexAccel = -1;
++    for ( const wxChar *pc = label; *pc != wxT('\0'); pc++ )
++    {
++        if ( *pc == MNEMONIC_PREFIX )
++        {
++            pc++; // skip it
++            if ( *pc != MNEMONIC_PREFIX )
++            {
++                if ( indexAccel == -1 )
++                {
++                    // remember it (-1 is for MNEMONIC_PREFIX itself
++                    indexAccel = pc - label.c_str() - 1;
++                }
++                else
++                {
++                    wxFAIL_MSG(_T("duplicate accel char in control label"));
++                }
++            }
++        }
++
++        if ( labelOnly )
++        {
++            *labelOnly += *pc;
++        }
++    }
++
++    return indexAccel;
++}
++#endif // wxUSE_OWNER_DRAWN
+ 
+ // ----------------------------------------------------------------------------
+
+ 	  	 

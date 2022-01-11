@@ -1,0 +1,217 @@
+diff --git include/wx/glcanvas.h include/wx/glcanvas.h
+old mode 100644
+new mode 100755
+index 5ba99c1..db9cbea
+--- include/wx/glcanvas.h
++++ include/wx/glcanvas.h
+@@ -57,6 +57,44 @@ enum
+ #define wxGLCanvasName wxT("GLCanvas")
+ 
+ // ----------------------------------------------------------------------------
++// wxGLAttribsBase: OpenGL rendering attributes
++// ----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_GL wxGLAttribsBase
++{
++public:
++    // Setters
++
++    void AddAttribute(int attribute) { m_GLValues.push_back(attribute); }
++    // Search for searchVal and combine the next value with combineVal
++    void AddAttribBits(int searchVal, int combineVal);
++
++    // Accessors
++    const int* GetGLAttrs() const
++    {
++        return m_GLValues.empty() ? NULL : m_GLValues.begin();
++    }
++
++private:
++    // Contains platform-dependent values
++    wxVector<int> m_GLValues;
++};
++
++// ----------------------------------------------------------------------------
++// wxGLContextAttrs: OpenGL rendering context attributes
++// ----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_GL wxGLContextAttrs : public wxGLAttribsBase
++{
++public:
++    // Setters, allowing chained calls
++    wxGLContextAttrs& CoreProfile();
++    wxGLContextAttrs& MajorVersion(int val);
++    wxGLContextAttrs& MinorVersion(int val);
++    void EndList(); // No more values can be chained
++};
++
++// ----------------------------------------------------------------------------
+ // wxGLContextBase: OpenGL rendering context
+ // ----------------------------------------------------------------------------
+ 
+@@ -134,6 +172,11 @@ public:
+     // compilation
+     static bool IsExtensionSupported(const char *extension);
+ 
++    // Get the wxGLContextAttrs object filled with the context-related values
++    // of the list of attributes passed at ctor when no wxGLAttributes is used
++    // as a parameter
++    wxGLContextAttrs& GetGLCTXAttrs() { return m_GLCTXAttrs; }
++
+     // deprecated methods using the implicit wxGLContext
+ #if WXWIN_COMPATIBILITY_2_8
+     wxDEPRECATED( wxGLContext* GetContext() const );
+@@ -158,6 +201,9 @@ protected:
+     // by glXQueryExtensionsString() or glGetString(GL_EXTENSIONS)
+     static bool IsExtensionInList(const char *list, const char *extension);
+ 
++    // For the case of "int* attribList" at ctor is != 0
++    wxGLContextAttrs m_GLCTXAttrs;
++
+ #if wxUSE_PALETTE
+     // create default palette if we're not using RGBA mode
+     // (not supported in most ports)
+diff --git src/common/glcmn.cpp src/common/glcmn.cpp
+old mode 100644
+new mode 100755
+index ff9372b..914e52f
+--- src/common/glcmn.cpp
++++ src/common/glcmn.cpp
+@@ -40,6 +40,34 @@ IMPLEMENT_CLASS(wxGLApp, wxApp)
+ // implementation
+ // ============================================================================
+ 
++void wxGLAttribsBase::AddAttribBits(int searchVal, int combineVal)
++{
++    // Search for searchVal
++    wxVector<int>::iterator it = m_GLValues.begin();
++    while ( it != m_GLValues.end() && *it != searchVal )
++        it++;
++    // Have we searchVal?
++    if ( it != m_GLValues.end() )
++    {
++        if ( ++it == m_GLValues.end() )
++        {
++            m_GLValues.push_back(combineVal);
++        }
++        else
++        {
++            *it |= combineVal;
++        }
++    }
++    else
++    {
++        // Add the identifier and the bits
++        m_GLValues.push_back(searchVal);
++        m_GLValues.push_back(combineVal);
++    }
++}
++
++// ============================================================================
++
+ wxGLCanvasBase::wxGLCanvasBase()
+ {
+ #if WXWIN_COMPATIBILITY_2_8
+diff --git src/msw/glcanvas.cpp src/msw/glcanvas.cpp
+old mode 100644
+new mode 100755
+index 58a3658..138ad41
+--- src/msw/glcanvas.cpp
++++ src/msw/glcanvas.cpp
+@@ -144,6 +144,37 @@ typedef HGLRC(WINAPI * PFNWGLCREATECONTEXTATTRIBSARBPROC)
+ #  pragma comment( lib, "opengl32" )
+ #  pragma comment( lib, "glu32" )
+ #endif
++
++// ----------------------------------------------------------------------------
++// wxGLContextAttrs: OpenGL rendering context attributes
++// ----------------------------------------------------------------------------
++// MSW specific values
++
++wxGLContextAttrs& wxGLContextAttrs::CoreProfile()
++{
++    AddAttribBits(WGL_CONTEXT_PROFILE_MASK_ARB,
++                 WGL_CONTEXT_CORE_PROFILE_BIT_ARB);
++    return *this;
++}
++
++wxGLContextAttrs& wxGLContextAttrs::MajorVersion(int val)
++{
++    AddAttribute(WGL_CONTEXT_MAJOR_VERSION_ARB);
++    AddAttribute(val);
++    return *this;
++}
++
++wxGLContextAttrs& wxGLContextAttrs::MinorVersion(int val)
++{
++    AddAttribute(WGL_CONTEXT_MINOR_VERSION_ARB);
++    AddAttribute(val);
++    return *this;
++}
++
++void wxGLContextAttrs::EndList()
++{
++    AddAttribute(0);
++}
+ 
+ // ----------------------------------------------------------------------------
+ // wxGLContext
+@@ -151,15 +182,12 @@ typedef HGLRC(WINAPI * PFNWGLCREATECONTEXTATTRIBSARBPROC)
+ 
+ IMPLEMENT_CLASS(wxGLContext, wxObject)
+ 
+-// The window will always be created first so the array will be initialized
+-// and then the window will be assigned to the context.
+-// max 8 attributes plus terminator
+-// if first is 0, create legacy context
+-static int s_wglContextAttribs[9] = {0};
+-
+ wxGLContext::wxGLContext(wxGLCanvas *win, const wxGLContext* other)
+-{
+-    if ( s_wglContextAttribs[0] == 0 ) // create legacy context
++{
++    // If OpenGL context parameters were set at wxGLCanvas ctor, get them now
++    const int* canvasContextAttribs = win->GetGLCTXAttrs().GetGLAttrs();
++
++    if ( canvasContextAttribs == NULL ) // create legacy context
+     {
+         m_glContext = wglCreateContext(win->GetHDC());
+         wxCHECK_RET( m_glContext, wxT("Couldn't create OpenGL context") );
+@@ -185,7 +213,7 @@ wxGLContext::wxGLContext(wxGLCanvas *win, const wxGLContext* other)
+         }
+ 
+         m_glContext = wglCreateContextAttribsARB(
+-            win->GetHDC(), 0, s_wglContextAttribs);
++            win->GetHDC(), 0, canvasContextAttribs);
+         wxCHECK_RET( m_glContext,
+                      wxT("Couldn't create core profile OpenGL context") );
+     }
+@@ -347,23 +375,13 @@ bool wxGLCanvas::Create(wxWindow *parent,
+     }
+ 
+     if ( useGLCoreProfile )
+-    {
+-        s_wglContextAttribs[0] = WGL_CONTEXT_MAJOR_VERSION_ARB;
+-        s_wglContextAttribs[1] = glVersionMajor;
+-        s_wglContextAttribs[2] = WGL_CONTEXT_MINOR_VERSION_ARB;
+-        s_wglContextAttribs[3] = glVersionMinor;
+-        s_wglContextAttribs[4] = WGL_CONTEXT_FLAGS_ARB;
+-        s_wglContextAttribs[5] = WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
+-        s_wglContextAttribs[6] = WGL_CONTEXT_PROFILE_MASK_ARB;
+-        s_wglContextAttribs[7] = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
+-        s_wglContextAttribs[8] = 0; // terminate
+-    }
+-    else // create legacy/compatibility context
+-    {
+-        s_wglContextAttribs[0] = 0;
++    {
++        m_GLCTXAttrs.MajorVersion(glVersionMajor)
++                    .MinorVersion(glVersionMinor)
++                    .CoreProfile();
++        m_GLCTXAttrs.EndList();
+     }
+ 
+-
+     PIXELFORMATDESCRIPTOR pfd;
+     const int setupVal = DoSetup(pfd, attribList);
+     if ( setupVal == 0 ) // PixelFormat error

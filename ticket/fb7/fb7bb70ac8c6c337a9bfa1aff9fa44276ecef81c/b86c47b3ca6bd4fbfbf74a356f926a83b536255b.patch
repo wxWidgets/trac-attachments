@@ -1,0 +1,182 @@
+diff -ru wxWidgets.orig/include/wx/msw/combobox.h wxWidgets/include/wx/msw/combobox.h
+--- wxWidgets.orig/include/wx/msw/combobox.h	2007-11-02 04:54:40.000000000 +0100
++++ wxWidgets/include/wx/msw/combobox.h	2007-11-05 20:45:36.000000000 +0100
+@@ -131,6 +131,7 @@
+     virtual WXHWND GetEditHWND() const;
+ 
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxComboBox)
++    void OnChar(wxKeyEvent&);
+     DECLARE_EVENT_TABLE()
+ };
+ 
+diff -ru wxWidgets.orig/samples/widgets/combobox.cpp wxWidgets/samples/widgets/combobox.cpp
+--- wxWidgets.orig/samples/widgets/combobox.cpp	2007-11-02 04:54:28.000000000 +0100
++++ wxWidgets/samples/widgets/combobox.cpp	2007-11-05 21:23:43.000000000 +0100
+@@ -345,7 +345,7 @@
+     m_combobox = new wxComboBox(this, ComboPage_Combo, wxEmptyString,
+                                 wxDefaultPosition, wxDefaultSize,
+                                 0, NULL,
+-                                0);
++                                wxTE_PROCESS_ENTER);
+     sizerRight->Add(m_combobox, 0, wxGROW | wxALL, 5);
+     sizerRight->SetMinSize(150, 0);
+     m_sizerCombo = sizerRight; // save it to modify it later
+diff -ru wxWidgets.orig/src/msw/combobox.cpp wxWidgets/src/msw/combobox.cpp
+--- wxWidgets.orig/src/msw/combobox.cpp	2007-11-02 04:54:36.000000000 +0100
++++ wxWidgets/src/msw/combobox.cpp	2007-11-05 21:01:16.125000000 +0100
+@@ -113,6 +113,7 @@
+ #endif
+ 
+ BEGIN_EVENT_TABLE(wxComboBox, wxControl)
++    EVT_CHAR(wxComboBox::OnChar)
+     EVT_MENU(wxID_CUT, wxComboBox::OnCut)
+     EVT_MENU(wxID_COPY, wxComboBox::OnCopy)
+     EVT_MENU(wxID_PASTE, wxComboBox::OnPaste)
+@@ -161,6 +162,7 @@
+ {
+     HWND hwndCombo = ::GetParent(hWnd);
+     wxWindow *win = wxFindWinFromHandle((WXHWND)hwndCombo);
++    wxComboBox *combo = wxDynamicCast(win, wxComboBox);
+ 
+     switch ( message )
+     {
+@@ -175,13 +177,12 @@
+         case WM_SETFOCUS:
+         case WM_KILLFOCUS:
+             {
+-                wxComboBox *combo = wxDynamicCast(win, wxComboBox);
+                 if ( !combo )
+                 {
+                     // we can get WM_KILLFOCUS while our parent is already half
+                     // destroyed and hence doesn't look like a combobx any
+                     // longer, check for it to avoid bogus assert failures
+-                    if ( !win->IsBeingDeleted() )
++                    if ( !combo->IsBeingDeleted() )
+                     {
+                         wxFAIL_MSG( _T("should have combo as parent") );
+                     }
+@@ -198,18 +199,31 @@
+             {
+                 wxCHECK_MSG( win, 0, _T("should have a parent") );
+ 
+-                if ( win->GetWindowStyle() & wxTE_PROCESS_ENTER )
++                long lDlgCode = DLGC_WANTCHARS | DLGC_WANTARROWS;
++                WXLRESULT lRc = ::CallWindowProc(CASTWNDPROC gs_wndprocEdit, hWnd, message, wParam, lParam);
++
++                if ( combo->IsEditable() )
++                {
++                    if ( combo->HasFlag(wxTE_PROCESS_ENTER) )
++                        lDlgCode |= DLGC_WANTMESSAGE;
++
++                    if ( combo->HasFlag(wxTE_PROCESS_TAB) )
++                        lDlgCode |= DLGC_WANTTAB;
++
++                    lRc |= lDlgCode;
++                }
++                else // !editable
+                 {
+-                    // need to return a custom dlg code or we'll never get it
+-                    return DLGC_WANTMESSAGE;
++                    lRc = lDlgCode;
+                 }
++                return lRc;
+             }
+             break;
+ 
+         case WM_CUT:
+         case WM_COPY:
+         case WM_PASTE:
+-            if( win->HandleClipboardEvent( message ) )
++            if( combo->HandleClipboardEvent( message ) )
+                 return 0;
+             break;
+     }
+@@ -262,30 +276,6 @@
+     switch ( msg )
+     {
+         case WM_CHAR:
+-            // for compatibility with wxTextCtrl, generate a special message
+-            // when Enter is pressed
+-            if ( wParam == VK_RETURN )
+-            {
+-                if (SendMessage(GetHwnd(), CB_GETDROPPEDSTATE, 0, 0))
+-                    return false;
+-
+-                wxCommandEvent event(wxEVT_COMMAND_TEXT_ENTER, m_windowId);
+-
+-                const int sel = GetSelection();
+-                event.SetInt(sel);
+-                event.SetString(GetValue());
+-                InitCommandEventWithItems(event, sel);
+-
+-                if ( ProcessCommand(event) )
+-                {
+-                    // don't let the event through to the native control
+-                    // because it doesn't need it and may generate an annoying
+-                    // beep if it gets it
+-                    return true;
+-                }
+-            }
+-            // fall through
+-
+         case WM_SYSCHAR:
+             return HandleChar(wParam, lParam, true /* isASCII */);
+ 
+@@ -307,6 +297,43 @@
+     return false;
+ }
+ 
++void wxComboBox::OnChar(wxKeyEvent& event)
++{
++    switch ( event.GetKeyCode() )
++    {
++        case WXK_RETURN:
++            {
++                wxCommandEvent event(wxEVT_COMMAND_TEXT_ENTER, m_windowId);
++                InitCommandEvent(event);
++                event.SetString(GetValue());
++                if ( GetEventHandler()->ProcessEvent(event) )
++                {
++                    return;
++                }
++            }
++            break;
++
++        case WXK_TAB:
++            if ( !HasFlag(wxTE_PROCESS_TAB))
++            {
++                if ( FindFocus() == this )
++                {
++                    int flags = 0;
++                    if (!event.ShiftDown())
++                        flags |= wxNavigationKeyEvent::IsForward ;
++                    if (event.ControlDown())
++                        flags |= wxNavigationKeyEvent::WinChange ;
++                    if (Navigate(flags))
++                        return;
++                }
++            }
++            break;
++    }
++
++    // no, we didn't process it
++    event.Skip();
++}
++
+ bool wxComboBox::MSWCommand(WXUINT param, WXWORD id)
+ {
+     int sel = -1;
+diff -ru wxWidgets.orig/src/xrc/xh_combo.cpp wxWidgets/src/xrc/xh_combo.cpp
+--- wxWidgets.orig/src/xrc/xh_combo.cpp	2007-11-02 04:54:32.000000000 +0100
++++ wxWidgets/src/xrc/xh_combo.cpp	2007-11-05 20:55:49.000000000 +0100
+@@ -34,6 +34,8 @@
+     XRC_ADD_STYLE(wxCB_SORT);
+     XRC_ADD_STYLE(wxCB_READONLY);
+     XRC_ADD_STYLE(wxCB_DROPDOWN);
++    XRC_ADD_STYLE(wxTE_PROCESS_ENTER);
++    XRC_ADD_STYLE(wxTE_PROCESS_TAB);
+     AddWindowStyles();
+ }
+ 
+
+ 	  	 

@@ -1,0 +1,279 @@
+Index: samples/opengl/cube/cube.cpp
+===================================================================
+--- samples/opengl/cube/cube.cpp	(revision 74723)
++++ samples/opengl/cube/cube.cpp	(working copy)
+@@ -268,22 +268,39 @@
+ int MyApp::OnExit()
+ {
+     delete m_glContext;
++    if( m_glStereoContext )
++      delete m_glStereoContext;
+ 
+     return wxApp::OnExit();
+ }
+ 
+-TestGLContext& MyApp::GetContext(wxGLCanvas *canvas)
++TestGLContext& MyApp::GetContext(wxGLCanvas *canvas, bool useStereo)
+ {
+-    if ( !m_glContext )
++    TestGLContext *tmpContext;
++    if ( useStereo )
+     {
+-        // Create the OpenGL context for the first window which needs it:
+-        // subsequently created windows will all share the same context.
+-        m_glContext = new TestGLContext(canvas);
++        if ( !m_glStereoContext )
++        {
++            // Create the OpenGL context for the first stereo window which needs it:
++            // subsequently created windows will all share the same context.
++            m_glStereoContext = new TestGLContext(canvas);
++        }
++        tmpContext = m_glStereoContext;
+     }
++    else
++    {
++        if ( !m_glContext )
++        {
++            // Create the OpenGL context for the first mono window which needs it:
++            // subsequently created windows will all share the same context.
++            m_glContext = new TestGLContext(canvas);
++        }
++        tmpContext = m_glContext;
++    }
+ 
+-    m_glContext->SetCurrent(*canvas);
++    tmpContext->SetCurrent(*canvas);
+ 
+-    return *m_glContext;
++    return *tmpContext;
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -296,18 +313,30 @@
+     EVT_TIMER(SpinTimer, TestGLCanvas::OnSpinTimer)
+ END_EVENT_TABLE()
+ 
+-TestGLCanvas::TestGLCanvas(wxWindow *parent)
++TestGLCanvas::TestGLCanvas(wxWindow *parent, int * attribList)
+     // With perspective OpenGL graphics, the wxFULL_REPAINT_ON_RESIZE style
+     // flag should always be set, because even making the canvas smaller should
+     // be followed by a paint event that updates the entire canvas with new
+     // viewport settings.
+-    : wxGLCanvas(parent, wxID_ANY, NULL /* attribs */,
++    : wxGLCanvas(parent, wxID_ANY, attribList,
+                  wxDefaultPosition, wxDefaultSize,
+                  wxFULL_REPAINT_ON_RESIZE),
+       m_xangle(30.0),
+       m_yangle(30.0),
+-      m_spinTimer(this,SpinTimer)
++      m_spinTimer(this,SpinTimer),
++      m_useStereo(false),
++      m_noStereoWarningDisplayed( false )
+ {
++    if( attribList )
++    {
++        int i = 0;
++        while( attribList[i] != 0 )
++        {
++            if( attribList[i] == WX_GL_STEREO )
++                m_useStereo = true;
++            ++i;
++        }
++    }
+ }
+ 
+ void TestGLCanvas::OnPaint(wxPaintEvent& WXUNUSED(event))
+@@ -323,11 +352,37 @@
+     // is wrong when next another canvas is repainted.
+     const wxSize ClientSize = GetClientSize();
+ 
+-    TestGLContext& canvas = wxGetApp().GetContext(this);
++    TestGLContext& canvas = wxGetApp().GetContext(this, m_useStereo);
+     glViewport(0, 0, ClientSize.x, ClientSize.y);
+ 
+     // Render the graphics and swap the buffers.
+-    canvas.DrawRotatedCube(m_xangle, m_yangle);
++    GLboolean quadStereoSupported;
++    glGetBooleanv( GL_STEREO, &quadStereoSupported);
++    if( quadStereoSupported )
++    {
++        glDrawBuffer( GL_BACK_LEFT );
++        glMatrixMode(GL_PROJECTION);
++        glLoadIdentity();
++        glFrustum(-0.47f, 0.53f, -0.5f, 0.5f, 1.0f, 3.0f);
++        canvas.DrawRotatedCube(m_xangle, m_yangle);
++        CheckGLError();
++        glDrawBuffer( GL_BACK_RIGHT );
++        glMatrixMode(GL_PROJECTION);
++        glLoadIdentity();
++        glFrustum(-0.53f, 0.47f, -0.5f, 0.5f, 1.0f, 3.0f);
++        canvas.DrawRotatedCube(m_xangle, m_yangle);
++        CheckGLError();
++    }
++    else
++    {
++        canvas.DrawRotatedCube(m_xangle, m_yangle);
++        if( m_useStereo && !m_noStereoWarningDisplayed )
++        {
++          m_noStereoWarningDisplayed = true;
++          wxMessageBox( wxString("Stereo not supported on graphics card." ), wxString("Error"),
++                  wxOK | wxICON_EXCLAMATION);
++        }
++    }
+     SwapBuffers();
+ }
+ 
+@@ -379,7 +434,20 @@
+     Spin(0.0, 4.0);
+ }
+ 
++wxString glGetwxString( GLenum name )
++{
++  wxString returnString;
++  const GLubyte * v = glGetString( name );
++  if( v == 0 ) {
++    glGetError();
++    // The error is not important. It is GL_INVALID_ENUM.
++    // We just want to clear the error stack.
++  } else
++    returnString = wxString( (const char *)v );
++  return returnString;
++}
+ 
++
+ // ----------------------------------------------------------------------------
+ // MyFrame: main application window
+ // ----------------------------------------------------------------------------
+@@ -386,13 +454,19 @@
+ 
+ BEGIN_EVENT_TABLE(MyFrame, wxFrame)
+     EVT_MENU(wxID_NEW, MyFrame::OnNewWindow)
++    EVT_MENU(NEW_STEREO_WINDOW, MyFrame::OnNewStereoWindow)
+     EVT_MENU(wxID_CLOSE, MyFrame::OnClose)
+ END_EVENT_TABLE()
+ 
+-MyFrame::MyFrame()
++MyFrame::MyFrame( bool stereoWindow )
+        : wxFrame(NULL, wxID_ANY, wxT("wxWidgets OpenGL Cube Sample"))
+ {
+-    new TestGLCanvas(this);
++    if( stereoWindow )
++    {
++        int attribList[] = { WX_GL_RGBA, WX_GL_DOUBLEBUFFER, WX_GL_STEREO, 0 };
++        new TestGLCanvas(this, attribList);
++    } else
++        new TestGLCanvas(this);
+ 
+     SetIcon(wxICON(sample));
+ 
+@@ -399,6 +473,7 @@
+     // Make a menubar
+     wxMenu *menu = new wxMenu;
+     menu->Append(wxID_NEW);
++    menu->Append(NEW_STEREO_WINDOW, wxString( "New Stereo Window" ), wxString( "Stereo is not properly calibrated for your viewing pleasure." ) );
+     menu->AppendSeparator();
+     menu->Append(wxID_CLOSE);
+     wxMenuBar *menuBar = new wxMenuBar;
+@@ -415,6 +490,13 @@
+     static const int attribs[] = { WX_GL_RGBA, WX_GL_DOUBLEBUFFER, 0 };
+     wxLogStatus("Double-buffered display %s supported",
+                 wxGLCanvas::IsDisplaySupported(attribs) ? "is" : "not");
++    
++    wxString vendor = glGetwxString( GL_VENDOR );
++    wxString renderer = glGetwxString( GL_RENDERER );
++    vendor.MakeLower();
++    renderer.MakeLower();
++    if( stereoWindow && vendor.find( wxString( "nvidia" ) ) != wxNOT_FOUND && renderer.find( wxString( "quadro" ) ) == wxNOT_FOUND )
++        ShowFullScreen( true, wxFULLSCREEN_ALL );
+ }
+ 
+ void MyFrame::OnClose(wxCommandEvent& WXUNUSED(event))
+@@ -428,3 +510,8 @@
+     new MyFrame();
+ }
+ 
++void MyFrame::OnNewStereoWindow( wxCommandEvent& WXUNUSED(event) )
++{
++    new MyFrame(true);
++}
++
+Index: samples/opengl/cube/cube.h
+===================================================================
+--- samples/opengl/cube/cube.h	(revision 74723)
++++ samples/opengl/cube/cube.h	(working copy)
+@@ -31,11 +31,11 @@
+ class MyApp : public wxApp
+ {
+ public:
+-    MyApp() { m_glContext = NULL; }
++    MyApp() { m_glContext = NULL; m_glStereoContext = NULL; }
+ 
+     // Returns the shared context used by all frames and sets it as current for
+     // the given canvas.
+-    TestGLContext& GetContext(wxGLCanvas *canvas);
++    TestGLContext& GetContext(wxGLCanvas *canvas, bool useStereo);
+ 
+     // virtual wxApp methods
+     virtual bool OnInit();
+@@ -42,8 +42,10 @@
+     virtual int OnExit();
+ 
+ private:
+-    // the GL context we use for all our windows
++    // the GL context we use for all our mono rendering windows
+     TestGLContext *m_glContext;
++    // the GL context we use for all our stereo rendering windows
++    TestGLContext *m_glStereoContext;
+ };
+ 
+ // Define a new frame type
+@@ -50,11 +52,12 @@
+ class MyFrame : public wxFrame
+ {
+ public:
+-    MyFrame();
++    MyFrame( bool stereoWindow = false );
+ 
+ private:
+     void OnClose(wxCommandEvent& event);
+     void OnNewWindow(wxCommandEvent& event);
++    void OnNewStereoWindow(wxCommandEvent& event);
+ 
+     DECLARE_EVENT_TABLE()
+ };
+@@ -62,7 +65,7 @@
+ class TestGLCanvas : public wxGLCanvas
+ {
+ public:
+-    TestGLCanvas(wxWindow *parent);
++    TestGLCanvas(wxWindow *parent, int * attribList = NULL);
+ 
+ private:
+     void OnPaint(wxPaintEvent& event);
+@@ -75,8 +78,14 @@
+           m_yangle;
+ 
+     wxTimer m_spinTimer;
++    bool m_useStereo, m_noStereoWarningDisplayed;
+ 
+     DECLARE_EVENT_TABLE()
+ };
+ 
++enum
++{
++    NEW_STEREO_WINDOW = wxID_HIGHEST + 1
++};
++
+ #endif // _WX_CUBE_H_
+Index: src/msw/toplevel.cpp
+===================================================================
+--- src/msw/toplevel.cpp	(revision 74723)
++++ src/msw/toplevel.cpp	(working copy)
+@@ -1099,6 +1099,7 @@
+             offFlags |= WS_CAPTION | WS_SYSMENU;
+ 
+         newStyle &= ~offFlags;
++        newStyle |= WS_POPUP;
+ 
+         // change our window style to be compatible with full-screen mode
+         ::SetWindowLong(GetHwnd(), GWL_STYLE, newStyle);

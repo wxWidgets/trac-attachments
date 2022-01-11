@@ -1,0 +1,541 @@
+This set of patches adds functionality to the gtk and windows versions
+of wxWidgets to support adding application-specific fonts. This capability
+is not required for OSX(Cocoa) because you put the relevant fonts in
+your application bundle - I patch the osx header to allude to that. On
+Windows you can ONLY use truetype ".ttf" fonts for gdiplus and hence
+wxGraphicsContext applications - that appears to be a Microsoft limitation.
+
+I would expect that code I have put in for gtk to apply in other X11 cases.
+
+In this file I put an explanation of what will want to go in by way of
+documentation, then a patch againt a recent trunk subversion checkout prepared
+using "svn diff", and finally my own test program. For use that needs a
+(binary) font file put in the directory where it lives.
+
+
+            Arthur Norman
+
+Documentation (skeletal)
+
+New type
+   wxArrayFileNamePtr
+See the wxArray documentation since this is merely a varient on the
+existing template for creation of arrays. You use it by creating an
+instance then using the method "Add" to insert pointers to wxFileName
+objects as in
+    wxArrayFileNamePtr fonts;
+    fonts.Add(new wxFileName("path to font file.ttf"));
+
+
+New methods in wxFont
+    void wxFont::wxAddPrivateFonts(const wxArrayFileNamePtr& fonts);
+makes fonts from the files in the array available but private to
+the current application.
+    void wxFont::wxRemovePrivateFonts();
+remove fonts at end of run
+    static const wxArrayFileNamePtr wxFont::wxGetPrivateFontFileNames();
+returns the array of file-names.
+
+In order to build with this on Windows you MUST have gdiplus headers
+available. I have build this using the i686-w64-mingw32 compiler as installed
+by cygwin but with a set of gdiplus headers copied in. To build in that
+environment I needed the change seen her to include/msw/missing.h
+
+I have also run this on Ubuntu 11.04 (64-bit). The code includes Xft/Xft.h
+which I hope is not seen as a terrible problem.
+
+==================================================================
+
+Index: include/wx/gtk/font.h
+===================================================================
+--- include/wx/gtk/font.h	(revision 69377)
++++ include/wx/gtk/font.h	(working copy)
+@@ -10,6 +10,10 @@
+ #ifndef _WX_GTK_FONT_H_
+ #define _WX_GTK_FONT_H_
+ 
++class wxFileName;
++
++WX_DEFINE_ARRAY_PTR(wxFileName*, wxArrayFileNamePtr);
++
+ // ----------------------------------------------------------------------------
+ // wxFont
+ // ----------------------------------------------------------------------------
+@@ -76,6 +80,12 @@
+ 
+     virtual ~wxFont();
+ 
++    static void wxAddPrivateFonts(const wxArrayFileNamePtr &filenames);
++    static void wxRemovePrivateFonts();
++    static const wxArrayFileNamePtr wxGetPrivateFontFileNames()
++    {   return privateFontFileNames;
++    }
++
+     // implement base class pure virtuals
+     virtual int GetPointSize() const;
+     virtual wxFontStyle GetStyle() const;
+@@ -113,6 +123,7 @@
+     virtual wxFontFamily DoGetFamily() const;
+ 
+ private:
++    static wxArrayFileNamePtr privateFontFileNames;
+     DECLARE_DYNAMIC_CLASS(wxFont)
+ };
+ 
+Index: include/wx/msw/font.h
+===================================================================
+--- include/wx/msw/font.h	(revision 69377)
++++ include/wx/msw/font.h	(working copy)
+@@ -14,6 +14,10 @@
+ 
+ #include "wx/gdicmn.h"
+ 
++class wxFileName;
++
++WX_DEFINE_ARRAY_PTR(wxFileName*, wxArrayFileNamePtr);
++
+ // ----------------------------------------------------------------------------
+ // wxFont
+ // ----------------------------------------------------------------------------
+@@ -110,6 +114,12 @@
+ 
+     virtual ~wxFont();
+ 
++    static void wxAddPrivateFonts(const wxArrayFileNamePtr &filenames);
++    static void wxRemovePrivateFonts();
++    static const wxArrayFileNamePtr wxGetPrivateFontFileNames()
++    {   return privateFontFileNames;
++    }
++
+     // implement base class pure virtuals
+     virtual int GetPointSize() const;
+     virtual wxSize GetPixelSize() const;
+@@ -165,6 +175,7 @@
+     virtual wxGDIRefData *CloneGDIRefData(const wxGDIRefData *data) const;
+ 
+ private:
++    static wxArrayFileNamePtr privateFontFileNames;
+     DECLARE_DYNAMIC_CLASS(wxFont)
+ };
+ 
+Index: include/wx/msw/missing.h
+===================================================================
+--- include/wx/msw/missing.h	(revision 69377)
++++ include/wx/msw/missing.h	(working copy)
+@@ -517,14 +517,24 @@
+ #endif
+ 
+ //Various defines that will be needed by mingw and possibly VC++6
+-//Used by the webview library
++//Used by the webview library. Well i686-w64-mingw and x86_64-w64-mingw32
++//in fact define this enum, and define __SHDocVw_LIBRARY_DEFINED__
++//to note that fact... all in exdisp.h
++
+ #ifdef __MINGW32__
++
++// Does this include need to be guarded by something that checks if the
++// file is present?
++#include <exdisp.h>
++
++#ifndef __SHDocVw_LIBRARY_DEFINED__
+ typedef enum CommandStateChangeConstants {
+     CSC_UPDATECOMMANDS = (int) 0xFFFFFFFF,
+     CSC_NAVIGATEFORWARD = 0x1,
+     CSC_NAVIGATEBACK = 0x2
+ } CommandStateChangeConstants;
+ #endif
++#endif
+ 
+ #ifndef DISPID_COMMANDSTATECHANGE
+ #define DISPID_COMMANDSTATECHANGE 105
+Index: include/wx/osx/font.h
+===================================================================
+--- include/wx/osx/font.h	(revision 69377)
++++ include/wx/osx/font.h	(working copy)
+@@ -98,6 +98,14 @@
+ 
+     virtual ~wxFont();
+ 
++// For Windows and X11-based systems it is useful to have a function
++// wxAddPrivateFonts to make application-specific fonts available.
++// On the Macintosh fonts can be places in the Application Bundle and
++// they will then be directly available without any special code needing
++// to be executed. Eg if the bundle is xxx.app then fonts might go in
++// xxx.app/Contents/Resources/Fonts and xxx.app/Cpmtents/Info.plist will
++// contain an indication of this.
++
+     // implement base class pure virtuals
+     virtual int GetPointSize() const;
+     virtual wxSize GetPixelSize() const;
+Index: src/gtk/font.cpp
+===================================================================
+--- src/gtk/font.cpp	(revision 69377)
++++ src/gtk/font.cpp	(working copy)
+@@ -29,9 +29,13 @@
+ 
+ #include "wx/fontutil.h"
+ #include "wx/tokenzr.h"
++#include "wx/filename.h"
+ 
+ #include "wx/gtk/private.h"
+ 
++#include <X11/Xlib.h>
++#include <X11/Xft/Xft.h>
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -448,3 +452,37 @@
+ {
+     return new wxFontRefData(*static_cast<const wxFontRefData*>(data));
+ }
++
++// Support for adding private fonts
++
++wxArrayFileNamePtr wxFont::privateFontFileNames;
++
++void wxFont::wxAddPrivateFonts(const wxArrayFileNamePtr& files)
++{
++// This passes an array of wxFileNames typically created as
++//    wxArrayFileNamePtr ff;
++//    ff.add("fontname.ttf");
++//    ff.add("fontname1.ttf");
++// and makes the fonts in those files available to the application but
++// not to other applications.
++// I save the list of names in a private static place even though under
++// X11/gtk I do not really need subsequent access to them. In part this is
++// so that I support the methods I need in Windows that retrieves the list.
++    FcConfig *config = FcConfigCreate();
++    wxFont::privateFontFileNames = files;
++    int n = files.GetCount();
++    for (int i=0; i<n; i++)
++    {   files[i]->Normalize();
++        wxString path = files[i]->GetFullPath();
++        FcConfigAppFontAddFile(config,
++            (const FcChar8 *)(const char *)path.fn_str());
++    }
++    FcConfigSetCurrent(config);
++}
++
++void wxFont::wxRemovePrivateFonts()
++{
++    FcConfigDestroy(FcConfigGetCurrent());
++}
++
++
+Index: src/msw/fontenum.cpp
+===================================================================
+--- src/msw/fontenum.cpp	(revision 69377)
++++ src/msw/fontenum.cpp	(working copy)
+@@ -38,6 +38,7 @@
+ #include "wx/encinfo.h"
+ #include "wx/fontutil.h"
+ #include "wx/fontmap.h"
++#include "wx/filename.h"
+ 
+ // ----------------------------------------------------------------------------
+ // private classes
+@@ -290,3 +291,41 @@
+ #endif
+ 
+ #endif // wxUSE_FONTENUM
++
++
++// Support for adding private fonts
++
++wxArrayFileNamePtr wxFont::privateFontFileNames;
++
++void wxFont::wxAddPrivateFonts(const wxArrayFileNamePtr& files)
++{
++// This passes an array of wxFileNames typically created as
++//    wxArrayFileNamePtr ff;
++//    ff.add("fontname.ttf");
++//    ff.add("fontname1.ttf");
++// and makes the fonts in those files available to the application but
++// not to other applications.
++// I save the list of names in a private static place so that I can access
++// them if I need to set up gdiplus versions and so I can remove them
++// when they are no longer needed.
++    wxFont::privateFontFileNames = files;
++    int n = files.GetCount();
++    for (int i=0; i<n; i++)
++    {   files[i]->Normalize();
++        wxString path = files[i]->GetFullPath();
++        int k = AddFontResourceExW(path.fn_str(), FR_PRIVATE, 0);
++// Note that you are suppose to call wxRemovePrivateFonts() at the end.
++    }
++    SendMessage(HWND_BROADCAST, WM_FONTCHANGE, 0, 0);
++}
++
++void wxFont::wxRemovePrivateFonts()
++{
++    int n = wxFont::privateFontFileNames.GetCount();
++    for (int i=0; i<n; i++)
++    {   wxString path = wxFont::privateFontFileNames[i]->GetFullPath();
++        int k = RemoveFontResourceExW(path.fn_str(), FR_PRIVATE, 0);
++    }
++    SendMessage(HWND_BROADCAST, WM_FONTCHANGE, 0, 0);
++}
++
+Index: src/msw/graphics.cpp
+===================================================================
+--- src/msw/graphics.cpp	(revision 69377)
++++ src/msw/graphics.cpp	(working copy)
+@@ -46,6 +46,7 @@
+     #include "wx/msw/enhmeta.h"
+ #endif
+ #include "wx/dcgraph.h"
++#include "wx/filename.h"
+ 
+ #include "wx/msw/private.h" // needs to be before #include <commdlg.h>
+ 
+@@ -53,6 +54,8 @@
+ #include <commdlg.h>
+ #endif
+ 
++#include <gdiplus.h>
++
+ namespace
+ {
+ 
+@@ -557,6 +560,8 @@
+     // create a subimage from a native image representation
+     virtual wxGraphicsBitmap CreateSubBitmap( const wxGraphicsBitmap &bitmap, wxDouble x, wxDouble y, wxDouble w, wxDouble h  );
+ 
++    static Gdiplus::PrivateFontCollection* privateFonts;
++
+ protected :
+     bool EnsureIsLoaded();
+     void Load();
+@@ -898,7 +903,28 @@
+                         const wxColour& col,
+                         Unit fontUnit)
+ {
+-    m_font = new Font(name, size, style, fontUnit);
++// If the user has registered any private fonts I wish to use them in
++// preference to any system-wide ones.
++    m_font = NULL;
++    if (wxGDIPlusRenderer::privateFonts != NULL)
++    {   int count = wxGDIPlusRenderer::privateFonts->GetFamilyCount();
++        Gdiplus::FontFamily* pFontFamily = new Gdiplus::FontFamily[count];
++        int found = 0;
++        wxGDIPlusRenderer::privateFonts->GetFamilies(count, pFontFamily,
++                                                     &found);
++// Here I hope and expect that found==count.
++        for (int j=0; j<found; j++)
++        {   wchar_t familyName[LF_FACESIZE];
++            int rc = pFontFamily[j].GetFamilyName(familyName);
++            if (wcscmp(name, familyName) == 0)
++            {   m_font = new Font(familyName, size, style, fontUnit,
++                                  wxGDIPlusRenderer::privateFonts);
++                break;
++            }
++        }
++        delete pFontFamily;
++    }
++    if (m_font == NULL) m_font = new Font(name, size, style, fontUnit);
+ 
+     m_textBrush = new SolidBrush(wxColourToColor(col));
+ }
+@@ -1945,6 +1971,7 @@
+     if ( !EnsureIsLoaded() )                   \
+         return (returnOnFail)
+ 
++Gdiplus::PrivateFontCollection* wxGDIPlusRenderer::privateFonts = NULL;
+ 
+ void wxGDIPlusRenderer::Load()
+ {
+@@ -1954,6 +1981,16 @@
+     {
+         wxLogTrace("gdiplus", "successfully initialized GDI+");
+         m_loaded = 1;
++// Now if some private fonts had been registered prior to use of gdiplus
++// I will establish them in a privateFontCollection. Note that I do not
++// do any of this until gdiplus has been started.
++        privateFonts = new Gdiplus::PrivateFontCollection();
++        wxArrayFileNamePtr files = wxFont::wxGetPrivateFontFileNames();
++        int n = files.GetCount();
++        for (int i=0; i<n; i++)
++        {   wxString path = files[i]->GetFullPath();
++            privateFonts->AddFontFile(path.fn_str());
++        }
+     }
+     else
+     {
+@@ -1968,6 +2005,8 @@
+     {
+         GdiplusShutdown(m_gditoken);
+         m_gditoken = 0;
++        if (privateFonts != NULL) delete privateFonts;
++        privateFonts = NULL;
+     }
+     m_loaded = -1; // next Load() will try again
+ }
+==========================================================
+
+
+
+
+// wxdemo.cpp
+
+// A sample wxWidgets application illustrating private fonts
+
+// You must build this and put various font files with name such as
+// cmuntt.ttf and csl-cmr10.ttf in the directory with the
+// the executable and it will display characters from them. The fonts
+// named at present are free fonts (CMU Typewriter text, but converted
+// from .otf to .ttf format) and the Bakoma Computer Modern Roman as
+// slightly adapted for use with the reduce-algebra project at sourceforge.
+
+
+// The first few lines are essentially taken from the wxWidgets documentation
+// and will be the same for almost all wxWidgets code.
+
+#include "wx/wxprec.h"
+ 
+#ifndef WX_PRECOMP
+#include "wx/wx.h"
+#endif
+
+#include "wx/dynarray.h"
+#include "wx/filename.h"
+
+#if wxUSE_GRAPHICS_CONTEXT
+// I will use wxGraphicsContext so I have better capabilities to
+// scale text. On Windows this means I must have gdiplus development
+// stuff installed when building wxWidgets. Specifically the header
+// file gdiplus.h is required at that stage that wxWidgets is configured.
+#else
+#error I now need wxGraphicsContext
+#endif
+
+#include "wx/dc.h"
+#include "wx/graphics.h"
+
+#if !defined __WXMSW__ && !defined __WXPM__
+#include "fwin.xpm" // Icon to use in non-Windows cases
+#endif
+
+#include <stdio.h>
+
+
+class wsDemo : public wxApp
+{
+public:
+    virtual bool OnInit();
+};
+
+class DemoFrame : public wxFrame
+{
+public:
+    DemoFrame(const wxString& title);
+
+    void OnQuit(wxCommandEvent& event);
+    void OnPaint(wxPaintEvent& event);
+
+private:
+    DECLARE_EVENT_TABLE()
+};
+
+enum
+{
+    ACN_Quit = wxID_EXIT,
+    ACN_About = wxID_ABOUT
+};
+
+BEGIN_EVENT_TABLE(DemoFrame, wxFrame)
+    EVT_MENU(ACN_Quit,  DemoFrame::OnQuit)
+    EVT_PAINT(          DemoFrame::OnPaint)
+END_EVENT_TABLE()
+
+
+IMPLEMENT_APP(wsDemo)
+
+// Pretty much everything so far has been uttery stylised and the contents
+// are forced by the structure that wxWidgets requires!
+
+static wxFont *ff = NULL;
+
+#define FONTSIZE 36
+#define WIDTH    600
+#define HEIGHT   400
+
+bool wsDemo::OnInit()
+{
+// Create and fill in an array of wxFileName objects that refer to files
+// that contain fonts. On Windows for use with wxGraphicsContext these
+// MUST be ".ttf" fonts. On Unix-like systems there is much greater
+// flexibility. On MacOSX rather than using this scheme you would put
+// your custom fonts into your application bundle. Thus this example is
+// both pointless and will not be supported on MacOSX.
+    wxArrayFileNamePtr fonts;
+    fonts.Add(new wxFileName("./csl-cmr10.ttf"));
+    fonts.Add(new wxFileName("./cmuntt.ttf"));
+    wxFont::wxAddPrivateFonts(fonts);
+
+// Now the new fonts should be available so I can use one of them.
+
+    ff = new wxFont();
+    ff->SetFaceName("CMU TYpewriter Text");
+    ff->SetPointSize(FONTSIZE);
+    DemoFrame *frame = new DemoFrame("wxdemo");
+    frame->Show(true);
+    return true;
+}
+
+DemoFrame::DemoFrame(const wxString& title)
+       : wxFrame(NULL, wxID_ANY, title)
+{
+    SetIcon(wxICON(fwin));
+
+// The size specified here is the total size of the whole window,
+// including title bar and borders...
+    wxSize winsize(WIDTH, HEIGHT);
+    SetSize(winsize);
+    SetMinSize(winsize);
+    SetMaxSize(winsize);
+    Centre();
+}
+
+
+void DemoFrame::OnQuit(wxCommandEvent& WXUNUSED(event))
+{
+    Close(true);
+// It is probably polite to remove private fonts at exit, but may also not
+// be terribly important?
+    wxFont::wxRemovePrivateFonts();
+}
+
+void DemoFrame::OnPaint(wxPaintEvent& event)
+{
+    wxPaintDC dc(this);
+    wxColour c1(230, 200, 255);
+    wxBrush b1(c1);
+    wxPen p1(c1);
+    dc.SetBrush(b1);
+    dc.SetPen(p1);
+    dc.DrawRectangle(0, 0, WIDTH, HEIGHT);
+// I draw some text once with a wxFont and once with wxGraphicsFont        
+    dc.SetPen(*wxRED_PEN);
+    dc.SetBrush(*wxTRANSPARENT_BRUSH);
+    dc.SetFont(*ff);
+    const char *msg = "Welcome to wxWidgets";
+    wxSize s(dc.GetTextExtent(msg));
+    dc.DrawText(msg, (WIDTH-s.GetWidth())/2, (HEIGHT-3*s.GetHeight())/2);
+    wxGraphicsContext *gc = wxGraphicsContext::Create(dc);
+    wxGraphicsPen bb = gc->CreatePen(*wxRED_PEN);
+    gc->SetPen(bb);
+    gc->Scale(0.5, 2.0);
+    wxGraphicsFont gff = gc->CreateFont(*ff, *wxGREEN);
+    gc->SetFont(gff);
+    gc->DrawEllipse(80.0, 80.0, 20.0, 20.0);
+    gc->DrawText("Welcome to wxWidgets", 50.0, 120.0);
+}
+
+
+// end of wxdemo.cpp
+
+
+===========
+
+

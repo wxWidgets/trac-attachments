@@ -1,0 +1,218 @@
+diff --git a/docs/changes.txt b/docs/changes.txt
+index 3e0b49c..02fc388 100644
+--- a/docs/changes.txt
++++ b/docs/changes.txt
+@@ -503,6 +503,7 @@ All (GUI):
+ - Add support for alpha channel in colours in wxSVGFileDC (snowleopard).
+ - Allow customizing AUI tab colours in wxAuiTabArt (snowleopard).
+ - Added wxAffineMatrix2D class (Catalin Raceanu).
++- Add support for alpha blending to wxImage::Paste (kramdar).
+ 
+ GTK:
+ 
+diff --git a/include/wx/image.h b/include/wx/image.h
+index e9fb5c5..dfe369a 100644
+--- a/include/wx/image.h
++++ b/include/wx/image.h
+@@ -71,6 +71,16 @@ enum wxImageResizeQuality
+     wxIMAGE_QUALITY_HIGH
+ };
+ 
++// Constants for wxImage::Paste() for specifying alpha blending option.
++enum wxImageAlphaBlendMode
++{
++    // Overwrite the original alpha values with the ones being pasted.
++    wxIMAGE_ALPHA_BLEND_OVER = 0,
++
++    // Compose the original alpha values with the ones being pasted.
++    wxIMAGE_ALPHA_BLEND_COMPOSE = 1
++};
++
+ // alpha channel values: fully transparent, default threshold separating
+ // transparent pixels from opaque for a few functions dealing with alpha and
+ // fully opaque
+@@ -312,9 +322,12 @@ class WXDLLIMPEXP_CORE wxImage: public wxObject
+     wxImage Size( const wxSize& size, const wxPoint& pos,
+                   int r = -1, int g = -1, int b = -1 ) const;
+ 
+-    // pastes image into this instance and takes care of
+-    // the mask colour and out of bounds problems
+-    void Paste( const wxImage &image, int x, int y );
++    // Copy the data of the given image to the specified position of this one
++    // taling care of the out of bounds problems. Mask is respected, but alpha
++    // is simply replaced by default, use wxIMAGE_ALPHA_BLEND_COMPOSE to
++    // combine it with the original image alpha values if needed.
++    void Paste( const wxImage &image, int x, int y,
++                wxImageAlphaBlendMode alphaBlend = wxIMAGE_ALPHA_BLEND_OVER );
+ 
+     // return the new image with size width*height
+     wxImage Scale( int width, int height,
+diff --git a/interface/wx/image.h b/interface/wx/image.h
+index 34808c5..95efd57 100644
+--- a/interface/wx/image.h
++++ b/interface/wx/image.h
+@@ -62,6 +62,20 @@ enum wxImageResizeQuality
+ };
+ 
+ /**
++    Constants for wxImage::Paste() for specifying alpha blending option.
++
++    @since 2.9.2
++*/
++enum wxImageAlphaBlendMode
++{
++    /// Overwrite the original alpha values with the ones being pasted.
++    wxIMAGE_ALPHA_BLEND_OVER = 0,
++
++    /// Compose the original alpha values with the ones being pasted.
++    wxIMAGE_ALPHA_BLEND_COMPOSE = 1
++};
++
++/**
+     Possible values for PNG image type option.
+ 
+     @see wxImage::GetOptionInt().
+@@ -702,8 +716,17 @@ class wxImage : public wxObject
+ 
+     /**
+         Copy the data of the given @a image to the specified position in this image.
++
++        Takes care of the mask colour and out of bounds problems.
++
++        @param alphaBlend
++            This parameter (new in wx 2.9.2) determines whether the alpha values
++            of the original image replace (default) or are composed with the
++            alpha channel of this image. Notice that alpha blending overrides
++            the mask handling.
+     */
+-    void Paste(const wxImage& image, int x, int y);
++    void Paste(const wxImage& image, int x, int y,
++               wxImageAlphaBlendMode alphaBlend = wxIMAGE_ALPHA_BLEND_OVER);
+ 
+     /**
+         Replaces the colour specified by @e r1,g1,b1 by the colour @e r2,g2,b2.
+diff --git a/src/common/image.cpp b/src/common/image.cpp
+index de87a34..4601447 100644
+--- a/src/common/image.cpp
++++ b/src/common/image.cpp
+@@ -1397,7 +1397,9 @@ wxImage wxImage::Size( const wxSize& size, const wxPoint& pos,
+     return image;
+ }
+ 
+-void wxImage::Paste( const wxImage &image, int x, int y )
++void
++wxImage::Paste( const wxImage &image, int x, int y,
++                wxImageAlphaBlendMode alphaBlend )
+ {
+     wxCHECK_RET( Ok(), wxT("invalid image") );
+     wxCHECK_RET( image.Ok(), wxT("invalid image") );
+@@ -1428,15 +1430,18 @@ void wxImage::Paste( const wxImage &image, int x, int y )
+     if (width < 1) return;
+     if (height < 1) return;
+ 
++    bool copiedPixels = false;
++
+     // If we can, copy the data using memcpy() as this is the fastest way. But
+-    // for this  the image being pasted must have "compatible" mask with this
+-    // one meaning that either it must not have one at all or it must use the
+-    // same masked colour.
+-    if ( !image.HasMask() ||
++    // for this we must not do alpha compositing and the image being pasted
++    // must have "compatible" mask with this one meaning that either it must
++    // not have one at all or it must use the same masked colour.
++    if ( alphaBlend == wxIMAGE_ALPHA_BLEND_OVER &&
++        (!image.HasMask() ||
+         ((HasMask() &&
+          (GetMaskRed()==image.GetMaskRed()) &&
+          (GetMaskGreen()==image.GetMaskGreen()) &&
+-         (GetMaskBlue()==image.GetMaskBlue()))) )
++         (GetMaskBlue()==image.GetMaskBlue())))) )
+     {
+         const unsigned char* source_data = image.GetData() + 3*(xx + yy*image.GetWidth());
+         int source_step = image.GetWidth()*3;
+@@ -1449,6 +1454,8 @@ void wxImage::Paste( const wxImage &image, int x, int y )
+             source_data += source_step;
+             target_data += target_step;
+         }
++
++        copiedPixels = true;
+     }
+ 
+     // Copy over the alpha channel from the original image
+@@ -1457,21 +1464,67 @@ void wxImage::Paste( const wxImage &image, int x, int y )
+         if ( !HasAlpha() )
+             InitAlpha();
+ 
+-        const unsigned char* source_data = image.GetAlpha() + xx + yy*image.GetWidth();
+-        int source_step = image.GetWidth();
++        const unsigned char*
++            alpha_source_data = image.GetAlpha() + xx + yy*image.GetWidth();
++        const int source_step = image.GetWidth();
+ 
+-        unsigned char* target_data = GetAlpha() + (x+xx) + (y+yy)*M_IMGDATA->m_width;
+-        int target_step = M_IMGDATA->m_width;
++        unsigned char*
++            alpha_target_data = GetAlpha() + (x+xx) + (y+yy)*M_IMGDATA->m_width;
++        const int target_step = M_IMGDATA->m_width;
+ 
+-        for (int j = 0; j < height; j++,
+-                                    source_data += source_step,
+-                                    target_data += target_step)
++        switch ( alphaBlend )
+         {
+-            memcpy( target_data, source_data, width );
++            case wxIMAGE_ALPHA_BLEND_OVER:
++                // Copy just the alpha values.
++                for ( int j = 0; j < height; j++,
++                                             alpha_source_data += source_step,
++                                             alpha_target_data += target_step )
++                {
++                    memcpy( alpha_target_data, alpha_source_data, width );
++                }
++                break;
++
++            case wxIMAGE_ALPHA_BLEND_COMPOSE:
++                const unsigned char*
++                    source_data = image.GetData() + 3*(xx + yy*image.GetWidth());
++
++                unsigned char*
++                    target_data = GetData() + 3*((x+xx) + (y+yy)*M_IMGDATA->m_width);
++
++                // Combine the alpha values but also apply alpha blending to
++                // the pixels themselves while we copy them.
++                for ( int j = 0; j < height; j++,
++                                             alpha_source_data += source_step,
++                                             alpha_target_data += target_step,
++                                             source_data += 3*source_step,
++                                             target_data += 3*target_step )
++                {
++                    for ( int i = 0; i < width; i++ )
++                    {
++                        const unsigned char a = alpha_source_data[i];
++
++                        for ( int c = 3*i; c < 3*(i + 1); c++ )
++                        {
++                            target_data[c] = (1 - a)*target_data[c] +
++                                                a   *source_data[c];
++                        }
++
++                        // Copy alpha checking for overflow.
++                        if ( alpha_target_data[i] + a <= 255 )
++                            alpha_target_data[i] += a;
++                        else
++                            alpha_target_data[i] = 255;
++                    }
++                }
++
++                copiedPixels = true;
++                break;
+         }
+     }
+ 
+-    if (!HasMask() && image.HasMask())
++    // If we hadn't copied them yet we must need to take the mask of the image
++    // being pasted into account.
++    if ( !copiedPixels )
+     {
+         unsigned char r = image.GetMaskRed();
+         unsigned char g = image.GetMaskGreen();

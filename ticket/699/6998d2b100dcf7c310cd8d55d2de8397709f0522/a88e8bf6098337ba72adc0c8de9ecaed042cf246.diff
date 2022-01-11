@@ -1,0 +1,180 @@
+diff -uNr orig/include/wx/file.h mine/include/wx/file.h
+--- orig/include/wx/file.h	2010-11-02 04:57:30.000000000 -0700
++++ mine/include/wx/file.h	2010-11-09 13:37:37.000000000 -0800
+@@ -17,6 +17,7 @@
+ 
+ #if wxUSE_FILE
+ 
++#include  <errno.h>
+ #include  "wx/string.h"
+ #include  "wx/filefn.h"
+ #include  "wx/strconv.h"
+@@ -49,11 +50,11 @@
+   // ctors
+   // -----
+     // def ctor
+-  wxFile() { m_fd = fd_invalid; m_error = false; }
++  wxFile() { m_fd = fd_invalid; m_lasterror = 0; }
+     // open specified file (may fail, use IsOpened())
+   wxFile(const wxString& fileName, OpenMode mode = read);
+     // attach to (already opened) file
+-  wxFile(int lfd) { m_fd = lfd; m_error = false; }
++  wxFile(int lfd) { m_fd = lfd; m_lasterror = 0; }
+ 
+   // open/close
+     // create a new file (with the default value of bOverwrite, it will fail if
+@@ -65,7 +66,7 @@
+   bool Close();  // Close is a NOP if not opened
+ 
+   // assign an existing file descriptor and get it back from wxFile object
+-  void Attach(int lfd) { Close(); m_fd = lfd; m_error = false; }
++  void Attach(int lfd) { Close(); m_fd = lfd; m_lasterror = 0; }
+   void Detach()       { m_fd = fd_invalid;  }
+   int  fd() const { return m_fd; }
+ 
+@@ -95,10 +96,15 @@
+     // is end of file reached?
+   bool Eof() const;
+     // has an error occurred?
+-  bool Error() const { return m_error; }
++  bool Error() const { return m_lasterror != 0; }
++    // get last errno
++  int GetLastError() const { return m_lasterror; }
++    // reset error state
++  void ClearError() { m_lasterror = 0; }
+     // type such as disk or pipe
+   wxFileKind GetKind() const { return wxGetFileKind(m_fd); }
+ 
++
+   // dtor closes the file if opened
+   ~wxFile() { Close(); }
+ 
+@@ -110,7 +116,7 @@
+   wxFile& operator=(const wxFile&);
+ 
+   int m_fd; // file descriptor or INVALID_FD if not opened
+-  bool m_error; // error memory
++  int m_lasterror; // errno value of last error
+ };
+ 
+ // ----------------------------------------------------------------------------
+diff -uNr orig/interface/wx/file.h mine/interface/wx/file.h
+--- orig/interface/wx/file.h	2010-11-02 04:57:30.000000000 -0700
++++ mine/interface/wx/file.h	2010-11-13 20:25:00.000000000 -0800
+@@ -232,6 +232,22 @@
+     ~wxFile();
+ 
+     /**
++        Returns @c errno value for the last unsuccessful operation.
++
++        @note Successful operations and methods declared @c const do not affect
++        the error code reported by this function. Exceptions are Attach(),
++        Create() and Open() which reset it on success.
++
++        @see ClearError()
++    */
++    int GetLastError() const;
++
++    /**
++        Resets the error code. GetLastError() will return 0 until next error.
++    */
++    void ClearError();
++
++    /**
+         This function verifies if we may access the given file in specified mode.
+         Only values of @c wxFile::read or @c wxFile::write really make sense here.
+     */
+diff -uNr orig/src/common/file.cpp mine/src/common/file.cpp
+--- orig/src/common/file.cpp	2010-11-02 04:57:30.000000000 -0700
++++ mine/src/common/file.cpp	2010-11-13 21:18:36.000000000 -0800
+@@ -176,7 +176,7 @@
+ wxFile::wxFile(const wxString& fileName, OpenMode mode)
+ {
+     m_fd = fd_invalid;
+-    m_error = false;
++    m_lasterror = 0;
+ 
+     Open(fileName, mode);
+ }
+@@ -192,6 +192,7 @@
+                      accessMode );
+     if ( fd == -1 )
+     {
++        m_lasterror = errno;
+         wxLogSysError(_("can't create file '%s'"), fileName);
+         return false;
+     }
+@@ -244,6 +245,7 @@
+ 
+     if ( fd == -1 )
+     {
++        m_lasterror = errno;
+         wxLogSysError(_("can't open file '%s'"), fileName);
+         return false;
+     }
+@@ -258,6 +260,7 @@
+     if ( IsOpened() ) {
+         if (wxClose(m_fd) == -1)
+         {
++            m_lasterror = errno;
+             wxLogSysError(_("can't close file descriptor %d"), m_fd);
+             m_fd = fd_invalid;
+             return false;
+@@ -282,6 +285,7 @@
+ 
+     if ( iRc == -1 )
+     {
++        m_lasterror = errno;
+         wxLogSysError(_("can't read from file descriptor %d"), m_fd);
+         return wxInvalidOffset;
+     }
+@@ -298,8 +302,8 @@
+ 
+     if ( iRc == -1 )
+     {
++        m_lasterror = errno;
+         wxLogSysError(_("can't write to file descriptor %d"), m_fd);
+-        m_error = true;
+         iRc = 0;
+     }
+ 
+@@ -331,6 +335,7 @@
+     {
+         if ( wxFsync(m_fd) == -1 )
+         {
++            m_lasterror = errno;
+             wxLogSysError(_("can't flush file descriptor %d"), m_fd);
+             return false;
+         }
+@@ -373,6 +378,7 @@
+     wxFileOffset iRc = wxSeek(m_fd, ofs, origin);
+     if ( iRc == wxInvalidOffset )
+     {
++        m_lasterror = errno;
+         wxLogSysError(_("can't seek on file descriptor %d"), m_fd);
+     }
+ 
+@@ -387,6 +393,7 @@
+     wxFileOffset iRc = wxTell(m_fd);
+     if ( iRc == wxInvalidOffset )
+     {
++        // m_lasterror = errno; // Can't be done in const method!
+         wxLogSysError(_("can't get seek position on file descriptor %d"), m_fd);
+     }
+ 
+@@ -429,6 +436,7 @@
+ 
+     if ( iRc == wxInvalidOffset )
+     {
++        // m_lasterror must have been set by Tell()
+         wxLogSysError(_("can't find length of file on file descriptor %d"), m_fd);
+     }
+ 
+@@ -459,6 +467,7 @@
+ 
+     if ( iRc == wxInvalidOffset )
+     {
++        // m_lasterror must have been set by Tell()
+         wxLogSysError(_("can't determine if the end of file is reached on descriptor %d"), m_fd);
+     }
+     else if ( iRc != 1 )

@@ -1,0 +1,185 @@
+Index: include/wx/aui/auibook.h
+===================================================================
+--- include/wx/aui/auibook.h	(revision 72457)
++++ include/wx/aui/auibook.h	(working copy)
+@@ -378,13 +378,13 @@
+     virtual int DoModifySelection(size_t n, bool events);
+ 
+ protected:
+-
++    virtual int GetNextPage(bool) const;
+     void DoSizing();
+     void InitNotebook(long style);
+     wxAuiTabCtrl* GetTabCtrlFromPoint(const wxPoint& pt);
+     wxWindow* GetTabFrameFromTabCtrl(wxWindow* tabCtrl);
+     wxAuiTabCtrl* GetActiveTabCtrl();
+-    bool FindTab(wxWindow* page, wxAuiTabCtrl** ctrl, int* idx);
++    bool FindTab(wxWindow* page, wxAuiTabCtrl** ctrl, int* idx) const;
+     void RemoveEmptyTabFrames();
+     void UpdateHintWindowSize();
+ 
+Index: include/wx/aui/framemanager.h
+===================================================================
+--- include/wx/aui/framemanager.h	(revision 72457)
++++ include/wx/aui/framemanager.h	(working copy)
+@@ -477,6 +477,7 @@
+     wxAuiPaneInfo& GetPane(wxWindow* window);
+     wxAuiPaneInfo& GetPane(const wxString& name);
+     wxAuiPaneInfoArray& GetAllPanes();
++    const wxAuiPaneInfoArray& GetAllPanes() const;
+ 
+     bool AddPane(wxWindow* window,
+                  const wxAuiPaneInfo& paneInfo);
+Index: include/wx/bookctrl.h
+===================================================================
+--- include/wx/bookctrl.h	(revision 72457)
++++ include/wx/bookctrl.h	(working copy)
+@@ -296,7 +296,7 @@
+     virtual wxSize DoGetBestSize() const;
+ 
+     // helper: get the next page wrapping if we reached the end
+-    int GetNextPage(bool forward) const;
++    virtual int GetNextPage(bool forward) const;
+ 
+     // Lay out controls
+     virtual void DoSize();
+Index: src/aui/auibook.cpp
+===================================================================
+--- src/aui/auibook.cpp	(revision 72457)
++++ src/aui/auibook.cpp	(working copy)
+@@ -1605,6 +1605,59 @@
+ 
+ // -- wxAuiNotebook class implementation --
+ 
++wxAuiTabCtrl* GetNextTabCtrl( wxAuiTabCtrl* current, const wxAuiManager& mgr )
++{
++  const wxAuiPaneInfoArray& allPanes = mgr.GetAllPanes();
++  for ( size_t i = 0; i != allPanes.GetCount(); i++ )
++    {
++      wxTabFrame* tabFrame = (wxTabFrame*)allPanes.Item(i).window;
++      if ( tabFrame->m_tabs != current )
++            continue;
++        for ( size_t j = i + 1; j < allPanes.GetCount(); j++ )
++        {
++            if ( allPanes.Item(j).name == wxT("dummy") )
++                continue;
++            return ((wxTabFrame*)(allPanes.Item(j).window))->m_tabs;
++        }
++    }
++    for ( size_t j = 0; j != allPanes.GetCount(); j++ ){
++        if ( allPanes.Item(j).name == wxT("dummy") ){
++            continue;
++        }
++        return ((wxTabFrame*)(allPanes.Item(j).window))->m_tabs;
++    }
++    return 0;
++}
++
++wxAuiTabCtrl* GetPrevTabCtrl( wxAuiTabCtrl* current, const wxAuiManager& mgr )
++{
++    const wxAuiPaneInfoArray& allPanes = mgr.GetAllPanes();
++    const int numPanes = static_cast<int>(allPanes.GetCount());
++    for ( int i = 0; i != numPanes; i++ )
++    {
++        wxTabFrame* tabFrame = (wxTabFrame*)allPanes.Item(i).window;
++        if ( tabFrame->m_tabs != current )
++            continue;
++        // Search for the previous pane
++        for ( int j = i - 1; j >= 0; j-- )
++        {
++            if ( allPanes.Item(j).name == wxT("dummy") )
++                continue;
++            return ((wxTabFrame*)(allPanes.Item(j).window))->m_tabs;
++        }
++        break;
++    }
++
++    // Search for the last valid pane
++    for ( size_t j = allPanes.GetCount(); j != 0; j-- )
++    {
++        if ( allPanes.Item(j - 1).name == wxT("dummy") )
++            continue;
++        return ( (wxTabFrame*)(allPanes.Item(j-1).window) )->m_tabs;
++    }
++    return 0;
++}
++
+ #define EVT_AUI_RANGE(id1, id2, event, func) \
+     wx__DECLARE_EVT2(event, id1, id2, wxAuiNotebookEventHandler(func))
+ 
+@@ -2325,9 +2378,9 @@
+ // FindTab() finds the tab control that currently contains the window as well
+ // as the index of the window in the tab control.  It returns true if the
+ // window was found, otherwise false.
+-bool wxAuiNotebook::FindTab(wxWindow* page, wxAuiTabCtrl** ctrl, int* idx)
++bool wxAuiNotebook::FindTab(wxWindow* page, wxAuiTabCtrl** ctrl, int* idx) const
+ {
+-    wxAuiPaneInfoArray& all_panes = m_mgr.GetAllPanes();
++    const wxAuiPaneInfoArray& all_panes = m_mgr.GetAllPanes();
+     size_t i, pane_count = all_panes.GetCount();
+     for (i = 0; i < pane_count; ++i)
+     {
+@@ -3235,6 +3288,47 @@
+     return tabCtrlHeight + pageHeight + decorHeight;
+ }
+ 
++int wxAuiNotebook::GetNextPage(bool forward) const
++{
++    if (GetPageCount() <= 1)
++      return wxNOT_FOUND;
++
++    wxAuiTabCtrl* tabCtrl = 0;
++    int idx = -1;
++    if( !FindTab(GetPage(GetSelection()), &tabCtrl, &idx) ){
++        // Could not find the tab control containing the currently
++        // active tab
++        return wxNOT_FOUND;
++    }
++    if( tabCtrl == 0 || idx < 0 ){
++        return wxNOT_FOUND;
++    }
++
++    wxWindow* page = 0;
++    const size_t maxPages = tabCtrl->GetPageCount();
++    forward ? idx++: idx--;
++    if( idx < 0 ){
++        // Wrap around to the last tab control
++        wxAuiTabCtrl* prevCtrl = GetPrevTabCtrl( tabCtrl, m_mgr );
++        page = prevCtrl->GetPage(prevCtrl->GetActivePage()).window;
++    }
++    else if ((size_t)idx < maxPages){
++        // Select the neighbouring page in the active
++        // tab control
++        page = tabCtrl->GetPage(idx).window;
++    }
++    else if ( maxPages > 0 ){
++        // Wrap around to the first tab control
++        wxAuiTabCtrl* nextCtrl = GetNextTabCtrl( tabCtrl, m_mgr );
++        page = nextCtrl->GetPage(nextCtrl->GetActivePage()).window;
++    }
++
++    if( page != 0 ){
++      return GetPageIndex(page);
++    }
++    return wxNOT_FOUND;
++}
++
+ // Shows the window menu
+ bool wxAuiNotebook::ShowWindowMenu()
+ {
+Index: src/aui/framemanager.cpp
+===================================================================
+--- src/aui/framemanager.cpp	(revision 72457)
++++ src/aui/framemanager.cpp	(working copy)
+@@ -709,6 +709,11 @@
+     return m_panes;
+ }
+ 
++const wxAuiPaneInfoArray& wxAuiManager::GetAllPanes() const
++{
++    return m_panes;
++}
++
+ // HitTest() is an internal function which determines
+ // which UI item the specified coordinates are over
+ // (x,y) specify a position in client coordinates

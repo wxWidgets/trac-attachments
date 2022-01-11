@@ -1,0 +1,495 @@
+Index: src/mac/carbon/sound.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/sound.cpp,v
+retrieving revision 1.27
+diff -b -u -2 -r1.27 sound.cpp
+--- src/mac/carbon/sound.cpp	2006/09/26 14:51:04	1.27
++++ src/mac/carbon/sound.cpp	2006/11/17 05:12:18
+@@ -15,6 +15,4 @@
+ #if wxUSE_SOUND
+ 
+-#include "wx/sound.h"
+-
+ #ifndef WX_PRECOMP
+     #include "wx/object.h"
+@@ -23,55 +21,25 @@
+     #include "wx/log.h"
+     #include "wx/timer.h"
++    #include "wx/file.h"
+ #endif
+-
+-#include "wx/file.h"
+ 
+-// Carbon QT Implementation Details -
+-//
+-// Memory:
+-// 1) OpenDefaultComponent(MovieImportType, kQTFileTypeWave);
+-// 2) NewMovie(0);
+-// 3) MovieImportDataRef() //Pass Memory Location to this
+-// 4) PlayMovie();
+-// 5) IsMovieDone(), MoviesTask() //2nd param is minimum wait time to allocate to quicktime
+-//
+-// File:
+-// 1) Path as CFString
+-// 2) Call QTNewDataReferenceFromFullPathCFString
+-// 3) Call NewMovieFromDataRef
+-// 4) Call CloseMovieFile
+-// 4) PlayMovie();
+-// 5) IsMovieDone(), MoviesTask() //2nd param is minimum wait time to allocate to quicktime
+-//
++#include "wx/sound.h"
+ 
+-#ifdef __WXMAC__
+ #include "wx/mac/uma.h"
+-#ifndef __DARWIN__
+-#include <Movies.h>
+-#include <Gestalt.h>
+-#endif
+-#endif
+-
+-#if defined __WXMAC__ && defined __DARWIN__/*TARGET_CARBON*/
+-#ifdef __APPLE_CC__
+-#include <Carbon/Carbon.h>
+-#else
+-#include <Carbon.h>
+-#endif
+-#else
+-#include <Sound.h>
+-#endif
+ 
+-//quicktime media layer only required for mac emulation on pc
+-#ifndef __WXMAC__
+-#include <qtml.h>
++#if defined(__DARWIN__)
++#   ifdef __APPLE_CC__
++#       include <Carbon/Carbon.h>
++#   else
++#       include <Carbon.h>
++#   endif
++#   include <QuickTime/QuickTimeComponents.h>
++#else /*TARGET_CARBON*/
++#   include <Movies.h>
++#   include <Gestalt.h>
++#   include <Sound.h>
++#   include <QuickTimeComponents.h>
+ #endif
+ 
+-#ifndef __DARWIN__
+-#include <QuickTimeComponents.h>
+-#else
+-#include <QuickTime/QuickTimeComponents.h>
+-#endif
+-
+ //Time between timer calls
+ #define MOVIE_DELAY 100
+@@ -81,11 +49,13 @@
+ 
+ // ------------------------------------------------------------------
+-//          wxQTTimer - Handle Asyncronous Playing
++//          wxQTTimer - Handle Asyncronous QuickTime Playing
+ // ------------------------------------------------------------------
+ class wxQTTimer : public wxTimer
+ {
+ public:
+-    wxQTTimer(Movie movie, bool bLoop, bool* playing) :
+-        m_movie(movie), m_bLoop(bLoop), m_pbPlaying(playing)
++    wxQTTimer(Movie movie, bool bLoop, 
++              bool* playing, Handle handleToFree) :
++        m_movie(movie), m_bLoop(bLoop), 
++        m_handleToFree(handleToFree), m_pbPlaying(playing)
+     {
+     }
+@@ -98,13 +68,11 @@
+         StopMovie(m_movie);
+         DisposeMovie(m_movie);
++        
++        if(m_handleToFree)
++            DisposeHandle(m_handleToFree);
++        
+         Stop();
+ 
+-        //Note that ExitMovies() is not necessary, but
+-        //the docs are fuzzy on whether or not TerminateQTML is
+         ExitMovies();
+-
+-#ifndef __WXMAC__
+-        TerminateQTML();
+-#endif
+     }
+ 
+@@ -133,6 +101,9 @@
+         }
+         else
+-            MoviesTask(m_movie, MOVIE_DELAY); //Give QT time to play movie
++        {
++            //Give some processing time to QT thread(s)
++            MoviesTask(m_movie, MOVIE_DELAY); 
+     }
++    }
+ 
+ 
+@@ -142,16 +113,21 @@
+     Movie m_movie;
+     bool m_bLoop;
++    Handle m_handleToFree;
+ 
+ public:
+     bool* m_pbPlaying;
+-
+ };
+ 
+ 
++// ------------------------------------------------------------------
++//          wxSMTimer - Handle Asyncronous Sound Manager Playing
++// ------------------------------------------------------------------
+ class wxSMTimer : public wxTimer
+ {
+ public:
+-    wxSMTimer(void* hSnd, void* pSndChannel, bool bLoop, bool* playing)
+-        : m_hSnd(hSnd), m_pSndChannel(pSndChannel), m_bLoop(bLoop), m_pbPlaying(playing)
++    wxSMTimer(void* hSnd, void* pSndChannel, 
++              bool bLoop, bool* playing)
++        : m_hSnd(hSnd), m_pSndChannel(pSndChannel), 
++          m_bLoop(bLoop), m_pbPlaying(playing)
+     {
+     }
+@@ -211,38 +187,4 @@
+ // ------------------------------------------------------------------
+ 
+-//Determines whether version 4 of QT is installed
+-Boolean wxIsQuickTime4Installed (void)
+-{
+-#ifdef __WXMAC__
+-    short error;
+-    long result;
+-
+-    error = Gestalt (gestaltQuickTime, &result);
+-    return (error == noErr) && (((result >> 16) & 0xffff) >= 0x0400);
+-#else
+-    return true;
+-#endif
+-}
+-
+-inline bool wxInitQT ()
+-{
+-    if (wxIsQuickTime4Installed())
+-    {
+-        #ifndef __WXMAC__
+-        int nError;
+-        //-2093 no dll
+-            if ((nError = InitializeQTML(0)) != noErr)
+-                wxLogSysError(wxString::Format(wxT("Couldn't Initialize Quicktime-%i"), nError));
+-        #endif
+-        EnterMovies();
+-        return true;
+-    }
+-    else
+-    {
+-        wxLogSysError(wxT("Quicktime is not installed, or Your Version of Quicktime is <= 4."));
+-        return false;
+-    }
+-}
+-
+ wxSound::wxSound()
+ : m_hSnd(NULL), m_waveLength(0), m_pTimer(NULL), m_type(wxSound_NONE)
+@@ -257,6 +199,7 @@
+ 
+ wxSound::wxSound(int size, const wxByte* data)
+-: m_hSnd((char*)data), m_waveLength(size), m_pTimer(NULL), m_type(wxSound_MEMORY)
++: m_hSnd(NULL), m_waveLength(0), m_pTimer(NULL), m_type(wxSound_NONE)
+ {
++    Create(size, data);
+ }
+ 
+@@ -271,5 +214,4 @@
+     if (isResource)
+     {
+-#ifdef __WXMAC__
+         m_type = wxSound_RESOURCE;
+ 
+@@ -280,8 +222,15 @@
+         m_sndname = fileName;
+         m_hSnd = (char*) GetNamedResource('snd ', (const unsigned char *) lpSnd);
+-#else
++        if(!m_hSnd)
++        {
++            m_type = wxSound_NONE;
++            
++            wxLogSysError(wxString(wxT("Error loading resource [")) + 
++                            fileName + 
++                            wxT("]!"));
++            
+         return false;
+-#endif
+     }
++    }
+     else
+     {
+@@ -293,9 +242,33 @@
+ }
+ 
++bool wxSound::Create(int size, const wxByte* data)
++{
++    Stop();
++    
++    //pad out enough for the initial filetype scan (WAVE etc.)
++    wxCHECK_MSG(size >= 12, false, wxT("Sound file too small"));
++    
++    m_hSnd = (char*)data;
++    m_waveLength = size;
++    m_type = wxSound_MEMORY;
++    
++    return true;
++}
++
++bool wxSound::IsOk() const
++{
++    return m_type != wxSound_NONE;
++}
++
+ bool wxSound::DoPlay(unsigned flags) const
+ {
++    wxCHECK_MSG((flags & wxSOUND_ASYNC) || !(flags & wxSOUND_LOOP), 
++                false, 
++                wxT("Can't loop and play syncronously at the same time!"));
++
+     Stop();
+ 
+     Movie movie;
++    Handle myHandle = NULL;
+ 
+     switch(m_type)
+@@ -303,9 +276,9 @@
+     case wxSound_MEMORY:
+         {
+-            if (!wxInitQT())
+-                return false;
+-            Handle myHandle, dataRef = nil;
++            EnterMovies();
++            
++            Handle dataRef = NULL;
+             MovieImportComponent miComponent;
+-            Track targetTrack = nil;
++            Track targetTrack = NULL;
+             TimeValue addedDuration = 0;
+             long outFlags = 0;
+@@ -331,4 +304,6 @@
+             }
+ 
++            wxLogDebug(wxString(&m_hSnd[8], wxConvLocal, 4));
++
+             movie = NewMovie(0);
+ 
+@@ -341,11 +316,12 @@
+             if (result != noErr)
+             {
++                DisposeHandle(myHandle);
++                DisposeMovie(movie);
+                 wxLogSysError(wxString::Format(wxT("Couldn't import movie data\nError:%i"), (int)result));
++                return false;
+             }
+ 
+             SetMovieVolume(movie, kFullVolume);
+             GoToBeginningOfMovie(movie);
+-
+-            DisposeHandle(myHandle);
+         }
+         break;
+@@ -356,5 +332,4 @@
+ 
+             ParseSndHeader((SndListHandle)m_hSnd, &data, &numframes, &offset);
+-            //m_waveLength = numFrames * data.numChannels;
+ 
+             SndChannelPtr pSndChannel;
+@@ -383,6 +358,5 @@
+     case wxSound_FILE:
+         {
+-            if (!wxInitQT())
+-                return false;
++            EnterMovies();
+ 
+             OSErr err = noErr ;
+@@ -394,10 +368,7 @@
+                 (UInt32)kQTNativeDefaultPathStyle, 0, &dataRef, &dataRefType);
+ 
+-            wxASSERT(err == noErr);
+-
+             if (NULL != dataRef || err != noErr)
+             {
+                 err = NewMovieFromDataRef( &movie, newMovieDontAskUnresolvedDataRefs , NULL, dataRef, dataRefType );
+-                wxASSERT(err == noErr);
+                 DisposeHandle(dataRef);
+             }
+@@ -424,5 +395,6 @@
+         lastSoundTimer = ((wxQTTimer*&)m_pTimer) =
+             new wxQTTimer(movie, flags & wxSOUND_LOOP ? 1 : 0,
+-                          &lastSoundIsPlaying);
++                          &lastSoundIsPlaying,
++                          myHandle);
+         lastSoundIsPlaying = true;
+         ((wxQTTimer*)m_pTimer)->Start(MOVIE_DELAY, wxTIMER_CONTINUOUS);
+@@ -430,13 +402,14 @@
+     else
+     {
+-        wxASSERT_MSG(!(flags & wxSOUND_LOOP), wxT("Can't loop and play syncronously at the same time"));
+-
+         //Play movie until it ends, then exit
+         //Note that due to quicktime caching this may not always
+-        //work 100% correctly
++        //work 100% correctly; best to use asyncronous playing where possible
+         while (!IsMovieDone(movie))
+             MoviesTask(movie, 1);
+ 
+         DisposeMovie(movie);
++        
++        if(myHandle)
++            DisposeHandle(myHandle);
+     }
+ 
+Index: include/wx/mac/carbon/sound.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/mac/carbon/sound.h,v
+retrieving revision 1.8
+diff -b -u -2 -r1.8 sound.h
+--- include/wx/mac/carbon/sound.h	2006/09/05 20:45:52	1.8
++++ include/wx/mac/carbon/sound.h	2006/11/17 05:12:18
+@@ -28,8 +28,13 @@
+ public:
+   bool  Create(const wxString& fileName, bool isResource = FALSE);
+-  bool  IsOk() const { return !m_sndname.IsEmpty(); }
++  bool Create(int size, const wxByte* data);
++
++  bool IsOk() const;
+   static void  Stop();
+   static bool IsPlaying();
+ 
++  // Obtain native handle - 
++  // 1) Sound Manager channel with resource
++  // 2) QuickTime movie otherwise
+   void* GetHandle();
+ protected:  
+Index: samples/sound/sound.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/sound/sound.cpp,v
+retrieving revision 1.16
+diff -b -u -2 -r1.16 sound.cpp
+--- samples/sound/sound.cpp	2006/05/28 23:31:27	1.16
++++ samples/sound/sound.cpp	2006/11/17 05:12:20
+@@ -36,4 +36,11 @@
+ // ----------------------------------------------------------------------------
+ 
++// Whether or not to use sound resources
++#if defined(__WXMSW__) || defined(__WXMAC__)
++#	define wxUSE_SOUND_RESOURCES 1
++#else
++#	define wxUSE_SOUND_RESOURCES 0
++#endif
++
+ // the application icon (under Windows and OS/2 it is in resources)
+ #if defined(__WXGTK__) || defined(__WXMOTIF__) || defined(__WXMAC__) || defined(__WXMGL__) || defined(__WXX11__)
+@@ -63,7 +70,7 @@
+     // event handlers (these functions should _not_ be virtual)
+     void OnSelectFile(wxCommandEvent& event);
+-#ifdef __WXMSW__
++#if wxUSE_SOUND_RESOURCES
+     void OnSelectResource(wxCommandEvent& event);
+-#endif // __WXMSW__
++#endif // wxUSE_SOUND_RESOURCES
+     void OnSelectMemory(wxCommandEvent& event);
+     void OnQuit(wxCommandEvent& event);
+@@ -85,7 +92,7 @@
+     wxSound*    m_sound;
+     wxString    m_soundFile;
+-#ifdef __WXMSW__
++#if wxUSE_SOUND_RESOURCES
+     wxString    m_soundRes;
+-#endif // __WXMSW__
++#endif // wxUSE_SOUND_RESOURCES
+     bool        m_useMemory;
+ 
+@@ -105,7 +112,7 @@
+     // menu items
+     Sound_SelectFile = wxID_HIGHEST + 1,
+-#ifdef __WXMSW__
++#if wxUSE_SOUND_RESOURCES
+     Sound_SelectResource,
+-#endif // __WXMSW__
++#endif // wxUSE_SOUND_RESOURCES
+     Sound_SelectMemory,
+ 
+@@ -120,4 +127,5 @@
+ };
+ 
++
+ // ----------------------------------------------------------------------------
+ // event tables and other macros for wxWidgets
+@@ -129,7 +137,7 @@
+ BEGIN_EVENT_TABLE(MyFrame, wxFrame)
+     EVT_MENU(Sound_SelectFile,       MyFrame::OnSelectFile)
+-#ifdef __WXMSW__
++#if wxUSE_SOUND_RESOURCES
+     EVT_MENU(Sound_SelectResource,   MyFrame::OnSelectResource)
+-#endif // __WXMSW__
++#endif // wxUSE_SOUND_RESOURCES
+     EVT_MENU(Sound_SelectMemory,     MyFrame::OnSelectMemory)
+     EVT_MENU(Sound_Quit,             MyFrame::OnQuit)
+@@ -190,7 +198,7 @@
+     wxMenu *menuFile = new wxMenu;
+     menuFile->Append(Sound_SelectFile, _T("Select WAV &file...\tCtrl-O"), _T("Select a new wav file to play"));
+-#ifdef __WXMSW__
++#if wxUSE_SOUND_RESOURCES
+     menuFile->Append(Sound_SelectResource, _T("Select WAV &resource...\tCtrl-R"), _T("Select a new resource to play"));
+-#endif // __WXMSW__
++#endif // wxUSE_SOUND_RESOURCES
+     menuFile->Append(Sound_SelectMemory, _T("Select WAV &data\tCtrl-M"), _T("Choose to play from memory buffer"));
+     menuFile->Append(Sound_Quit, _T("E&xit\tAlt-X"), _T("Quit this program"));
+@@ -958,10 +966,10 @@
+     }
+ 
+-#ifdef __WXMSW__
++#if wxUSE_SOUND_RESOURCES
+     if ( !m_soundRes.empty() )
+     {
+         return snd.Create(m_soundRes, true);
+     }
+-#endif // __WXMSW__
++#endif // wxUSE_SOUND_RESOURCES
+ 
+     return snd.Create(m_soundFile);
+@@ -989,7 +997,7 @@
+     {
+         m_soundFile = dlg.GetPath();
+-#ifdef __WXMSW__
++#if wxUSE_SOUND_RESOURCES
+         m_soundRes.clear();
+-#endif // __WXMSW__
++#endif // wxUSE_SOUND_RESOURCES
+         m_useMemory = false;
+ 
+@@ -1001,5 +1009,5 @@
+ }
+ 
+-#ifdef __WXMSW__
++#if wxUSE_SOUND_RESOURCES
+ 
+ void MyFrame::OnSelectResource(wxCommandEvent& WXUNUSED(event))
+@@ -1021,11 +1029,15 @@
+     m_sound = NULL;
+ 
+-    NotifyUsingFile(_T("Windows WAV resource"));
++    NotifyUsingFile(_T("Sound resource"));
+ }
+ 
+-#endif // __WXMSW__
++#endif // wxUSE_SOUND_RESOURCES
+ 
+ void MyFrame::OnSelectMemory(wxCommandEvent& WXUNUSED(event))
+ {
++    m_soundFile.clear();
++    delete m_sound;
++    m_sound = NULL;
++    
+     m_useMemory = true;
+ 
+
+ 	  	 

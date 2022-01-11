@@ -1,0 +1,49 @@
+diff --git src/unix/fswatcher_inotify.cpp src/unix/fswatcher_inotify.cpp
+index 1ad0208..d59b0e1 100644
+--- src/unix/fswatcher_inotify.cpp
++++ src/unix/fswatcher_inotify.cpp
+@@ -139,6 +139,9 @@ public:
+             wxFAIL_MSG( wxString::Format("Path %s is not watched",
+                                           watch->GetPath()) );
+         }
++        // Cache the wd in case any events arrive late
++        m_staleDescriptors.Add(watch->GetWatchDescriptor());
++
+         watch->SetWatchDescriptor(-1);
+         return true;
+     }
+@@ -217,13 +220,24 @@ protected:
+         // will be already removed from our list at that time
+         if (inevt.mask & IN_IGNORED)
+         {
++            // However we cached the stale wd. It should now be safe to remove it
++            m_staleDescriptors.Remove(inevt.wd);
++            wxLogTrace(wxTRACE_FSWATCHER, "Removed wd %i from the stale-wd cache", inevt.wd);
+             return;
+         }
+ 
+         // get watch entry for this event
+         wxFSWatchEntryDescriptors::iterator it = m_watchMap.find(inevt.wd);
+-        wxCHECK_RET(it != m_watchMap.end(),
+-                             "Watch descriptor not present in the watch map!");
++        if (it == m_watchMap.end())
++        {
++            // It's not in the map; check the recently-removed cache
++            if (m_staleDescriptors.Index(inevt.wd) != wxNOT_FOUND)
++            {
++                wxLogTrace(wxTRACE_FSWATCHER, "Caught a stale event, wd %i", inevt.wd);
++                return;  // It is there. Just ignore this event
++            }
++            wxCHECK_RET(false, "Watch descriptor not present in the watch map!");
++        }
+ 
+         wxFSWatchEntry& watch = *(it->second);
+         int nativeFlags = inevt.mask;
+@@ -425,6 +439,7 @@ protected:
+ 
+     wxFSWSourceHandler* m_handler;        // handler for inotify event source
+     wxFSWatchEntryDescriptors m_watchMap; // inotify wd=>wxFSWatchEntry* map
++    wxArrayInt m_staleDescriptors;        // stores recently-removed watches
+     wxInotifyCookies m_cookies;           // map to track renames
+     wxEventLoopSource* m_source;          // our event loop source
+ 

@@ -1,0 +1,218 @@
+Index: wxWidgets-2.9.x.async_exec/src/unix/baseunix.cpp
+===================================================================
+--- wxWidgets-2.9.x.async_exec/src/unix/baseunix.cpp	(revision 52303)
++++ wxWidgets-2.9.x.async_exec/src/unix/baseunix.cpp	(working copy)
+@@ -45,43 +45,35 @@
+ // wxConsoleAppTraits implementation
+ // ============================================================================
+ 
+-// ----------------------------------------------------------------------------
+-// wxExecute support
+-// ----------------------------------------------------------------------------
+-
+-bool wxConsoleAppTraits::CreateEndProcessPipe(wxExecuteData& WXUNUSED(data))
+-{
+-    // nothing to do, so always ok
+-    return true;
+-}
+-
+-bool
+-wxConsoleAppTraits::IsWriteFDOfEndProcessPipe(wxExecuteData& WXUNUSED(data),
+-                                              int WXUNUSED(fd))
+-{
+-    // we don't have any pipe
+-    return false;
+-}
+-
+-void
+-wxConsoleAppTraits::DetachWriteFDOfEndProcessPipe(wxExecuteData& WXUNUSED(data))
+-{
+-    // nothing to do
+-}
+-
+-
+ int
+ wxConsoleAppTraits::WaitForChild(wxExecuteData& execData)
+ {
+-    wxASSERT_MSG( execData.flags & wxEXEC_SYNC,
+-                  wxT("async execution not supported yet") );
++//     wxASSERT_MSG( execData.flags & wxEXEC_SYNC,
++//                   wxT("async execution not supported yet") );
+ 
+     int exitcode = 0;
+-    if ( waitpid(execData.pid, &exitcode, 0) == -1 || !WIFEXITED(exitcode) )
++    if ( execData.flags & wxEXEC_SYNC )
+     {
+-        wxLogSysError(_("Waiting for subprocess termination failed"));
+-    }
++        if ( waitpid(execData.pid, &exitcode, 0) == -1 || !WIFEXITED(exitcode) )
++        {
++            wxLogSysError(_("Waiting for subprocess termination failed"));
++        }
++    } 
++    else 
++    {
++      wxEndProcessData *endProcData = new wxEndProcessData;
++      endProcData->process  = execData.process;
++      endProcData->pid      = execData.pid;
++      endProcData->tag = wxAddProcessCallback
++                         (
++                           endProcData,
++                           execData.pipeEndProcDetect.Detach(wxPipe::Read)
++                         );
+ 
++      execData.pipeEndProcDetect.Close();
++      exitcode = execData.pid;
++
++    }
+     return exitcode;
+ }
+ 
+Index: wxWidgets-2.9.x.async_exec/src/unix/utilsunx.cpp
+===================================================================
+--- wxWidgets-2.9.x.async_exec/src/unix/utilsunx.cpp	(revision 52303)
++++ wxWidgets-2.9.x.async_exec/src/unix/utilsunx.cpp	(working copy)
+@@ -1222,8 +1222,6 @@
+ 
+ #endif // wxUSE_BASE
+ 
+-#if wxUSE_GUI
+-
+ #ifdef __DARWIN__
+     #include <sys/errno.h>
+ #endif
+@@ -1246,17 +1244,17 @@
+ // need wxExecute-related helpers for them
+ #if !USE_OLD_DARWIN_END_PROCESS_DETECT
+ 
+-bool wxGUIAppTraits::CreateEndProcessPipe(wxExecuteData& execData)
++bool wxAppTraits::CreateEndProcessPipe(wxExecuteData& execData)
+ {
+     return execData.pipeEndProcDetect.Create();
+ }
+ 
+-bool wxGUIAppTraits::IsWriteFDOfEndProcessPipe(wxExecuteData& execData, int fd)
++bool wxAppTraits::IsWriteFDOfEndProcessPipe(wxExecuteData& execData, int fd)
+ {
+     return fd == (execData.pipeEndProcDetect)[wxPipe::Write];
+ }
+ 
+-void wxGUIAppTraits::DetachWriteFDOfEndProcessPipe(wxExecuteData& execData)
++void wxAppTraits::DetachWriteFDOfEndProcessPipe(wxExecuteData& execData)
+ {
+     execData.pipeEndProcDetect.Detach(wxPipe::Write);
+     execData.pipeEndProcDetect.Close();
+@@ -1264,26 +1262,28 @@
+ 
+ #else // !Darwin
+ 
+-bool wxGUIAppTraits::CreateEndProcessPipe(wxExecuteData& WXUNUSED(execData))
++bool wxAppTraits::CreateEndProcessPipe(wxExecuteData& WXUNUSED(execData))
+ {
+     return true;
+ }
+ 
+ bool
+-wxGUIAppTraits::IsWriteFDOfEndProcessPipe(wxExecuteData& WXUNUSED(execData),
++wxAppTraits::IsWriteFDOfEndProcessPipe(wxExecuteData& WXUNUSED(execData),
+                                           int WXUNUSED(fd))
+ {
+     return false;
+ }
+ 
+ void
+-wxGUIAppTraits::DetachWriteFDOfEndProcessPipe(wxExecuteData& WXUNUSED(execData))
++wxAppTraits::DetachWriteFDOfEndProcessPipe(wxExecuteData& WXUNUSED(execData))
+ {
+     // nothing to do here, we don't use the pipe
+ }
+ 
+ #endif // !Darwin/Darwin
+ 
++#if wxUSE_GUI
++
+ int wxGUIAppTraits::WaitForChild(wxExecuteData& execData)
+ {
+     wxEndProcessData *endProcData = new wxEndProcessData;
+@@ -1440,6 +1440,10 @@
+     }
+ }
+ 
++#endif //wxUSE_GUI
++
++#if wxUSE_BASE
++
+ #ifdef wxHAS_GENERIC_PROCESS_CALLBACK
+ struct wxEndProcessFDIOHandler : public wxFDIOHandler
+ {
+@@ -1512,9 +1516,6 @@
+ }
+ #endif // wxHAS_GENERIC_PROCESS_CALLBACK
+ 
+-#endif // wxUSE_GUI
+-#if wxUSE_BASE
+-
+ void wxHandleProcessTermination(wxEndProcessData *proc_data)
+ {
+     // notify user about termination if required
+Index: wxWidgets-2.9.x.async_exec/include/wx/unix/apptbase.h
+===================================================================
+--- wxWidgets-2.9.x.async_exec/include/wx/unix/apptbase.h	(revision 52303)
++++ wxWidgets-2.9.x.async_exec/include/wx/unix/apptbase.h	(working copy)
+@@ -30,14 +30,14 @@
+     // wxBase
+     //
+     // if it returns false, we should return from wxExecute() with an error
+-    virtual bool CreateEndProcessPipe(wxExecuteData& execData) = 0;
++    virtual bool CreateEndProcessPipe(wxExecuteData& execData);
+ 
+     // test if the given descriptor is the end of the pipe create by the
+     // function above
+-    virtual bool IsWriteFDOfEndProcessPipe(wxExecuteData& execData, int fd) = 0;
++    virtual bool IsWriteFDOfEndProcessPipe(wxExecuteData& execData, int fd);
+ 
+     // ensure that the write end of the pipe is not closed by wxPipe dtor
+-    virtual void DetachWriteFDOfEndProcessPipe(wxExecuteData& execData) = 0;
++    virtual void DetachWriteFDOfEndProcessPipe(wxExecuteData& execData);
+ 
+     // wait for the process termination, return whatever wxExecute() must
+     // return
+Index: wxWidgets-2.9.x.async_exec/include/wx/unix/execute.h
+===================================================================
+--- wxWidgets-2.9.x.async_exec/include/wx/unix/execute.h	(revision 52303)
++++ wxWidgets-2.9.x.async_exec/include/wx/unix/execute.h	(working copy)
+@@ -15,7 +15,7 @@
+ class WXDLLIMPEXP_FWD_BASE wxProcess;
+ class wxStreamTempInputBuffer;
+ 
+-#if defined(__WXDFB__) || defined(__WXX11__)
++#if defined(__WXDFB__) || defined(__WXX11__) || defined(__UNIX__)
+     #define wxHAS_GENERIC_PROCESS_CALLBACK 1
+ #endif
+ 
+Index: wxWidgets-2.9.x.async_exec/include/wx/unix/apptrait.h
+===================================================================
+--- wxWidgets-2.9.x.async_exec/include/wx/unix/apptrait.h	(revision 52303)
++++ wxWidgets-2.9.x.async_exec/include/wx/unix/apptrait.h	(working copy)
+@@ -22,9 +22,6 @@
+ #if wxUSE_CONSOLE_EVENTLOOP
+     virtual wxEventLoopBase *CreateEventLoop();
+ #endif // wxUSE_CONSOLE_EVENTLOOP
+-    virtual bool CreateEndProcessPipe(wxExecuteData& execData);
+-    virtual bool IsWriteFDOfEndProcessPipe(wxExecuteData& execData, int fd);
+-    virtual void DetachWriteFDOfEndProcessPipe(wxExecuteData& execData);
+     virtual int WaitForChild(wxExecuteData& execData);
+ #if wxUSE_TIMER
+     virtual wxTimerImpl *CreateTimerImpl(wxTimer *timer);
+@@ -37,9 +34,6 @@
+ {
+ public:
+     virtual wxEventLoopBase *CreateEventLoop();
+-    virtual bool CreateEndProcessPipe(wxExecuteData& execData);
+-    virtual bool IsWriteFDOfEndProcessPipe(wxExecuteData& execData, int fd);
+-    virtual void DetachWriteFDOfEndProcessPipe(wxExecuteData& execData);
+     virtual int WaitForChild(wxExecuteData& execData);
+ #if wxUSE_TIMER
+     virtual wxTimerImpl *CreateTimerImpl(wxTimer *timer);
+
+ 	  	 

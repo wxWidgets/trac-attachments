@@ -1,0 +1,227 @@
+Index: src/msw/tbar95.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/tbar95.cpp,v
+retrieving revision 1.145
+diff -u -r1.145 tbar95.cpp
+--- src/msw/tbar95.cpp	2005/03/20 12:02:52	1.145
++++ src/msw/tbar95.cpp	2005/03/24 22:21:15
+@@ -43,6 +43,7 @@
+ 
+ #include "wx/toolbar.h"
+ #include "wx/sysopt.h"
++#include "wx/image.h"
+ 
+ #include "wx/msw/private.h"
+ 
+@@ -213,6 +214,7 @@
+ void wxToolBar::Init()
+ {
+     m_hBitmap = 0;
++    m_disabledImgList = 0;
+ 
+     m_nButtons = 0;
+ 
+@@ -321,6 +323,11 @@
+         m_hBitmap = 0;
+     }
+ 
++    if ( m_disabledImgList )
++    {
++        delete m_disabledImgList;
++        m_disabledImgList = 0; 
++    }
+     Realize();
+     UpdateSize();
+ }
+@@ -339,6 +346,10 @@
+     {
+         ::DeleteObject((HBITMAP) m_hBitmap);
+     }
++    if ( m_disabledImgList )
++    {
++        delete m_disabledImgList;
++    }
+ }
+ 
+ wxSize wxToolBar::DoGetBestSize() const
+@@ -508,6 +519,35 @@
+     return true;
+ }
+ 
++wxImageList *  wxToolBar::CreateDisabledImageList(const size_t nTools)
++{
++    wxImageList * newDisabledImageList = 0;
++    wxToolBarToolsList::compatibility_iterator node;
++    if ( wxTheApp->GetComCtl32Version() >= 470 ) 
++    {
++        // search for the first disabled button img in the toolbar, if any
++        wxBitmap disbmp;
++        for ( node = m_tools.GetFirst(); node; node = node->GetNext() )
++        {
++            wxToolBarToolBase *tool = node->GetData();
++            disbmp = tool->GetDisabledBitmap();
++            if (disbmp.Ok()) break; // if there is a disabled bitmap
++        }
++        if ( disbmp.Ok() )
++        {
++            bool useMask = true;
++            if ( 0 == disbmp.GetMask() ) useMask = false; 
++            newDisabledImageList = new wxImageList(m_defaultWidth, 
++                                        m_defaultHeight, useMask, nTools );
++            if ( !newDisabledImageList )
++            {
++                wxLogLastError(wxT("wxImageList ctor error called from wxToolBar::CreateDisabledImageList"));
++            } 
++        }
++    } 
++    return newDisabledImageList;
++}
++
+ bool wxToolBar::Realize()
+ {
+     const size_t nTools = GetToolsCount();
+@@ -600,6 +640,8 @@
+                 totalBitmapWidth, totalBitmapHeight);
+ 
+             dcAllButtons.SelectObject(bitmap);
++
++            
+         }
+ #endif
+ 
+@@ -609,6 +651,7 @@
+         // the number of buttons (not separators)
+         int nButtons = 0;
+ 
++        wxImageList * newDisabledImgList = CreateDisabledImageList( nTools );
+         for ( node = m_tools.GetFirst(); node; node = node->GetNext() )
+         {
+             wxToolBarToolBase *tool = node->GetData();
+@@ -627,11 +670,41 @@
+                     wxFAIL_MSG( _T("invalid tool button bitmap") );
+                 }
+ 
++                const wxBitmap& bmp_disabled = tool->GetDisabledBitmap();
++                if ( newDisabledImgList && bmp_disabled.Ok() )
++                {
++                    wxMask * mask = bmp_disabled.GetMask();
++                    wxBitmap mask_bmp;
++                    if ( mask )
++                    { 
++                        HBITMAP hmask=0;
++                        hmask = ( HBITMAP ) mask->GetMaskBitmap();
++                        mask_bmp.SetHBITMAP( hmask );
++                    }
++                    else mask_bmp = wxNullBitmap;
++                    newDisabledImgList->Add( bmp_disabled , mask_bmp  );
++                }
++                // don't fail on else, allowable to not supply a disabled bitmap
++                else if ( newDisabledImgList )
++                {
++                    // there is no disabled bitmap for this item.  We need to fill
++                    // the space in the image list with something, so we grey out
++                    // the existing normal bitmap.  
++
++                    wxImage img = tool->GetNormalBitmap().ConvertToImage();
++                    wxImage greyed_img;
++                    wxCreateGreyedImage( img, greyed_img );
++                    wxBitmap new_bmp(greyed_img);
++                    newDisabledImgList->Add( new_bmp );  
++                    
++                }    
+                 // still inc width and number of buttons because otherwise the
+                 // subsequent buttons will all be shifted which is rather confusing
+                 // (and like this you'd see immediately which bitmap was bad)
++
+                 x += m_defaultWidth;
+                 nButtons++;
++
+             }
+         }
+ 
+@@ -645,6 +718,8 @@
+             // Map to system colours
+             hBitmap = (HBITMAP)MapBitmap((WXHBITMAP) hBitmap,
+                 totalBitmapWidth, totalBitmapHeight);
++
++            
+         }
+ 
+         bool addBitmap = true;
+@@ -667,6 +742,18 @@
+                 }
+ 
+                 ::DeleteObject(oldToolBarBitmap);
++        
++            if ( newDisabledImgList )
++            {
++                HIMAGELIST oldImageList = (HIMAGELIST)::SendMessage(GetHwnd(),
++                                   TB_SETDISABLEDIMAGELIST,
++                                   (WPARAM)0, (LPARAM)(HIMAGELIST) 
++                                   newDisabledImgList->GetHIMAGELIST());
++                // if old image list
++                if ( oldImageList ) ::DeleteObject( oldImageList ); // remove it
++                m_disabledImgList = newDisabledImgList; 
++                newDisabledImgList = 0; // checked later in code
++            }
+ 
+                 // already done
+                 addBitmap = false;
+@@ -693,7 +780,23 @@
+             {
+                 wxFAIL_MSG(wxT("Could not add bitmap to toolbar"));
+             }
++
++            if ( newDisabledImgList )
++            {
++                HIMAGELIST oldImageList = (HIMAGELIST)::SendMessage(GetHwnd(),
++                                   TB_SETDISABLEDIMAGELIST,
++                                   (WPARAM)0, (LPARAM)(HIMAGELIST) 
++                                   newDisabledImgList->GetHIMAGELIST() );
++                    // if old image list
++                    if ( oldImageList ) ::DeleteObject( oldImageList ); // remove it
++                    m_disabledImgList = newDisabledImgList;
++                    newDisabledImgList = 0; // just in case
++            }
++
+         }
++        // in case there is an error of some sort, lets clean up
++        // the created image list (admittedly rare)
++        if ( newDisabledImgList ) delete newDisabledImgList;
+     }
+ 
+     // don't call SetToolBitmapSize() as we don't want to change the values of
+Index: include/wx/msw/tbar95.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/msw/tbar95.h,v
+retrieving revision 1.36
+diff -u -r1.36 tbar95.h
+--- include/wx/msw/tbar95.h	2005/02/06 18:42:41	1.36
++++ include/wx/msw/tbar95.h	2005/03/24 21:31:36
+@@ -19,6 +19,7 @@
+ #if wxUSE_TOOLBAR
+ 
+ #include "wx/dynarray.h"
++#include "wx/imaglist.h"
+ 
+ class WXDLLEXPORT wxToolBar : public wxToolBarBase
+ {
+@@ -76,7 +77,7 @@
+ protected:
+     // common part of all ctors
+     void Init();
+-
++    wxImageList * CreateDisabledImageList(const size_t nTools);
+     // create the native toolbar control
+     bool MSWCreateToolbar(const wxPoint& pos, const wxSize& size);
+ 
+@@ -118,6 +119,7 @@
+ 
+     // the big bitmap containing all bitmaps of the toolbar buttons
+     WXHBITMAP m_hBitmap;
++    wxImageList * m_disabledImgList;
+ 
+     // the total number of toolbar elements
+     size_t m_nButtons;
+
+ 	  	 

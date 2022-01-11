@@ -1,0 +1,970 @@
+Index: src/msw/button.cpp
+===================================================================
+--- src/msw/button.cpp	(revision 66945)
++++ src/msw/button.cpp	(working copy)
+@@ -117,25 +117,6 @@
+ 
+ // we use different data classes for owner drawn buttons and for themed XP ones
+ 
+-class wxButtonImageData
+-{
+-public:
+-    wxButtonImageData() { }
+-    virtual ~wxButtonImageData() { }
+-
+-    virtual wxBitmap GetBitmap(wxButton::State which) const = 0;
+-    virtual void SetBitmap(const wxBitmap& bitmap, wxButton::State which) = 0;
+-
+-    virtual wxSize GetBitmapMargins() const = 0;
+-    virtual void SetBitmapMargins(wxCoord x, wxCoord y) = 0;
+-
+-    virtual wxDirection GetBitmapPosition() const = 0;
+-    virtual void SetBitmapPosition(wxDirection dir) = 0;
+-
+-private:
+-    wxDECLARE_NO_COPY_CLASS(wxButtonImageData);
+-};
+-
+ namespace
+ {
+ 
+Index: src/msw/tglbtn.cpp
+===================================================================
+--- src/msw/tglbtn.cpp	(revision 66945)
++++ src/msw/tglbtn.cpp	(working copy)
+@@ -34,16 +34,148 @@
+     #include "wx/brush.h"
+     #include "wx/dcscreen.h"
+     #include "wx/settings.h"
+-
+-    #include "wx/log.h"
++    #include "wx/dcscreen.h"
++    #include "wx/dcclient.h"
++    #include "wx/toplevel.h"
++    #include "wx/msw/wrapcctl.h"
++    #include "wx/msw/private.h"
++    #include "wx/msw/missing.h"
+ #endif // WX_PRECOMP
+ 
+-#include "wx/renderer.h"
+-#include "wx/dcclient.h"
+-
+-#include "wx/msw/private.h"
++#include "wx/imaglist.h"
++#include "wx/stockitem.h"
+ #include "wx/msw/private/button.h"
++#include "wx/msw/private/dc.h"
++#include "wx/private/window.h"
+ 
++#if wxUSE_UXTHEME
++    #include "wx/msw/uxtheme.h"
++
++    // no need to include tmschema.h
++    #ifndef BP_PUSHBUTTON
++        #define BP_PUSHBUTTON 1
++
++        #define PBS_NORMAL    1
++        #define PBS_HOT       2
++        #define PBS_PRESSED   3
++        #define PBS_DISABLED  4
++        #define PBS_DEFAULTED 5
++
++        #define TMT_CONTENTMARGINS 3602
++    #endif
++
++    // provide the necessary declarations ourselves if they're missing from
++    // headers
++    #ifndef BCM_SETIMAGELIST
++        #define BCM_SETIMAGELIST    0x1602
++        #define BCM_SETTEXTMARGIN   0x1604
++
++        enum
++        {
++            BUTTON_IMAGELIST_ALIGN_LEFT,
++            BUTTON_IMAGELIST_ALIGN_RIGHT,
++            BUTTON_IMAGELIST_ALIGN_TOP,
++            BUTTON_IMAGELIST_ALIGN_BOTTOM
++        };
++
++        struct BUTTON_IMAGELIST
++        {
++            HIMAGELIST himl;
++            RECT margin;
++            UINT uAlign;
++        };
++    #endif
++#endif // wxUSE_UXTHEME
++
++#ifndef WM_THEMECHANGED
++    #define WM_THEMECHANGED     0x031A
++#endif
++
++#ifndef ODS_NOACCEL
++    #define ODS_NOACCEL         0x0100
++#endif
++
++#ifndef ODS_NOFOCUSRECT
++    #define ODS_NOFOCUSRECT     0x0200
++#endif
++
++#ifndef DT_HIDEPREFIX
++    #define DT_HIDEPREFIX       0x00100000
++#endif
++
++// set the value for BCM_SETSHIELD (for the UAC shield) if it's not defined in
++// the header
++#ifndef BCM_SETSHIELD
++    #define BCM_SETSHIELD       0x160c
++#endif
++
++namespace
++{
++
++// the gap between button edge and the interior area used by Windows for the
++// standard buttons
++const int OD_BUTTON_MARGIN = 4;
++
++class wxODToggleButtonImageData : public wxButtonImageData
++{
++public:
++    wxODToggleButtonImageData(wxBitmapToggleButton *WXUNUSED(btn), const wxBitmap& bitmap)
++    {
++        SetBitmap(bitmap, wxButton::State_Normal);
++
++        m_dir = wxLEFT;
++    }
++
++    virtual wxBitmap GetBitmap(wxButton::State which) const
++    {
++        return m_bitmaps[which];
++    }
++
++    virtual void SetBitmap(const wxBitmap& bitmap, wxButton::State which)
++    {
++        m_bitmaps[which] = bitmap;
++    }
++
++    virtual wxSize GetBitmapMargins() const
++    {
++        return m_margin;
++    }
++
++    virtual void SetBitmapMargins(wxCoord x, wxCoord y)
++    {
++        m_margin = wxSize(x, y);
++    }
++
++    virtual wxDirection GetBitmapPosition() const
++    {
++        return m_dir;
++    }
++
++    virtual void SetBitmapPosition(wxDirection dir)
++    {
++        m_dir = dir;
++    }
++
++private:
++    // just store the values passed to us to be able to retrieve them later
++    // from the drawing code
++    wxBitmap m_bitmaps[wxButton::State_Max];
++    wxSize m_margin;
++    wxDirection m_dir;
++
++    wxDECLARE_NO_COPY_CLASS(wxODToggleButtonImageData);
++};
++
++#if wxUSE_UXTHEME
++
++// somehow the margin is one pixel greater than the value returned by
++// GetThemeMargins() call
++const int XP_BUTTON_EXTRA_MARGIN = 1;
++
++#endif // wxUSE_UXTHEME
++
++} // anonymous namespace
++
+ // ----------------------------------------------------------------------------
+ // macros
+ // ----------------------------------------------------------------------------
+@@ -61,17 +193,15 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxBitmapToggleButton, wxControl)
+ 
+ BEGIN_EVENT_TABLE(wxBitmapToggleButton,wxToggleButtonBase)
+-   EVT_PAINT(wxBitmapToggleButton::OnPaint)
+-   EVT_MOUSE_EVENTS(wxBitmapToggleButton::OnMouse)
+-   EVT_CHAR(wxBitmapToggleButton::OnChar)
+-   EVT_SIZE(wxBitmapToggleButton::OnSize)
++   EVT_SYS_COLOUR_CHANGED(wxBitmapToggleButton::OnSysColourChanged)
+ END_EVENT_TABLE()
+ 
+ void wxBitmapToggleButton::Init()
+ {
+-    m_depressed = false;
+-    m_oldValue = false;
+-    m_capturing = false;
++    m_imageData = NULL;
++    m_disabledSetByUser =
++    m_hoverSetByUser = false;
++    m_state = false;
+ }
+ 
+ bool wxBitmapToggleButton::Create( wxWindow *parent, wxWindowID id,
+@@ -79,172 +209,546 @@
+                 const wxValidator& validator, const wxString& name )
+ {
+     Init();
++    if ( !CreateControl(parent, id, pos, size, style, validator, name) )
++        return false;
+ 
+-    if (!wxToggleButtonBase::Create( parent, id, pos, size, style, validator, name ))
++    WXDWORD exstyle;
++    WXDWORD msStyle = MSWGetStyle(style, &exstyle);
++
++    if ( !MSWCreateControl(wxT("BUTTON"), msStyle, pos, size, wxT(""), exstyle) )
+         return false;
+ 
+-    m_bitmap = label;
++    SetLabel(label);
+ 
+-    if (size.x == -1 || size.y == -1)
++    if ( !size.IsFullySpecified() )
+     {
+-        wxSize new_size = GetBestSize();
+-        if (size.x != -1)
+-            new_size.x = size.x;
+-        if (size.y != -1)
+-            new_size.y = size.y;
+-        SetSize( new_size );
++        // As our bitmap has just changed, our best size has changed as well so
++        // reset the initial size using the new value.
++        SetInitialSize(size);
+     }
+ 
+     return true;
+ }
+ 
+-void wxBitmapToggleButton::SetValue(bool state)
++wxBitmapToggleButton::~wxBitmapToggleButton()
+ {
+-    if (m_capturing) return;
++    delete m_imageData;
++}
+ 
+-    if (state == m_depressed) return;
++// drawing helpers
++namespace
++{
+ 
+-    m_depressed = state;
+-    Refresh();
++// return the button state using both the ODS_XXX flags specified in state
++// parameter and the current button state
++wxButton::State GetButtonState(wxBitmapToggleButton *btn, UINT state)
++{
++    if ( state & ODS_DISABLED )
++        return wxButton::State_Disabled;
++
++    if ( state & ODS_SELECTED )
++        return wxButton::State_Pressed;
++
++    if ( btn->HasCapture() || btn->IsMouseInWindow() )
++        return wxButton::State_Current;
++
++    if ( state & ODS_FOCUS )
++        return wxButton::State_Focused;
++
++    return wxButton::State_Normal;
+ }
+ 
+-bool wxBitmapToggleButton::GetValue() const
++void DrawRect(HDC hdc, const RECT& r)
+ {
+-    return m_depressed;
++    wxDrawLine(hdc, r.left, r.top, r.right, r.top);
++    wxDrawLine(hdc, r.right, r.top, r.right, r.bottom);
++    wxDrawLine(hdc, r.right, r.bottom, r.left, r.bottom);
++    wxDrawLine(hdc, r.left, r.bottom, r.left, r.top);
+ }
+ 
+-void wxBitmapToggleButton::SetLabel(const wxBitmap& label)
++/*
++   The button frame looks like this normally:
++
++   WWWWWWWWWWWWWWWWWWB
++   WHHHHHHHHHHHHHHHHGB  W = white       (HILIGHT)
++   WH               GB  H = light grey  (LIGHT)
++   WH               GB  G = dark grey   (SHADOW)
++   WH               GB  B = black       (DKSHADOW)
++   WH               GB
++   WGGGGGGGGGGGGGGGGGB
++   BBBBBBBBBBBBBBBBBBB
++
++   When the button is selected, the button becomes like this (the total button
++   size doesn't change):
++
++   BBBBBBBBBBBBBBBBBBB
++   BWWWWWWWWWWWWWWWWBB
++   BWHHHHHHHHHHHHHHGBB
++   BWH             GBB
++   BWH             GBB
++   BWGGGGGGGGGGGGGGGBB
++   BBBBBBBBBBBBBBBBBBB
++   BBBBBBBBBBBBBBBBBBB
++
++   When the button is pushed (while selected) it is like:
++
++   BBBBBBBBBBBBBBBBBBB
++   BGGGGGGGGGGGGGGGGGB
++   BG               GB
++   BG               GB
++   BG               GB
++   BG               GB
++   BGGGGGGGGGGGGGGGGGB
++   BBBBBBBBBBBBBBBBBBB
++*/
++void DrawButtonFrame(HDC hdc, RECT& rectBtn,
++                     bool selected, bool pushed)
+ {
+-    m_bitmap = label;
+-    m_disabledBitmap = wxBitmap();
++    RECT r;
++    CopyRect(&r, &rectBtn);
+ 
+-    Refresh();
++    AutoHPEN hpenBlack(GetSysColor(COLOR_3DDKSHADOW)),
++             hpenGrey(GetSysColor(COLOR_3DSHADOW)),
++             hpenLightGr(GetSysColor(COLOR_3DLIGHT)),
++             hpenWhite(GetSysColor(COLOR_3DHILIGHT));
++
++    SelectInHDC selectPen(hdc, hpenBlack);
++
++    r.right--;
++    r.bottom--;
++
++    if ( pushed )
++    {
++        DrawRect(hdc, r);
++
++        (void)SelectObject(hdc, hpenGrey);
++        ::InflateRect(&r, -1, -1);
++
++        DrawRect(hdc, r);
++    }
++    else // !pushed
++    {
++        if ( selected )
++        {
++            DrawRect(hdc, r);
++
++            ::InflateRect(&r, -1, -1);
++        }
++
++        wxDrawLine(hdc, r.left, r.bottom, r.right, r.bottom);
++        wxDrawLine(hdc, r.right, r.bottom, r.right, r.top - 1);
++
++        (void)SelectObject(hdc, hpenWhite);
++        wxDrawLine(hdc, r.left, r.bottom - 1, r.left, r.top);
++        wxDrawLine(hdc, r.left, r.top, r.right, r.top);
++
++        (void)SelectObject(hdc, hpenLightGr);
++        wxDrawLine(hdc, r.left + 1, r.bottom - 2, r.left + 1, r.top + 1);
++        wxDrawLine(hdc, r.left + 1, r.top + 1, r.right - 1, r.top + 1);
++
++        (void)SelectObject(hdc, hpenGrey);
++        wxDrawLine(hdc, r.left + 1, r.bottom - 1, r.right - 1, r.bottom - 1);
++        wxDrawLine(hdc, r.right - 1, r.bottom - 1, r.right - 1, r.top);
++    }
++
++    InflateRect(&rectBtn, -OD_BUTTON_MARGIN, -OD_BUTTON_MARGIN);
+ }
+ 
+-bool wxBitmapToggleButton::Enable(bool enable)
++#if wxUSE_UXTHEME
++void DrawXPBackground(wxBitmapToggleButton *button, HDC hdc, RECT& rectBtn, UINT state)
+ {
+-    if (m_capturing) return false;
++    wxUxThemeHandle theme(button, L"BUTTON");
+ 
+-    if (!wxToggleButtonBase::Enable( enable ))
+-      return false;
++    // this array is indexed by wxButton::State values and so must be kept in
++    // sync with it
++    static const int uxStates[] =
++    {
++        PBS_NORMAL, PBS_HOT, PBS_PRESSED, PBS_DISABLED, PBS_DEFAULTED
++    };
+ 
+-    Refresh();
++    int iState = uxStates[GetButtonState(button, state)];
+ 
+-    return true;
++    wxUxThemeEngine * const engine = wxUxThemeEngine::Get();
++
++    // draw parent background if needed
++    if ( engine->IsThemeBackgroundPartiallyTransparent
++                 (
++                    theme,
++                    BP_PUSHBUTTON,
++                    iState
++                 ) )
++    {
++        engine->DrawThemeParentBackground(GetHwndOf(button), hdc, &rectBtn);
++    }
++
++    // draw background
++    engine->DrawThemeBackground(theme, hdc, BP_PUSHBUTTON, iState,
++                                &rectBtn, NULL);
++
++    // calculate content area margins
++    MARGINS margins;
++    engine->GetThemeMargins(theme, hdc, BP_PUSHBUTTON, iState,
++                            TMT_CONTENTMARGINS, &rectBtn, &margins);
++    ::InflateRect(&rectBtn, -margins.cxLeftWidth, -margins.cyTopHeight);
++    ::InflateRect(&rectBtn, -XP_BUTTON_EXTRA_MARGIN, -XP_BUTTON_EXTRA_MARGIN);
++
++    if ( button->UseBgCol() )
++    {
++        COLORREF colBg = wxColourToRGB(button->GetBackgroundColour());
++        AutoHBRUSH hbrushBackground(colBg);
++
++        // don't overwrite the focus rect
++        RECT rectClient;
++        ::CopyRect(&rectClient, &rectBtn);
++        ::InflateRect(&rectClient, -1, -1);
++        FillRect(hdc, &rectClient, hbrushBackground);
++    }
+ }
++#endif // wxUSE_UXTHEME
+ 
+-void wxBitmapToggleButton::OnPaint(wxPaintEvent &WXUNUSED(event))
++} // anonymous namespace
++
++bool wxBitmapToggleButton::MSWOnDraw(WXDRAWITEMSTRUCT *wxdis)
+ {
+-    wxSize size = GetSize();
++    LPDRAWITEMSTRUCT lpDIS = (LPDRAWITEMSTRUCT)wxdis;
++    HDC hdc = lpDIS->hDC;
+ 
+-    wxBitmap bitmap = m_bitmap;
++    UINT state = lpDIS->itemState;
++    if (GetValue())
++        state |= ODS_SELECTED;
++    bool pushed = (SendMessage(GetHwnd(), BM_GETSTATE, 0, 0) & BST_PUSHED) != 0 || GetValue();
+ 
+-    wxPaintDC dc(this);
+-    wxRendererNative &renderer = wxRendererNative::Get();
+-    int flags = 0;
+-    if (m_depressed)
+-        flags |= wxCONTROL_PRESSED;
+-    wxRect rect(0,0,size.x,size.y);
+-    renderer.DrawPushButton( this, dc, rect, flags );
++    RECT rectBtn;
++    CopyRect(&rectBtn, &lpDIS->rcItem);
+ 
+-    if (bitmap.IsOk())
++    // draw the button background
++    if ( !HasFlag(wxBORDER_NONE) )
+     {
+-        if (!IsEnabled())
++#if wxUSE_UXTHEME
++        if ( wxUxThemeEngine::GetIfActive() )
+         {
+-            if (!m_disabledBitmap.IsOk())
++            DrawXPBackground(this, hdc, rectBtn, state);
++        }
++        else
++#endif // wxUSE_UXTHEME
++        {
++            COLORREF colBg = wxColourToRGB(GetBackgroundColour());
++
++            // first, draw the background
++            AutoHBRUSH hbrushBackground(colBg);
++            FillRect(hdc, &rectBtn, hbrushBackground);
++
++            // draw the border for the current state
++            bool selected = (state & ODS_SELECTED) != 0;
++
++            DrawButtonFrame(hdc, rectBtn, selected, pushed);
++        }
++
++        // draw the focus rectangle if we need it
++        if ( (state & ODS_FOCUS) && !(state & ODS_NOFOCUSRECT) )
++        {
++            DrawFocusRect(hdc, &rectBtn);
++
++#if wxUSE_UXTHEME
++            if ( !wxUxThemeEngine::GetIfActive() )
++#endif // wxUSE_UXTHEME
+             {
+-                wxImage image = m_bitmap.ConvertToImage();
+-                m_disabledBitmap = wxBitmap( image.ConvertToGreyscale() );
++                if ( pushed )
++                {
++                    // the label is shifted by 1 pixel to create "pushed" effect
++                    OffsetRect(&rectBtn, 1, 1);
++                }
+             }
+-
+-            bitmap = m_disabledBitmap;
+         }
++    }
+ 
+-        wxSize bsize = bitmap.GetSize();
+-        int offset = 0;
+-        if (m_depressed) offset = 1;
+-        dc.DrawBitmap( bitmap, (size.x-bsize.x) / 2 + offset, (size.y-bsize.y) / 2 + offset, true );
++
++    // draw the image, if any
++    if ( m_imageData )
++    {
++        wxBitmap bmp = m_imageData->GetBitmap(GetButtonState(this, state));
++        if ( !bmp.IsOk() )
++            bmp = m_imageData->GetBitmap(wxButton::State_Normal);
++
++        const wxSize sizeBmp = bmp.GetSize();
++        const wxSize margin = m_imageData->GetBitmapMargins();
++        const wxSize sizeBmpWithMargins(sizeBmp + 2*margin);
++        wxRect rectButton(wxRectFromRECT(rectBtn));
++
++        // for simplicity, we start with centred rectangle and then move it to
++        // the appropriate edge
++        wxRect rectBitmap = wxRect(sizeBmp).CentreIn(rectButton);
++
++        wxDCTemp dst((WXHDC)hdc);
++        dst.DrawBitmap(bmp, rectBitmap.GetPosition(), true);
++
++        wxCopyRectToRECT(rectButton, rectBtn);
+     }
+ 
++    return true;
+ }
+ 
+-void wxBitmapToggleButton::OnMouse(wxMouseEvent &event)
++WXDWORD wxBitmapToggleButton::MSWGetStyle(long style, WXDWORD *exstyle) const
+ {
+-    if (!IsEnabled())
+-        return;
++    // buttons never have an external border, they draw their own one
++    WXDWORD msStyle = wxControl::MSWGetStyle
++                      (
++                        (style & ~wxBORDER_MASK) | wxBORDER_NONE, exstyle
++                      );
+ 
+-    wxSize size = GetSize();
+-    bool mouse_in = ((event.GetX() > 0) && (event.GetX() < size.x) &&
+-                     (event.GetY() > 0) && (event.GetY() < size.y));
++    // we must use WS_CLIPSIBLINGS with the buttons or they would draw over
++    // each other in any resizeable dialog which has more than one button in
++    // the bottom
++    msStyle |= WS_CLIPSIBLINGS;
+ 
+-    if (m_capturing)
++    // as in button.cpp, use owner drawn for bitmap-only buttons
++    msStyle |= BS_OWNERDRAW;
++
++    // don't use "else if" here: weird as it is, but you may combine wxBU_LEFT
++    // and wxBU_RIGHT to get BS_CENTER!
++    if ( style & wxBU_LEFT )
++        msStyle |= BS_LEFT;
++    if ( style & wxBU_RIGHT )
++        msStyle |= BS_RIGHT;
++    if ( style & wxBU_TOP )
++        msStyle |= BS_TOP;
++    if ( style & wxBU_BOTTOM )
++        msStyle |= BS_BOTTOM;
++#ifndef __WXWINCE__
++    // flat 2d buttons
++    if ( style & wxNO_BORDER )
++        msStyle |= BS_FLAT;
++#endif // __WXWINCE__
++
++    return msStyle;
++}
++
++void wxBitmapToggleButton::AdjustForBitmapSize(wxSize &size) const
++{
++    wxCHECK_RET( m_imageData, wxT("shouldn't be called if no image") );
++
++    // account for the bitmap size
++    const wxSize sizeBmp = m_imageData->GetBitmap(wxButton::State_Normal).GetSize();
++    const wxDirection dirBmp = m_imageData->GetBitmapPosition();
++    if ( dirBmp == wxLEFT || dirBmp == wxRIGHT )
+     {
+-        bool old_depressed = m_depressed;
+-        if (mouse_in)
+-            m_depressed = !m_oldValue;
+-        else
+-            m_depressed = m_oldValue;
++        size.x += sizeBmp.x;
++        if ( sizeBmp.y > size.y )
++            size.y = sizeBmp.y;
++    }
++    else // bitmap on top/below the text
++    {
++        size.y += sizeBmp.y;
++        if ( sizeBmp.x > size.x )
++            size.x = sizeBmp.x;
++    }
+ 
+-        if (event.LeftUp())
++    // account for the user-specified margins
++    size += 2*m_imageData->GetBitmapMargins();
++
++    // and also for the margins we always add internally (unless we have no
++    // border at all in which case the button has exactly the same size as
++    // bitmap and so no margins should be used)
++    if ( !HasFlag(wxBORDER_NONE) )
++    {
++        int marginH = 0,
++            marginV = 0;
++#if wxUSE_UXTHEME
++        if ( wxUxThemeEngine::GetIfActive() )
+         {
+-            ReleaseMouse();
+-            m_capturing = false;
+-            if (mouse_in)
+-            {
+-                wxCommandEvent event(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, m_windowId);
+-                event.SetInt(GetValue());
+-                event.SetEventObject(this);
+-                ProcessCommand(event);
+-            }
++            wxUxThemeHandle theme(const_cast<wxBitmapToggleButton *>(this), L"BUTTON");
++
++            MARGINS margins;
++            wxUxThemeEngine::Get()->GetThemeMargins(theme, NULL,
++                                                    BP_PUSHBUTTON,
++                                                    PBS_NORMAL,
++                                                    TMT_CONTENTMARGINS,
++                                                    NULL,
++                                                    &margins);
++
++            // XP doesn't draw themed buttons correctly when the client
++            // area is smaller than 8x8 - enforce this minimum size for
++            // small bitmaps
++            size.IncTo(wxSize(8, 8));
++
++            marginH = margins.cxLeftWidth + margins.cxRightWidth
++                        + 2*XP_BUTTON_EXTRA_MARGIN;
++            marginV = margins.cyTopHeight + margins.cyBottomHeight
++                        + 2*XP_BUTTON_EXTRA_MARGIN;
+         }
++        else
++#endif // wxUSE_UXTHEME
++        {
++            marginH =
++            marginV = OD_BUTTON_MARGIN;
++        }
+ 
+-        if (old_depressed != m_depressed)
+-           Refresh();
++        size.IncBy(marginH, marginV);
+     }
++}
++
++wxSize wxBitmapToggleButton::DoGetBestSize() const
++{
++    wxBitmapToggleButton * const self = const_cast<wxBitmapToggleButton *>(this);
++
++    wxSize size;
++
++    if ( m_imageData )
++        AdjustForBitmapSize(size);
++
++    return wxMSWButton::IncreaseToStdSizeAndCache(self, size);
++}
++
++void wxBitmapToggleButton::DoSetBitmapBase(const wxBitmap& bitmap, wxButton::State which)
++{
++    // allocate the image data when the first bitmap is set
++    if ( !m_imageData )
++    {
++        m_imageData = new wxODToggleButtonImageData(this, bitmap);
++    }
+     else
+     {
+-        if (event.LeftDown())
++        m_imageData->SetBitmap(bitmap, which);
++    }
++
++    // it should be enough to only invalidate the best size when the normal
++    // bitmap changes as all bitmaps assigned to the button should be of the
++    // same size anyhow
++    if ( which == wxButton::State_Normal )
++        InvalidateBestSize();
++
++    Refresh();
++}
++
++void wxBitmapToggleButton::DoSetBitmap(const wxBitmap& bitmap, wxButton::State which)
++{
++    if ( bitmap.IsOk() )
++    {
++        switch ( which )
+         {
+-            m_capturing = true;
+-            m_oldValue = m_depressed;
+-            m_depressed = !m_oldValue;
+-            CaptureMouse();
+-            Refresh();
++#if wxUSE_IMAGE
++            case wxButton::State_Normal:
++                if ( !HasFlag(wxBU_AUTODRAW) && !m_disabledSetByUser )
++                {
++                    wxImage img(bitmap.ConvertToImage().ConvertToGreyscale());
++                    DoSetBitmapBase(img, wxButton::State_Disabled);
++                }
++                break;
++#endif // wxUSE_IMAGE
++
++            case wxButton::State_Focused:
++                // if the focus bitmap is specified but current one isn't, use
++                // the focus bitmap for hovering as well if this is consistent
++                // with the current Windows version look and feel
++                //
++                // rationale: this is compatible with the old wxGTK behaviour
++                // and also makes it much easier to do "the right thing" for
++                // all platforms (some of them, such as Windows XP, have "hot"
++                // buttons while others don't)
++                if ( !m_hoverSetByUser )
++                    DoSetBitmapBase(bitmap, wxButton::State_Current);
++                break;
++
++            case wxButton::State_Current:
++                // don't overwrite it with the focused bitmap
++                m_hoverSetByUser = true;
++                break;
++
++            case wxButton::State_Disabled:
++                // don't overwrite it with the version automatically created
++                // from the normal one
++                m_disabledSetByUser = true;
++                break;
++
++            default:
++                // nothing special to do but include the default clause to
++                // suppress gcc warnings
++                ;
+         }
+     }
++
++    DoSetBitmapBase(bitmap, which);
+ }
+ 
+-void wxBitmapToggleButton::OnChar(wxKeyEvent &event)
++void wxBitmapToggleButton::SetValue(bool val)
+ {
+-   if (event.GetKeyCode() == WXK_SPACE)
+-   {
+-       m_depressed = !m_depressed;
+-       Refresh();
++    m_state = val;
++    Refresh();
++}
+ 
+-       wxCommandEvent event(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, m_windowId);
+-       event.SetInt(GetValue());
+-       event.SetEventObject(this);
+-       ProcessCommand(event);
+-   }
++bool wxBitmapToggleButton::GetValue() const
++{
++    return m_state;
+ }
+ 
+-void wxBitmapToggleButton::OnSize(wxSizeEvent &WXUNUSED(event))
++void wxBitmapToggleButton::Command(wxCommandEvent& event)
+ {
+-    Refresh();
++    SetValue(event.GetInt() != 0);
++    ProcessCommand(event);
+ }
+ 
+-wxSize wxBitmapToggleButton::DoGetBestSize() const
++bool wxBitmapToggleButton::MSWCommand(WXUINT cmd, WXWORD WXUNUSED(id))
+ {
+-    if (!m_bitmap.IsOk())
+-        return wxSize(16,16);
++    if ( cmd != BN_CLICKED && cmd != BN_DBLCLK )
++        return false;
+ 
+-    wxSize ret = m_bitmap.GetSize();
+-    ret.x += 8;
+-    ret.y += 8;
+-    return ret;
++    // first update the value so that user event handler gets the new checkbox
++    // value
++
++    // ownerdrawn buttons don't manage their state themselves unlike usual
++    // auto checkboxes so do it ourselves in any case
++    m_state = !m_state;
++
++    wxCommandEvent event(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, m_windowId);
++    event.SetInt(GetValue());
++    event.SetEventObject(this);
++    ProcessCommand(event);
++    return true;
+ }
+ 
++WXLRESULT wxBitmapToggleButton::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam)
++{
++    if ( nMsg == WM_LBUTTONDBLCLK )
++    {
++        // emulate a click event to force an owner-drawn button to change its
++        // appearance - without this, it won't do it
++        (void)wxControl::MSWWindowProc(WM_LBUTTONDOWN, wParam, lParam);
+ 
++        // and continue with processing the message normally as well
++    }
++#if wxUSE_UXTHEME
++    else if ( nMsg == WM_THEMECHANGED )
++    {
++        // need to recalculate the best size here
++        // as the theme size might have changed
++        InvalidateBestSize();
++    }
++#endif // wxUSE_UXTHEME
++    // must use m_mouseInWindow here instead of IsMouseInWindow()
++    // since we need to know the first time the mouse enters the window
++    // and IsMouseInWindow() would return true in this case
++    else if ( (nMsg == WM_MOUSEMOVE && !m_mouseInWindow) ||
++                nMsg == WM_MOUSELEAVE )
++    {
++        if (
++                IsEnabled() &&
++                (
++#if wxUSE_UXTHEME
++                wxUxThemeEngine::GetIfActive() ||
++#endif // wxUSE_UXTHEME
++                 (m_imageData && m_imageData->GetBitmap(wxButton::State_Current).IsOk())
++                )
++           )
++        {
++            Refresh();
++        }
++    }
++
++    // let the base class do all real processing
++    return wxControl::MSWWindowProc(nMsg, wParam, lParam);
++}
++
++
+ // ----------------------------------------------------------------------------
+ // wxToggleButton
+ // ----------------------------------------------------------------------------
+@@ -308,7 +812,7 @@
+ 
+ void wxToggleButton::SetValue(bool val)
+ {
+-   ::SendMessage(GetHwnd(), BM_SETCHECK, val, 0);
++    ::SendMessage(GetHwnd(), BM_SETCHECK, val, 0);
+ }
+ 
+ bool wxToggleButton::GetValue() const
+Index: include/wx/msw/tglbtn.h
+===================================================================
+--- include/wx/msw/tglbtn.h	(revision 66945)
++++ include/wx/msw/tglbtn.h	(working copy)
+@@ -36,6 +36,7 @@
+                    const wxValidator& validator = wxDefaultValidator,
+                    const wxString& name = wxCheckBoxNameStr)
+     {
++        Init();
+         Create(parent, id, label, pos, size, style, validator, name);
+     }
+ 
+@@ -47,6 +48,7 @@
+                 const wxSize& size = wxDefaultSize, long style = 0,
+                 const wxValidator& validator = wxDefaultValidator,
+                 const wxString& name = wxCheckBoxNameStr);
++    virtual ~wxBitmapToggleButton();
+ 
+     // Get/set the value
+     void SetValue(bool state);
+@@ -54,24 +56,45 @@
+ 
+     // Set the label
+     virtual void SetLabel(const wxString& label) { wxControl::SetLabel(label); }
+-    virtual void SetLabel(const wxBitmap& label);
+-    bool Enable(bool enable = true);
++    virtual void SetLabel(const wxBitmap& bitmap) { DoSetBitmap(bitmap, wxButton::State_Normal); }
+ 
++    virtual bool MSWCommand(WXUINT param, WXWORD id);
++    virtual WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam);
++    virtual void Command(wxCommandEvent& event);
++
++    // returns true if the platform should explicitly apply a theme border
++    virtual bool CanApplyThemeBorder() const { return false; }
++
+ protected:
+     void Init();
++    virtual wxBorder GetDefaultBorder() const { return wxBORDER_NONE; }
++    virtual wxSize DoGetBestSize() const;
++    void DoSetBitmapBase(const wxBitmap& bitmap, wxButton::State which);
++    virtual void DoSetBitmap(const wxBitmap& bitmap, wxButton::State which);
+ 
+-    wxBitmap  m_bitmap;
+-    wxBitmap  m_disabledBitmap;
+-    bool      m_capturing;
+-    bool      m_depressed,m_oldValue;
++    virtual bool MSWOnDraw(WXDRAWITEMSTRUCT *item);
++    virtual WXDWORD MSWGetStyle(long flags, WXDWORD *exstyle = NULL) const;
+ 
+-    void OnPaint(wxPaintEvent &event);
+-    void OnMouse(wxMouseEvent &event);
+-    void OnChar(wxKeyEvent &event);
+-    void OnSize(wxSizeEvent &event);
++    // Increases the passed in size to account for the button image.
++    //
++    // Should only be called if we do have a button, i.e. if m_imageData is
++    // non-NULL.
++    void AdjustForBitmapSize(wxSize& size) const;
+ 
+-    virtual wxSize DoGetBestSize() const;
++    class wxButtonImageData *m_imageData;
+ 
++    // true if disabled bitmap was set by user, false if we created it
++    // ourselves from the normal one
++    bool m_disabledSetByUser;
++
++    // true if hover bitmap was set by user, false if it was set from focused
++    // one
++    bool m_hoverSetByUser;
++
++    // current state of the button
++    bool m_state;
++
++
+ private:
+     DECLARE_EVENT_TABLE()
+     DECLARE_DYNAMIC_CLASS(wxBitmapToggleButton)
+Index: include/wx/msw/private/button.h
+===================================================================
+--- include/wx/msw/private/button.h	(revision 66945)
++++ include/wx/msw/private/button.h	(working copy)
+@@ -72,5 +72,24 @@
+ 
+ } // namespace wxMSWButton
+ 
++class wxButtonImageData
++{
++public:
++    wxButtonImageData() { }
++    virtual ~wxButtonImageData() { }
++
++    virtual wxBitmap GetBitmap(wxButton::State which) const = 0;
++    virtual void SetBitmap(const wxBitmap& bitmap, wxButton::State which) = 0;
++
++    virtual wxSize GetBitmapMargins() const = 0;
++    virtual void SetBitmapMargins(wxCoord x, wxCoord y) = 0;
++
++    virtual wxDirection GetBitmapPosition() const = 0;
++    virtual void SetBitmapPosition(wxDirection dir) = 0;
++
++private:
++    wxDECLARE_NO_COPY_CLASS(wxButtonImageData);
++};
++
+ #endif // _WX_MSW_PRIVATE_BUTTON_H_
+ 

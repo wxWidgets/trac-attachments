@@ -1,0 +1,774 @@
+Index: include/wx/xml/xml.h
+===================================================================
+--- include/wx/xml/xml.h	(revision 65945)
++++ include/wx/xml/xml.h	(working copy)
+@@ -257,7 +257,7 @@
+                   const wxString& encoding = wxT("UTF-8"));
+     wxXmlDocument(wxInputStream& stream,
+                   const wxString& encoding = wxT("UTF-8"));
+-    virtual ~wxXmlDocument() { wxDELETE(m_root); }
++    virtual ~wxXmlDocument() { wxDELETE(m_docNode); }
+ 
+     wxXmlDocument(const wxXmlDocument& doc);
+     wxXmlDocument& operator=(const wxXmlDocument& doc);
+@@ -273,11 +273,14 @@
+     virtual bool Save(const wxString& filename, int indentstep = 2) const;
+     virtual bool Save(wxOutputStream& stream, int indentstep = 2) const;
+ 
+-    bool IsOk() const { return m_root != NULL; }
++    bool IsOk() const { return GetRoot() != NULL; }
+ 
+     // Returns root node of the document.
+-    wxXmlNode *GetRoot() const { return m_root; }
++    wxXmlNode *GetRoot() const;
++    // Returns the document node.
++    wxXmlNode *GetDocumentNode() const { return m_docNode; }
+ 
++
+     // Returns version of document (may be empty).
+     const wxString& GetVersion() const { return m_version; }
+     // Returns encoding of document (may be empty).
+@@ -286,10 +289,13 @@
+     const wxString& GetFileEncoding() const { return m_fileEncoding; }
+ 
+     // Write-access methods:
+-    wxXmlNode *DetachRoot() { wxXmlNode *old=m_root; m_root=NULL; return old; }
+-    void SetRoot(wxXmlNode *node) { wxDELETE(m_root); m_root = node; }
++    wxXmlNode *DetachDocumentNode() { wxXmlNode *old=m_docNode; m_docNode=NULL; return old; }
++    void SetDocumentNode(wxXmlNode *node) { wxDELETE(m_docNode); m_docNode = node; }
++    wxXmlNode *DetachRoot();
++    void SetRoot(wxXmlNode *node);
+     void SetVersion(const wxString& version) { m_version = version; }
+     void SetFileEncoding(const wxString& encoding) { m_fileEncoding = encoding; }
++    void AppendToProlog(wxXmlNode *node);
+ 
+ #if !wxUSE_UNICODE
+     // Returns encoding of in-memory representation of the document
+@@ -305,7 +311,7 @@
+ #if !wxUSE_UNICODE
+     wxString   m_encoding;
+ #endif
+-    wxXmlNode *m_root;
++    wxXmlNode *m_docNode;
+ 
+     void DoCopy(const wxXmlDocument& doc);
+ 
+Index: interface/wx/xml/xml.h
+===================================================================
+--- interface/wx/xml/xml.h	(revision 65945)
++++ interface/wx/xml/xml.h	(working copy)
+@@ -40,6 +40,11 @@
+     @c title and irrelevant content and one child of type @c wxXML_TEXT_NODE
+     with @c hi as content.
+ 
++    The @c wxXML_PI_NODE type sets the name to the PI target and the contents to
++    the instructions. Note that whilst the PI instructions are often in the form
++    of pseudo-attributes these do not use the nodes attribute system. It is the users
++    responsibility to code and decode the instruction text.
++
+     If @c wxUSE_UNICODE is 0, all strings are encoded in the encoding given to
+     wxXmlDocument::Load (default is UTF-8).
+ 
+@@ -179,7 +184,7 @@
+ 
+         This function searches only the parents of this node until it finds
+         @a grandparent or the @NULL node (which is the parent of non-linked
+-        nodes or the parent of a wxXmlDocument's root node).
++        nodes or the parent of a wxXmlDocument's root element node).
+     */
+     int GetDepth(wxXmlNode* grandparent = NULL) const;
+ 
+@@ -215,14 +220,14 @@
+         is represented by expat with the following tag tree:
+ 
+         @code
+-        wxXML_ENTITY_NODE name="tagname", content=""
++        wxXML_ELEMENT_NODE name="tagname", content=""
+         |-- wxXML_TEXT_NODE name="", content="tagcontent"
+         @endcode
+ 
+         or eventually:
+ 
+         @code
+-        wxXML_ENTITY_NODE name="tagname", content=""
++        wxXML_ELEMENT_NODE name="tagname", content=""
+         |-- wxXML_CDATA_SECTION_NODE name="", content="tagcontent"
+         @endcode
+ 
+@@ -449,6 +454,20 @@
+     if (doc.GetRoot()->GetName() != "myroot-node")
+         return false;
+ 
++    // examine prolog
++    wxXmlNode *prolog = doc.GetDocumentNode()->GetChildren();
++    while (prolog) {
++
++        if (prolog->GetType() == wxXML_PI_NODE && prolog->GetName() == "target") {
++
++            // process Process Instruction contents
++            wxString pi = prolog->GetContent();
++
++            ...
++
++        }
++    }
++
+     wxXmlNode *child = doc.GetRoot()->GetChildren();
+     while (child) {
+ 
+@@ -533,14 +552,38 @@
+     virtual ~wxXmlDocument();
+ 
+     /**
+-        Detaches the document root node and returns it.
++        Appends a Process Instruction or Comment node to the document prolog.
+ 
+-        The document root node will be set to @NULL and thus IsOk() will
++        Calling this function will create a prolog or attach the node to the end
++        of an existing prolog.
++
++        @since 2.9.2
++    */
++    void AppendToProlog(wxXmlNode* node);
++
++    /**
++        Detaches the document node and returns it.
++
++        The document node will be set to @NULL and thus IsOk() will
+         return @false after calling this function.
+ 
+         Note that the caller is reponsible for deleting the returned node in order
+         to avoid memory leaks.
++
++        @since 2.9.2
+     */
++    wxXmlNode* DetachDocumentNode();
++
++    /**
++        Detaches the root entity node and returns it.
++
++        After calling this function, the document node will remain together with
++        any prolog nodes, but IsOk() will return @false since the root entity
++        will be missing.
++
++        Note that the caller is reponsible for deleting the returned node in order
++        to avoid memory leaks.
++    */
+     wxXmlNode* DetachRoot();
+ 
+     /**
+@@ -560,8 +603,15 @@
+     const wxString& GetFileEncoding() const;
+ 
+     /**
+-        Returns the root node of the document.
++        Returns the document node of the document.
++
++        @since 2.9.2
+     */
++    wxXmlNode* GetDocumentNode() const;
++
++    /**
++        Returns the root element node of the document.
++    */
+     wxXmlNode* GetRoot() const;
+ 
+     /**
+@@ -620,8 +670,19 @@
+     virtual bool Save(wxOutputStream& stream, int indentstep = 2) const;
+ 
+     /**
+-        Sets the enconding of the document.
++        Sets the document node of this document.
++
++        Deletes any previous document node.
++        Use DetachDocumentNode() and then SetDocumentNode() if you want to
++        replace the document node without deleting the old document tree.
++
++        @since 2.9.2
+     */
++    void SetDocumentNode(wxXmlNode* node);
++
++    /**
++        Sets the encoding of the document.
++    */
+     void SetEncoding(const wxString& enc);
+ 
+     /**
+@@ -630,9 +691,10 @@
+     void SetFileEncoding(const wxString& encoding);
+ 
+     /**
+-        Sets the root node of this document. Deletes previous root node.
+-        Use DetachRoot() and then SetRoot() if you want to replace the root
+-        node without deleting the old document tree.
++        Sets the root element node of this document.
++
++        Will create the document node if necessary. Any previous
++        root element node is deleted.
+     */
+     void SetRoot(wxXmlNode* node);
+ 
+Index: src/xml/xml.cpp
+===================================================================
+--- src/xml/xml.cpp	(revision 65945)
++++ src/xml/xml.cpp	(working copy)
+@@ -395,7 +395,7 @@
+ //-----------------------------------------------------------------------------
+ 
+ wxXmlDocument::wxXmlDocument()
+-    : m_version(wxS("1.0")), m_fileEncoding(wxS("utf-8")), m_root(NULL)
++    : m_version(wxS("1.0")), m_fileEncoding(wxS("UTF-8")), m_docNode(NULL)
+ {
+ #if !wxUSE_UNICODE
+     m_encoding = wxS("UTF-8");
+@@ -403,20 +403,20 @@
+ }
+ 
+ wxXmlDocument::wxXmlDocument(const wxString& filename, const wxString& encoding)
+-              :wxObject(), m_root(NULL)
++              :wxObject(), m_docNode(NULL)
+ {
+     if ( !Load(filename, encoding) )
+     {
+-        wxDELETE(m_root);
++        wxDELETE(m_docNode);
+     }
+ }
+ 
+ wxXmlDocument::wxXmlDocument(wxInputStream& stream, const wxString& encoding)
+-              :wxObject(), m_root(NULL)
++              :wxObject(), m_docNode(NULL)
+ {
+     if ( !Load(stream, encoding) )
+     {
+-        wxDELETE(m_root);
++        wxDELETE(m_docNode);
+     }
+ }
+ 
+@@ -428,7 +428,7 @@
+ 
+ wxXmlDocument& wxXmlDocument::operator=(const wxXmlDocument& doc)
+ {
+-    wxDELETE(m_root);
++    wxDELETE(m_docNode);
+     DoCopy(doc);
+     return *this;
+ }
+@@ -441,10 +441,10 @@
+ #endif
+     m_fileEncoding = doc.m_fileEncoding;
+ 
+-    if (doc.m_root)
+-        m_root = new wxXmlNode(*doc.m_root);
++    if (doc.m_docNode)
++        m_docNode = new wxXmlNode(*doc.m_docNode);
+     else
+-        m_root = NULL;
++        m_docNode = NULL;
+ }
+ 
+ bool wxXmlDocument::Load(const wxString& filename, const wxString& encoding, int flags)
+@@ -463,8 +463,84 @@
+     return Save(stream, indentstep);
+ }
+ 
++wxXmlNode *wxXmlDocument::GetRoot() const
++{
++    wxXmlNode *node = m_docNode;
++    if (node)
++    {
++        node = m_docNode->GetChildren();
++        while (node != NULL && node->GetType() != wxXML_ELEMENT_NODE)
++            node = node->GetNext();
++    }
++    return node;
++}
+ 
++wxXmlNode *wxXmlDocument::DetachRoot()
++{
++    wxXmlNode *node = m_docNode;
++    if (node)
++    {
++        node = m_docNode->GetChildren();
++        wxXmlNode *prev = NULL;
++        while (node != NULL && node->GetType() != wxXML_ELEMENT_NODE)
++        {
++            prev = node;
++            node = node->GetNext();
++        }
++        if (node)
++        {
++            if (node == m_docNode->GetChildren())
++                m_docNode->SetChildren(node->GetNext());
+ 
++            if (prev)
++                prev->SetNext(node->GetNext());
++
++            node->SetParent(NULL);
++            node->SetNext(NULL);
++        }
++    }
++    return node;
++}
++
++void wxXmlDocument::SetRoot(wxXmlNode *root)
++{
++    wxXmlNode *node = m_docNode;
++    if (node)
++    {
++        node = m_docNode->GetChildren();
++        wxXmlNode *prev = NULL;
++        while (node != NULL && node->GetType() != wxXML_ELEMENT_NODE)
++        {
++            prev = node;
++            node = node->GetNext();
++        }
++        if (node)
++        {
++            root->SetNext( node->GetNext() );
++            wxDELETE(node);
++        }
++        if (prev)
++            prev->SetNext(root);
++        else
++            m_docNode->SetChildren(root);
++    }
++    else
++    {
++        m_docNode = new wxXmlNode(wxXML_DOCUMENT_NODE, wxEmptyString);
++    }
++    root->SetParent(m_docNode);
++}
++
++void wxXmlDocument::AppendToProlog(wxXmlNode *node)
++{
++    if (!m_docNode)
++        m_docNode = new wxXmlNode(wxXML_DOCUMENT_NODE, wxEmptyString);
++    if (IsOk())
++        m_docNode->InsertChild( node, GetRoot() );
++    else
++        m_docNode->AddChild( node );
++}
++
+ //-----------------------------------------------------------------------------
+ //  wxXmlDocument loading routines
+ //-----------------------------------------------------------------------------
+@@ -508,7 +584,6 @@
+ {
+     wxXmlParsingContext()
+         : conv(NULL),
+-          root(NULL),
+           node(NULL),
+           lastChild(NULL),
+           lastAsText(NULL),
+@@ -517,7 +592,6 @@
+ 
+     XML_Parser parser;
+     wxMBConv  *conv;
+-    wxXmlNode *root;
+     wxXmlNode *node;                    // the node being parsed
+     wxXmlNode *lastChild;               // the last child of "node"
+     wxXmlNode *lastAsText;              // the last _text_ child of "node"
+@@ -550,16 +624,8 @@
+         a += 2;
+     }
+ 
+-    if (ctx->root == NULL)
+-    {
+-        ctx->root = node;
+-    }
+-    else
+-    {
+-        ASSERT_LAST_CHILD_OK(ctx);
+-        ctx->node->InsertChildAfter(node, ctx->lastChild);
+-    }
+-
++    ASSERT_LAST_CHILD_OK(ctx);
++    ctx->node->InsertChildAfter(node, ctx->lastChild);
+     ctx->lastAsText = NULL;
+     ctx->lastChild = NULL; // our new node "node" has no children yet
+ 
+@@ -635,21 +701,29 @@
+ {
+     wxXmlParsingContext *ctx = (wxXmlParsingContext*)userData;
+ 
+-    if (ctx->node)
+-    {
+-        wxXmlNode *commentnode =
+-            new wxXmlNode(wxXML_COMMENT_NODE,
+-                          wxS("comment"), CharToString(ctx->conv, data),
+-                          XML_GetCurrentLineNumber(ctx->parser));
++    wxXmlNode *commentnode =
++        new wxXmlNode(wxXML_COMMENT_NODE,
++                      wxS("comment"), CharToString(ctx->conv, data),
++                      XML_GetCurrentLineNumber(ctx->parser));
+ 
+-        ASSERT_LAST_CHILD_OK(ctx);
+-        ctx->node->InsertChildAfter(commentnode, ctx->lastChild);
+-        ctx->lastChild = commentnode;
+-    }
+-    //else: ctx->node == NULL happens if there is a comment before
+-    //      the root element. We current don't have a way to represent
+-    //      these in wxXmlDocument (FIXME).
++    ASSERT_LAST_CHILD_OK(ctx);
++    ctx->node->InsertChildAfter(commentnode, ctx->lastChild);
++    ctx->lastChild = commentnode;
++    ctx->lastAsText = NULL;
++}
+ 
++static void PIHnd(void *userData, const char *target, const char *data)
++{
++    wxXmlParsingContext *ctx = (wxXmlParsingContext*)userData;
++
++    wxXmlNode *pinode =
++        new wxXmlNode(wxXML_PI_NODE, CharToString(ctx->conv, target),
++                      CharToString(ctx->conv, data),
++                      XML_GetCurrentLineNumber(ctx->parser));
++
++    ASSERT_LAST_CHILD_OK(ctx);
++    ctx->node->InsertChildAfter(pinode, ctx->lastChild);
++    ctx->lastChild = pinode;
+     ctx->lastAsText = NULL;
+ }
+ 
+@@ -717,6 +791,7 @@
+     wxXmlParsingContext ctx;
+     bool done;
+     XML_Parser parser = XML_ParserCreate(NULL);
++    wxXmlNode *root = new wxXmlNode(wxXML_DOCUMENT_NODE, wxEmptyString);
+ 
+     ctx.encoding = wxS("UTF-8"); // default in absence of encoding=""
+     ctx.conv = NULL;
+@@ -726,12 +801,14 @@
+ #endif
+     ctx.removeWhiteOnlyNodes = (flags & wxXMLDOC_KEEP_WHITESPACE_NODES) == 0;
+     ctx.parser = parser;
++    ctx.node = root;
+ 
+     XML_SetUserData(parser, (void*)&ctx);
+     XML_SetElementHandler(parser, StartElementHnd, EndElementHnd);
+     XML_SetCharacterDataHandler(parser, TextHnd);
+     XML_SetCdataSectionHandler(parser, StartCdataHnd, EndCdataHnd);;
+     XML_SetCommentHandler(parser, CommentHnd);
++    XML_SetProcessingInstructionHandler(parser, PIHnd);
+     XML_SetDefaultHandler(parser, DefaultHnd);
+     XML_SetUnknownEncodingHandler(parser, UnknownEncodingHnd, NULL);
+ 
+@@ -758,11 +835,11 @@
+             SetVersion(ctx.version);
+         if (!ctx.encoding.empty())
+             SetFileEncoding(ctx.encoding);
+-        SetRoot(ctx.root);
++        SetDocumentNode(root);
+     }
+     else
+     {
+-        delete ctx.root;
++        delete root;
+     }
+ 
+     XML_ParserFree(parser);
+@@ -994,6 +1071,14 @@
+                  OutputString(stream, wxS("-->"), convMem, convFile);
+             break;
+ 
++        case wxXML_PI_NODE:
++            rc = OutputString(stream, wxT("<?"), convMem, convFile) &&
++                 OutputString(stream, node->GetName(), convMem, convFile) &&
++                 OutputString(stream, wxT(" "), convMem, convFile) &&
++                 OutputString(stream, node->GetContent(), convMem, convFile) &&
++                 OutputString(stream, wxT("?>"), convMem, convFile);
++            break;
++
+         default:
+             wxFAIL_MSG("unsupported node type");
+             rc = false;
+@@ -1022,17 +1107,24 @@
+     //else: file and in-memory encodings are the same, no conversion needed
+ #endif
+ 
+-    return OutputString(stream,
+-                        wxString::Format
+-                        (
+-                         wxS("<?xml version=\"%s\" encoding=\"%s\"?>\n"),
+-                         GetVersion(), GetFileEncoding()
+-                        ),
+-                        convMem.get(),
+-                        convFile.get()) &&
+-           OutputNode(stream, GetRoot(), 0,
+-                      convMem.get(), convFile.get(), indentstep) &&
+-           OutputString(stream, wxS("\n"), convMem.get(), convFile.get());
++    wxString dec = wxString::Format(
++                                    wxS("<?xml version=\"%s\" encoding=\"%s\"?>\n"),
++                                    GetVersion(), GetFileEncoding()
++                                   );
++    bool rc = OutputString(stream, dec, convMem.get(), convFile.get());
++
++    wxXmlNode *node = GetDocumentNode();
++    if ( node )
++        node = node->GetChildren();
++
++    while( rc && node )
++    {
++        rc = OutputNode(stream, node, 0, convMem.get(),
++                        convFile.get(), indentstep) &&
++             OutputString(stream, wxS("\n"), convMem.get(), convFile.get());
++        node = node->GetNext();
++    }
++    return rc;
+ }
+ 
+ #endif // wxUSE_XML
+Index: tests/xml/xmltest.cpp
+===================================================================
+--- tests/xml/xmltest.cpp	(revision 65945)
++++ tests/xml/xmltest.cpp	(working copy)
+@@ -22,6 +22,7 @@
+ #endif // WX_PRECOMP
+ 
+ #include "wx/xml/xml.h"
++
+ #include "wx/sstream.h"
+ 
+ #include <stdarg.h>
+@@ -76,14 +77,20 @@
+         CPPUNIT_TEST( InsertChildAfter );
+         CPPUNIT_TEST( LoadSave );
+         CPPUNIT_TEST( CDATA );
++        CPPUNIT_TEST( PI );
+         CPPUNIT_TEST( Escaping );
++        CPPUNIT_TEST( DetachRoot );
++        CPPUNIT_TEST( AppendToProlog );
+     CPPUNIT_TEST_SUITE_END();
+ 
+     void InsertChild();
+     void InsertChildAfter();
+     void LoadSave();
+     void CDATA();
++    void PI();
+     void Escaping();
++    void DetachRoot();
++    void AppendToProlog();
+ 
+     DECLARE_NO_COPY_CLASS(XmlTestCase)
+ };
+@@ -112,6 +119,8 @@
+     // and in the middle:
+     root->InsertChild(new wxXmlNode(wxXML_ELEMENT_NODE, "C"), two);
+     CheckXml(root, "B", "A", "1", "C", "2", "3", NULL);
++
++    delete root;
+ }
+ 
+ void XmlTestCase::InsertChildAfter()
+@@ -136,6 +145,8 @@
+     // and at the end:
+     root->InsertChildAfter(new wxXmlNode(wxXML_ELEMENT_NODE, "C"), three);
+     CheckXml(root, "1", "A", "2", "B", "3", "C", NULL);
++
++    delete root;
+ }
+ 
+ void XmlTestCase::LoadSave()
+@@ -149,6 +160,7 @@
+     const char *xmlText =
+ "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n"
+ "<resource xmlns=\"http://www.wxwidgets.org/wxxrc\" version=\"2.3.0.1\">\n"
++"  <!-- Test comment -->\n"
+ "  <object class=\"wxDialog\" name=\"my_dialog\">\n"
+ "    <children>\n"
+ "      <grandchild id=\"1\"/>\n"
+@@ -191,6 +203,30 @@
+     CPPUNIT_ASSERT( doc.Save(sos8) );
+     CPPUNIT_ASSERT_EQUAL( wxString(utf8xmlText),
+                           wxString(sos8.GetString().ToUTF8()) );
++
++    const char *xmlTextProlog =
++"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++"<!-- Prolog comment -->\n"
++"<?xml-stylesheet href=\"style.css\" type=\"text/css\"?>\n"
++"<resource xmlns=\"http://www.wxwidgets.org/wxxrc\" version=\"2.3.0.1\">\n"
++"  <!-- Test comment -->\n"
++"  <object class=\"wxDialog\" name=\"my_dialog\">\n"
++"    <children>\n"
++"      <grandchild id=\"1\"/>\n"
++"    </children>\n"
++"    <subobject/>\n"
++"  </object>\n"
++"</resource>\n"
++"<!-- Trailing comment -->\n"
++    ;
++
++    wxStringInputStream sisp(xmlTextProlog);
++    CPPUNIT_ASSERT( doc.Load(sisp, "UTF-8") );
++
++    wxStringOutputStream sosp;
++    CPPUNIT_ASSERT( doc.Save(sosp) );
++
++    CPPUNIT_ASSERT_EQUAL( xmlTextProlog, sosp.GetString() );
+ }
+ 
+ void XmlTestCase::CDATA()
+@@ -218,6 +254,28 @@
+     CPPUNIT_ASSERT_EQUAL( "Giovanni Mittone", n->GetContent() );
+ }
+ 
++void XmlTestCase::PI()
++{
++    const char *xmlText =
++        "<?xml version=\"1.0\" encoding=\"windows-1252\"?>\n"
++        "<root>\n"
++        "  <?robot index=\"no\" follow=\"no\"?>\n"
++        "</root>\n"
++    ;
++
++    wxStringInputStream sis(xmlText);
++    wxXmlDocument doc;
++    CPPUNIT_ASSERT( doc.Load(sis) );
++
++    wxXmlNode *n = doc.GetRoot();
++    CPPUNIT_ASSERT( n );
++
++    n = n->GetChildren();
++    CPPUNIT_ASSERT( n );
++
++    CPPUNIT_ASSERT_EQUAL( "index=\"no\" follow=\"no\"", n->GetContent() );
++}
++
+ void XmlTestCase::Escaping()
+ {
+     // Verify that attribute values are escaped correctly, see
+@@ -240,3 +298,131 @@
+ 
+     CPPUNIT_ASSERT_EQUAL( xmlText, sos.GetString() );
+ }
++
++void XmlTestCase::DetachRoot()
++{
++    const char *xmlTextProlog =
++"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++"<!-- Prolog comment -->\n"
++"<?xml-stylesheet href=\"style.css\" type=\"text/css\"?>\n"
++"<resource xmlns=\"http://www.wxwidgets.org/wxxrc\" version=\"2.3.0.1\">\n"
++"  <!-- Test comment -->\n"
++"  <object class=\"wxDialog\" name=\"my_dialog\">\n"
++"    <children>\n"
++"      <grandchild id=\"1\"/>\n"
++"    </children>\n"
++"    <subobject/>\n"
++"  </object>\n"
++"</resource>\n"
++"<!-- Trailing comment -->\n"
++    ;
++    const char *xmlTextHtm =
++"<?xml version=\"1.0\" encoding=\"windows-1252\"?>\n"
++"<html>\n"
++"  <head>\n"
++"    <title>Testing wxXml</title>\n"
++"  </head>\n"
++"  <body>\n"
++"    <p>Some body text</p>\n"
++"  </body>\n"
++"</html>\n"
++    ;
++    wxXmlDocument doc;
++
++    wxStringInputStream sish(xmlTextHtm);
++    CPPUNIT_ASSERT( doc.Load(sish) );
++
++    wxXmlNode *root = doc.DetachRoot();
++
++    wxStringInputStream sisp(xmlTextProlog);
++    CPPUNIT_ASSERT( doc.Load(sisp) );
++
++    doc.SetRoot(root);
++
++    wxStringOutputStream sos;
++    CPPUNIT_ASSERT( doc.Save(sos) );
++
++    const char *xmlTextResult1 =
++"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++"<!-- Prolog comment -->\n"
++"<?xml-stylesheet href=\"style.css\" type=\"text/css\"?>\n"
++"<html>\n"
++"  <head>\n"
++"    <title>Testing wxXml</title>\n"
++"  </head>\n"
++"  <body>\n"
++"    <p>Some body text</p>\n"
++"  </body>\n"
++"</html>\n"
++"<!-- Trailing comment -->\n"
++    ;
++    CPPUNIT_ASSERT_EQUAL( xmlTextResult1, sos.GetString() );
++
++    wxStringInputStream sisp2(xmlTextProlog);
++    CPPUNIT_ASSERT( doc.Load(sisp2) );
++
++    root = doc.DetachRoot();
++
++    wxStringInputStream sish2(xmlTextHtm);
++    CPPUNIT_ASSERT( doc.Load(sish2) );
++
++    doc.SetRoot(root);
++
++    wxStringOutputStream sos2;
++    CPPUNIT_ASSERT( doc.Save(sos2) );
++
++    const char *xmlTextResult2 =
++"<?xml version=\"1.0\" encoding=\"windows-1252\"?>\n"
++"<resource xmlns=\"http://www.wxwidgets.org/wxxrc\" version=\"2.3.0.1\">\n"
++"  <!-- Test comment -->\n"
++"  <object class=\"wxDialog\" name=\"my_dialog\">\n"
++"    <children>\n"
++"      <grandchild id=\"1\"/>\n"
++"    </children>\n"
++"    <subobject/>\n"
++"  </object>\n"
++"</resource>\n"
++    ;
++    CPPUNIT_ASSERT_EQUAL( xmlTextResult2, sos2.GetString() );
++}
++
++void XmlTestCase::AppendToProlog()
++{
++    const char *xmlText =
++"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++"<root>\n"
++"  <p>Some text</p>\n"
++"</root>\n"
++    ;
++    wxXmlDocument rootdoc;
++    wxStringInputStream sis(xmlText);
++    CPPUNIT_ASSERT( rootdoc.Load(sis) );
++    wxXmlNode *root = rootdoc.DetachRoot();
++
++    wxXmlNode *comment1 = new wxXmlNode(wxXML_COMMENT_NODE, "comment",
++        " 1st prolog entry ");
++    wxXmlNode *pi = new wxXmlNode(wxXML_PI_NODE, "xml-stylesheet",
++        "href=\"style.css\" type=\"text/css\"");
++    wxXmlNode *comment2 = new wxXmlNode(wxXML_COMMENT_NODE, "comment",
++        " 3rd prolog entry ");
++
++    wxXmlDocument doc;
++    doc.AppendToProlog( comment1 );
++    doc.AppendToProlog( pi );
++    doc.SetRoot( root );
++    doc.AppendToProlog( comment2 );
++
++    wxStringOutputStream sos;
++    CPPUNIT_ASSERT( doc.Save(sos) );
++
++    const char *xmlTextResult =
++"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++"<!-- 1st prolog entry -->\n"
++"<?xml-stylesheet href=\"style.css\" type=\"text/css\"?>\n"
++"<!-- 3rd prolog entry -->\n"
++"<root>\n"
++"  <p>Some text</p>\n"
++"</root>\n"
++    ;
++    CPPUNIT_ASSERT_EQUAL( xmlTextResult, sos.GetString() );
++}

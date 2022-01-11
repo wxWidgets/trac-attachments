@@ -1,0 +1,285 @@
+
+import sys
+
+import wx
+import wx.glcanvas as glcanvas
+
+
+try:
+    from OpenGL.GL import *
+    from OpenGL.GLUT import *
+    haveOpenGL = True
+except ImportError:
+    haveOpenGL = False
+
+from PIL import Image
+import OpenGL.GL as gl
+
+#----------------------------------------------------------------------
+
+
+#----------------------------------------------------------------------
+_kDefaultInitSize = (640, 480)
+_kBlackColor = (0, 0, 0, 0)
+_kWhiteColor = (255, 255, 255, 255)
+_kDefaultBgColorRGBAi = _kBlackColor
+_kDefaultBgColorRGBi = _kDefaultBgColorRGBAi[0:3]
+_kDefaultBgColorRGBAf = tuple([c/255.0 for c in _kDefaultBgColorRGBAi])
+_kDefaultBgColorRGBf = _kDefaultBgColorRGBAf[0:3]
+
+
+
+###########################################################
+###########################################################
+class MyGLCanvas( glcanvas.GLCanvas ):
+    kSizeMinX           = 4
+    kSizeGranularityX   = 4
+    kSizeOrPaintBitmapUpdateInterval    = 2
+
+    ###########################################################
+    def __init__( self, parent ):
+        self._isInitialized = False
+
+        # This doesn't work with 4.1.1
+        dispAttrs = wx.glcanvas.GLAttributes()
+        dispAttrs.Defaults().DoubleBuffer().Depth(24).EndList()
+        glcanvas.GLCanvas.__init__(self, parent, id=wx.ID_ANY, dispAttrs=dispAttrs,)
+        
+        # But replacce the above with this on 4.0.7 -- and it works fine
+        # glcanvas.GLCanvas.__init__(self, parent, id=wx.ID_ANY, attribList=[ wx.glcanvas.WX_GL_DOUBLEBUFFER],)
+
+
+        
+
+        self.storedOffset       = ( 0, 0 )
+        self.bDidInitTexture    = False
+        self._cacheFrameSizeWidth   = 0
+        self._cacheFrameSizeHeight  = 0
+        self._cacheSizeImage    = ( 0, 0 )
+        self._cacheSizeWindow   = ( 0, 0 )
+        self._texType = gl.GL_TEXTURE_2D
+        self._cachedSetSize = None
+
+        self.glContext = glcanvas.GLContext( self )
+        self.glContext.SetCurrent(self)
+
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+
+        self._imgData = None
+        self.InitTexture(True)
+
+        self.Bind(wx.EVT_PAINT, self.OnPaint)
+        self.Bind(wx.EVT_SIZE, self.OnSize)
+        self._isInitialized = True
+
+
+    ###########################################################
+    def OnPaint(self, event):
+        dc = wx.PaintDC(self)
+        self.HandleDraw(True)
+
+    ###########################################################
+    def HandleDraw( self , doSwapBuffers=True):
+        if not self._isInitialized:
+            return
+
+        self.SetCurrent(self.glContext)
+
+        if not self.IsShown():
+            return
+
+        try:
+            gl.glClear( gl.GL_COLOR_BUFFER_BIT )
+
+            if self.bDidInitTexture:
+                gl.glEnable( self._texType )
+                gl.glBindTexture( self._texType, self.aGLTexture )
+
+                gl.glColor3f(*_kDefaultBgColorRGBf)
+                gl.glBegin( gl.GL_QUADS )
+                gl.glTexCoord2f( 0, 0 );    gl.glVertex2f( -1, 1.0 )
+                gl.glTexCoord2f( 0, 1 );    gl.glVertex2f( -1, -1.0 )
+                gl.glTexCoord2f( 1, 1 );    gl.glVertex2f( 1, -1.0 )
+                gl.glTexCoord2f( 1, 0 );    gl.glVertex2f( 1, 1.0 )
+                gl.glEnd()
+                gl.glDisable( self._texType )
+            if doSwapBuffers:
+                self.SwapBuffers()
+            else:
+                gl.glFlush()
+                gl.glFinish()
+        except:
+            raise
+
+
+    ###########################################################
+    def OnSize( self, event ):
+        sizeWindow  = self.GetClientSize()
+        if self._cacheSizeImage == (0,0):
+            self._cacheSizeImage = sizeWindow
+        self.SetImageAndWindowSizes(self._cacheSizeImage, sizeWindow)
+        if event is not None:
+            event.Skip()
+        self.Refresh()
+
+    ###########################################################
+    def log(self, str):
+        print("%s" % str)
+
+    ###########################################################
+    def SetImageAndWindowSizes( self, sizeImage, sizeWindow, keepAspectRatio=True ):
+        if not self.IsShown():
+           self._cachedSetSize = (sizeImage, sizeWindow, keepAspectRatio)
+           return
+
+        self._cachedSetSize = None
+
+        if self._cacheSizeImage == sizeImage and self._cacheSizeWindow == sizeWindow:
+            self.SetCurrent( self.glContext )
+            return
+
+        offsetX = 0
+        offsetY = 0
+        imX     = sizeImage[ 0 ]
+        imY     = sizeImage[ 1 ]
+        windowX = sizeWindow[ 0 ]
+        windowY = sizeWindow[ 1 ]
+        if imY == 0 or windowY == 0:
+            return
+
+        ratioWindow = float( windowX ) / float( windowY )
+        ratioImage  = float( imX ) / float( imY )
+        widthAdj    = windowX
+        heightAdj   = windowY
+        if keepAspectRatio:
+            if ratioWindow > ratioImage:
+                widthAdj    = windowX * ratioImage / ratioWindow
+                offsetX     = ( windowX - widthAdj ) / 2
+            else:
+                heightAdj   = windowY * ratioWindow / ratioImage
+                offsetY     = ( windowY - heightAdj ) / 2
+            if 0 != ( imX % 4 ):
+                self.log(
+                    "UNEXPECTED ofx,ofy,imx,imy,winw,winh: " +
+                    str(
+                        (
+                            int( offsetX ), int( offsetY ),
+                            imX, imY, windowX, windowY
+                        )
+                    )
+                )
+
+        self.log("sizeImage=%s, sizeWindow=%s, offset=(%d,%d), size=(%d,%d)" % ( str(sizeImage), str(sizeWindow), offsetX, offsetY, widthAdj, heightAdj) )
+
+        self.SetCurrent( self.glContext )
+        gl.glViewport( int( offsetX ), int( offsetY ), int( widthAdj*self.GetContentScaleFactor() ), int( heightAdj*self.GetContentScaleFactor() ))
+
+        self._cacheSizeImage    = sizeImage
+        self._cacheSizeWindow   = sizeWindow
+
+
+    ###########################################################
+    def InitTexture( self, setBitmap=False):
+        if self.bDidInitTexture:
+            return
+
+        self.SetCurrent( self.glContext )
+
+        gl.glClearColor(*_kDefaultBgColorRGBAf)
+
+        # generate a texture id, make it current
+        self.aGLTexture = gl.glGenTextures( 1 )
+        gl.glBindTexture( self._texType, self.aGLTexture )
+
+        # texture mode and parameters controlling wrapping and scaling
+        gl.glTexEnvf( gl.GL_TEXTURE_ENV, gl.GL_TEXTURE_ENV_MODE, gl.GL_REPLACE )
+        gl.glTexParameterf( self._texType, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP )
+        gl.glTexParameterf( self._texType, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP )
+        gl.glTexParameterf( self._texType, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR )
+        gl.glTexParameterf( self._texType, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR )
+
+        if setBitmap:
+            pilImg = Image.new( 'RGB', _kDefaultInitSize )
+            self.updateBitmap(pilImg)
+
+        self.bDidInitTexture    = True
+
+    ###########################################################
+    def UpdateTextureRaw( self, data, width, height ):
+        if not self.IsShown():
+            return
+
+        self.InitTexture()
+
+        if self._cachedSetSize is not None:
+            self.SetImageAndWindowSizes( self._cachedSetSize[0], self._cachedSetSize[1], self._cachedSetSize[2] )
+
+        self.SetCurrent( self.glContext )
+        if ( self._cacheFrameSizeWidth == width ) and ( self._cacheFrameSizeHeight == height ):
+            # try the faster routine
+            gl.glTexSubImage2D( self._texType, 0, 0, 0, width, height, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, data )
+        else:
+            gl.glTexImage2D( self._texType, 0, gl.GL_RGB, width, height, 0, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, data )
+            self._cacheFrameSizeWidth   = width
+            self._cacheFrameSizeHeight  = height
+
+    ###########################################################
+    def updateImageBuffer(self, data, width, height, keepAspectRatio=True ):
+        try:
+            sizeWindow  = self.GetClientSize()
+            sizeFrame   = ( width, height )
+            self.SetImageAndWindowSizes( sizeFrame, sizeWindow, keepAspectRatio )
+            self._imgData = ( data, width, height )
+            self.UpdateTextureRaw( data, width, height )
+            self.HandleDraw(True)
+        except:
+            import traceback
+            self.log("Crash in updateImageBuffer size %s" % traceback.format_exc())
+
+    ###########################################################
+    def GetImageData(self):
+        return self._imgData
+
+    ###########################################################
+    def updateBitmap( self, bitmap ):
+        if bitmap is None:
+            return
+
+        width               = bitmap.size[0]
+        height              = bitmap.size[1]
+        asBuffer            = bitmap.tobytes('raw', 'RGB')
+        if 0 != ( width % MyGLCanvas.kSizeGranularityX ):
+            return
+        self.updateImageBuffer( asBuffer, width, height )
+
+    ###########################################################
+    def updateImageData( self, frame ):
+        self.updateImageBuffer( frame.buffer, frame.width, frame.height)
+
+
+
+#----------------------------------------------------------------------
+class ImageWrapper:
+    def __init__(self):
+        self.width = 100
+        self.height = 50
+        self.img = Image.new('RGB', (self.width,self.height), (255,0,0))
+        self.buffer = self.img.tobytes()
+
+if __name__ == '__main__':
+    app = wx.App(False)
+    if not haveOpenGL:
+        wx.MessageBox('This sample requires the PyOpenGL package.', 'Sorry')
+    else:
+        frm = wx.Frame(None, title='GLCanvas Sample')
+        canvas = MyGLCanvas(frm)
+        frm.Show()
+        img = ImageWrapper()
+        # Fill the canvas with red blob ... expectation is, unless the
+        # control is sized exactly 2:1, we'll see some black bars
+        canvas.updateImageData(img)
+    app.MainLoop()
+
+
+
+#----------------------------------------------------------------------

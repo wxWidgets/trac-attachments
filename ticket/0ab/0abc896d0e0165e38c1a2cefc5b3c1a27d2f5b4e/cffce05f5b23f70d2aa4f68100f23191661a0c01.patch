@@ -1,0 +1,148 @@
+Index: src/common/http.cpp
+===================================================================
+--- src/common/http.cpp	(revision 70366)
++++ src/common/http.cpp	(working copy)
+@@ -48,7 +48,8 @@
+     m_addr = NULL;
+     m_read = false;
+     m_proxy_mode = false;
+-    m_post_buf = wxEmptyString;
++    m_postBuffer = wxMemoryBuffer();
++    m_contentType = wxEmptyString;
+     m_http_response = 0;
+ 
+     SetNotify(wxSOCKET_LOST_FLAG);
+@@ -193,9 +194,30 @@
+ 
+ void wxHTTP::SetPostBuffer(const wxString& post_buf)
+ {
+-    m_post_buf = post_buf;
++    // For backward compatibility, use here To8BitData()
++    wxScopedCharBuffer scb = post_buf.To8BitData();
++    if ( scb.length() )
++    {
++        m_postBuffer.AppendData(scb.data(), scb.length());
++    }
+ }
+ 
++void wxHTTP::SetPostBuffer(const wxString &contentType, const wxMemoryBuffer& postBuffer)
++{
++    m_postBuffer = postBuffer;
++    m_contentType = contentType;
++}
++
++void wxHTTP::SetPostText(const wxString &contentType, const wxString &postBuffer, const wxMBConv& conv)
++{
++    wxScopedCharBuffer scb = postBuffer.mb_str(conv);
++    if ( scb.length() ) 
++    {
++        m_postBuffer.AppendData(scb.data(), scb.length());
++        m_contentType = contentType;
++    }
++}
++
+ void wxHTTP::SendHeaders()
+ {
+     typedef wxStringToStringHashMap::iterator iterator;
+@@ -312,8 +334,18 @@
+ 
+         case wxHTTP_POST:
+             request = wxT("POST");
+-            if ( GetHeader( wxT("Content-Length") ).empty() )
+-                SetHeader( wxT("Content-Length"), wxString::Format( wxT("%lu"), (unsigned long)m_post_buf.Len() ) );
++            // Even if the caller already set "Content-Length" header, we override it here
++            // with the m_postBuffer actual length
++            if ( m_postBuffer.GetDataLen() > 0 ) 
++            {
++                SetHeader(wxT("Content-Length"), wxString::Format( wxT("%lu"), (unsigned long) m_postBuffer.GetDataLen() ));
++            }
++            // If we got a "Content-Type" value, set it as well. However, if the user explicitly set it using SetHeader
++            // do not override it
++            if ( !m_contentType.IsEmpty() && !GetHeader(wxT("Content-Type")) )
++            {
++                SetHeader(wxT("Content-Type"), m_contentType);
++            }
+             break;
+ 
+         default:
+@@ -349,15 +381,16 @@
+         // Post data can be arbitrary binary data when the "binary" content
+         // transfer encoding is used so don't assume it's ASCII only or
+         // NUL-terminated.
++        if ( m_postBuffer.GetDataLen() )
+         {
+-            const wxScopedCharBuffer buf(m_post_buf.To8BitData());
+-            Write(buf, buf.length());
+-        } // delete the buffer before modifying the string it points to, it
++            Write(m_postBuffer.GetData(), m_postBuffer.GetDataLen());
++        }
++        // delete the buffer before modifying the string it points to, it
+           // wouldn't really be a problem here even if we didn't do this
+           // because we won't use this buffer again but this will avoid any
+           // nasty surprises in the future if this code changes
+ 
+-        m_post_buf = wxEmptyString;
++        m_postBuffer = wxMemoryBuffer();
+     }
+ 
+     wxString tmp_str;
+@@ -483,7 +516,7 @@
+         return NULL;
+ #endif
+ 
+-    if (!BuildRequest(path, m_post_buf.empty() ? wxHTTP_GET : wxHTTP_POST))
++    if (!BuildRequest(path, m_postBuffer.GetDataLen() > 0 ? wxHTTP_POST : wxHTTP_GET))
+         return NULL;
+ 
+     inp_stream = new wxHTTPStream(this);
+Index: include/wx/protocol/http.h
+===================================================================
+--- include/wx/protocol/http.h	(revision 70366)
++++ include/wx/protocol/http.h	(working copy)
+@@ -17,6 +17,7 @@
+ 
+ #include "wx/hashmap.h"
+ #include "wx/protocol/protocol.h"
++#include "wx/buffer.h"
+ 
+ class WXDLLIMPEXP_NET wxHTTP : public wxProtocol
+ {
+@@ -36,7 +37,27 @@
+     int GetResponse() const { return m_http_response; }
+ 
+     void SetHeader(const wxString& header, const wxString& h_data);
+-    void SetPostBuffer(const wxString& post_buf);
++    /**
++     * Deprecated. Use SetPostText or SetPostBuffer(const wxMemoryBuffer& postBuffer, const wxString &contentType)
++     */
++    wxDEPRECATED(void SetPostBuffer(const wxString& post_buf));
++    /**
++     * @brief set the post buffer and content type. The 'conv' argument is used for converting 
++     * the buffer into raw 'char*' before sending it over the net (it also used to calculate the
++     * actual buffer length and the value set in the "Content-Length" header)
++     * @param contentType contains the HTTP's "Content-Type" header, e.g. wxT("text/html; charset=UTF-8")
++     * @param postBuffer the post buffer
++     * @param conv the conversion object to use for the postBuffer
++     * @since 2.9.4
++     */
++    void SetPostText(const wxString &contentType, const wxString &postBuffer, const wxMBConv& conv = wxConvLibc);
++    /**
++     * @brief similar to SetPostText(), however there are no conversion done on the postBuffer
++     * @param contentType contains the HTTP's "Content-Type" header, e.g. wxT("text/html; charset=UTF-8")
++     * @param postBuffer the post buffer
++     * @since 2.9.4
++     */
++    void SetPostBuffer(const wxString &contentType, const wxMemoryBuffer& postBuffer);
+     void SetProxyMode(bool on);
+ 
+     /* Cookies */
+@@ -80,7 +101,8 @@
+     bool m_read,
+          m_proxy_mode;
+     wxSockAddress *m_addr;
+-    wxString m_post_buf;
++    wxMemoryBuffer m_postBuffer;
++    wxString       m_contentType;
+     int m_http_response;
+ 
+     DECLARE_DYNAMIC_CLASS(wxHTTP)

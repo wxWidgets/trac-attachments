@@ -1,0 +1,273 @@
+Index: include/wx/gtk/dcclient.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/gtk/dcclient.h,v
+retrieving revision 1.42
+diff -u2 -r1.42 include/wx/gtk/dcclient.h
+--- include/wx/gtk/dcclient.h
++++ include/wx/gtk/dcclient.h
+@@ -22,4 +22,15 @@
+ class WXDLLIMPEXP_CORE wxClientDC;
+ 
++// tells wxWindowDC not to leave the underlining task to Pango but rather draw
++// the underline ourself (currently this works only for single lines only).
++#define wxDC_DRAW_TEXT_FORCE_NOPANGO_UNDERLINE        1
++
++// like wxDC_DRAW_TEXT_NOPANGO_UNDERLINE except that the underlining is left to
++// Pango only if the string has no leading/trailing whitespaces.
++#define wxDC_DRAW_TEXT_AUTODETECT_NOPANGO_UNDERLINE   2
++
++// the default
++#define wxDC_DRAW_TEXT_DEFAULT                        (wxDC_DRAW_TEXT_AUTODETECT_NOPANGO_UNDERLINE)
++
+ //-----------------------------------------------------------------------------
+ // wxWindowDC
+@@ -37,4 +48,14 @@
+     virtual bool CanGetTextExtent() const { return true; }
+ 
++    // additional function exposing the flags parameter
++    void DrawText(const wxString& text, wxCoord x, wxCoord y, int flags)
++        { DoDrawText(text, x, y, flags); }
++
++    // avoid the above function shadows these:
++    void DrawText(const wxString& text, wxCoord x, wxCoord y)
++        { DoDrawText(text, x, y); }
++    void DrawText(const wxString& text, const wxPoint& pt)
++        { DoDrawText(text, pt.x, pt.y); }
++
+ protected:
+     virtual void DoGetSize(int *width, int *height) const;
+@@ -68,5 +89,9 @@
+                          int logical_func = wxCOPY, bool useMask = false, wxCoord xsrcMask = -1, wxCoord ysrcMask = -1 );
+ 
+-    virtual void DoDrawText( const wxString &text, wxCoord x, wxCoord y );
++    virtual void DoDrawText( const wxString &text, wxCoord x, wxCoord y )
++        { DoDrawText(text, x, y, wxDC_DRAW_TEXT_DEFAULT); }
++
++    virtual void DoDrawText( const wxString &text, wxCoord x, wxCoord y, int flags );
++
+     virtual void DoDrawRotatedText(const wxString& text, wxCoord x, wxCoord y,
+                                    double angle);
+@@ -79,4 +104,5 @@
+     virtual void DoSetClippingRegionAsRegion( const wxRegion &region );
+ 
++
+ public:
+     virtual wxCoord GetCharWidth() const;
+Index: include/wx/html/htmlcell.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/html/htmlcell.h,v
+retrieving revision 1.65
+diff -u2 -r1.65 include/wx/html/htmlcell.h
+--- include/wx/html/htmlcell.h
++++ include/wx/html/htmlcell.h
+@@ -375,4 +375,6 @@
+     void Draw(wxDC& dc, int x, int y, int view_y1, int view_y2,
+               wxHtmlRenderingInfo& info);
++    void DrawText( wxDC &dc, const wxString &text, wxCoord x, wxCoord y );
++
+     virtual wxCursor GetMouseCursor(wxHtmlWindowInterface *window) const;
+     wxString ConvertToText(wxHtmlSelection *sel) const;
+Index: src/gtk/dcclient.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/dcclient.cpp,v
+retrieving revision 1.222
+diff -u2 -r1.222 src/gtk/dcclient.cpp
+--- src/gtk/dcclient.cpp
++++ src/gtk/dcclient.cpp
+@@ -1485,5 +1485,5 @@
+ }
+ 
+-void wxWindowDC::DoDrawText( const wxString &text, wxCoord x, wxCoord y )
++void wxWindowDC::DoDrawText( const wxString &text, wxCoord x, wxCoord y, int flags )
+ {
+     wxCHECK_RET( Ok(), wxT("invalid window dc") );
+@@ -1500,6 +1500,22 @@
+     wxCHECK_RET( m_fontdesc, wxT("no Pango font description") );
+ 
++    // Unfortunately Pango does not behave as GDI when we ask it to render
++    // a PangoLayout which has leading/trailing spaces with underlined font:
++    // in this case, in fact, Pango does not underline the spaces.
++    // This can be a problem; e.g. wxHTML rendering of underlined text relies on
++    // this behaviour. To workaround this problem, when the given string has
++    // trailing/leading spaces we draw the underline ourselves.
+     bool underlined = m_font.Ok() && m_font.GetUnderlined();
+ 
++    bool underlinehack = false;
++    if (flags & wxDC_DRAW_TEXT_FORCE_NOPANGO_UNDERLINE)
++        // force use of our underline hack
++        underlinehack = !text.Contains(wxT("\n")) && underlined;
++    else if (flags & wxDC_DRAW_TEXT_AUTODETECT_NOPANGO_UNDERLINE)
++        // autodetect if given string has leading/trailing spaces
++        underlinehack = (text.StartsWith(wxT(" ")) || text.EndsWith(wxT(" "))) &&
++                        !text.Contains(wxT("\n")) && underlined;
++    bool underlinepango = !underlinehack && underlined;
++
+     const wxCharBuffer data = wxGTK_CONV( text );
+     if ( !data )
+@@ -1508,5 +1524,5 @@
+     pango_layout_set_text( m_layout, data, datalen);
+ 
+-    if (underlined)
++    if (underlinepango)
+     {
+         PangoAttrList *attrs = pango_attr_list_new();
+@@ -1520,30 +1536,53 @@
+ 
+     int w,h;
++    gint oldSize;
+ 
+-    if (fabs(m_scaleY - 1.0) > 0.00001)
++    bool scaling = fabs(m_scaleY - 1.0) > 0.00001;
++    if (scaling)
+     {
+-         // If there is a user or actually any scale applied to
+-         // the device context, scale the font.
++        // If there is a user or actually any scale applied to
++        // the device context, scale the font.
+ 
+-         // scale font description
+-         gint oldSize = pango_font_description_get_size( m_fontdesc );
+-         double size = oldSize;
+-         size = size * m_scaleY;
+-         pango_font_description_set_size( m_fontdesc, (gint)size );
++        // scale font description
++        oldSize = pango_font_description_get_size( m_fontdesc );
++        double size = oldSize;
++        size = size * m_scaleY;
++        pango_font_description_set_size( m_fontdesc, (gint)size );
+ 
+-         // actually apply scaled font
+-         pango_layout_set_font_description( m_layout, m_fontdesc );
++        // actually apply scaled font
++        pango_layout_set_font_description( m_layout, m_fontdesc );
++    }
++
++    pango_layout_get_pixel_size( m_layout, &w, &h );
+ 
+-         pango_layout_get_pixel_size( m_layout, &w, &h );
+-         if ( m_backgroundMode == wxSOLID )
+-         {
+-            gdk_gc_set_foreground(m_textGC, m_textBackgroundColour.GetColor());
+-            gdk_draw_rectangle(m_window, m_textGC, TRUE, x, y, w, h);
+-            gdk_gc_set_foreground(m_textGC, m_textForegroundColour.GetColor());
+-         }
++    if ( m_backgroundMode == wxSOLID )
++    {
++        gdk_gc_set_foreground(m_textGC, m_textBackgroundColour.GetColor());
++        gdk_draw_rectangle(m_window, m_textGC, TRUE, x, y, w, h);
++        gdk_gc_set_foreground(m_textGC, m_textForegroundColour.GetColor());
++    }
+ 
+-         // Draw layout.
+-         gdk_draw_layout( m_window, m_textGC, x, y, m_layout );
++    if (underlinehack)
++    {
++        // get some metrics for the currently selected font
++        PangoFontMetrics *metrics = pango_context_get_metrics(m_context, m_fontdesc, NULL);
++        int underline_thickness = pango_font_metrics_get_underline_thickness(metrics)/PANGO_SCALE;
++        int underline_position = pango_font_metrics_get_underline_position(metrics)/PANGO_SCALE;
++        int ascent = pango_font_metrics_get_ascent(metrics)/PANGO_SCALE;
++
++        // the logic here is: 'y + ascent' gives the baseline for the selected font;
++        // underline_position, quoting Pango docs, "is the distance above
++        // the baseline of the top of the underline" and thus needs to be subtracted.
++        // The result is an underline which in all tested case coincided always with
++        // Pango's one...
++        gdk_draw_rectangle(m_window, m_textGC, TRUE,
++                            x, y + ascent - underline_position, w, underline_thickness);
++    }
+ 
++    // Draw layout.
++    gdk_draw_layout( m_window, m_textGC, x, y, m_layout );
++
++    if (scaling)
++    {
+          // reset unscaled size
+          pango_font_description_set_size( m_fontdesc, oldSize );
+@@ -1552,18 +1591,6 @@
+          pango_layout_set_font_description( m_layout, m_fontdesc );
+     }
+-    else
+-    {
+-        pango_layout_get_pixel_size( m_layout, &w, &h );
+-        if ( m_backgroundMode == wxSOLID )
+-        {
+-            gdk_gc_set_foreground(m_textGC, m_textBackgroundColour.GetColor());
+-            gdk_draw_rectangle(m_window, m_textGC, TRUE, x, y, w, h);
+-            gdk_gc_set_foreground(m_textGC, m_textForegroundColour.GetColor());
+-        }
+-        // Draw layout.
+-        gdk_draw_layout( m_window, m_textGC, x, y, m_layout );
+-    }
+ 
+-    if (underlined)
++    if (underlinepango)
+     {
+         // undo underline attributes setting:
+@@ -1581,4 +1608,6 @@
+ 
+ 
++
++
+ // TODO: There is an example of rotating text with GTK2 that would probably be
+ // a better approach here:
+Index: src/html/htmlcell.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/html/htmlcell.cpp,v
+retrieving revision 1.112
+diff -u2 -r1.112 src/html/htmlcell.cpp
+--- src/html/htmlcell.cpp
++++ src/html/htmlcell.cpp
+@@ -485,4 +485,21 @@
+ 
+ 
++
++void wxHtmlWordCell::DrawText( wxDC &dc, const wxString &text, wxCoord x, wxCoord y )
++{
++#ifdef __WXGTK20__
++    // We need to always do the underlining ourselves as Pango does not render
++    // leading/trailing spaces when they are underlined - and we need it.
++    //
++    // NB: all wxDC classes (in wxGTK2) derive from wxWindowDC thus the
++    //     following cast is legitimate
++    wxASSERT(dc.IsKindOf(CLASSINFO(wxWindowDC)));
++    ((wxWindowDC &)dc).DrawText(text, x, y, wxDC_DRAW_TEXT_FORCE_NOPANGO_UNDERLINE);
++#else
++    // all other platforms do not have problems with underlining
++    dc.DrawText(text, x, y);
++#endif
++}
++
+ void wxHtmlWordCell::Draw(wxDC& dc, int x, int y,
+                           int WXUNUSED(view_y1), int WXUNUSED(view_y2),
+@@ -525,5 +542,5 @@
+         {
+             txt = m_Word.Mid(0, part1);
+-            dc.DrawText(txt, x + m_PosX, y + m_PosY);
++            DrawText(dc, txt, x + m_PosX, y + m_PosY);
+             dc.GetTextExtent(txt, &w, &h);
+             ofs += w;
+@@ -533,5 +550,5 @@
+ 
+         txt = m_Word.Mid(part1, part2-part1);
+-        dc.DrawText(txt, ofs + x + m_PosX, y + m_PosY);
++        DrawText(dc, txt, ofs + x + m_PosX, y + m_PosY);
+ 
+         if ( (size_t)part2 < m_Word.length() )
+@@ -541,5 +558,5 @@
+             SwitchSelState(dc, info, false);
+             txt = m_Word.Mid(part2);
+-            dc.DrawText(txt, ofs + x + m_PosX, y + m_PosY);
++            DrawText(dc, txt, ofs + x + m_PosX, y + m_PosY);
+         }
+         else
+@@ -560,5 +577,6 @@
+             SwitchSelState(dc, info, false);
+         }
+-        dc.DrawText(m_Word, x + m_PosX, y + m_PosY);
++
++        DrawText(dc, m_Word, x + m_PosX, y + m_PosY);
+         drawSelectionAfterCell = (selstate != wxHTML_SEL_OUT);
+     }
+
+ 	  	 

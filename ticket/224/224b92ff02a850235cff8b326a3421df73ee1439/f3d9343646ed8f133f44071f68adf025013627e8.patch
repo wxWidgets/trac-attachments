@@ -1,0 +1,216 @@
+Index: include/wx/dynlib.h
+===================================================================
+--- include/wx/dynlib.h	(revision 56864)
++++ include/wx/dynlib.h	(working copy)
+@@ -240,9 +240,9 @@
+     // return the platform standard DLL extension (with leading dot)
+     static const wxString& GetDllExt() { return ms_dllext; }
+ 
+-    wxDynamicLibrary() : m_handle(0) { }
++    wxDynamicLibrary() : m_handle(0), m_flags(0) { }
+     wxDynamicLibrary(const wxString& libname, int flags = wxDL_DEFAULT)
+-        : m_handle(0)
++        : m_handle(0), m_flags(0)
+     {
+         Load(libname, flags);
+     }
+@@ -265,13 +265,13 @@
+     // detach the library object from its handle, i.e. prevent the object from
+     // unloading the library in its dtor -- the caller is now responsible for
+     // doing this
+-    wxDllType Detach() { wxDllType h = m_handle; m_handle = 0; return h; }
++    wxDllType Detach() { wxDllType h = m_handle; m_handle = 0, m_flags = 0; return h; }
+ 
+     // unload the given library handle (presumably returned by Detach() before)
+-    static void Unload(wxDllType handle);
++    static void Unload(wxDllType handle, int flags = 0);
+ 
+     // unload the library, also done automatically in dtor
+-    void Unload() { if ( IsLoaded() ) { Unload(m_handle); m_handle = 0; } }
++    void Unload() { if ( IsLoaded() ) { Unload(m_handle, m_flags); m_handle = 0; } }
+ 
+     // Return the raw handle from dlopen and friends.
+     wxDllType GetLibHandle() const { return m_handle; }
+@@ -370,6 +370,7 @@
+ 
+     // the handle to DLL or NULL
+     wxDllType m_handle;
++    int m_flags;
+ 
+     // no copy ctor/assignment operators (or we'd try to unload the library
+     // twice)
+Index: include/wx/msw/app.h
+===================================================================
+--- include/wx/msw/app.h	(revision 56864)
++++ include/wx/msw/app.h	(working copy)
+@@ -20,6 +20,7 @@
+ class WXDLLIMPEXP_FWD_CORE wxApp;
+ class WXDLLIMPEXP_FWD_CORE wxKeyEvent;
+ class WXDLLIMPEXP_FWD_BASE wxLog;
++class WXDLLIMPEXP_FWD_BASE wxDynamicLibrary;
+ 
+ // Represents the application. Derive OnInit and declare
+ // a new App object to start application
+@@ -66,6 +67,7 @@
+ 
+     // returns 400, 470, 471 for comctl32.dll 4.00, 4.70, 4.71 or 0 if it
+     // wasn't found at all
++    static const wxDynamicLibrary& GetComCtl32();
+     static int GetComCtl32Version();
+ 
+     // the same for shell32.dll: returns 400, 471, 500, 600, ... (4.70 not
+Index: src/common/dynlib.cpp
+===================================================================
+--- src/common/dynlib.cpp	(revision 56864)
++++ src/common/dynlib.cpp	(working copy)
+@@ -97,16 +97,20 @@
+     m_handle = RawLoad(libname, flags);
+ #endif
+ 
+-    if ( m_handle == 0 && !(flags & wxDL_QUIET) )
++    bool ok = (m_handle != 0);
++    if (ok)
+     {
++        m_flags = flags;
++    }
++    else if ((flags & wxDL_QUIET) == 0)
++    {
+ #ifdef wxHAVE_DYNLIB_ERROR
+         Error();
+ #else
+         wxLogSysError(_("Failed to load shared library '%s'"), libname.c_str());
+ #endif
+     }
+-
+-    return IsLoaded();
++    return ok;
+ }
+ 
+ // for MSW and Unix this is implemented in the platform-specific file
+Index: src/msw/app.cpp
+===================================================================
+--- src/msw/app.cpp	(revision 56864)
++++ src/msw/app.cpp	(working copy)
+@@ -929,7 +929,7 @@
+ 
+ // helper function: retrieve the DLL version by using DllGetVersion(), returns
+ // 0 if the DLL doesn't export such function
+-int CallDllGetVersion(wxDynamicLibrary& dll)
++int CallDllGetVersion(const wxDynamicLibrary& dll)
+ {
+     // now check if the function is available during run-time
+     wxDYNLIB_FUNCTION( DLLGETVERSIONPROC, DllGetVersion, dll );
+@@ -953,6 +953,20 @@
+ } // anonymous namespace
+ 
+ /* static */
++const wxDynamicLibrary& wxApp::GetComCtl32()
++{
++    // we don't want to load comctl32.dll, it should be already loaded but,
++    // depending on the OS version and the presence of the manifest, it can
++    // be either v5 or v6 and instead of trying to guess it just get the
++    // handle of the already loaded version
++    static wxDynamicLibrary dll(_T("comctl32.dll"),
++                               wxDL_VERBATIM |
++                               wxDL_QUIET |
++                               wxDL_GET_LOADED);
++    return dll;
++}
++
++/* static */
+ int wxApp::GetComCtl32Version()
+ {
+     // cache the result
+@@ -966,14 +980,7 @@
+         // we're prepared to handle the errors
+         wxLogNull noLog;
+ 
+-        // we don't want to load comctl32.dll, it should be already loaded but,
+-        // depending on the OS version and the presence of the manifest, it can
+-        // be either v5 or v6 and instead of trying to guess it just get the
+-        // handle of the already loaded version
+-        wxDynamicLibrary dllComCtl32(_T("comctl32.dll"),
+-                                     wxDL_VERBATIM |
+-                                     wxDL_QUIET |
+-                                     wxDL_GET_LOADED);
++        const wxDynamicLibrary& dllComCtl32 = wxApp::GetComCtl32();
+         if ( !dllComCtl32.IsLoaded() )
+         {
+             s_verComCtl32 = 0;
+@@ -1011,9 +1018,6 @@
+                 }
+             }
+         }
+-
+-        // we shouldn't unload it here as we didn't really load it above
+-        dllComCtl32.Detach();
+     }
+ 
+     return s_verComCtl32;
+Index: src/msw/datecontrols.cpp
+===================================================================
+--- src/msw/datecontrols.cpp	(revision 56864)
++++ src/msw/datecontrols.cpp	(working copy)
+@@ -67,13 +67,7 @@
+         icex.dwSize = sizeof(icex);
+         icex.dwICC = ICC_DATE_CLASSES;
+ 
+-        // see comment in wxApp::GetComCtl32Version() explaining the
+-        // use of wxDL_GET_LOADED
+-        wxDynamicLibrary dllComCtl32(_T("comctl32.dll"),
+-                                     wxDL_VERBATIM |
+-                                     wxDL_QUIET |
+-                                     wxDL_GET_LOADED);
+-
++        const wxDynamicLibrary& dllComCtl32 = wxApp::GetComCtl32();
+         if ( dllComCtl32.IsLoaded() )
+         {
+             wxLogNull noLog;
+Index: src/msw/dlmsw.cpp
+===================================================================
+--- src/msw/dlmsw.cpp	(revision 56864)
++++ src/msw/dlmsw.cpp	(working copy)
+@@ -290,9 +290,12 @@
+ }
+ 
+ /* static */
+-void wxDynamicLibrary::Unload(wxDllType handle)
++void wxDynamicLibrary::Unload(wxDllType handle, int flags)
+ {
+-    ::FreeLibrary(handle);
++    if ( (flags & wxDL_GET_LOADED) == 0)
++    {
++        ::FreeLibrary(handle);
++    }
+ }
+ 
+ /* static */
+Index: src/msw/window.cpp
+===================================================================
+--- src/msw/window.cpp	(revision 56864)
++++ src/msw/window.cpp	(working copy)
+@@ -5306,12 +5306,7 @@
+             static bool s_initDone = false;
+             if ( !s_initDone )
+             {
+-                // see comment in wxApp::GetComCtl32Version() explaining the
+-                // use of wxDL_GET_LOADED
+-                wxDynamicLibrary dllComCtl32(_T("comctl32.dll"),
+-                                             wxDL_VERBATIM |
+-                                             wxDL_QUIET |
+-                                             wxDL_GET_LOADED);
++                const wxDynamicLibrary& dllComCtl32 = wxApp::GetComCtl32();
+                 if ( dllComCtl32.IsLoaded() )
+                 {
+                     s_pfn_TrackMouseEvent = (_TrackMouseEvent_t)
+@@ -5319,10 +5314,6 @@
+                 }
+ 
+                 s_initDone = true;
+-
+-                // we shouldn't unload comctl32.dll here as we didn't really
+-                // load it above
+-                dllComCtl32.Detach();
+             }
+ 
+             if ( s_pfn_TrackMouseEvent )

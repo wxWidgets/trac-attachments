@@ -1,0 +1,146 @@
+diff --git a/include/wx/stc/stc.h b/include/wx/stc/stc.h
+index ab5ffaa..4611eea 100644
+--- a/include/wx/stc/stc.h
++++ b/include/wx/stc/stc.h
+@@ -3555,7 +3555,8 @@ public:
+     int GetPrintColourMode() const;
+ 
+     // Find some text in the document.
+-    int FindText(int minPos, int maxPos, const wxString& text, int flags=0);
++    int FindText(int minPos, int maxPos, const wxString& text, int flags=0,
++                 int* findEnd=NULL);
+ 
+     // On Windows, will draw the document into a display context such as a printer.
+     int FormatRange(bool   doDraw,
+diff --git a/interface/wx/stc/stc.h b/interface/wx/stc/stc.h
+index bb4f58b..070dfc2 100644
+--- a/interface/wx/stc/stc.h
++++ b/interface/wx/stc/stc.h
+@@ -3091,10 +3091,32 @@ public:
+     /**
+         Find some text in the document.
+ 
+-        The fourth argument should be a bit list containing one or more of the
+-        @link wxStyledTextCtrl::wxSTC_FIND_WHOLEWORD wxSTC_FIND_* @endlink constants.
++        @param minPos
++            The position (starting from zero) in the document at which to begin
++            the search
++        @param maxPos
++            The last position (starting from zero) in the document to which
++            the search will be restricted.
++        @param text
++            The text to search for.
++        @param flags
++            (Optional)  The search flags.  This should be a bit list containing
++             one or more of the @link wxStyledTextCtrl::wxSTC_FIND_WHOLEWORD
++            wxSTC_FIND_* @endlink constants.
++        @param findEnd
++            (Optional)  This parameter can optionally be used to receive the
++            end position (starting from zero) of the found text.  This is 
++            primarily needed when searching using regular expressions.
++            This parameter is available since wxWidgets 3.1.1.
++        @return
++            The position (starting from zero) in the document at which the text
++            was found or wxSTC_INVALID_POSITION if the search fails.
++        @remarks
++            A backwards search can be performed by setting minPos to be greater
++            than maxPos.
+     */
+-    int FindText(int minPos, int maxPos, const wxString& text, int flags=0);
++    int FindText(int minPos, int maxPos, const wxString& text, int flags=0,
++                 int* findEnd=NULL);
+ 
+     /**
+         Sets the position that starts the target which is used for updating the
+diff --git a/src/stc/gen_docs.py b/src/stc/gen_docs.py
+index 0af91aa..cd02f5c 100644
+--- a/src/stc/gen_docs.py
++++ b/src/stc/gen_docs.py
+@@ -1225,8 +1225,29 @@ extendedDocs = {
+         ('The input should be a time in milliseconds or wxSTC_TIME_FOREVER.',),
+ 
+     'FindText':
+-        ('The fourth argument should be a bit list containing one or more of the',
+-        '@link wxStyledTextCtrl::wxSTC_FIND_WHOLEWORD wxSTC_FIND_* @endlink constants.',),
++        ('@param minPos',
++        '    The position (starting from zero) in the document at which to begin',
++        '    the search',
++        '@param maxPos',
++        '    The last position (starting from zero) in the document to which',
++        '    the search will be restricted.',
++        '@param text',
++        '    The text to search for.',
++        '@param flags',
++        '    (Optional)  The search flags.  This should be a bit list containing',
++        '     one or more of the @link wxStyledTextCtrl::wxSTC_FIND_WHOLEWORD',
++        '    wxSTC_FIND_* @endlink constants.',
++        '@param findEnd',
++        '    (Optional)  This parameter can optionally be used to receive the',
++        '    end position (starting from zero) of the found text.  This is ',
++        '    primarily needed when searching using regular expressions.',
++        '    This parameter is available since wxWidgets 3.1.1.',
++        '@return',
++        '    The position (starting from zero) in the document at which the text',
++        '    was found or wxSTC_INVALID_POSITION if the search fails.',
++        '@remarks',
++        '    A backwards search can be performed by setting minPos to be greater',
++        '    than maxPos.',),
+ 
+     'AddUndoAction':
+         ('The flags argument can be either 0 or wxSTC_UNDO_MAY_COALESCE.',),
+diff --git a/src/stc/gen_iface.py b/src/stc/gen_iface.py
+index ed8e850..33e7044 100755
+--- a/src/stc/gen_iface.py
++++ b/src/stc/gen_iface.py
+@@ -580,18 +580,20 @@ methodOverrideMap = {
+ 
+     'FindText' :
+     (0,
+-     '''int %s(int minPos, int maxPos, const wxString& text, int flags=0);''',
++     '''int %s(int minPos, int maxPos, const wxString& text, int flags=0,
++                 int* findEnd=NULL);''',
+ 
+-     '''int %s(int minPos, int maxPos,
+-               const wxString& text,
+-               int flags) {
++     '''int %s(int minPos, int maxPos, const wxString& text,
++                               int flags, int* findEnd) {
+             Sci_TextToFind  ft;
+             ft.chrg.cpMin = minPos;
+             ft.chrg.cpMax = maxPos;
+             const wxWX2MBbuf buf = wx2stc(text);
+             ft.lpstrText = (char*)(const char*)buf;
+ 
+-            return SendMsg(%s, flags, (sptr_t)&ft);'''
++            int pos = SendMsg(%s, flags, (sptr_t)&ft);
++            if (findEnd) *findEnd=(pos==-1?-1:ft.chrgText.cpMax);
++            return pos;'''
+     ),
+ 
+     'FormatRange' :
+diff --git a/src/stc/stc.cpp b/src/stc/stc.cpp
+index 3ababf3..e08e44c 100644
+--- a/src/stc/stc.cpp
++++ b/src/stc/stc.cpp
+@@ -1704,16 +1704,17 @@ int wxStyledTextCtrl::GetPrintColourMode() const
+ }
+ 
+ // Find some text in the document.
+-int wxStyledTextCtrl::FindText(int minPos, int maxPos,
+-               const wxString& text,
+-               int flags) {
++int wxStyledTextCtrl::FindText(int minPos, int maxPos, const wxString& text,
++                               int flags, int* findEnd) {
+             Sci_TextToFind  ft;
+             ft.chrg.cpMin = minPos;
+             ft.chrg.cpMax = maxPos;
+             const wxWX2MBbuf buf = wx2stc(text);
+             ft.lpstrText = (char*)(const char*)buf;
+ 
+-            return SendMsg(SCI_FINDTEXT, flags, (sptr_t)&ft);
++            int pos = SendMsg(SCI_FINDTEXT, flags, (sptr_t)&ft);
++            if (findEnd) *findEnd=(pos==-1?-1:ft.chrgText.cpMax);
++            return pos;
+ }
+ 
+ // On Windows, will draw the document into a display context such as a printer.

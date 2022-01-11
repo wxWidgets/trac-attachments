@@ -1,0 +1,295 @@
+Index: include/wx/dc.h
+===================================================================
+--- include/wx/dc.h	(revision 67494)
++++ include/wx/dc.h	(working copy)
+@@ -30,6 +30,7 @@
+ #include "wx/math.h"
+ #include "wx/image.h"
+ #include "wx/region.h"
++#include "wx/affinematrix2d.h"
+ 
+ #define wxUSE_NEW_DC 1
+ 
+@@ -490,6 +491,12 @@
+         if ( y ) *y = m_deviceOriginY;
+     }
+ 
++    // these should all be pure virtual but then they'd need an implementation for every OS...
++    virtual bool CanUseTransformMatrix() const { return false; }
++    virtual bool SetTransformMatrix(const wxAffineMatrix2D &WXUNUSED(matrix)) { return false; }
++    virtual wxAffineMatrix2D GetTransformMatrix() const { return wxAffineMatrix2D(); }
++    virtual void ResetTransformMatrix() {}
++
+     virtual void SetDeviceLocalOrigin( wxCoord x, wxCoord y );
+ 
+     virtual void ComputeScaleAndOrigin();
+@@ -1001,6 +1008,18 @@
+     void SetAxisOrientation(bool xLeftRight, bool yBottomUp)
+         { m_pimpl->SetAxisOrientation(xLeftRight, yBottomUp); }
+ 
++    bool CanUseTransformMatrix() const
++        { return m_pimpl->CanUseTransformMatrix(); }
++
++    bool SetTransformMatrix(const wxAffineMatrix2D &matrix)
++        { return m_pimpl->SetTransformMatrix(matrix); }
++
++    wxAffineMatrix2D GetTransformMatrix() const
++        { return m_pimpl->GetTransformMatrix(); }
++
++    void ResetTransformMatrix()
++        { m_pimpl->ResetTransformMatrix(); }
++
+     // mostly internal
+     void SetDeviceLocalOrigin( wxCoord x, wxCoord y )
+         { m_pimpl->SetDeviceLocalOrigin( x, y ); }
+Index: include/wx/msw/dc.h
+===================================================================
+--- include/wx/msw/dc.h	(revision 67494)
++++ include/wx/msw/dc.h	(working copy)
+@@ -87,6 +87,11 @@
+     virtual void SetDeviceOrigin(wxCoord x, wxCoord y);
+     virtual void SetAxisOrientation(bool xLeftRight, bool yBottomUp);
+ 
++    virtual bool CanUseTransformMatrix() const;
++    virtual bool SetTransformMatrix(const wxAffineMatrix2D &matrix);
++    virtual wxAffineMatrix2D GetTransformMatrix() const;
++    virtual void ResetTransformMatrix();
++
+     virtual void SetLogicalFunction(wxRasterOperationMode function);
+ 
+     // implementation from now on
+Index: include/wx/msw/private/dc.h
+===================================================================
+--- include/wx/msw/private/dc.h	(revision 67494)
++++ include/wx/msw/private/dc.h	(working copy)
+@@ -13,6 +13,7 @@
+ 
+ #include "wx/msw/dc.h"
+ #include "wx/msw/wrapwin.h"
++#include "wx/dynlib.h"
+ 
+ namespace wxMSWImpl
+ {
+@@ -142,6 +143,70 @@
+     wxDECLARE_NO_COPY_CLASS(wxBkModeChanger);
+ };
+ 
++
++// class used to dinamically load API calls if available
++class wxGdi32
++{
++public:
++    typedef int (WINAPI *SetGraphicsMode_t)(HDC, int);
++    static SetGraphicsMode_t GetPfnSetGraphicsMode()
++    {
++        if(!s_worldTransformSymbolsLoaded)
++            LoadWorldTransformSymbols();
++
++        return s_pfnSetGraphicsMode; 
++    }
++
++    typedef BOOL (WINAPI *SetWorldTransform_t)(HDC, const XFORM *);
++    static SetWorldTransform_t GetPfnSetWorldTransform()
++    {
++        if(!s_worldTransformSymbolsLoaded)
++            LoadWorldTransformSymbols();
++
++        return s_pfnSetWorldTransform; 
++    }
++
++    typedef BOOL (WINAPI *GetWorldTransform_t)(HDC, LPXFORM);
++    static GetWorldTransform_t GetPfnGetWorldTransform()
++    {
++        if(!s_worldTransformSymbolsLoaded)
++            LoadWorldTransformSymbols();
++
++        return s_pfnGetWorldTransform; 
++    }
++
++    typedef BOOL (WINAPI *ModifyWorldTransform_t)(HDC, const XFORM *, DWORD);
++    static ModifyWorldTransform_t GetPfnModifyWorldTransform()
++    {
++        if(!s_worldTransformSymbolsLoaded)
++            LoadWorldTransformSymbols();
++
++        return s_pfnModifyWorldTransform; 
++    }
++
++private:
++    static void LoadWorldTransformSymbols()
++    {
++#if wxUSE_DYNLIB_CLASS
++        wxDynamicLibrary dll(wxT("gdi32.dll"));
++
++        wxDL_INIT_FUNC(s_pfn, SetGraphicsMode, dll);
++        wxDL_INIT_FUNC(s_pfn, SetWorldTransform, dll);
++        wxDL_INIT_FUNC(s_pfn, GetWorldTransform, dll);
++        wxDL_INIT_FUNC(s_pfn, ModifyWorldTransform, dll);
++#endif // wxUSE_DYNLIB_CLASS
++
++        s_worldTransformSymbolsLoaded = true;
++    }
++
++    static SetGraphicsMode_t s_pfnSetGraphicsMode;
++    static SetWorldTransform_t s_pfnSetWorldTransform;
++    static GetWorldTransform_t s_pfnGetWorldTransform;
++    static ModifyWorldTransform_t s_pfnModifyWorldTransform;
++
++    static bool s_worldTransformSymbolsLoaded;
++};
++
+ } // namespace wxMSWImpl
+ 
+ #endif // _MSW_PRIVATE_DC_H_
+Index: interface/wx/dc.h
+===================================================================
+--- interface/wx/dc.h	(revision 67494)
++++ interface/wx/dc.h	(working copy)
+@@ -163,6 +163,12 @@
+     wxColour use the colour's alpha values when stroking or filling.
+ 
+ 
++    @section Support for Transformation Matrix
++
++    Currently this is implemented only for MSW, and only where support is available.
++    Requires Windows NT 3.1 or later. Windows 9x/Me: Unsupported.
++    For unsupported platforms calling these functions will have no effect.
++
+     @library{wxcore}
+     @category{dc,gdi}
+ 
+@@ -1499,6 +1505,42 @@
+         'zooming'.
+     */
+     void SetUserScale(double xScale, double yScale);
++
++
++    /**
++        @name Transformation matrix
++    */
++    //@{
++
++    /**
++        Check if the use of transformation matrix is supported by the OS.
++
++        @since 2.9.2
++    */
++    bool CanUseTransformMatrix() const;
++
++    /**
++        Set the transformation matrix.
++
++        @since 2.9.2
++    */
++    bool SetTransformMatrix(const wxAffineMatrix2D &matrix);
++
++    /**
++        Return the transformation matrix used by this device context.
++        By default the transformation matrix is the identity matrix.
++
++        @since 2.9.2
++    */
++    wxAffineMatrix2D GetTransformMatrix() const;
++
++    /**
++        Revert the transformation matrix to identity matrix.
++
++        @since 2.9.2
++    */
++    bool ResetTransformMatrix();
++    //@}
+ };
+ 
+ 
+Index: src/msw/dc.cpp
+===================================================================
+--- src/msw/dc.cpp	(revision 67494)
++++ src/msw/dc.cpp	(working copy)
+@@ -41,7 +41,6 @@
+ 
+ #include "wx/msw/dc.h"
+ #include "wx/sysopt.h"
+-#include "wx/dynlib.h"
+ 
+ #ifdef wxHAS_RAW_BITMAP
+     #include "wx/rawbmp.h"
+@@ -53,6 +52,12 @@
+ 
+ using namespace wxMSWImpl;
+ 
++wxGdi32::SetGraphicsMode_t wxGdi32::s_pfnSetGraphicsMode = NULL;
++wxGdi32::SetWorldTransform_t wxGdi32::s_pfnSetWorldTransform = NULL;
++wxGdi32::GetWorldTransform_t wxGdi32::s_pfnGetWorldTransform = NULL;
++wxGdi32::ModifyWorldTransform_t wxGdi32::s_pfnModifyWorldTransform = NULL;
++bool wxGdi32::s_worldTransformSymbolsLoaded = false;
++
+ #ifndef AC_SRC_ALPHA
+     #define AC_SRC_ALPHA 1
+ #endif
+@@ -2005,6 +2010,66 @@
+     ::SetViewportOrgEx(GetHdc(), (int)m_deviceOriginX, (int)m_deviceOriginY, NULL);
+ }
+ 
++bool wxMSWDCImpl::CanUseTransformMatrix() const
++{
++    return wxGdi32::GetPfnSetGraphicsMode() &&
++           wxGdi32::GetPfnSetWorldTransform() &&
++           wxGdi32::GetPfnGetWorldTransform() &&
++           wxGdi32::GetPfnModifyWorldTransform();
++}
++
++bool wxMSWDCImpl::SetTransformMatrix(const wxAffineMatrix2D &matrix)
++{
++    if(!wxGdi32::GetPfnSetGraphicsMode() || !wxGdi32::GetPfnSetWorldTransform())
++        return false;
++
++    if(matrix.IsIdentity())
++    {
++        ResetTransformMatrix();
++        return true;
++    }
++
++    if(!wxGdi32::GetPfnSetGraphicsMode()(GetHdc(), GM_ADVANCED))
++        return false;
++
++    wxMatrix2D mat;
++    wxPoint2DDouble tr;
++    matrix.Get(&mat, &tr);
++
++    XFORM xform;
++    xform.eM11 = mat.m_11;
++    xform.eM12 = mat.m_12;
++    xform.eM21 = mat.m_21;
++    xform.eM22 = mat.m_22;
++    xform.eDx = tr.m_x;
++    xform.eDy = tr.m_y;
++
++    return wxGdi32::GetPfnSetWorldTransform()(GetHdc(), &xform );
++}
++
++wxAffineMatrix2D wxMSWDCImpl::GetTransformMatrix() const
++{
++    XFORM xform;
++    if(!wxGdi32::GetPfnGetWorldTransform() || !wxGdi32::GetPfnGetWorldTransform()(GetHdc(), &xform))
++        return wxAffineMatrix2D();
++
++    wxMatrix2D m(xform.eM11, xform.eM12, xform.eM21, xform.eM22);
++    wxPoint2DDouble p(xform.eDx, xform.eDy);
++    wxAffineMatrix2D transform;
++    transform.Set(m, p);
++
++    return transform;
++}
++
++void wxMSWDCImpl::ResetTransformMatrix()
++{
++    if(wxGdi32::GetPfnModifyWorldTransform() && wxGdi32::GetPfnSetGraphicsMode())
++    {
++        wxGdi32::GetPfnModifyWorldTransform()(GetHdc(), NULL, MWT_IDENTITY);
++        wxGdi32::GetPfnSetGraphicsMode()(GetHdc(), GM_COMPATIBLE);
++    }
++}
++
+ // ---------------------------------------------------------------------------
+ // bit blit
+ // ---------------------------------------------------------------------------

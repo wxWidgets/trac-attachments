@@ -1,0 +1,365 @@
+Index: src/gtk/minifram.cpp
+===================================================================
+--- src/gtk/minifram.cpp	(revision 64391)
++++ src/gtk/minifram.cpp	(working copy)
+@@ -281,6 +281,7 @@
+                gdk_window_set_cursor( widget->window, gdk_cursor_new( GDK_BOTTOM_RIGHT_CORNER ) );
+             else
+                gdk_window_set_cursor( widget->window, NULL );
++            win->GTKUpdateCursor(false);
+         }
+         return TRUE;
+     }
+Index: src/gtk/window.cpp
+===================================================================
+--- src/gtk/window.cpp	(revision 64391)
++++ src/gtk/window.cpp	(working copy)
+@@ -183,14 +183,12 @@
+ 
+    Cursors, too, have been a constant source of pleasure. The main difficulty
+    is that a GdkWindow inherits a cursor if the programmer sets a new cursor
+-   for the parent. To prevent this from doing too much harm, I use idle time
+-   to set the cursor over and over again, starting from the toplevel windows
+-   and ending with the youngest generation (speaking of parent and child windows).
++   for the parent. To prevent this from doing too much harm, SetCursor calls
++   GTKUpdateCursor, which will recursively re-set the cursors of all child windows.
+    Also don't forget that cursors (like much else) are connected to GdkWindows,
+    not GtkWidgets and that the "window" field of a GtkWidget might very well
+    point to the GdkWindow of the parent widget (-> "window-less widget") and
+    that the two obviously have very different meanings.
+-
+ */
+ 
+ //-----------------------------------------------------------------------------
+@@ -2565,38 +2563,6 @@
+         m_needsStyleChange = false;
+     }
+ 
+-    wxCursor cursor = m_cursor;
+-    if (g_globalCursor.Ok()) cursor = g_globalCursor;
+-
+-    if (cursor.Ok())
+-    {
+-        /* I now set the cursor anew in every OnInternalIdle call
+-           as setting the cursor in a parent window also effects the
+-           windows above so that checking for the current cursor is
+-           not possible. */
+-
+-        if (m_wxwindow && (m_wxwindow != m_widget))
+-        {
+-            GdkWindow* window = GTKGetDrawingWindow();
+-            if (window)
+-                gdk_window_set_cursor( window, cursor.GetCursor() );
+-
+-            if (!g_globalCursor.Ok())
+-                cursor = *wxSTANDARD_CURSOR;
+-
+-            window = m_widget->window;
+-            if ((window) && !(GTK_WIDGET_NO_WINDOW(m_widget)))
+-                gdk_window_set_cursor( window, cursor.GetCursor() );
+-
+-        }
+-        else if ( m_widget )
+-        {
+-            GdkWindow *window = m_widget->window;
+-            if ( window && !GTK_WIDGET_NO_WINDOW(m_widget) )
+-               gdk_window_set_cursor( window, cursor.GetCursor() );
+-        }
+-    }
+-
+     if (wxUpdateUIEvent::CanUpdate(this) && IsShownOnScreen())
+         UpdateWindowUI(wxUPDATE_UI_FROMIDLE);
+ }
+@@ -3429,33 +3395,55 @@
+     return true;
+ }
+ 
+-void wxWindowGTK::GTKUpdateCursor()
++void wxWindowGTK::GTKUpdateCursor(bool update_self /*=true*/, bool recurse /*=true*/)
+ {
+-    wxCursor cursor(g_globalCursor.Ok() ? g_globalCursor : GetCursor());
+-    if ( cursor.Ok() )
+-    {
+-        wxArrayGdkWindows windowsThis;
+-        GdkWindow * const winThis = GTKGetWindow(windowsThis);
+-        if ( winThis )
+-        {
+-            gdk_window_set_cursor(winThis, cursor.GetCursor());
+-        }
+-        else
+-        {
+-            const size_t count = windowsThis.size();
+-            for ( size_t n = 0; n < count; n++ )
+-            {
+-                GdkWindow *win = windowsThis[n];
+-                if ( !win )
+-                {
+-                    wxFAIL_MSG(wxT("NULL window returned by GTKGetWindow()?"));
+-                    continue;
+-                }
++    if (update_self)
++    {
++        wxCursor cursor(g_globalCursor.Ok() ? g_globalCursor : GetCursor());
++        if ( cursor.Ok() )
++        {
++            if (m_wxwindow && (m_wxwindow != m_widget))
++            {
++                wxArrayGdkWindows windowsThis;
++                GdkWindow* window = GTKGetDrawingWindow();
++                if (window)
++                    gdk_window_set_cursor( window, cursor.GetCursor() );
++                else
++                {
++                    const size_t count = windowsThis.size();
++                    for ( size_t n = 0; n < count; n++ )
++                    {
++                        GdkWindow *win = windowsThis[n];
++                        if ( !win )
++                        {
++                            wxFAIL_MSG(wxT("NULL window returned by GTKGetWindow()?"));
++                            continue;
++                        }
++                        gdk_window_set_cursor(win, cursor.GetCursor());
++                    }
++                }
+ 
+-                gdk_window_set_cursor(win, cursor.GetCursor());
+-            }
+-        }
+-    }
++                window = m_widget->window;
++                if ((window) && !(GTK_WIDGET_NO_WINDOW(m_widget)))
++                    gdk_window_set_cursor( window, cursor.GetCursor() );
++
++            }
++            else if ( m_widget )
++            {
++                GdkWindow *window = m_widget->window;
++                if ( window && !GTK_WIDGET_NO_WINDOW(m_widget) )
++                    gdk_window_set_cursor( window, cursor.GetCursor() );
++            }
++        }
++    }
++
++    if (recurse)
++    {
++        for (wxWindowList::iterator it = GetChildren().begin(); it != GetChildren().end(); ++it)
++        {
++            (*it)->GTKUpdateCursor( true );
++        }
++    }
+ }
+ 
+ void wxWindowGTK::WarpPointer( int x, int y )
+Index: src/gtk/textctrl.cpp
+===================================================================
+--- src/gtk/textctrl.cpp	(revision 64391)
++++ src/gtk/textctrl.cpp	(working copy)
+@@ -622,16 +622,10 @@
+ 
+     m_text = NULL;
+     m_showPositionOnThaw = NULL;
+-    m_gdkHandCursor = NULL;
+-    m_gdkXTermCursor = NULL;
+ }
+ 
+ wxTextCtrl::~wxTextCtrl()
+ {
+-    if(m_gdkHandCursor)
+-        gdk_cursor_unref(m_gdkHandCursor);
+-    if(m_gdkXTermCursor)
+-        gdk_cursor_unref(m_gdkXTermCursor);
+ }
+ 
+ wxTextCtrl::wxTextCtrl( wxWindow *parent,
+@@ -763,8 +757,6 @@
+         if (style & wxTE_AUTO_URL)
+         {
+             GtkTextIter start, end;
+-            m_gdkHandCursor = gdk_cursor_new(GDK_HAND2);
+-            m_gdkXTermCursor = gdk_cursor_new(GDK_XTERM);
+ 
+             // We create our wxUrl tag here for slight efficiency gain - we
+             // don't have to check for the tag existance in callbacks,
+@@ -810,7 +802,7 @@
+     g_signal_connect (m_text, "paste-clipboard",
+                       G_CALLBACK (gtk_paste_clipboard_callback), this);
+ 
+-    m_cursor = wxCursor( wxCURSOR_IBEAM );
++    m_cursor = wxCursor( wxCURSOR_IBEAM );
+ 
+     return true;
+ }
+@@ -1873,13 +1865,11 @@
+     gtk_text_view_get_iter_at_location(GTK_TEXT_VIEW(m_text), &end, x, y);
+     if (!gtk_text_iter_has_tag(&end, tag))
+     {
+-        gdk_window_set_cursor(gtk_text_view_get_window(GTK_TEXT_VIEW(m_text),
+-                              GTK_TEXT_WINDOW_TEXT), m_gdkXTermCursor);
++        SetCursor(wxCursor(wxCURSOR_IBEAM));
+         return;
+     }
+ 
+-    gdk_window_set_cursor(gtk_text_view_get_window(GTK_TEXT_VIEW(m_text),
+-                          GTK_TEXT_WINDOW_TEXT), m_gdkHandCursor);
++    SetCursor(wxCursor(wxCURSOR_HAND));
+ 
+     start = end;
+     if(!gtk_text_iter_begins_tag(&start, tag))
+Index: src/gtk/cursor.cpp
+===================================================================
+--- src/gtk/cursor.cpp	(revision 64391)
++++ src/gtk/cursor.cpp	(working copy)
+@@ -374,7 +374,7 @@
+     return wxCursor(wxCURSOR_WATCH);
+ }
+ 
+-static void InternalIdle(const wxWindowList& list, GdkDisplay*& display)
++static void UpdateCursors(const wxWindowList& list, GdkDisplay*& display)
+ {
+     wxWindowList::const_iterator i = list.begin();
+     for (size_t n = list.size(); n--; ++i)
+@@ -382,8 +382,8 @@
+         wxWindow* win = *i;
+         if (display == NULL && win->m_widget && win->m_widget->window)
+             display = gdk_drawable_get_display(win->m_widget->window);
+-        win->OnInternalIdle();
+-        InternalIdle(win->GetChildren(), display);
++        win->GTKUpdateCursor(true, false);
++        UpdateCursors(win->GetChildren(), display);
+     }
+ }
+ 
+@@ -395,7 +395,7 @@
+     g_globalCursor = gs_savedCursor;
+     gs_savedCursor = wxNullCursor;
+     GdkDisplay* unused = NULL;
+-    InternalIdle(wxTopLevelWindows, unused);
++    UpdateCursors(wxTopLevelWindows, unused);
+ }
+ 
+ void wxBeginBusyCursor(const wxCursor* cursor)
+@@ -409,7 +409,7 @@
+     gs_savedCursor = g_globalCursor;
+     g_globalCursor = *cursor;
+     GdkDisplay* display = NULL;
+-    InternalIdle(wxTopLevelWindows, display);
++    UpdateCursors(wxTopLevelWindows, display);
+     if (display)
+         gdk_display_flush(display);
+ }
+@@ -422,5 +422,6 @@
+ void wxSetCursor( const wxCursor& cursor )
+ {
+     g_globalCursor = cursor;
+-    wxTheApp->WakeUpIdle();
++    GdkDisplay* unused = NULL;
++    UpdateCursors(wxTopLevelWindows, unused);
+ }
+Index: src/gtk/toolbar.cpp
+===================================================================
+--- src/gtk/toolbar.cpp	(revision 64391)
++++ src/gtk/toolbar.cpp	(working copy)
+@@ -733,45 +733,6 @@
+     // Check if we have to show window now
+     if (GTKShowFromOnIdle()) return;
+ 
+-    wxCursor cursor = m_cursor;
+-    if (g_globalCursor.Ok()) cursor = g_globalCursor;
+-
+-    if (cursor.Ok())
+-    {
+-        /* I now set the cursor the anew in every OnInternalIdle call
+-           as setting the cursor in a parent window also effects the
+-           windows above so that checking for the current cursor is
+-           not possible. */
+-
+-        if (HasFlag(wxTB_DOCKABLE) && (m_widget->window))
+-        {
+-            /* if the toolbar is dockable, then m_widget stands for the
+-               GtkHandleBox widget, which uses its own window so that we
+-               can set the cursor for it. if the toolbar is not dockable,
+-               m_widget comes from m_toolbar which uses its parent's
+-               window ("windowless windows") and thus we cannot set the
+-               cursor. */
+-            gdk_window_set_cursor( m_widget->window, cursor.GetCursor() );
+-        }
+-
+-        wxToolBarToolsList::compatibility_iterator node = m_tools.GetFirst();
+-        while ( node )
+-        {
+-            wxToolBarTool *tool = (wxToolBarTool *)node->GetData();
+-            node = node->GetNext();
+-
+-            if (tool->m_item)
+-            {
+-                GdkWindow* window = GTK_WIDGET(tool->m_item)->window;
+-
+-                if ( window )
+-                {
+-                    gdk_window_set_cursor( window, cursor.GetCursor() );
+-                }
+-            }
+-        }
+-    }
+-
+     if (wxUpdateUIEvent::CanUpdate(this) && IsShownOnScreen())
+         UpdateWindowUI(wxUPDATE_UI_FROMIDLE);
+ }
+Index: src/gtk/control.cpp
+===================================================================
+--- src/gtk/control.cpp	(revision 64391)
++++ src/gtk/control.cpp	(working copy)
+@@ -323,11 +323,6 @@
+     if ( GTKShowFromOnIdle() )
+         return;
+ 
+-    if ( GTK_WIDGET_REALIZED(m_widget) )
+-    {
+-        GTKUpdateCursor();
+-    }
+-
+     if ( wxUpdateUIEvent::CanUpdate(this) && IsShownOnScreen() )
+         UpdateWindowUI(wxUPDATE_UI_FROMIDLE);
+ }
+Index: include/wx/gtk/window.h
+===================================================================
+--- include/wx/gtk/window.h	(revision 64391)
++++ include/wx/gtk/window.h	(working copy)
+@@ -279,6 +279,10 @@
+     // find the direction of the given scrollbar (must be one of ours)
+     ScrollDir ScrollDirFromRange(GtkRange *range) const;
+ 
++    // set the current cursor for all GdkWindows making part of this widget
++    // (see GTKGetWindow)
++    void GTKUpdateCursor(bool update_self = true, bool recurse = true);
++
+     // extra (wxGTK-specific) flags
+     bool                 m_noExpose:1;          // wxGLCanvas has its own redrawing
+     bool                 m_nativeSizeEvent:1;   // wxGLCanvas sends wxSizeEvent upon "alloc_size"
+@@ -357,12 +361,6 @@
+     // sets the border of a given GtkScrolledWindow from a wx style
+     static void GTKScrolledWindowSetBorder(GtkWidget* w, int style);
+ 
+-    // set the current cursor for all GdkWindows making part of this widget
+-    // (see GTKGetWindow)
+-    //
+-    // should be called from OnInternalIdle() if it's overridden
+-    void GTKUpdateCursor();
+-
+     // Connect the given function to the specified signal on m_widget.
+     //
+     // This is just a wrapper for g_signal_connect() and returns the handler id
+Index: include/wx/gtk/textctrl.h
+===================================================================
+--- include/wx/gtk/textctrl.h	(revision 64391)
++++ include/wx/gtk/textctrl.h	(working copy)
+@@ -217,8 +217,6 @@
+ 
+     // For wxTE_AUTO_URL
+     void OnUrlMouseEvent(wxMouseEvent&);
+-    GdkCursor *m_gdkHandCursor;
+-    GdkCursor *m_gdkXTermCursor;
+ 
+     DECLARE_EVENT_TABLE()
+     DECLARE_DYNAMIC_CLASS(wxTextCtrl)

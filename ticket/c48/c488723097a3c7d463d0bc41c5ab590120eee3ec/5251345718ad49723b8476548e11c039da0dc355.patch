@@ -1,0 +1,1578 @@
+From 974ad8bc8a199fdd53992c59a0967cc1f98ab831 Mon Sep 17 00:00:00 2001
+From: Rob Bresalier
+Date: Tue, 18 Jun 2013 03:22:48 +0000
+Subject: [PATCH] My goal for my first commit/patch was to only change the FD
+ handling to use wxEventLoop::AddSourceForFd() and to have a
+ working implementation.
+
+---
+ include/wx/evtloopsrc.h                         |   56 ++++++-
+ include/wx/osx/evtloopsrc.h                     |   17 ++-
+ include/wx/private/fdioeventloopsourcehandler.h |   42 +++++
+ include/wx/unix/app.h                           |   20 ++-
+ include/wx/unix/apptbase.h                      |   34 ++---
+ include/wx/unix/apptrait.h                      |    4 -
+ include/wx/unix/execute.h                       |   23 ++-
+ include/wx/unix/pipe.h                          |    1 +
+ include/wx/unix/private/executeiohandler.h      |   13 +-
+ include/wx/unix/private/wakeuppipe.h            |    4 +-
+ src/gtk/evtloop.cpp                             |   16 ++-
+ src/gtk/utilsgtk.cpp                            |   58 -------
+ src/gtk1/utilsgtk.cpp                           |   44 -----
+ src/motif/utils.cpp                             |   40 -----
+ src/osx/core/evtloop_cf.cpp                     |   15 ++-
+ src/osx/core/utilsexc_cf.cpp                    |  100 -----------
+ src/unix/apptraits.cpp                          |    8 -
+ src/unix/appunix.cpp                            |   88 ++++++++--
+ src/unix/evtloopunix.cpp                        |   30 +---
+ src/unix/utilsunx.cpp                           |  202 +++++++++++++++--------
+ src/unix/wakeuppipe.cpp                         |   50 ++++++
+ tests/exec/exec.cpp                             |  104 +++++++++---
+ 22 files changed, 544 insertions(+), 425 deletions(-)
+ create mode 100644 include/wx/private/fdioeventloopsourcehandler.h
+
+diff --git a/include/wx/evtloopsrc.h b/include/wx/evtloopsrc.h
+index 0a5d767..c354e1c 100644
+--- a/include/wx/evtloopsrc.h
++++ b/include/wx/evtloopsrc.h
+@@ -28,6 +28,27 @@
+ class wxEventLoopSourceHandler
+ {
+ public:
++    // See the declaration of 'bool activeFlag' for more detailed
++    // explanation.
++    wxEventLoopSourceHandler()
++    {
++        activeFlag = false;
++    }
++
++    // See the declaration of 'bool activeFlag' for more detailed
++    // explanation.
++    void SetActiveFlag(bool activeFlag_)
++    {
++        activeFlag = activeFlag_;
++    }
++
++    // See the declaration of 'bool activeFlag' for more detailed
++    // explanation.
++    bool GetActiveFlag()
++    {
++        return activeFlag;
++    }
++
+     // called when descriptor is available for non-blocking read
+     virtual void OnReadWaiting() = 0;
+ 
+@@ -39,6 +60,32 @@ public:
+ 
+     // virtual dtor for the base class
+     virtual ~wxEventLoopSourceHandler() { }
++
++private:
++
++    // Keeps track of whether a corresponding wxEventLoopSource
++    // exists, which means that it is possible to get callbacks
++    // on this function.
++    // 
++    // For the current OSX implementation of AddSourceForFD(), it is 
++    // required due to usage of the one-shot function
++    // CFFileDescriptorEnableCallBacks() to enable callbacks.
++    // Once we finish the callback function (wx_cffiledescriptor_callback()
++    // inside of evtloop_cf.cpp), we need to know
++    // whether or not callbacks are still active and if not then
++    // we don't want to call CFFileDescriptorEnableCallBacks() at
++    // the end of the callback anymore.  We can use this flag to decide that.
++    //
++    // I think this strategy has some risks, such as if this handler instance
++    // is re-used for multiple fds, then we would need an activeFlag for
++    // each fd.
++    // 
++    // This can all be avoided if we use the Socket method for fd
++    // sources in OSX as was used in the original wxExecute patch.
++    // Therefore, I strongly advise to moving the implementation of
++    // wxEventLoopBase::AddSourceForFd() to migrate to the socket
++    // API in my next commit/patch.
++    bool activeFlag;
+ };
+ 
+ // flags describing which kind of IO events we're interested in
+@@ -73,6 +120,7 @@ protected:
+         : m_handler(handler),
+           m_flags(flags)
+     {
++        m_handler->SetActiveFlag(true);
+     }
+ 
+     wxEventLoopSourceHandler* m_handler;
+@@ -81,7 +129,13 @@ protected:
+     wxDECLARE_NO_COPY_CLASS(wxEventLoopSource);
+ };
+ 
+-inline wxEventLoopSource::~wxEventLoopSource() { }
++inline wxEventLoopSource::~wxEventLoopSource()
++{
++    // Inform the handler that the source is no longer active.
++    // This is needed in wxOSX implementation so we can know not
++    // to re-enable the callback anymore.
++    m_handler->SetActiveFlag(false); 
++}
+ 
+ #if defined(__UNIX__)
+     #include "wx/unix/evtloopsrc.h"
+diff --git a/include/wx/osx/evtloopsrc.h b/include/wx/osx/evtloopsrc.h
+index 3c18bba..028d4b0 100644
+--- a/include/wx/osx/evtloopsrc.h
++++ b/include/wx/osx/evtloopsrc.h
+@@ -31,9 +31,24 @@ public:
+ 
+     virtual ~wxCFEventLoopSource();
+ 
+-private:
++    // Undo debug
++    // Temporarily made public for debugging/demonstration purposes
++    // only - not meant to be merged into library.
++    // Made public in order to be able to renable callbacks for when
++    // we use the wxSelectDispatcher for wxEXEC_NOEVENTS case.
++    // If we don't re-enable callbacks after the fd is handled
++    // by the dispatcher, we won't get the events/callbacks in the
++    // main event loop anymore.
++    // For demo purposes only, wxWakeupPipe::OnReadWaiting() will
++    // re-enable the callback.
++    // I will discuss this more on wx-dev.
+     CFFileDescriptorRef m_cffd;
+ 
++private:
++    // Undo debug, This will be made private again, or totally removed
++    // if we change to using Socket method for fd callbacks on OSX.
++    // CFFileDescriptorRef m_cffd;
++
+     wxDECLARE_NO_COPY_CLASS(wxCFEventLoopSource);
+ };
+ 
+diff --git a/include/wx/private/fdioeventloopsourcehandler.h b/include/wx/private/fdioeventloopsourcehandler.h
+new file mode 100644
+index 0000000..5dc9746
+--- /dev/null
++++ b/include/wx/private/fdioeventloopsourcehandler.h
+@@ -0,0 +1,42 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/private/fdiohandler.h
++// Purpose:     declares wxFDIOEventLoopSourceHandler class
++// Author:      Rob Bresalier
++// Created:     2013-06-13
++// RCS-ID:      $Id$
++// Copyright:   (c) 2013 Rob Bresalier
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef FDIO_EVENT_LOOP_SOURCE_HANDLER_H
++#define FDIO_EVENT_LOOP_SOURCE_HANDLER_H
++
++// This class is a temporary bridge between event loop sources and
++// FDIODispatcher. It is going to be removed soon, when all subject interfaces
++// are modified
++class wxFDIOEventLoopSourceHandler : public wxFDIOHandler
++{
++public:
++    wxFDIOEventLoopSourceHandler(wxEventLoopSourceHandler* handler) :
++        m_impl(handler) { }
++
++    virtual void OnReadWaiting()
++    {
++        m_impl->OnReadWaiting();
++    }
++    virtual void OnWriteWaiting()
++    {
++        m_impl->OnWriteWaiting();
++    }
++
++    virtual void OnExceptionWaiting()
++    {
++        m_impl->OnExceptionWaiting();
++    }
++
++protected:
++    wxEventLoopSourceHandler* m_impl;
++};
++
++#endif // #ifndef FDIO_EVENT_LOOP_SOURCE_HANDLER_H
++
+diff --git a/include/wx/unix/app.h b/include/wx/unix/app.h
+index afa7640..2313ca8 100644
+--- a/include/wx/unix/app.h
++++ b/include/wx/unix/app.h
+@@ -13,6 +13,7 @@
+ 
+ class wxFDIODispatcher;
+ class wxWakeUpPipe;
++class wxFDIOEventLoopSourceHandler;
+ 
+ // wxApp subclass implementing event processing for console applications
+ class WXDLLIMPEXP_BASE wxAppConsole : public wxAppConsoleBase
+@@ -38,7 +39,19 @@ public:
+     // instead of a function pointer
+     //
+     // Return true if handler was installed, false on error
+-    bool SetSignalHandler(int signal, SignalHandler handler);
++    //
++    // Need to pass evtLoop for wxExecute(SYNC) case for console applications
++    // in order to activate fd sources (callbacks).  In order to activate
++    // fd callbacks, we must call wxEventLoopBase::AddSourceForFd() and it is
++    // currently not a static method, so we need an event loop object.  For
++    // console applications using wxExecute(SYNC), wxEventLoopBase::GetActive()
++    // can be used to obtain the event loop object because the synchronous
++    // event loop has not had its Run() method called yet.
++    //
++    // We could avoid passing this parameter if we turned 
++    // wxEventLoopBase::AddSourceForFd() into a static method, which I am very
++    // much in favor of, and will talk more about on wx-dev.
++    bool SetSignalHandler(int signal, SignalHandler handler, wxEventLoopBase* evtLoop=NULL);
+ 
+     // Check if any Unix signals arrived since the last call and execute
+     // handlers for them
+@@ -47,7 +60,10 @@ public:
+     // Register the signal wake up pipe with the given dispatcher.
+     //
+     // This is used by wxExecute(wxEXEC_NOEVENTS) implementation only.
+-    bool RegisterSignalWakeUpPipe(wxFDIODispatcher& dispatcher);
++    //
++    // The pointer to the wxFDIOEventLoopSourceHandler is returned so
++    // that it can be deleted when we no longer needed it.
++    wxFDIOEventLoopSourceHandler* RegisterSignalWakeUpPipe(wxFDIODispatcher& dispatcher);
+ 
+ private:
+     // signal handler set up by SetSignalHandler() for all signals we handle,
+diff --git a/include/wx/unix/apptbase.h b/include/wx/unix/apptbase.h
+index 1021c7e..5a7a205 100644
+--- a/include/wx/unix/apptbase.h
++++ b/include/wx/unix/apptbase.h
+@@ -13,12 +13,16 @@
+ #define _WX_UNIX_APPTBASE_H_
+ 
+ #include "wx/hashmap.h"
++#include "wx/evtloop.h"
++#include "wx/evtloopsrc.h"
+ 
+ struct wxEndProcessData;
+ struct wxExecuteData;
+ class wxFDIOManager;
+ class wxFDIOHandler;
+-class wxSelectDispatcher;
++class wxFDIODispatcher;
++class wxWakeUpPipe;
++class wxFDIOEventLoopSourceHandler;
+ 
+ // ----------------------------------------------------------------------------
+ // wxAppTraits: the Unix version adds extra hooks needed by Unix code
+@@ -41,31 +45,16 @@ public:
+         termination for synchronous execution. */
+     int WaitForChildSync(wxExecuteData& execData);
+ 
+-    // Integrate the monitoring of the given fd with the port-specific event
+-    // loop: when this fd is written to, OnReadWaiting() of the provided
+-    // handler will be called.
+-    //
+-    // The lifetime of the handler must be long enough, call
+-    // RemoveProcessCallback() before destroying it.
+-    virtual void AddProcessCallback(wxFDIOHandler& handler, int fd);
+-
+-    // Remove the callback previously installed by AddProcessCallback().
+-    virtual void RemoveProcessCallback(int fd);
+-
+     /*
+-        Wrapper for calling the platform specific, AddProcessCallback, so that
+-        there is more control over the handling of callbacks that might still
+-        be occurring after we don't want them anymore, but the fd is still
+-        closing.
+-
+         Additional parameter dispatcher indicates that this specific
+         wxFDIODispatcher will be used instead of the current event loop, so the
+         callback needs to be set differently in that case. This is needed for
+         the wxEXEC_NOEVENTS case of wxExecute.
+      */
+-    void
+-    RegisterProcessCallback(wxFDIOHandler& handler,
++    wxFDIOEventLoopSourceHandler*
++    RegisterProcessCallback(wxEventLoopSourceHandler& handler,
+                             int fd,
++                            wxEventLoopBase& evtLoop,
+                             wxFDIODispatcher *dispatcher = NULL);
+ 
+     /** Disables the callback and removes the fd from the hash that
+@@ -99,15 +88,18 @@ protected:
+         {
+             handler = NULL;
+             dispatcher = NULL;
++            eventLoopSource = NULL;
+         }
+ 
+-        FDHandlerData(wxFDIOHandler* handler_, wxFDIODispatcher* dispatcher_)
++        FDHandlerData(wxEventLoopSourceHandler* handler_, wxFDIODispatcher* dispatcher_)
+             : handler(handler_), dispatcher(dispatcher_)
+         {
++            eventLoopSource = NULL;
+         }
+ 
+-        wxFDIOHandler* handler;
++        wxEventLoopSourceHandler* handler;
+         wxFDIODispatcher* dispatcher;
++        wxEventLoopSource* eventLoopSource;
+     };
+ 
+     WX_DECLARE_HASH_MAP(int, FDHandlerData, wxIntegerHash, wxIntegerEqual, FDHandlers);
+diff --git a/include/wx/unix/apptrait.h b/include/wx/unix/apptrait.h
+index d1162e1..204fa37 100644
+--- a/include/wx/unix/apptrait.h
++++ b/include/wx/unix/apptrait.h
+@@ -88,10 +88,6 @@ public:
+ #endif // wxUSE_SOCKETS
+ 
+ protected:
+-#ifdef wxHAS_GUI_PROCESS_CALLBACKS
+-    virtual void AddProcessCallback(wxFDIOHandler& handler, int fd);
+-    virtual void RemoveProcessCallback(int fd);
+-#endif
+ };
+ 
+ #endif // wxUSE_GUI
+diff --git a/include/wx/unix/execute.h b/include/wx/unix/execute.h
+index af2f604..7a6afe1 100644
+--- a/include/wx/unix/execute.h
++++ b/include/wx/unix/execute.h
+@@ -17,6 +17,8 @@ class wxFDIOHandler;
+ class WXDLLIMPEXP_FWD_BASE wxProcess;
+ class wxStreamTempInputBuffer;
+ class wxSelectDispatcher;
++class wxEventLoopBase;
++class wxFDIOEventLoopSourceHandler;
+ 
+ struct wxEndProcessData
+ {
+@@ -69,8 +71,16 @@ struct wxExecuteData
+         endProcDataPtr = &endProcData;
+ 
+         dispatcher = NULL;
++
++        dispatcherWakeupPipe = NULL;
++        dispatcherStdoutPipe = NULL;
++        dispatcherStderrPipe = NULL;
+     }
+ 
++    // The destructor is where we will delete the dispatcher pipes
++    // when we are done with them.
++    ~wxExecuteData();
++
+     // get the FD corresponding to the read end of the process end detection
+     // pipe and close the write one
+     int GetEndProcReadFD()
+@@ -107,6 +117,15 @@ struct wxExecuteData
+     // Set to NULL when wxEXEC_NOEVENTS is not specified.
+     wxFDIODispatcher *dispatcher;
+ 
++    /* For the wxEXEC_NOEVENTS case, we need to bridge wxEventLoopSource
++       to wxFDIOHandler in order to register the FD in the dispatcher.
++       We will need to delete these bridged objects when we are done with
++       them.  Therefore, we store these pointers here so that we can delete
++       them when they are no longer needed. */
++    wxFDIOEventLoopSourceHandler* dispatcherWakeupPipe;
++    wxFDIOEventLoopSourceHandler* dispatcherStdoutPipe;
++    wxFDIOEventLoopSourceHandler* dispatcherStderrPipe;
++
+ #if wxUSE_STREAMS
+     // the input buffer bufOut is connected to stdout, this is why it is
+     // called bufOut and not bufIn
+@@ -130,8 +149,4 @@ extern WXDLLIMPEXP_BASE void wxHandleProcessTermination(wxEndProcessData *proc_d
+ // wxExecute, it will get called during their wait loops.
+ extern WXDLLIMPEXP_BASE void wxCheckChildProcessTermination(int sig);
+ 
+-// Call wxFDIOHandler::OnReadWaiting() on the given handler if this FD is still
+-// being monitored.
+-extern WXDLLIMPEXP_BASE void wxOnReadWaiting(wxFDIOHandler* handler, int fd);
+-
+ #endif // _WX_UNIX_EXECUTE_H
+diff --git a/include/wx/unix/pipe.h b/include/wx/unix/pipe.h
+index 1a33302..8e4af98 100644
+--- a/include/wx/unix/pipe.h
++++ b/include/wx/unix/pipe.h
+@@ -13,6 +13,7 @@
+ #define _WX_UNIX_PIPE_H_
+ 
+ #include <unistd.h>
++#include <fcntl.h>
+ 
+ #include "wx/log.h"
+ #include "wx/intl.h"
+diff --git a/include/wx/unix/private/executeiohandler.h b/include/wx/unix/private/executeiohandler.h
+index f8888be..f10756b 100644
+--- a/include/wx/unix/private/executeiohandler.h
++++ b/include/wx/unix/private/executeiohandler.h
+@@ -13,12 +13,14 @@
+ 
+ #include "wx/private/fdiohandler.h"
+ #include "wx/process.h"
++#include "wx/evtloop.h"
++#include "wx/evtloopsrc.h"
+ 
+ class wxStreamTempInputBuffer;
+ 
+ /** This class is used to handle callbacks from the OS that indicate data
+     is available on stdout or stderr. */
+-class wxExecuteIOHandler : public wxFDIOHandler
++class wxExecuteIOHandler : public wxEventLoopSourceHandler
+ {
+ public:
+     void Init(
+@@ -41,11 +43,14 @@ public:
+     // Called when the associated descriptor is available for reading.
+     virtual void OnReadWaiting();
+ 
+-    // These methods are never called as we only monitor the associated FD for
+-    // reading, but we still must implement them as they're pure virtual in the
++    // OnExceptionWaiting will be called for EOF event, we will treat
++    // it with common code in OnReadWaiting().
++    virtual void OnExceptionWaiting() { OnReadWaiting(); }
++
++    // OnWriteWaiting is never called as we only monitor the associated FD for
++    // reading, but we still must implement it as they're pure virtual in the
+     // base class.
+     virtual void OnWriteWaiting() { }
+-    virtual void OnExceptionWaiting() { }
+ 
+     /** Disables future callbacks. */
+     void DisableCallback();
+diff --git a/include/wx/unix/private/wakeuppipe.h b/include/wx/unix/private/wakeuppipe.h
+index ef03bd7..ead4d35 100644
+--- a/include/wx/unix/private/wakeuppipe.h
++++ b/include/wx/unix/private/wakeuppipe.h
+@@ -14,6 +14,8 @@
+ #include "wx/private/fdiohandler.h"
+ 
+ #include "wx/unix/pipe.h"
++#include "wx/evtloop.h"
++#include "wx/evtloopsrc.h"
+ 
+ // ----------------------------------------------------------------------------
+ // wxWakeUpPipe: allows to wake up the event loop by writing to it
+@@ -22,7 +24,7 @@
+ // This class is not MT-safe, see wxWakeUpPipeMT below for a wake up pipe
+ // usable from other threads.
+ 
+-class wxWakeUpPipe : public wxFDIOHandler
++class wxWakeUpPipe : public wxEventLoopSourceHandler
+ {
+ public:
+     // Create and initialize the pipe.
+diff --git a/src/gtk/evtloop.cpp b/src/gtk/evtloop.cpp
+index d104d82..13056c5 100644
+--- a/src/gtk/evtloop.cpp
++++ b/src/gtk/evtloop.cpp
+@@ -123,12 +123,26 @@ static gboolean wx_on_channel_event(GIOChannel *channel,
+ 
+     if (condition & G_IO_IN || condition & G_IO_PRI)
+         handler->OnReadWaiting();
++
+     if (condition & G_IO_OUT)
+         handler->OnWriteWaiting();
+-    else if (condition & G_IO_ERR || condition & G_IO_NVAL)
++
++    // G_IO_HUP condition is raised for EOF.  If we did not get any data
++    // on the fd and the file goes EOF (such as nothing on stderr when
++    // running wxExecute()), then the only way to catch the EOF is
++    // to check the G_IO_HUP condition.
++    if ( (condition & G_IO_ERR) || (condition & G_IO_NVAL) || (condition & G_IO_HUP) )
+         handler->OnExceptionWaiting();
+ 
+     // we never want to remove source here, so always return true
++    //
++    // The source may have been removed by the handler, so it may be
++    // a good idea to return FALSE when the source has already been 
++    // removed.  However, that would involve somehow informing this function
++    // that the source was removed, which is not trivial to implement
++    // and handle all cases.  It has been found through testing
++    // that if the source was removed by the handler, that even if we
++    // return TRUE here, the source/callback will not get called again.
+     return TRUE;
+ }
+ }
+diff --git a/src/gtk/utilsgtk.cpp b/src/gtk/utilsgtk.cpp
+index b679f4b..c60695b 100644
+--- a/src/gtk/utilsgtk.cpp
++++ b/src/gtk/utilsgtk.cpp
+@@ -188,64 +188,6 @@ const gchar *wx_pango_version_check (int major, int minor, int micro)
+ }
+ 
+ // ----------------------------------------------------------------------------
+-// subprocess routines
+-// ----------------------------------------------------------------------------
+-
+-#ifdef __UNIX__
+-
+-namespace
+-{
+-
+-WX_DECLARE_HASH_MAP(int, guint, wxIntegerHash, wxIntegerEqual, FDSourceIDs);
+-FDSourceIDs gs_sourceIDs;
+-
+-}
+-
+-extern "C" {
+-
+-static gboolean GTK_OnReadWaiting(GIOChannel* source, GIOCondition WXUNUSED(cond), void* data)
+-{
+-    int fd = g_io_channel_unix_get_fd(source);
+-
+-    wxFDIOHandler* const handler = static_cast<wxFDIOHandler *>(data);
+-
+-    wxOnReadWaiting(handler, fd);
+-
+-    if ( gs_sourceIDs.find(fd) == gs_sourceIDs.end() )
+-    {
+-        // We must have been disconnected, don't call us again.
+-        return false;
+-    }
+-
+-    return true;
+-}
+-
+-}
+-
+-void wxGUIAppTraits::AddProcessCallback(wxFDIOHandler& handler, int fd)
+-{
+-    GIOChannel* channel = g_io_channel_unix_new(fd);
+-    GIOCondition cond = GIOCondition(G_IO_IN | G_IO_HUP | G_IO_ERR);
+-    guint sourceId = g_io_add_watch(channel, cond, GTK_OnReadWaiting, &handler);
+-
+-    // Save the source so that we can remove it later with g_source_remove()
+-    gs_sourceIDs[fd] = sourceId;
+-
+-    g_io_channel_unref(channel);
+-}
+-
+-void wxGUIAppTraits::RemoveProcessCallback(int fd)
+-{
+-    const FDSourceIDs::iterator it = gs_sourceIDs.find(fd);
+-    wxCHECK_RET( it != gs_sourceIDs.end(), "No such FD" );
+-
+-    g_source_remove(it->second);
+-    gs_sourceIDs.erase(it);
+-}
+-
+-#endif // __UNIX__
+-
+-// ----------------------------------------------------------------------------
+ // wxPlatformInfo-related
+ // ----------------------------------------------------------------------------
+ 
+diff --git a/src/gtk1/utilsgtk.cpp b/src/gtk1/utilsgtk.cpp
+index 9051049..518b300 100644
+--- a/src/gtk1/utilsgtk.cpp
++++ b/src/gtk1/utilsgtk.cpp
+@@ -126,50 +126,6 @@ wxWindow* wxFindWindowAtPoint(const wxPoint& pt)
+ // subprocess routines
+ // ----------------------------------------------------------------------------
+ 
+-namespace
+-{
+-
+-WX_DECLARE_HASH_MAP(int, int, wxIntegerHash, wxIntegerEqual, FDSourceIDs);
+-FDSourceIDs gs_sourceIDs;
+-
+-}
+-
+-extern "C" {
+-static
+-void GTK_EndProcessDetector(gpointer data, gint source,
+-                            GdkInputCondition WXUNUSED(condition) )
+-{
+-    wxFDIOHandler* const handler = static_cast<wxFDIOHandler *>(data);
+-
+-    wxOnReadWaiting(handler, fd);
+-}
+-
+-void wxGUIAppTraits::AddProcessCallback(wxFDIOHandler& handler, int fd)
+-{
+-    int tag = gdk_input_add(fd,
+-                            GDK_INPUT_READ,
+-                            GTK_EndProcessDetector,
+-                            (gpointer)&handler);
+-
+-    gs_sourceIDs[fd] = tag;
+-}
+-
+-void wxGUIAppTraits::RemoveProcessCallback(int fd)
+-{
+-    // child exited, end waiting
+-
+-    // Don't close the fd because wxProcess will close it in its
+-    // destructor.  Also we don't want to close it so that we can
+-    // keep using the output/error streams in the wxProcess.
+-    // close(fd);
+-
+-    const FDSourceIDs::iterator it = gs_sourceIDs.find(fd);
+-    wxCHECK_RET( it != gs_sourceIDs.end(), "No such FD" );
+-
+-    gdk_input_remove(it->second);
+-    gs_sourceIDs.erase(it);
+-}
+-
+ #if wxUSE_TIMER
+ 
+ wxTimerImpl* wxGUIAppTraits::CreateTimerImpl(wxTimer *timer)
+diff --git a/src/motif/utils.cpp b/src/motif/utils.cpp
+index ec906c6..1e97d4a 100644
+--- a/src/motif/utils.cpp
++++ b/src/motif/utils.cpp
+@@ -80,46 +80,6 @@ void wxFlushEvents(WXDisplay* wxdisplay)
+ }
+ 
+ // ----------------------------------------------------------------------------
+-// wxExecute stuff
+-// ----------------------------------------------------------------------------
+-
+-namespace
+-{
+-
+-WX_DECLARE_HASH_MAP(int, int, wxIntegerHash, wxIntegerEqual, FDInputIDs);
+-FDInputIDs gs_inputIDs;
+-
+-}
+-
+-static void xt_notify_end_process(XtPointer data, int *fid,
+-                                  XtInputId *id)
+-{
+-    wxFDIOHandler* const handler = static_cast<wxFDIOHandler *>(data);
+-
+-    wxOnReadWaiting(handler, *fid);
+-}
+-
+-void wxGUIAppTraits::AddProcessCallback(wxFDIOHandler& handler, int fd)
+-{
+-    XtInputId id = XtAppAddInput((XtAppContext) wxTheApp->GetAppContext(),
+-                                 fd,
+-                                 (XtPointer *) XtInputReadMask,
+-                                 (XtInputCallbackProc) xt_notify_end_process,
+-                                 (XtPointer) &handler);
+-
+-    gs_inputIDs[fd] = id;
+-}
+-
+-void wxGUIAppTraits::RemoveProcessCallback(int fd)
+-{
+-    const FDInputIDs::iterator it = gs_inputIDs.find(fd);
+-    wxCHECK_RET( it != gs_inputIDs.end(), "No such FD" );
+-
+-    XtRemoveInput(it->second);
+-    gs_inputIDs.erase(it);
+-}
+-
+-// ----------------------------------------------------------------------------
+ // misc
+ // ----------------------------------------------------------------------------
+ 
+diff --git a/src/osx/core/evtloop_cf.cpp b/src/osx/core/evtloop_cf.cpp
+index 2401909..3758601 100644
+--- a/src/osx/core/evtloop_cf.cpp
++++ b/src/osx/core/evtloop_cf.cpp
+@@ -77,8 +77,13 @@ wx_cffiledescriptor_callback(CFFileDescriptorRef cffd,
+     if ( flags & kCFFileDescriptorWriteCallBack )
+         handler->OnWriteWaiting();
+ 
+-    // we need to re-enable callbacks to be called again
+-    EnableDescriptorCallBacks(cffd, source->GetFlags());
++    // If callbacks were disabled, then we don't want to re-enable
++    // the callbacks.
++    if (handler->GetActiveFlag())
++    {
++        // we need to re-enable callbacks to be called again
++        EnableDescriptorCallBacks(cffd, source->GetFlags());
++    }
+ }
+ 
+ } // anonymous namespace
+@@ -132,7 +137,13 @@ void wxCFEventLoopSource::SetFileDescriptor(CFFileDescriptorRef cffd)
+ wxCFEventLoopSource::~wxCFEventLoopSource()
+ {
+     if ( m_cffd )
++    {
++        CFFileDescriptorDisableCallBacks (
++            m_cffd,  // CFFileDescriptorRef f,
++            m_flags  // CFOptionFlags callBackTypes
++        );
+         CFRelease(m_cffd);
++    }
+ }
+ 
+ #endif // wxUSE_EVENTLOOP_SOURCE
+diff --git a/src/osx/core/utilsexc_cf.cpp b/src/osx/core/utilsexc_cf.cpp
+index 4d5c774..812bc73 100644
+--- a/src/osx/core/utilsexc_cf.cpp
++++ b/src/osx/core/utilsexc_cf.cpp
+@@ -26,106 +26,6 @@
+ 
+ #include <CoreFoundation/CFSocket.h>
+ 
+-namespace
+-{
+-
+-WX_DECLARE_HASH_MAP(int, CFSocketRef, wxIntegerHash, wxIntegerEqual, FDSockets);
+-FDSockets gs_sockets;
+-
+-}
+-
+-/*!
+-    Called due to source signal detected by the CFRunLoop.
+-    This is nearly identical to the wxGTK equivalent.
+- */
+-extern "C" void WXCF_EndProcessDetector(CFSocketRef s,
+-                                        CFSocketCallBackType WXUNUSED(callbackType),
+-                                        CFDataRef WXUNUSED(address),
+-                                        void const *WXUNUSED(data),
+-                                        void *info)
+-{
+-    wxOnReadWaiting(static_cast<wxFDIOHandler *>(info), CFSocketGetNative(s));
+-}
+-
+-/*!
+-    Implements the GUI-specific AddProcessCallback() for both wxMac and
+-    wxCocoa using the CFSocket/CFRunLoop API which is available to both.
+-    Takes advantage of the fact that sockets on UNIX are just regular
+-    file descriptors and thus even a non-socket file descriptor can
+-    apparently be used with CFSocket so long as you only tell CFSocket
+-    to do things with it that would be valid for a non-socket fd.
+- */
+-void wxGUIAppTraits::AddProcessCallback(wxFDIOHandler& handler, int fd)
+-{
+-    CFSocketContext context =
+-    {   0
+-    ,   &handler
+-    ,   NULL
+-    ,   NULL
+-    ,   NULL
+-    };
+-    CFSocketRef cfSocket = CFSocketCreateWithNative(kCFAllocatorDefault,fd,kCFSocketReadCallBack,&WXCF_EndProcessDetector,&context);
+-    if(cfSocket == NULL)
+-    {
+-        wxLogError(wxT("Failed to create socket for end process detection"));
+-        return;
+-    }
+-
+-    /* When IO is complete and we need to stop the callbacks, we need to
+-       call CFSocketInvalidate().  By default, CFSocketInvalidate() will
+-       also close the fd, which is undesired and could cause lots of
+-       problems.  In order to not close the fd, we need to clear the
+-       kCFSocketCloseOnInvalidate flag.  See:
+-
+-       https://developer.apple.com/library/mac/#documentation/CoreFOundation/Reference/CFSocketRef/Reference/reference.html
+-       */
+-    CFOptionFlags sockopt = CFSocketGetSocketFlags(cfSocket);
+-
+-    /* Clear the close-on-invalidate flag. */
+-    sockopt &= ~kCFSocketCloseOnInvalidate;
+-
+-    CFSocketSetSocketFlags(cfSocket, sockopt);
+-
+-    CFRunLoopSourceRef runLoopSource = CFSocketCreateRunLoopSource(kCFAllocatorDefault, cfSocket, /*highest priority:*/0);
+-    if(runLoopSource == NULL)
+-    {
+-        wxLogError(wxT("Failed to create CFRunLoopSource from CFSocket for end process detection"));
+-        CFSocketInvalidate(cfSocket);
+-        CFRelease(cfSocket);
+-        return;
+-    }
+-
+-    // Save the socket so that we can remove it later if asked to.
+-    gs_sockets[fd] = cfSocket;
+-
+-    CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes);
+-    // Now that the run loop has the source retained we can release it.
+-    CFRelease(runLoopSource);
+-}
+-
+-void wxGUIAppTraits::RemoveProcessCallback(int fd)
+-{
+-    const FDSockets::iterator it = gs_sockets.find(fd);
+-    wxCHECK_RET( it != gs_sockets.end(), "No such FD" );
+-
+-   /*
+-       CFSocketInvalidate does not close the fd due to clearing of
+-       the kCFSocketCloseOnInvalidate when the socket (fd) was
+-       created.
+-
+-       CFSocketInvalidate invalidates the run loop source for us which should
+-       cause it to release the CFSocket (thus causing it to be deallocated) and
+-       remove itself from the runloop which should release it and
+-       cause it to also be deallocated.  Of course, it's possible
+-       the RunLoop hangs onto one or both of them by
+-       retaining/releasing them within its stack frame.  However,
+-       that shouldn't be depended on. Assume that s is deallocated
+-       due to the following call.
+-    */
+-   CFSocketInvalidate(it->second);
+-   gs_sockets.erase(it);
+-}
+-
+ /////////////////////////////////////////////////////////////////////////////
+ 
+ // NOTE: This doesn't really belong here but this was a handy file to
+diff --git a/src/unix/apptraits.cpp b/src/unix/apptraits.cpp
+index 6894572..55ffd72 100644
+--- a/src/unix/apptraits.cpp
++++ b/src/unix/apptraits.cpp
+@@ -51,14 +51,6 @@ int wxGUIAppTraits::WaitForChild(wxExecuteData& execData)
+     wxBusyCursor bc;
+     wxWindowDisabler wd(!(flags & wxEXEC_NODISABLE));
+ 
+-    // Allocate an event loop that will be used to wait for the process
+-    // to terminate, will handle stdout, stderr, and any other events.
+-    //
+-    // The event loop will get started in common (to console and GUI) code
+-    // in WaitForChildSync
+-    wxGUIEventLoop loop;
+-    execData.endProcData.syncEventLoopPtr = &loop;
+-
+     return WaitForChildSync(execData);
+ }
+ 
+diff --git a/src/unix/appunix.cpp b/src/unix/appunix.cpp
+index 124e4a5..026aaea 100644
+--- a/src/unix/appunix.cpp
++++ b/src/unix/appunix.cpp
+@@ -25,6 +25,7 @@
+ #include "wx/private/fdiodispatcher.h"
+ #include "wx/apptrait.h"
+ #include "wx/unix/apptbase.h"
++#include "wx/private/fdioeventloopsourcehandler.h"
+ 
+ #include <signal.h>
+ #include <unistd.h>
+@@ -49,6 +50,8 @@ public:
+ 
+     virtual void OnReadWaiting()
+     {
++        // The base class wxWakeUpPipe::OnReadWaiting() needs to be called in order
++        // to read the data out of the wake up pipe and clear it for next time.
+         wxWakeUpPipe::OnReadWaiting();
+ 
+         if ( wxTheApp )
+@@ -99,12 +102,6 @@ void wxAppConsole::HandleSignal(int signal)
+     app->m_signalWakeUpPipe->WakeUpNoLock();
+ }
+ 
+-void wxOnReadWaiting(wxFDIOHandler* handler, int fd)
+-{
+-    if ( wxTheApp->GetTraits()->HasCallbackForFD(fd) )
+-        handler->OnReadWaiting();
+-}
+-
+ void wxAppConsole::CheckSignal()
+ {
+     for ( SignalHandlerHash::iterator it = m_signalHandlerHash.begin();
+@@ -120,16 +117,25 @@ void wxAppConsole::CheckSignal()
+     }
+ }
+ 
+-bool wxAppConsole::RegisterSignalWakeUpPipe(wxFDIODispatcher& dispatcher)
++wxFDIOEventLoopSourceHandler* wxAppConsole::RegisterSignalWakeUpPipe(wxFDIODispatcher& dispatcher)
+ {
+     wxCHECK_MSG( m_signalWakeUpPipe, false, "Should be allocated" );
+ 
+-    return dispatcher.RegisterFD
+-                      (
+-                        m_signalWakeUpPipe->GetReadFd(),
+-                        m_signalWakeUpPipe,
+-                        wxFDIO_INPUT
+-                      );
++    wxFDIOEventLoopSourceHandler* fdioHandler;
++
++    // we need a bridge to wxFDIODispatcher
++    //
++    // TODO: refactor the code so that only wxEventLoopSourceHandler is used
++    fdioHandler = new wxFDIOEventLoopSourceHandler(m_signalWakeUpPipe);
++
++    dispatcher.RegisterFD
++               (
++                 m_signalWakeUpPipe->GetReadFd(),
++                 fdioHandler,
++                 wxFDIO_INPUT
++               );
++
++    return fdioHandler;
+ }
+ 
+ // the type of the signal handlers we use is "void(*)(int)" while the real
+@@ -141,7 +147,15 @@ extern "C"
+     typedef void (*SignalHandler_t)(int);
+ }
+ 
+-bool wxAppConsole::SetSignalHandler(int signal, SignalHandler handler)
++// Undo debug
++// This if for debug/demonstration purposes only and is not meant to 
++// be merged with the final commit.  For more details, see the
++// comments inside of src\unix\wakeuppipe.cpp
++#ifdef __WXOSX__
++wxCFEventLoopSource *wakeupSource=NULL;
++#endif
++
++bool wxAppConsole::SetSignalHandler(int signal, SignalHandler handler, wxEventLoopBase* evtLoop)
+ {
+     const bool install = (SignalHandler_t)handler != SIG_DFL &&
+                          (SignalHandler_t)handler != SIG_IGN;
+@@ -152,8 +166,50 @@ bool wxAppConsole::SetSignalHandler(int signal, SignalHandler handler)
+         // cause the event loop to call wxAppConsole::CheckSignal().
+         m_signalWakeUpPipe = new SignalsWakeUpPipe();
+ 
+-        // Setup the callback for the wake-up pipe.
+-        GetTraits()->RegisterProcessCallback(*m_signalWakeUpPipe, m_signalWakeUpPipe->GetReadFd());
++        // Much of the ugly code below to get an event loop pointer
++        // could be removed if we changed wxEventLoop::AddSourceForFd() to
++        // a static method, which I am very much in favor of.
++        // I will discuss that more on wx-dev.
++        // 
++        // If no event loop specified, then try to register with the main 
++        // application loop or the active loop.
++        if ( evtLoop == NULL )
++        {
++            wxEventLoopBase* loop = wxTheApp->GetMainLoop();
++            if ( loop != NULL )
++            {
++                evtLoop = loop;
++            }
++            else
++            {   // Main loop does not exist, so use active loop.
++                // This could be useful in an asynchronous console application.
++                evtLoop = wxEventLoopBase::GetActive();
++            }
++        }
++
++        if ( evtLoop != NULL )
++        {
++            // Setup the callback for the wake-up pipe.
++            // Needs to always be done and not just when m_signalWakeUpPipe does
++            // not exist in case we want to register a different loop (such as
++            // synchronous event loop in wxExecute(SYNC)) than previous.
++
++            // Undo debug
++            // This if for debug/demonstration purposes only and is not meant to 
++            // be merged with the final commit.  For more details, see the
++            // comments inside of src\unix\wakeuppipe.cpp
++            #ifdef __WXOSX__
++            wakeupSource = static_cast<wxCFEventLoopSource*>(
++            #endif
++
++            evtLoop->AddSourceForFD(m_signalWakeUpPipe->GetReadFd(),m_signalWakeUpPipe,wxFDIO_INPUT)
++
++            // Undo debug
++            #ifdef __WXOSX__
++            )
++            #endif
++            ;
++        }
+     }
+ 
+     struct sigaction sa;
+diff --git a/src/unix/evtloopunix.cpp b/src/unix/evtloopunix.cpp
+index 95756ef..362b56d 100644
+--- a/src/unix/evtloopunix.cpp
++++ b/src/unix/evtloopunix.cpp
+@@ -36,6 +36,7 @@
+ #include "wx/unix/private/epolldispatcher.h"
+ #include "wx/unix/private/wakeuppipe.h"
+ #include "wx/private/selectdispatcher.h"
++#include "wx/private/fdioeventloopsourcehandler.h"
+ 
+ #if wxUSE_EVENTLOOP_SOURCE
+     #include "wx/evtloopsrc.h"
+@@ -64,7 +65,7 @@ wxConsoleEventLoop::wxConsoleEventLoop()
+     if ( !m_dispatcher )
+         return;
+ 
+-    m_dispatcher->RegisterFD(pipeFD, m_wakeupPipe, wxFDIO_INPUT);
++    this->AddSourceForFD(pipeFD, m_wakeupPipe, wxFDIO_INPUT);
+ }
+ 
+ wxConsoleEventLoop::~wxConsoleEventLoop()
+@@ -86,33 +87,6 @@ wxConsoleEventLoop::~wxConsoleEventLoop()
+ 
+ #if wxUSE_EVENTLOOP_SOURCE
+ 
+-// This class is a temporary bridge between event loop sources and
+-// FDIODispatcher. It is going to be removed soon, when all subject interfaces
+-// are modified
+-class wxFDIOEventLoopSourceHandler : public wxFDIOHandler
+-{
+-public:
+-    wxFDIOEventLoopSourceHandler(wxEventLoopSourceHandler* handler) :
+-        m_impl(handler) { }
+-
+-    virtual void OnReadWaiting()
+-    {
+-        m_impl->OnReadWaiting();
+-    }
+-    virtual void OnWriteWaiting()
+-    {
+-        m_impl->OnWriteWaiting();
+-    }
+-
+-    virtual void OnExceptionWaiting()
+-    {
+-        m_impl->OnExceptionWaiting();
+-    }
+-
+-protected:
+-    wxEventLoopSourceHandler* m_impl;
+-};
+-
+ wxEventLoopSource *
+ wxConsoleEventLoop::AddSourceForFD(int fd,
+                                    wxEventLoopSourceHandler *handler,
+diff --git a/src/unix/utilsunx.cpp b/src/unix/utilsunx.cpp
+index dbff8d7..e507ac9 100644
+--- a/src/unix/utilsunx.cpp
++++ b/src/unix/utilsunx.cpp
+@@ -55,6 +55,7 @@
+ 
+ #include "wx/evtloop.h"
+ #include "wx/mstream.h"
++#include "wx/private/fdioeventloopsourcehandler.h"
+ 
+ #include <pwd.h>
+ #include <sys/wait.h>       // waitpid()
+@@ -522,11 +523,51 @@ long wxExecute(wchar_t **wargv, int flags, wxProcess *process,
+ 
+ #endif // wxUSE_UNICODE
+ 
++class wxEventLoopCreator
++{
++public:
++    wxEventLoopCreator(wxAppTraits &traits)
++    {
++        m_eventLoop = traits.CreateEventLoop();
++    }
++
++    ~wxEventLoopCreator()
++    {
++        delete m_eventLoop;
++    }
++
++    wxEventLoopBase* m_eventLoop;
++};
++
+ // wxExecute: the real worker function
+ long wxExecute(char **argv, int flags, wxProcess *process,
+         const wxExecuteEnv *env)
+ {
+-    static bool wxExecuteExecutedAlready = false;
++    // We need a pointer to the traits object early in order to create 
++    // an event loop next.
++    // We want this function to work even if there is no wxApp so ensure
++    // that we have a valid traits pointer
++    wxConsoleAppTraits traitsConsole;
++    wxAppTraits *traits = wxTheApp ? wxTheApp->GetTraits() : NULL;
++    if ( !traits )
++        traits = &traitsConsole;
++
++    // For synchronous wxExecute, we need to call 
++    // wxEventLoopBase::AddSourceForFd() in order to enable the callback
++    // to process the self-pipe (wakeuppipe) that is triggered in the signal 
++    // handler.
++    // 
++    // This loop is still created in asynchronous case but will not be
++    // used.
++    wxScopedPtr<wxEventLoopCreator>
++    eventLoopCreator(new wxEventLoopCreator(*traits));
++
++    wxExecuteData execData;
++    execData.flags = flags;
++
++    // For SYNC, wxEXEC_NOEVENTS case, we don't need an event loop, so
++    // default to NULL.
++    wxEventLoopBase* evtLoop = NULL;
+ 
+     // for the sync execution, we return -1 to indicate failure, but for async
+     // case we return 0 which is never a valid PID
+@@ -535,6 +576,28 @@ long wxExecute(char **argv, int flags, wxProcess *process,
+     // about "ERROR_RETURN_CODE value may be clobbered by fork()"
+     #define ERROR_RETURN_CODE ((flags & wxEXEC_SYNC) ? -1 : 0)
+ 
++    // This complicated "if" structure can be avoided if we convert
++    // wxEventLoopBase::AddSourceForFD() into a static method, which I
++    // am very much in favor of and will discuss on wx-dev.
++    if ( ( flags & wxEXEC_SYNC ) && ( !( flags & wxEXEC_NOEVENTS) ) )
++    {   // syncEventLoopPtr should only be non-null for wxEXEC_SYNC without wxEXEC_NOEVENTS case.
++        execData.endProcData.syncEventLoopPtr = eventLoopCreator.get()->m_eventLoop;
++        evtLoop = execData.endProcData.syncEventLoopPtr;
++    }
++    else
++    {   // For asynchronous applications, use the active event loop.
++        // For sync console application, GetActive() will return NULL
++        // if there is no event loop. 
++        evtLoop = wxEventLoopBase::GetActive();
++
++        if ( !(flags & wxEXEC_SYNC) )  // Async, but not wxEXEC_NOEVENTS
++        {
++            // Note that this constraint can be removed if we
++            // changed wxEventLoop::AddSourceForFd() to a static method.
++            wxCHECK_MSG( evtLoop != NULL, ERROR_RETURN_CODE, "Can't run asynchronous wxExecute without an event loop!");
++        }
++    }
++
+     wxCHECK_MSG( *argv, ERROR_RETURN_CODE, wxT("can't exec empty command") );
+ 
+ #if wxUSE_THREADS
+@@ -558,28 +621,30 @@ long wxExecute(char **argv, int flags, wxProcess *process,
+     }
+ #endif // __DARWIN__
+ 
+-    if ( !wxExecuteExecutedAlready )
++    if ( wxTheApp != NULL )
+     {
+-        if ( wxTheApp != NULL )
+-        {
+-            // Setup the signal handler for SIGCHLD, as this is the
+-            // mechanism that is used to detect that the child process
+-            // has terminated.
+-            wxTheApp->SetSignalHandler(SIGCHLD, wxCheckChildProcessTermination);
+-
+-            wxExecuteExecutedAlready = true;
+-        }
+-        else
+-        {
+-            wxFAIL_MSG("wxTheApp is not initialized, therefore we can't wait for child termination!");
+-        }
++        // Setup the signal handler for SIGCHLD, as this is the
++        // mechanism that is used to detect that the child process
++        // has terminated.
++        // There is no harm in calling this for each wxExecute.
++        // as we only allocate the wakeuppipe inside of it if it is
++        // not already allocated.  Also, the call to sigaction() 
++        // inside of SetSignalHandler can be called more than once, and it
++        // just changes the signal handler (which is really no change, as
++        // it is always set to wxAppConsole::HandleSignal.
++        // Finally, we don't have to worry about re-populating the 
++        // m_signalHandlerHash[SIGCHLD], as it would always get replaced
++        // with wxCheckChildProcessTermination.
++        wxTheApp->SetSignalHandler(SIGCHLD, wxCheckChildProcessTermination, evtLoop);
++    }
++    else
++    {
++        wxFAIL_MSG("wxTheApp is not initialized, therefore we can't wait for child termination!");
+     }
+ 
+     // this struct contains all information which we use for housekeeping
+-    wxExecuteData execData;
+     wxStreamTempInputBuffer bufOut, bufErr;
+ 
+-    execData.flags = flags;
+     execData.process = process;
+ 
+     // Used for wxEXEC_NOEVENTS case.
+@@ -857,13 +922,6 @@ long wxExecute(char **argv, int flags, wxProcess *process,
+             pipeErr.Close();
+         }
+ 
+-        // we want this function to work even if there is no wxApp so ensure
+-        // that we have a valid traits pointer
+-        wxConsoleAppTraits traitsConsole;
+-        wxAppTraits *traits = wxTheApp ? wxTheApp->GetTraits() : NULL;
+-        if ( !traits )
+-            traits = &traitsConsole;
+-
+ #if wxUSE_STREAMS
+         if ( process && process->IsRedirected() && process->GetUnixProcess()->IsNotifyEnabled() )
+         {
+@@ -887,10 +945,20 @@ long wxExecute(char **argv, int flags, wxProcess *process,
+             );
+ 
+             // Register the callback for stdout.
+-            traits->RegisterProcessCallback(handlerStdout, execData.fdOut, execData.dispatcher);
++            execData.dispatcherStdoutPipe = traits->RegisterProcessCallback(
++                                                handlerStdout,      // wxEventLoopSourceHandler& handler
++                                                execData.fdOut,     // int fd
++                                                *evtLoop,           // wxEventLoopBase& evtLoop,
++                                                execData.dispatcher // wxFDIODispatcher* dispatcher
++                                            );
+ 
+             // Register the callback for stderr.
+-            traits->RegisterProcessCallback(handlerStderr, execData.fdErr, execData.dispatcher);
++            execData.dispatcherStderrPipe = traits->RegisterProcessCallback(
++                                                handlerStderr,      // wxEventLoopSourceHandler& handler
++                                                execData.fdErr,     // int fd
++                                                *evtLoop,           // wxEventLoopBase& evtLoop,
++                                                execData.dispatcher // wxFDIODispatcher* dispatcher
++                                            );
+         }
+ #endif // wxUSE_STREAMS
+ 
+@@ -1457,27 +1525,6 @@ bool wxHandleFatalExceptions(bool doit)
+ // wxExecute support
+ // ----------------------------------------------------------------------------
+ 
+-// This version of AddProcessCallback is only for console applications.
+-// For GUI applications, AddProcessCallback is specific to the platform, so
+-// there are specialized versions for both OSX and GTK.
+-void wxAppTraits::AddProcessCallback(wxFDIOHandler& data, int fd)
+-{
+-    wxFDIODispatcher::Get()->RegisterFD
+-                             (
+-                                 fd,
+-                                 &data,
+-                                 wxFDIO_INPUT
+-                             );
+-}
+-
+-// This version of RemoveProcessCallback is only for console applications.
+-// For GUI applications, RemoveProcessCallback is specific to the platform, so
+-// there are specialized versions for both OSX and GTK.
+-void wxAppTraits::RemoveProcessCallback(int fd)
+-{
+-    wxFDIODispatcher::Get()->UnregisterFD(fd);
+-}
+-
+ int wxAppTraits::WaitForChild(wxExecuteData& execData)
+ {
+     if ( !(execData.flags & wxEXEC_SYNC) )
+@@ -1487,14 +1534,6 @@ int wxAppTraits::WaitForChild(wxExecuteData& execData)
+     }
+     //else: synchronous execution case
+ 
+-    // Allocate an event loop that will be used to wait for the process
+-    // to terminate, will handle stdout, stderr, and any other events.
+-    //
+-    // The event loop will get started in common (to console and GUI) code
+-    // in WaitForChildSync
+-    wxConsoleEventLoop loop;
+-    execData.endProcData.syncEventLoopPtr = &loop;
+-
+     return WaitForChildSync(execData);
+ }
+ 
+@@ -1537,13 +1576,7 @@ int wxAppTraits::WaitForChildSync(wxExecuteData& execData)
+         // the pipe used to indicate its termination
+ 
+         // Register the FD for child process termination.
+-        wxTheApp->RegisterSignalWakeUpPipe(*execData.dispatcher);
+-
+-        // Set SyncEventPtr to NULL, so that we don't try to call
+-        // ScheduleExit() on a non-existent event loop.  This is not the owning
+-        // pointer (the object is actually on the stack), so it will still get
+-        // deleted properly even if we set it to NULL.
+-        execData.endProcData.syncEventLoopPtr = NULL;
++        execData.dispatcherWakeupPipe = wxTheApp->RegisterSignalWakeUpPipe(*execData.dispatcher);
+ 
+         // endProcData.pid will be set to 0 from wxHandleProcessTermination()
+         // when the process terminates.  So keep dispatching events that
+@@ -1606,23 +1639,40 @@ void wxHandleProcessTermination(wxEndProcessData *data)
+     }
+ }
+ 
+-void
+-wxAppTraits::RegisterProcessCallback(wxFDIOHandler& handler,
++wxFDIOEventLoopSourceHandler*
++wxAppTraits::RegisterProcessCallback(wxEventLoopSourceHandler& handler,
+                                      int fd,
++                                     wxEventLoopBase& evtLoop,
+                                      wxFDIODispatcher* dispatcher)
+ {
+-    wxCHECK_RET( !HasCallbackForFD(fd), "Already registered for this FD?" );
++    wxCHECK_MSG( !HasCallbackForFD(fd), NULL, "Already registered for this FD?" );
++
++    wxFDIOEventLoopSourceHandler* fdioHandler = NULL;
+ 
+     m_fdHandlers[fd] = FDHandlerData(&handler, dispatcher);
+ 
+     if ( dispatcher )
+     {
+-        dispatcher->RegisterFD(fd, &handler, wxFDIO_INPUT);
++        // we need a bridge to wxFDIODispatcher
++        //
++        // TODO: refactor the code so that only wxEventLoopSourceHandler is used
++        fdioHandler = new wxFDIOEventLoopSourceHandler(&handler);
++
++        dispatcher->RegisterFD(fd, fdioHandler, wxFDIO_INPUT);
+     }
+     else
+     {
+-        AddProcessCallback(handler, fd);
++        wxEventLoopSource *eventLoopSource;
++
++        // Need wxEVENT_SOURCE_EXCEPTION to detect EOF.
++        eventLoopSource = evtLoop.AddSourceForFD(fd,&handler,wxEVENT_SOURCE_INPUT|wxEVENT_SOURCE_EXCEPTION);
++
++        // Save the event loop source so that we can delete it when
++        // we no longer want callbacks.
++        m_fdHandlers[fd].eventLoopSource = eventLoopSource;
+     }
++
++    return fdioHandler;
+ }
+ 
+ void wxAppTraits::UnRegisterProcessCallback(int fd)
+@@ -1631,12 +1681,19 @@ void wxAppTraits::UnRegisterProcessCallback(int fd)
+ 
+     wxCHECK_RET( it != m_fdHandlers.end(), "FD not registered" );
+ 
+-    const FDHandlerData& data = it->second;
++    FDHandlerData& data = it->second;
+ 
+     if ( data.dispatcher )
+         data.dispatcher->UnregisterFD(fd);
+     else
+-        RemoveProcessCallback(fd);
++    {
++        // Disable future callbacks by deleting the event loop source.
++        delete data.eventLoopSource;
++
++        // Set to NULL to allow it to be deleted again in case
++        // UnRegisterProcessCallback() is called again.
++        data.eventLoopSource = NULL;
++    }
+ 
+     m_fdHandlers.erase(it);
+ }
+@@ -1864,3 +1921,10 @@ void wxEndProcessData::CheckHandleTermination()
+     }
+ }
+ 
++wxExecuteData::~wxExecuteData()
++{
++    delete dispatcherWakeupPipe;
++    delete dispatcherStdoutPipe;
++    delete dispatcherStderrPipe;
++}
++
+diff --git a/src/unix/wakeuppipe.cpp b/src/unix/wakeuppipe.cpp
+index b310652..cb74ece 100644
+--- a/src/unix/wakeuppipe.cpp
++++ b/src/unix/wakeuppipe.cpp
+@@ -88,6 +88,24 @@ void wxWakeUpPipe::WakeUpNoLock()
+     }
+ }
+ 
++// Undo debug
++#ifdef __WXOSX__
++// This code is not intended to be merged into the library, and is for
++// debug/demonstration purposes only.
++// For more details about the reasons why this is here, see the comment
++// at the end of this file in OnReadWaiting() where EnableDescriptorCallBacks()
++// is called.
++#include <CoreFoundation/CoreFoundation.h>
++extern wxCFEventLoopSource *wakeupSource;
++void EnableDescriptorCallBacks(CFFileDescriptorRef cffd, int flags)
++{
++    if ( flags & wxEVENT_SOURCE_INPUT )
++        CFFileDescriptorEnableCallBacks(cffd, kCFFileDescriptorReadCallBack);
++    if ( flags & wxEVENT_SOURCE_OUTPUT )
++        CFFileDescriptorEnableCallBacks(cffd, kCFFileDescriptorWriteCallBack);
++}
++#endif
++
+ void wxWakeUpPipe::OnReadWaiting()
+ {
+     // got wakeup from child thread, remove the data that provoked it from the
+@@ -130,5 +148,37 @@ void wxWakeUpPipe::OnReadWaiting()
+     // writing to the wake up pipe will make wxConsoleEventLoop return from
+     // wxFDIODispatcher::Dispatch() it might be currently blocking in, nothing
+     // else needs to be done
++
++    // Undo debug
++    // Re-enable the callbacks
++    // Unfortunately this is necessary to do because of the usage of
++    // CFFileDescriptorEnableCallBacks() in wxEventLoop::AddSourceForFd().
++    // It is because I have found through testing the code that when the
++    // fd is handled by the wxSelectDispatcher (wxEXEC_NOEVENTS case), then
++    // the fd will no longer be handled by the main event loop unless
++    // we call CFFileDescriptorEnableCallBacks() again.
++    // 
++    // We can get rid of this ugliness if we use the socket implementation
++    // for callbacks inside of AddSourceForFd() as was done in the original
++    // wxExecute() patch for OSX.  I would like to do that in the next
++    // commit/patch.
++    // 
++    // See:
++    // http://developer.apple.com/library/mac/#documentation/CoreFoundation/Reference/CFFileDescriptorRef/Reference/reference.html
++    // 
++    // and the unfortunate property of this API as described at the link above:
++    // 
++    // "Each call back is one-shot, and must be re-enabled if you want to get another one."
++    // 
++    // If you don't believe me you can try it yourself and comment out the 
++    // call to this function.  You will see that the wxExecute() tests hang
++    // on the first occasion when we retest without wxEXEC_NOEVENTS after
++    // performing a test with wxEXEC_NOEVENTS which uses wxSelectDispatcher.
++    // We hang because we never get the callback for the self-pipe anymore.
++    // 
++    // I will discuss more on wx-dev.
++    #ifdef __WXOSX__
++    EnableDescriptorCallBacks(wakeupSource->m_cffd, wakeupSource->GetFlags());
++    #endif
+ }
+ 
+diff --git a/tests/exec/exec.cpp b/tests/exec/exec.cpp
+index ad42d51..ff2e8ea 100644
+--- a/tests/exec/exec.cpp
++++ b/tests/exec/exec.cpp
+@@ -92,6 +92,53 @@ private:
+                              CheckStream check,
+                              const char* expectedContaining);
+ 
++    // This class is used as a helper in order to run wxExecute(ASYNC)
++    // inside of an event loop.
++    class AsyncInEventLoop : public wxTimer
++    {
++    public:
++        AsyncInEventLoop() { }
++
++        long DoExecute(bool forceExitLoop_,
++                     const wxString& command_,
++                     int flags_ = wxEXEC_ASYNC,
++                     wxProcess* callback_ = NULL)
++        {
++            forceExitLoop = forceExitLoop_;
++            command = command_;
++            flags = flags_;
++            callback = callback_;
++
++            wxEventLoop loop;
++
++            // Trigger the timer to go off inside the event loop
++            // so that we can run wxExecute there.
++            StartOnce(10);
++
++            // Run the event loop.
++            loop.Run();
++
++            return wxExecuteReturnCode;
++        }
++
++        void Notify()
++        {
++            // Run wxExecute inside the event loop.
++            wxExecuteReturnCode = wxExecute(command, flags, callback);
++
++            if (forceExitLoop)
++            {
++                wxEventLoop::GetActive()->Exit();
++            }
++        }
++
++        bool forceExitLoop;
++        wxString command;
++        int flags;
++        wxProcess* callback;
++        long wxExecuteReturnCode;
++    };
++
+     DECLARE_NO_COPY_CLASS(ExecTestCase)
+ };
+ 
+@@ -109,8 +156,18 @@ void ExecTestCase::TestShell()
+ 
+ void ExecTestCase::TestExecute()
+ {
++    AsyncInEventLoop asyncInEventLoop;
++
+     // test asynch exec
+-    long pid = wxExecute(ASYNC_COMMAND, wxEXEC_ASYNC);
++    // 
++    // asyncInEventLoop.DoExecute will perform the
++    // call to wxExecute(ASYNC) in an event loop, as required by
++    // console test (and this same event loop will also
++    // be used in GUI test too, even though not required, just to have 
++    // common code).
++    long pid = asyncInEventLoop.DoExecute(true, // Force exit of event loop right
++                                                // after the call to wxExecute()
++                                          ASYNC_COMMAND, wxEXEC_ASYNC);
+     CPPUNIT_ASSERT( pid != 0 );
+ 
+     // NOTE: under Windows the first wxKill() invocation with wxSIGTERM
+@@ -164,9 +221,19 @@ void ExecTestCase::TestExecute()
+ 
+ void ExecTestCase::TestProcess()
+ {
++    AsyncInEventLoop asyncInEventLoop;
++
+     // test wxExecute with wxProcess
+     wxProcess *proc = new wxProcess;
+-    long pid = wxExecute(ASYNC_COMMAND, wxEXEC_ASYNC, proc);
++
++    // asyncInEventLoop.DoExecute will perform the
++    // call to wxExecute(ASYNC) in an event loop, as required by
++    // console test (and this same event loop will also
++    // be used in GUI test too, even though not required, just to have 
++    // common code).
++    long pid = asyncInEventLoop.DoExecute(true, // Force exit of event loop right
++                                                // after the call to wxExecute()
++                                          ASYNC_COMMAND, wxEXEC_ASYNC, proc);
+     CPPUNIT_ASSERT( proc->GetPid() == pid && pid != 0 );
+ 
+     // we're not going to process the wxEVT_END_PROCESS event,
+@@ -220,20 +287,17 @@ void ExecTestCase::TestProcess()
+ class TestAsyncProcess : public wxProcess
+ {
+ public:
+-    wxEXPLICIT TestAsyncProcess(wxEventLoop& loop)
+-        : m_loop(loop)
++    wxEXPLICIT TestAsyncProcess()
+     {
+     }
+ 
+     // may be overridden to be notified about process termination
+     virtual void OnTerminate(int WXUNUSED(pid), int WXUNUSED(status))
+     {
+-        m_loop.ScheduleExit();
++        wxEventLoop::GetActive()->ScheduleExit();
+     }
+ 
+ private:
+-    wxEventLoop& m_loop;
+-
+     wxDECLARE_NO_COPY_CLASS(TestAsyncProcess);
+ };
+ 
+@@ -241,13 +305,13 @@ void ExecTestCase::TestAsync()
+ {
+     // Test asynchronous execution with no redirection, just to make sure we
+     // get the OnTerminate() call.
+-    wxEventLoop loop;
++    TestAsyncProcess proc;
++    AsyncInEventLoop asyncInEventLoop;
+ 
+-    TestAsyncProcess proc(loop);
+-
+-    CPPUNIT_ASSERT( wxExecute(COMMAND_NO_OUTPUT, wxEXEC_ASYNC, &proc) != 0 );
+-
+-    loop.Run();
++    CPPUNIT_ASSERT( asyncInEventLoop.DoExecute(
++                       false,  // proc is expected (inside of its OnTerminate())
++                               // to trigger the exit of the event loop.
++                       COMMAND_NO_OUTPUT, wxEXEC_ASYNC, &proc) != 0 );
+ }
+ 
+ void
+@@ -255,17 +319,15 @@ ExecTestCase::DoTestAsyncRedirect(const wxString& command,
+                                   CheckStream check,
+                                   const char* expectedContaining)
+ {
+-    // We need a temporary event loop so that we can get the stdout/stderr and
+-    // terminate events.
+-    wxEventLoop loop;
++    AsyncInEventLoop asyncInEventLoop;
++    TestAsyncProcess proc;
+ 
+-    TestAsyncProcess proc(loop);
+     proc.Redirect();
+ 
+-    CPPUNIT_ASSERT( wxExecute(command, wxEXEC_ASYNC, &proc) != 0 );
+-
+-    // Run the temporary event loop. It will stop when the process terminates.
+-    loop.Run();
++    CPPUNIT_ASSERT( asyncInEventLoop.DoExecute(
++                       false,  // proc is expected (inside of its OnTerminate())
++                               // to trigger the exit of the event loop.
++                       command, wxEXEC_ASYNC, &proc) != 0 );
+ 
+     wxInputStream *streamToCheck = NULL;
+     switch ( check )
+-- 
+1.7.9
+

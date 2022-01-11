@@ -1,0 +1,1051 @@
+Index: include/wx/aui/auibook.h
+===================================================================
+--- include/wx/aui/auibook.h	(revision 66805)
++++ include/wx/aui/auibook.h	(working copy)
+@@ -551,6 +551,7 @@
+     virtual void Split(size_t page, int direction);
+ 
+     const wxAuiManager& GetAuiManager() const { return m_mgr; }
++    wxAuiManager& GetAuiManager() { return m_mgr; }
+ 
+     // Sets the normal font
+     void SetNormalFont(const wxFont& font);
+Index: include/wx/aui/framemanager.h
+===================================================================
+--- include/wx/aui/framemanager.h	(revision 66805)
++++ include/wx/aui/framemanager.h	(working copy)
+@@ -35,7 +35,8 @@
+     wxAUI_DOCK_BOTTOM = 3,
+     wxAUI_DOCK_LEFT = 4,
+     wxAUI_DOCK_CENTER = 5,
+-    wxAUI_DOCK_CENTRE = wxAUI_DOCK_CENTER
++    wxAUI_DOCK_CENTRE = wxAUI_DOCK_CENTER,
++    wxAUI_DOCK_NOTEBOOK_PAGE = 6,
+ };
+ 
+ enum wxAuiManagerOption
+@@ -49,6 +50,7 @@
+     wxAUI_MGR_HINT_FADE                = 1 << 6,
+     wxAUI_MGR_NO_VENETIAN_BLINDS_FADE  = 1 << 7,
+     wxAUI_MGR_LIVE_RESIZE              = 1 << 8,
++    wxAUI_MGR_NO_AUTO_NOTEBOOK         = 1 << 9,
+ 
+     wxAUI_MGR_DEFAULT = wxAUI_MGR_ALLOW_FLOATING |
+                         wxAUI_MGR_TRANSPARENT_HINT |
+@@ -129,7 +131,10 @@
+ class wxAuiDockInfo;
+ class wxAuiDockArt;
+ class wxAuiManagerEvent;
++class wxAuiNotebook;
++class wxAuiNotebookEvent;
+ 
++
+ #ifndef SWIG
+ WX_DECLARE_USER_EXPORTED_OBJARRAY(wxAuiDockInfo, wxAuiDockInfoArray, WXDLLIMPEXP_AUI);
+ WX_DECLARE_USER_EXPORTED_OBJARRAY(wxAuiDockUIPart, wxAuiDockUIPartArray, WXDLLIMPEXP_AUI);
+@@ -137,6 +142,7 @@
+ WX_DECLARE_USER_EXPORTED_OBJARRAY(wxAuiPaneInfo, wxAuiPaneInfoArray, WXDLLIMPEXP_AUI);
+ WX_DEFINE_USER_EXPORTED_ARRAY_PTR(wxAuiPaneInfo*, wxAuiPaneInfoPtrArray, class WXDLLIMPEXP_AUI);
+ WX_DEFINE_USER_EXPORTED_ARRAY_PTR(wxAuiDockInfo*, wxAuiDockInfoPtrArray, class WXDLLIMPEXP_AUI);
++WX_DEFINE_USER_EXPORTED_ARRAY_PTR(wxAuiNotebook*, wxAuiNotebookPtrArray, class WXDLLIMPEXP_AUI);
+ #endif // SWIG
+ 
+ extern WXDLLIMPEXP_AUI wxAuiDockInfo wxAuiNullDockInfo;
+@@ -157,6 +163,7 @@
+         dock_layer = 0;
+         dock_row = 0;
+         dock_pos = 0;
++        notebook_id = -1;
+         floating_pos = wxDefaultPosition;
+         floating_size = wxDefaultSize;
+         best_size = wxDefaultSize;
+@@ -182,6 +189,7 @@
+         dock_layer = c.dock_layer;
+         dock_row = c.dock_row;
+         dock_pos = c.dock_pos;
++        notebook_id = c.notebook_id;
+         best_size = c.best_size;
+         min_size = c.min_size;
+         max_size = c.max_size;
+@@ -197,12 +205,14 @@
+         name = c.name;
+         caption = c.caption;
+         window = c.window;
++        icon = c.icon;
+         frame = c.frame;
+         state = c.state;
+         dock_direction = c.dock_direction;
+         dock_layer = c.dock_layer;
+         dock_row = c.dock_row;
+         dock_pos = c.dock_pos;
++        notebook_id = c.notebook_id;
+         best_size = c.best_size;
+         min_size = c.min_size;
+         max_size = c.max_size;
+@@ -230,6 +240,22 @@
+         *this = source;
+     }
+ 
++    // Copy over the members that pertain to docking position
++    wxAuiPaneInfo& SetDockPos(const wxAuiPaneInfo &source)
++    {
++       state = (state & ~optionFloating ) |
++               (source.state & optionFloating);
++       dock_direction = source.dock_direction;
++       dock_layer = source.dock_layer;
++       dock_row = source.dock_row;
++       dock_pos = source.dock_pos;
++       dock_proportion = source.dock_proportion;
++       floating_pos = source.floating_pos;
++       floating_size = source.floating_size;
++       rect = source.rect;
++       return *this;
++    }
++
+     bool IsOk() const { return window != NULL; }
+     bool IsFixed() const { return !HasFlag(optionResizable); }
+     bool IsResizable() const { return HasFlag(optionResizable); }
+@@ -250,6 +276,8 @@
+     bool IsMovable() const { return HasFlag(optionMovable); }
+     bool IsDestroyOnClose() const { return HasFlag(optionDestroyOnClose); }
+     bool IsMaximized() const { return HasFlag(optionMaximized); }
++    bool IsNotebookDockable() const
++       { return HasFlag(optionNotebookDockable) && HasFlag(optionResizable); }
+     bool HasCaption() const { return HasFlag(optionCaption); }
+     bool HasGripper() const { return HasFlag(optionGripper); }
+     bool HasBorder() const { return HasFlag(optionPaneBorder); }
+@@ -296,8 +324,24 @@
+     wxAuiPaneInfo& FloatingSize(int x, int y) { floating_size.Set(x,y); return *this; }
+     wxAuiPaneInfo& Fixed() { return SetFlag(optionResizable, false); }
+     wxAuiPaneInfo& Resizable(bool resizable = true) { return SetFlag(optionResizable, resizable); }
+-    wxAuiPaneInfo& Dock() { return SetFlag(optionFloating, false); }
+-    wxAuiPaneInfo& Float() { return SetFlag(optionFloating, true); }
++    wxAuiPaneInfo& Dock()
++    {
++        if (IsNotebookPage())
++        {
++            notebook_id = -1;
++            dock_direction = wxAUI_DOCK_NONE;
++        }
++        return SetFlag(optionFloating, false);
++    }
++    wxAuiPaneInfo& Float()
++    {
++        if (IsNotebookPage())
++        {
++            notebook_id = -1;
++            dock_direction = wxAUI_DOCK_NONE;
++        }
++        return SetFlag(optionFloating, true);
++    }
+     wxAuiPaneInfo& Hide() { return SetFlag(optionHidden, true); }
+     wxAuiPaneInfo& Show(bool show = true) { return SetFlag(optionHidden, !show); }
+     wxAuiPaneInfo& CaptionVisible(bool visible = true) { return SetFlag(optionCaption, visible); }
+@@ -316,6 +360,7 @@
+     wxAuiPaneInfo& LeftDockable(bool b = true) { return SetFlag(optionLeftDockable, b); }
+     wxAuiPaneInfo& RightDockable(bool b = true) { return SetFlag(optionRightDockable, b); }
+     wxAuiPaneInfo& Floatable(bool b = true) { return SetFlag(optionFloatable, b); }
++    wxAuiPaneInfo& NotebookDockable(bool b = true) { return SetFlag(optionNotebookDockable, b); }
+     wxAuiPaneInfo& Movable(bool b = true) { return SetFlag(optionMovable, b); }
+     wxAuiPaneInfo& DockFixed(bool b = true) { return SetFlag(optionDockFixed, b); }
+ 
+@@ -329,6 +374,7 @@
+         wxAuiPaneInfo test(*this);
+         test.state |= optionTopDockable | optionBottomDockable |
+                  optionLeftDockable | optionRightDockable |
++                 optionNotebookDockable |
+                  optionFloatable | optionMovable | optionResizable |
+                  optionCaption | optionPaneBorder | buttonClose;
+         wxCHECK_MSG(test.IsValid(), *this,
+@@ -372,6 +418,40 @@
+         return (state & flag) != 0;
+     }
+ 
++    // By defaulting to 1000, the tab will get placed at the end
++    wxAuiPaneInfo& NotebookPage(int id,int tab_position=1000)
++    {
++       // Remove any floating frame
++       Dock();
++       notebook_id = id;
++       dock_pos = tab_position;
++       dock_row = 0;
++       dock_layer = 0;
++       dock_direction = wxAUI_DOCK_NOTEBOOK_PAGE;
++       return *this;
++    }
++    wxAuiPaneInfo& NotebookControl(int id)
++    {
++       notebook_id = id;
++       window = 0;
++       buttons.Empty();
++       if (dock_direction==wxAUI_DOCK_NOTEBOOK_PAGE)
++          dock_direction = wxAUI_DOCK_NONE;
++       return *this;
++    }
++    bool HasNotebook() const { return notebook_id>=0; }
++    bool IsNotebookPage() const
++      { return notebook_id>=0 && dock_direction==wxAUI_DOCK_NOTEBOOK_PAGE; }
++    bool IsNotebookControl() const
++      { return !IsNotebookPage() && HasNotebook(); }
++
++    wxAuiPaneInfo& SetNameFromNotebookId()
++    {
++       if (notebook_id>=0)
++          name.Printf(wxT("__notebook_%d"),notebook_id);
++       return *this;
++    }
++
+ #ifdef SWIG
+     %typemap(out) wxAuiPaneInfo& ;
+ #endif
+@@ -404,6 +484,7 @@
+         optionGripperTop      = 1 << 15,
+         optionMaximized       = 1 << 16,
+         optionDockFixed       = 1 << 17,
++        optionNotebookDockable= 1 << 18,
+ 
+         buttonClose           = 1 << 21,
+         buttonMaximize        = 1 << 22,
+@@ -432,6 +513,8 @@
+     int dock_row;         // row number on the docking bar (0 = first row)
+     int dock_pos;         // position inside the row (0 = first position)
+ 
++    int notebook_id;      // Notebook associated with pane. -1 if none.
++
+     wxSize best_size;     // size that the layout engine will prefer
+     wxSize min_size;      // minimum size the pane window can tolerate
+     wxSize max_size;      // maximum size the pane window can tolerate
+@@ -459,7 +542,8 @@
+ public:
+ 
+     wxAuiManager(wxWindow* managed_wnd = NULL,
+-                   unsigned int flags = wxAUI_MGR_DEFAULT);
++                   unsigned int flags = wxAUI_MGR_DEFAULT,
++                   wxAuiManager *master_manager = NULL);
+     virtual ~wxAuiManager();
+     void UnInit();
+ 
+@@ -510,6 +594,8 @@
+     void RestorePane(wxAuiPaneInfo& pane_info);
+     void RestoreMaximizedPane();
+ 
++    int AddNotebook(wxAuiPaneInfo dock_info);
++
+ public:
+ 
+     virtual wxAuiFloatingFrame* CreateFloatingFrame(wxWindow* parent, const wxAuiPaneInfo& p);
+@@ -591,9 +677,22 @@
+                               wxArrayInt& positions,
+                               wxArrayInt& sizes);
+ 
+-    /// Ends a resize action, or for live update, resizes the sash
++    // Snooped from notebooks
++    wxAuiPaneInfo &PaneFromTabEvent(wxAuiNotebookEvent& event);
++    void OnTabBeginDrag(wxAuiNotebookEvent& event);
++    void OnTabPageClose(wxAuiNotebookEvent& event);
++
++    wxAuiNotebookPtrArray &GetNotebooks()
++    {
++       if (m_master_manager)
++          return m_master_manager->GetNotebooks();
++       return m_notebooks;
++    }
++
++    // Ends a resize action, or for live update, resizes the sash
+     bool DoEndResizeAction(wxMouseEvent& event);
+ 
++    void SetMasterManager(wxAuiManager *manager) { m_master_manager=manager; }
+ public:
+ 
+     // public events (which can be invoked externally)
+@@ -630,6 +729,7 @@
+ 
+ protected:
+ 
++    wxAuiManager *m_master_manager;
+     wxWindow* m_frame;           // the window being managed
+     wxAuiDockArt* m_art;            // dock art object which does all drawing
+     unsigned int m_flags;        // manager flags wxAUI_MGR_*
+@@ -637,6 +737,7 @@
+     wxAuiPaneInfoArray m_panes;     // array of panes structures
+     wxAuiDockInfoArray m_docks;     // array of docks structures
+     wxAuiDockUIPartArray m_uiparts; // array of UI parts (captions, buttons, etc)
++    wxAuiNotebookPtrArray m_notebooks; // Auto notbooks - referenced by "notebook_id" in the wxAuiPaneInfo
+ 
+     int m_action;                // current mouse action
+     wxPoint m_action_start;      // position where the action click started
+Index: src/aui/framemanager.cpp
+===================================================================
+--- src/aui/framemanager.cpp	(revision 66805)
++++ src/aui/framemanager.cpp	(working copy)
+@@ -524,7 +524,6 @@
+     }
+ }
+ 
+-/*
+ // This function works fine, and may be used in the future
+ 
+ // RenumberDockRows() takes a dock and assigns sequential numbers
+@@ -543,7 +542,6 @@
+             dock.panes.Item(j)->dock_row = i;
+     }
+ }
+-*/
+ 
+ 
+ // SetActivePane() sets the active pane, as well as cycles through
+@@ -595,10 +593,13 @@
+     EVT_MOUSE_CAPTURE_LOST(wxAuiManager::OnCaptureLost)
+     EVT_CHILD_FOCUS(wxAuiManager::OnChildFocus)
+     EVT_AUI_FIND_MANAGER(wxAuiManager::OnFindManager)
++    EVT_AUINOTEBOOK_BEGIN_DRAG(wxID_ANY, wxAuiManager::OnTabBeginDrag)
++    EVT_AUINOTEBOOK_PAGE_CLOSE(wxID_ANY,wxAuiManager::OnTabPageClose)
+ END_EVENT_TABLE()
+ 
+ 
+-wxAuiManager::wxAuiManager(wxWindow* managed_wnd, unsigned int flags)
++wxAuiManager::wxAuiManager(wxWindow* managed_wnd, unsigned int flags,
++    wxAuiManager *master_manager)
+ {
+     m_action = actionNone;
+     m_action_window = NULL;
+@@ -614,6 +615,7 @@
+     m_dock_constraint_y = 0.3;
+     m_reserved = NULL;
+     m_currentDragItem = -1;
++    m_master_manager = master_manager;
+ 
+     if (managed_wnd)
+     {
+@@ -1251,6 +1253,12 @@
+                 p.frame->Destroy();
+                 p.frame = NULL;
+             }
++            else if (p.IsNotebookPage())
++            {
++               wxAuiNotebook *notebook = m_notebooks[p.notebook_id];
++               int id = notebook->GetPageIndex(p.window);
++               notebook->RemovePage(id);
++            }
+ 
+             // make sure there are no references to this pane in our uiparts,
+             // just in case the caller doesn't call Update() immediately after
+@@ -1303,6 +1311,13 @@
+         pane_info.frame->Destroy();
+         pane_info.frame = NULL;
+     }
++    // if we are a notebook page, remove ourselves...
++    else if (pane_info.IsNotebookPage())
++    {
++        wxAuiNotebook *notebook = m_notebooks[pane_info.notebook_id];
++        int id = notebook->GetPageIndex(pane_info.window);
++        notebook->RemovePage(id);
++    }
+ 
+     // now we need to either destroy or hide the pane
+     if (pane_info.IsDestroyOnClose())
+@@ -1318,6 +1333,23 @@
+     {
+         pane_info.Hide();
+     }
++
++
++    if (pane_info.IsNotebookControl())
++    {
++       wxAuiNotebook *notebook = m_notebooks[pane_info.notebook_id];
++       while(notebook->GetPageCount())
++       {
++          wxWindow *window = notebook->GetPage(0);
++          notebook->RemovePage(0);
++          wxAuiPaneInfo &info = GetPane(window);
++          if (info.IsOk())
++          {
++             // Note: this could change our pane_info reference ...
++             ClosePane(info);
++          }
++       }
++    }
+ }
+ 
+ void wxAuiManager::MaximizePane(wxAuiPaneInfo& pane_info)
+@@ -1439,7 +1471,8 @@
+     result += wxString::Format(wxT("floatx=%d;"), pane.floating_pos.x);
+     result += wxString::Format(wxT("floaty=%d;"), pane.floating_pos.y);
+     result += wxString::Format(wxT("floatw=%d;"), pane.floating_size.x);
+-    result += wxString::Format(wxT("floath=%d"), pane.floating_size.y);
++    result += wxString::Format(wxT("floath=%d;"), pane.floating_size.y);
++    result += wxString::Format(wxT("notebookid=%d"), pane.notebook_id);
+ 
+     return result;
+ }
+@@ -1503,6 +1536,8 @@
+             pane.floating_size.x = wxAtoi(value.c_str());
+         else if (val_name == wxT("floath"))
+             pane.floating_size.y = wxAtoi(value.c_str());
++        else if (val_name == wxT("notebookid"))
++            pane.notebook_id = wxAtoi(value.c_str());
+         else {
+             wxFAIL_MSG(wxT("Bad Perspective String"));
+         }
+@@ -1633,12 +1668,20 @@
+         wxAuiPaneInfo& p = GetPane(pane.name);
+         if (!p.IsOk())
+         {
+-            // the pane window couldn't be found
+-            // in the existing layout -- skip it
+-            continue;
++            if (pane.IsNotebookControl())
++            {
++               // notebook controls - auto add...
++               m_panes.Add(pane);
++            }
++            else
++            {
++                // the pane window couldn't be found
++                // in the existing layout -- skip it
++                continue;
++            }
+         }
+-
+-        p.SafeSet(pane);
++        else
++           p.SafeSet(pane);
+     }
+ 
+     if (update)
+@@ -2357,6 +2400,7 @@
+ 
+         // find any top docks in this layer
+         FindDocks(docks, wxAUI_DOCK_TOP, layer, -1, arr);
++        RenumberDockRows(arr);
+         if (!arr.IsEmpty())
+         {
+             for (row = 0, row_count = arr.GetCount(); row < row_count; ++row)
+@@ -2371,6 +2415,7 @@
+ 
+         // find any left docks in this layer
+         FindDocks(docks, wxAUI_DOCK_LEFT, layer, -1, arr);
++        RenumberDockRows(arr);
+         if (!arr.IsEmpty())
+         {
+             for (row = 0, row_count = arr.GetCount(); row < row_count; ++row)
+@@ -2409,6 +2454,7 @@
+ 
+         // find any right docks in this layer
+         FindDocks(docks, wxAUI_DOCK_RIGHT, layer, -1, arr);
++        RenumberDockRows(arr);
+         if (!arr.IsEmpty())
+         {
+             for (row = arr.GetCount()-1; row >= 0; --row)
+@@ -2424,6 +2470,7 @@
+ 
+         // find any bottom docks in this layer
+         FindDocks(docks, wxAUI_DOCK_BOTTOM, layer, -1, arr);
++        RenumberDockRows(arr);
+         if (!arr.IsEmpty())
+         {
+             for (row = arr.GetCount()-1; row >= 0; --row)
+@@ -2452,7 +2499,111 @@
+     return container;
+ }
+ 
++wxAuiPaneInfo &wxAuiManager::PaneFromTabEvent(wxAuiNotebookEvent& event)
++{
++    wxObject *obj = event.GetEventObject();
++    if (obj &&  obj->IsKindOf(CLASSINFO(wxAuiTabCtrl)))
++    {
++       wxAuiTabCtrl *tab = (wxAuiTabCtrl *)obj;
++       int page_idx =  tab->GetActivePage();
++       if (page_idx>=0)
++       {
++           wxAuiNotebookPage& page = tab->GetPage(page_idx);
++           wxWindow *window = page.window;
++           if (window)
++               return GetPane(window);
++       }
++    }
++    else if (obj &&  obj->IsKindOf(CLASSINFO(wxAuiNotebook)))
++    {
++       wxAuiNotebook *notebook = (wxAuiNotebook *)obj;
++       int page_idx =  event.GetSelection();
++       if (page_idx>=0)
++       {
++           wxWindow *window = notebook->GetPage(page_idx);
++           if (window)
++               return GetPane(window);
++       }
++    }
+ 
++
++    return wxAuiNullPaneInfo;
++}
++
++
++void wxAuiManager::OnTabPageClose(wxAuiNotebookEvent& event)
++{
++   if (m_master_manager)
++       m_master_manager->OnTabPageClose(event);
++   else
++   {
++       wxAuiPaneInfo &p= PaneFromTabEvent(event);
++       if (p.IsOk())
++       {
++           // veto it because we will call "RemovePage" ourselves
++           event.Veto();
++           event.wxNotifyEvent::Veto();
++
++           // Now ask the app if they really want to close...
++           // fire pane close event
++           wxAuiManagerEvent e(wxEVT_AUI_PANE_CLOSE);
++           e.SetPane(&p);
++           e.SetCanVeto(true);
++           ProcessMgrEvent(e);
++
++           if (e.GetVeto())
++               return;
++
++           ClosePane(p);
++           Update();
++       }
++   }
++}
++
++void wxAuiManager::OnTabBeginDrag(wxAuiNotebookEvent& event)
++{
++   if (m_master_manager)
++      m_master_manager->OnTabBeginDrag(event);
++   else
++   {
++      wxAuiPaneInfo &p= PaneFromTabEvent(event);
++      if (p.IsOk())
++      {
++          // It's one of ours!
++          m_action = actionDragFloatingPane;
++
++          wxPoint mouse = ::wxGetMousePosition();
++
++          // set initial float position - may have to think about this
++          //  offset a bit ore later ...
++          m_action_offset = wxPoint(20,10);
++          p.floating_pos = mouse - m_action_offset;
++          p.dock_pos = wxAUI_DOCK_NONE;
++          p.notebook_id = -1;
++
++          // float the window
++          if (p.IsMaximized())
++             RestorePane(p);
++          p.Float();
++
++          wxWindow *tab = (wxWindow *)event.GetEventObject();
++          if (wxWindow::GetCapture() == tab)
++             tab->ReleaseMouse();
++
++          Update();
++          m_action_window = p.frame;
++          m_frame->CaptureMouse();
++
++      }
++      else
++      {
++         // not our window
++         event.Skip();
++      }
++   }
++}
++
++
+ // SetDockSizeConstraint() allows the dock constraints to be set.  For example,
+ // specifying values of 0.5, 0.5 will mean that upon dock creation, a dock may
+ // not be larger than half of the window's size
+@@ -2472,6 +2623,18 @@
+         *height_pct = m_dock_constraint_y;
+ }
+ 
++int wxAuiManager::AddNotebook(wxAuiPaneInfo dock_info)
++{
++    int id = m_notebooks.size();
++    wxAuiNotebook *notebook = new wxAuiNotebook(m_frame);
++    // This is so we can get the tab-drag event.
++    notebook->GetAuiManager().SetMasterManager(this);
++    m_notebooks.Add( notebook );
++    dock_info.NotebookControl(id);
++    dock_info.SetNameFromNotebookId();
++    AddPane(notebook,dock_info);
++    return id;
++}
+ 
+ 
+ // Update() updates the layout.  Whenever changes are made to
+@@ -2486,6 +2649,8 @@
+     wxSizer* sizer;
+     int i, pane_count = m_panes.GetCount();
+ 
++    // Workout how many notebooks we need.
++    int max_notebook = -1;
+ 
+     // destroy floating panes which have been
+     // redocked or are becoming non-floating
+@@ -2493,6 +2658,8 @@
+     {
+         wxAuiPaneInfo& p = m_panes.Item(i);
+ 
++        max_notebook = wxMax(max_notebook,p.notebook_id);
++
+         if (!p.IsFloating() && p.frame)
+         {
+             // because the pane is no longer in a floating, we need to
+@@ -2533,7 +2700,234 @@
+         }
+     }
+ 
++    // Only the master manager should create/destroy notebooks...
++    if (m_master_manager==NULL)
++    {
++        // We are the master of our domain
++        int extra_notebook = m_notebooks.GetCount();
++        max_notebook++;
++        for(; extra_notebook<max_notebook; ++ extra_notebook)
++        {
++           wxAuiNotebook *notebook = new wxAuiNotebook(m_frame);
++           // This is so we can get the tab-drag event.
++           notebook->GetAuiManager().SetMasterManager(this);
++           m_notebooks.Add( notebook );
++        }
++    
++        // Remove pages from notebooks that no-longer belong there ...
++        int nb,nb_count = m_notebooks.GetCount();
++        for(nb=0;nb<nb_count;nb++)
++        {
++           wxAuiNotebook *notebook = m_notebooks.Item(nb);
++           // Check each tab ...
++           int pages = notebook->GetPageCount();
++           for(int page=0;page<pages;page++)
++           {
++              wxWindow *window = notebook->GetPage(page);
++              wxAuiPaneInfo& pane = GetPane(window);
++              if (pane.IsOk())
++              {
++                 if (pane.notebook_id != nb)
++                 {
++                    notebook->RemovePage(page);
++                    pages--;
++                    page--;
++                    window->Reparent(m_frame);
++                 }
++              }
++           }
++        }
++    
++        // Add notebook pages that aren't there already...
++        for (i = 0; i < pane_count; ++i)
++        {
++            wxAuiPaneInfo& p = m_panes.Item(i);
++            if (p.IsNotebookPage())
++            {
++                wxString title(p.caption.IsEmpty()?p.name:p.caption);
+ 
++                wxAuiNotebook *notebook = m_notebooks.Item(p.notebook_id);
++                int page_id =  notebook->GetPageIndex(p.window);
++                if (page_id<0)
++                {
++                   p.window->Reparent(notebook);
++    
++                   notebook->AddPage(p.window,title,true,p.icon);
++                }
++                // Update title and icon ...
++                else
++                {
++                   notebook->SetPageText(page_id,title);
++                   notebook->SetPageBitmap(page_id,p.icon);
++                }
++            }
++            // Wire-up newly created notebooks
++            else if (p.IsNotebookControl() && !p.window)
++            {
++                p.window = m_notebooks.Item(p.notebook_id);
++            }
++        }
++    
++        // Delete empty notebooks, and convert notebooks with 1 page to
++        //  normal panes...
++        // Also, check for notebooks containing "current document"
++        wxArrayInt remap_ids;
++        remap_ids.Add(-1,nb_count);
++        int nb_idx = 0;
++
++        for(nb=0;nb<nb_count;nb++)
++        {
++           wxAuiNotebook *notebook = m_notebooks.Item(nb);
++           if (notebook->GetPageCount()==1)
++           {
++              // Convert notebook page to pane...
++              wxWindow *window = notebook->GetPage(0);
++              wxAuiPaneInfo& child_pane = GetPane(window);
++              wxAuiPaneInfo& notebook_pane = GetPane(notebook);
++              if (child_pane.IsOk() && notebook_pane.IsOk())
++              {
++                 child_pane.SetDockPos(notebook_pane);
++                 notebook->RemovePage(0);
++                 child_pane.window->Reparent(m_frame);
++                 child_pane.frame = NULL;
++                 child_pane.notebook_id = -1;
++
++                 DetachPane(notebook);
++                 notebook->Destroy();
++              }
++              else
++              {
++                  wxASSERT_MSG(false, wxT("Odd notebook docking"));
++              }
++           }
++           else if (notebook->GetPageCount()==0)
++           {
++              DetachPane(notebook);
++              notebook->Destroy();
++           }
++           else
++           {
++              // Check page-ordering...
++              m_notebooks[nb_idx] = notebook;
++              int pages = notebook->GetPageCount();
++              wxWindow *selected = notebook->GetPage(notebook->GetSelection());
++              bool reordered = false;
++              for(int page=0;page<pages;page++)
++              {
++                 wxWindow *win = notebook->GetPage(page);
++                 wxAuiPaneInfo *pane = &GetPane(win);
++                 if (pane->IsOk())
++                 {
++                    int lowest = pane->dock_pos;
++                    int where = -1;
++                    // Now look for panes with lower dock_poss
++                    for(int look=page+1;look<pages;look++)
++                    {
++                       wxWindow *w = notebook->GetPage(look);
++                       wxAuiPaneInfo *other = &GetPane(w);
++                       if (other->IsOk())
++                       {
++                          if (other->dock_pos < lowest)
++                          {
++                             where = look;
++                             lowest = other->dock_pos;
++                             pane = other;
++                          }
++                       }
++                    }
++                    if (where>0)
++                    {
++                       // We need to move a new pane into slot "page"
++                       notebook->RemovePage(where);
++                       wxString title(pane->caption.IsEmpty()?
++                          pane->name:pane->caption);
++                       notebook->InsertPage(page,pane->window,title);
++                       reordered = true;
++                    }
++                    // Now that we've move it, we can "normalise" the value.
++                    pane->dock_pos = page;
++                 }
++              }
++
++              if (reordered)
++                 notebook->SetSelection(notebook->GetPageIndex(selected));
++
++              // It's a keeper.
++              remap_ids[nb] = nb_idx++;
++           }
++        }
++
++        // pane_count may have changed
++        pane_count = m_panes.GetCount();
++
++        // Apply remap...
++        if (nb_count != nb_idx)
++        {
++           m_notebooks.RemoveAt(nb_idx, nb_count-nb_idx);
++           for(i=0;i<pane_count;i++)
++           {
++              wxAuiPaneInfo& p = m_panes.Item(i);
++              if (p.notebook_id>=0)
++              {
++                 p.notebook_id = remap_ids[ p.notebook_id ];
++                 if (p.IsNotebookControl())
++                    p.SetNameFromNotebookId();
++              }
++           }
++        }
++
++        // Make sure buttons are correct ...
++        nb_count = m_notebooks.GetCount();
++        for(nb=0;nb<nb_count;nb++)
++        {
++           wxAuiNotebook *notebook = m_notebooks.Item(nb);
++           bool want_max = true;
++           bool want_close = true;
++
++           int pages = notebook->GetPageCount();
++           for(int page=0;page<pages;page++)
++           {
++              wxWindow *win = notebook->GetPage(page);
++              wxAuiPaneInfo &pane = GetPane(win);
++              if (pane.IsOk())
++              {
++                 if (!pane.HasCloseButton())
++                    want_close = false;
++                 if (!pane.HasMaximizeButton())
++                    want_max = false;
++              }
++           }
++
++           wxAuiPaneInfo &notebook_pane = GetPane(notebook);
++           if (notebook_pane.IsOk())
++           {
++              if ( notebook_pane.HasMaximizeButton() != want_max )
++              {
++                 if (want_max)
++                 {
++                     wxAuiPaneButton button;
++                     notebook_pane.state |= wxAuiPaneInfo::buttonMaximize;
++                     button.button_id = wxAUI_BUTTON_MAXIMIZE_RESTORE;
++                     notebook_pane.buttons.Add(button);
++                 }
++                 // todo: remove min/max
++              }
++              if (notebook_pane.HasCloseButton()!=want_close)
++              {
++                 if (want_close)
++                 {
++                     wxAuiPaneButton button;
++                     button.button_id = wxAUI_BUTTON_CLOSE;
++                     notebook_pane.state |= wxAuiPaneInfo::buttonClose;
++                     notebook_pane.buttons.Add(button);
++                 }
++                 // todo: remove close
++              }
++           }
++        }
++    }
++    
++
+     // delete old sizer first
+     m_frame->SetSizer(NULL);
+ 
+@@ -2571,7 +2965,8 @@
+             {
+                 // frame already exists, make sure it's position
+                 // and size reflect the information in wxAuiPaneInfo
+-                if ((p.frame->GetPosition() != p.floating_pos) || (p.frame->GetSize() != p.floating_size))
++                if ((p.frame->GetPosition() != p.floating_pos) ||
++                    (p.frame->GetSize() != p.floating_size))
+                 {
+                     p.frame->SetSize(p.floating_pos.x, p.floating_pos.y,
+                                      p.floating_size.x, p.floating_size.y,
+@@ -2601,7 +2996,7 @@
+         }
+         else
+         {
+-            if (p.window->IsShown() != p.IsShown())
++            if (p.window->IsShown() != p.IsShown() && !p.IsNotebookPage())
+                 p.window->Show(p.IsShown());
+         }
+ 
+@@ -2898,9 +3293,9 @@
+             new_layer = auiToolBarLayer;
+ 
+         drop.Dock().Left().
+-             Layer(new_layer).
+-             Row(0).
+-             Position(pt.y - GetDockPixelOffset(drop) - offset.y);
++            Layer(new_layer).
++            Row(0).
++            Position(pt.y - GetDockPixelOffset(drop) - offset.y);
+         return ProcessDockResult(target, drop);
+     }
+     else if (pt.y < layer_insert_offset &&
+@@ -2914,9 +3309,9 @@
+             new_layer = auiToolBarLayer;
+ 
+         drop.Dock().Top().
+-             Layer(new_layer).
+-             Row(0).
+-             Position(pt.x - GetDockPixelOffset(drop) - offset.x);
++            Layer(new_layer).
++            Row(0).
++            Position(pt.x - GetDockPixelOffset(drop) - offset.x);
+         return ProcessDockResult(target, drop);
+     }
+     else if (pt.x >= cli_size.x - layer_insert_offset &&
+@@ -2930,9 +3325,9 @@
+             new_layer = auiToolBarLayer;
+ 
+         drop.Dock().Right().
+-             Layer(new_layer).
+-             Row(0).
+-             Position(pt.y - GetDockPixelOffset(drop) - offset.y);
++            Layer(new_layer).
++            Row(0).
++            Position(pt.y - GetDockPixelOffset(drop) - offset.y);
+         return ProcessDockResult(target, drop);
+     }
+     else if (pt.y >= cli_size.y - layer_insert_offset &&
+@@ -2946,9 +3341,9 @@
+             new_layer = auiToolBarLayer;
+ 
+         drop.Dock().Bottom().
+-             Layer(new_layer).
+-             Row(0).
+-             Position(pt.x - GetDockPixelOffset(drop) - offset.x);
++            Layer(new_layer).
++            Row(0).
++            Position(pt.x - GetDockPixelOffset(drop) - offset.x);
+         return ProcessDockResult(target, drop);
+     }
+ 
+@@ -3057,8 +3452,45 @@
+         return ProcessDockResult(target, drop);
+     }
+ 
++    // Look to docking on floating toolbars...
++    if (!part && target.IsNotebookDockable())
++    {
++       int i, pane_count = panes.GetCount();
++       for(i=0;i<pane_count;++i)
++       {
++           wxAuiPaneInfo& p = panes.Item(i);
++           if (p.IsFloating() && p.IsShown() && p.frame &&
++                (p.IsNotebookDockable() || p.IsNotebookControl()) &&
++                p.frame != target.frame )
++           {
++              wxRect rect =  p.frame->GetScreenRect();
++              wxPoint screen = m_frame->ClientToScreen(pt);
++              if (rect.Contains(screen))
++              {
++                 if (!p.HasNotebook())
++                 {
++                    // Add a new notebook pane ...
++                    int id = m_notebooks.GetCount();
++ 
++                    wxAuiPaneInfo info;
++                    // Set CloseButton to false, so it gets added as needed
++                    info.SetDockPos(p).NotebookControl(id).CloseButton(false).
++                      SetNameFromNotebookId().NotebookDockable(false);
++                    info.best_size = p.best_size;
++                    panes.Add(info);
+ 
++                    // add original pane as tab ...
++                    p.NotebookPage(id);
++                 }
+ 
++                 // Add new item to notebook
++                 drop.NotebookPage(p.notebook_id);
++                 target = drop;
++                 return true;
++              }
++           }
++       }
++    }
+ 
+     if (!part)
+         return false;
+@@ -3136,6 +3568,50 @@
+         int insert_dir = part->pane->dock_direction;
+         int insert_layer = part->pane->dock_layer;
+ 
++        // Check for middle-third = create tabbed entry.
++        wxRect centre(part->rect);
++        centre.Deflate( centre.GetWidth()/3, centre.GetHeight()/3 );
++        if (target.IsNotebookDockable() &&
++            centre.Contains(pt) &&
++            !(m_flags & wxAUI_MGR_NO_AUTO_NOTEBOOK) &&
++          (part->pane->IsNotebookDockable() || part->pane->IsNotebookControl()))
++        {
++            wxAuiPaneInfo *pane = part->pane;
++            // The part->pane may still point to original values, not copies.
++            // Find the pointer to copy, if required.
++            if (&panes !=  &m_panes)
++            {
++                wxWindow *win = pane->window;
++                unsigned int idx = 0;
++                for(idx=0;idx<panes.GetCount();idx++)
++                    if (panes.Item(idx).window == win)
++                       break;
++
++                 pane = &panes.Item(idx);
++            }
++
++            if (!pane->HasNotebook())
++            {
++               // Add a new notebook pane ...
++               int id = m_notebooks.GetCount();
++
++               wxAuiPaneInfo info;
++               info.SetDockPos(*pane).NotebookControl(id).CloseButton(false).
++                  SetNameFromNotebookId().NotebookDockable(false);
++
++               info.best_size = pane->best_size;
++               panes.Add(info);
++
++               // add original pane as tab ...
++               pane->NotebookPage(id);
++            }
++
++            // Add new item to notebook
++            drop.NotebookPage(pane->notebook_id);
++            target = drop;
++            return true;
++        }
++
+         switch (part->pane->dock_direction)
+         {
+             case wxAUI_DOCK_TOP:
+@@ -3490,13 +3966,29 @@
+     sizer->SetDimension(0, 0, client_size.x, client_size.y);
+     sizer->Layout();
+ 
++    wxString sought = wxT("__HINT__");
++
++    // For a notebook page, actually look for the noteboot itself.
++    if (hint.IsNotebookPage())
++    {
++       int id = hint.notebook_id;
++       for(unsigned int i=0;i<panes.GetCount();i++)
++       {
++          if (panes[i].IsNotebookControl() && panes[i].notebook_id==id)
++          {
++             sought = panes[i].name;
++             break;
++          }
++       }
++    }
++
+     for (i = 0, part_count = uiparts.GetCount();
+          i < part_count; ++i)
+     {
+         wxAuiDockUIPart& part = uiparts.Item(i);
+ 
+         if (part.type == wxAuiDockUIPart::typePaneBorder &&
+-            part.pane && part.pane->name == wxT("__HINT__"))
++            part.pane && part.pane->name == sought)
+         {
+             rect = wxRect(part.sizer_item->GetPosition(),
+                           part.sizer_item->GetSize());
+@@ -3506,8 +3998,20 @@
+ 
+     delete sizer;
+ 
++    // check for floating frame ...
+     if (rect.IsEmpty())
+     {
++        int pane_count = panes.GetCount();
++        for(i=0;i<pane_count;i++)
++        {
++           wxAuiPaneInfo &p = panes[i];
++           if (p.name==sought && p.IsFloating() )
++               return wxRect(p.floating_pos,p.floating_size);
++        }
++    }
++
++    if (rect.IsEmpty())
++    {
+         return rect;
+     }
+ 

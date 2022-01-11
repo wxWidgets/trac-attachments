@@ -1,0 +1,225 @@
+Index: include/wx/msw/radiobox.h
+===================================================================
+--- include/wx/msw/radiobox.h	(revision 51058)
++++ include/wx/msw/radiobox.h	(working copy)
+@@ -158,7 +158,7 @@
+ 
+     // the buttons we contain
+     wxSubwindows *m_radioButtons;
+-    wxWindowIDRef *m_radioButtonIds;
++    wxSubwindows *m_dummyButton;
+ 
+     // array of widths and heights of the buttons, may be wxDefaultCoord if the
+     // corresponding quantity should be computed
+Index: include/wx/msw/slider95.h
+===================================================================
+--- include/wx/msw/slider95.h	(revision 51058)
++++ include/wx/msw/slider95.h	(working copy)
+@@ -118,7 +118,6 @@
+ 
+     // the labels windows, if any
+     wxSubwindows  *m_labels;
+-    wxWindowIDRef *m_labelIds;
+ 
+     int           m_rangeMin;
+     int           m_rangeMax;
+Index: include/wx/msw/subwin.h
+===================================================================
+--- include/wx/msw/subwin.h	(revision 51058)
++++ include/wx/msw/subwin.h	(working copy)
+@@ -32,6 +32,7 @@
+ 
+         m_count = n;
+         m_hwnds = (HWND *)calloc(n, sizeof(HWND));
++        m_ids = new wxWindowIDRef[n];
+     }
+ 
+     // non-virtual dtor, this class is not supposed to be used polymorphically
+@@ -43,6 +44,8 @@
+         }
+ 
+         free(m_hwnds);
++        delete [] m_ids; // Should we use the same allocation scheme
++                         // (new/delete) for m_hwnds for consistency
+     }
+ 
+     // get the number of subwindows
+@@ -56,6 +59,22 @@
+         return m_hwnds[n];
+     }
+ 
++    // Use Set to set the HWND and the ID
++    // This way, even if the id is created from NewControlId, it
++    // will be freed when the wxSubwindows object is destroyed.
++    // Even if the id is not created but is a fixed value, this is
++    // still fine.  To use this and reduce possible problems,
++    // perhaps this should be enforced by removing the return
++    // reference, only return value so the only way to change is
++    // to call Set.
++    void Set(size_t n, HWND hwnd, wxWindowID id)
++    {
++        wxASSERT_MSG( n < m_count, _T("subwindow index out of range") );
++
++        m_hwnds[n] = hwnd;
++        m_ids[n] = id;
++    }
++    
+     HWND& operator[](size_t n) { return Get(n); }
+     HWND operator[](size_t n) const
+     {
+@@ -139,6 +158,9 @@
+ 
+     // the HWNDs we contain
+     HWND *m_hwnds;
++    
++    // the IDs of the windows
++    wxWindowIDRef *m_ids;
+ 
+ 
+     DECLARE_NO_COPY_CLASS(wxSubwindows)
+Index: src/msw/radiobox.cpp
+===================================================================
+--- src/msw/radiobox.cpp	(revision 51058)
++++ src/msw/radiobox.cpp	(working copy)
+@@ -129,7 +129,7 @@
+ {
+     m_selectedButton = wxNOT_FOUND;
+     m_radioButtons = NULL;
+-    m_radioButtonIds = NULL;
++    m_dummyButton = NULL;
+     m_radioWidth = NULL;
+     m_radioHeight = NULL;
+ }
+@@ -156,8 +156,17 @@
+     wxUnusedVar(val);
+ #endif // wxUSE_VALIDATORS/!wxUSE_VALIDATORS
+ 
++    // We need an extra one to keep track of the 'dummy' item we
++    // create to end the radio group, so it will be destroyed and
++    // it's id will be released.  But we want it seperate from the
++    // other buttons since the wxSubwindows will operate on it as
++    // well and we just want to ignore it until destroying it.
++    // For instance, we don't wnat the bounding box of the radio
++    // buttons to include the dummy button
+     m_radioButtons = new wxSubwindows(n);
+-    m_radioButtonIds = new wxWindowIDRef[n + 1];
++    m_dummyButton = new wxSubwindows(1);
++    
++    
+     m_radioWidth = new int[n];
+     m_radioHeight = new int[n];
+ 
+@@ -169,14 +178,14 @@
+         if ( i == 0 )
+             styleBtn |= WS_GROUP;
+ 
+-        m_radioButtonIds[i] = NewControlId();
++        wxWindowIDRef subid = NewControlId();
+ 
+         HWND hwndBtn = ::CreateWindow(_T("BUTTON"),
+                                       choices[i].wx_str(),
+                                       styleBtn,
+                                       0, 0, 0, 0,   // will be set in SetSize()
+                                       GetHwndOf(parent),
+-                                      (HMENU)(wxWindowID)m_radioButtonIds[i],
++                                      (HMENU)subid.GetValue(),
+                                       wxGetInstance(),
+                                       NULL);
+ 
+@@ -187,22 +196,30 @@
+             return false;
+         }
+ 
+-        (*m_radioButtons)[i] = hwndBtn;
++        // Keep track of the subwindow
++        m_radioButtons->Set(i, hwndBtn, subid);
+ 
+         SubclassRadioButton((WXHWND)hwndBtn);
+ 
+-        m_subControls.Add(m_radioButtonIds[i]);
++        // Also, make it a subcontrol of this control
++        m_subControls.Add(subid);
+     }
+ 
+     // Create a dummy radio control to end the group.
+-    m_radioButtonIds[n] = NewControlId();
++    wxWindowIDRef subid = NewControlId();
+ 
+-    (void)::CreateWindow(_T("BUTTON"),
++    HWND dummy = ::CreateWindow(_T("BUTTON"),
+                          wxEmptyString,
+                          WS_GROUP | BS_AUTORADIOBUTTON | WS_CHILD,
+                          0, 0, 0, 0, GetHwndOf(parent),
+-                         (HMENU)(wxWindowID)m_radioButtonIds[n], wxGetInstance(), NULL);
++                         (HMENU)subid.GetValue(), wxGetInstance(), NULL);
+ 
++    // Keep track of the subwindow so it will be destroyed when the radio
++    // box is and it's id will be freed.
++    // Also, do we need to consider this dummy item a subcontrol and add it
++    // to m_subControls
++    m_dummyButton->Set(0, dummy, subid);
++
+     m_radioButtons->SetFont(GetFont());
+ 
+ #ifdef __WXWINCE__
+@@ -241,7 +258,7 @@
+     m_isBeingDeleted = true;
+ 
+     delete m_radioButtons;
+-    delete[] m_radioButtonIds;
++    delete m_dummyButton;
+     delete[] m_radioWidth;
+     delete[] m_radioHeight;
+ }
+Index: src/msw/slider95.cpp
+===================================================================
+--- src/msw/slider95.cpp	(revision 51058)
++++ src/msw/slider95.cpp	(working copy)
+@@ -135,7 +135,6 @@
+ void wxSlider::Init()
+ {
+     m_labels = NULL;
+-    m_labelIds = NULL;
+ 
+     m_pageSize = 1;
+     m_lineSize = 1;
+@@ -205,24 +204,25 @@
+     if ( m_windowStyle & wxSL_LABELS )
+     {
+         m_labels = new wxSubwindows(SliderLabel_Last);
+-        m_labelIds = new wxWindowIDRef[SliderLabel_Last];
+ 
+         HWND hwndParent = GetHwndOf(parent);
+         for ( size_t n = 0; n < SliderLabel_Last; n++ )
+         {
+-            m_labelIds[n] = NewControlId();
++            wxWindowIDRef lblid = NewControlId();
+ 
+-            (*m_labels)[n] = ::CreateWindow
++            HWND wnd = ::CreateWindow
+                                (
+                                     wxT("STATIC"),
+                                     NULL,
+                                     WS_CHILD | WS_VISIBLE | SS_CENTER,
+                                     0, 0, 0, 0,
+                                     hwndParent,
+-                                    (HMENU)(wxWindowID)m_labelIds[n],
++                                    (HMENU)lblid.GetValue(),
+                                     wxGetInstance(),
+                                     NULL
+                                );
++                               
++            m_labels->Set(n, wnd, lblid);
+         }
+ 
+         m_labels->SetFont(GetFont());
+@@ -286,7 +286,6 @@
+ wxSlider::~wxSlider()
+ {
+     delete m_labels;
+-    delete[] m_labelIds;
+ }
+ 
+ // ----------------------------------------------------------------------------
+
+ 	  	 

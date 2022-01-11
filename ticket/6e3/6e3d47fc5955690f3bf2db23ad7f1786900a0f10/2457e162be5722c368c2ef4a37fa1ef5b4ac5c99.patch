@@ -1,0 +1,347 @@
+Index: include/wx/dataview.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/dataview.h,v
+retrieving revision 1.46
+diff -u -r1.46 dataview.h
+--- include/wx/dataview.h	2006/11/01 15:24:40	1.46
++++ include/wx/dataview.h	2007/02/15 11:42:56
+@@ -51,21 +51,20 @@
+ // wxDataViewModel
+ // ---------------------------------------------------------
+ 
+-class WXDLLIMPEXP_ADV wxDataViewModel: public wxObject
++class WXDLLIMPEXP_ADV wxDataViewModel: public wxObjectRefData
+ {
+ public:
+     wxDataViewModel() { }
+-    virtual ~wxDataViewModel() { }
+ 
+ protected:
+-    DECLARE_DYNAMIC_CLASS_NO_COPY(wxDataViewModel)
++    // the user should not delete this class directly: he should use DecRef() instead!
++    virtual ~wxDataViewModel() { }
+ };
+ 
+ // ---------------------------------------------------------
+ // wxDataViewListModelNotifier
+ // ---------------------------------------------------------
+ 
+-
+ class WXDLLIMPEXP_ADV wxDataViewListModelNotifier: public wxObject
+ {
+ public:
+@@ -80,6 +79,8 @@
+     virtual bool ValueChanged( unsigned int col, unsigned int row ) = 0;
+     virtual bool RowsReordered( unsigned int *new_order ) = 0;
+     virtual bool Cleared() = 0;
++    virtual bool Freed()
++        { m_owner = NULL; return true; }
+ 
+     void SetOwner( wxDataViewListModel *owner ) { m_owner = owner; }
+     wxDataViewListModel *GetOwner()             { return m_owner; }
+@@ -107,16 +108,24 @@
+ 
+ class WXDLLIMPEXP_ADV wxDataViewListModel: public wxDataViewModel
+ {
++    friend class WXDLLIMPEXP_ADV wxDataViewCtrl;
++    friend class WXDLLIMPEXP_ADV wxDataViewCtrlBase;
++    friend class WXDLLIMPEXP_ADV wxDataViewSortedListModel;
++    friend class WXDLLIMPEXP_ADV wxDataViewColumnBase;
++    friend class WXDLLIMPEXP_ADV wxGtkDataViewListModelNotifier;
++
+ public:
+     wxDataViewListModel();
+-    virtual ~wxDataViewListModel();
+ 
+     virtual unsigned int GetNumberOfRows() = 0;
+     virtual unsigned int GetNumberOfCols() = 0;
++
+     // return type as reported by wxVariant
+     virtual wxString GetColType( unsigned int col ) = 0;
++
+     // get value into a wxVariant
+     virtual void GetValue( wxVariant &variant, unsigned int col, unsigned int row ) = 0;
++
+     // set value, call ValueChanged() afterwards!
+     virtual bool SetValue( wxVariant &variant, unsigned int col, unsigned int row ) = 0;
+ 
+@@ -130,20 +139,23 @@
+     virtual bool RowsReordered( unsigned int *new_order );
+     virtual bool Cleared();
+ 
++protected:
++    // the user should not delete this class directly: he should use DecRef() instead!
++    virtual ~wxDataViewListModel();
++
+     // Used internally
+     void AddViewingColumn( wxDataViewColumn *view_column, unsigned int model_column );
+     void RemoveViewingColumn( wxDataViewColumn *column );
+ 
+     void AddNotifier( wxDataViewListModelNotifier *notifier );
+     void RemoveNotifier( wxDataViewListModelNotifier *notifier );
+-
+-    wxList                      m_notifiers;
+-    wxList                      m_viewingColumns;
+ 
+-protected:
+-    DECLARE_DYNAMIC_CLASS_NO_COPY(wxDataViewListModel)
++    wxList m_notifiers;
++    wxList m_viewingColumns;
+ };
+ 
++
++
+ // ---------------------------------------------------------
+ // wxDataViewSortedListModel
+ // ---------------------------------------------------------
+@@ -155,6 +167,8 @@
+ 
+ class WXDLLIMPEXP_ADV wxDataViewSortedListModel: public wxDataViewListModel
+ {
++    friend class wxDataViewSortedListModelNotifier;
++
+ public:
+     wxDataViewSortedListModel( wxDataViewListModel *child );
+     virtual ~wxDataViewSortedListModel();
+@@ -200,9 +214,6 @@
+     wxDataViewListModelNotifier     *m_notifierOnChild;
+     
+     void InitStatics(); // BAD
+-
+-protected:
+-    DECLARE_DYNAMIC_CLASS_NO_COPY(wxDataViewSortedListModel)
+ };
+ 
+ // ---------------------------------------------------------
+Index: samples/dataview/dataview.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/dataview/dataview.cpp,v
+retrieving revision 1.31
+diff -u -r1.31 dataview.cpp
+--- samples/dataview/dataview.cpp	2006/10/06 09:50:45	1.31
++++ samples/dataview/dataview.cpp	2007/02/15 12:25:07
+@@ -34,9 +34,9 @@
+ // MyTextModel
+ // -------------------------------------
+ 
+-WX_DECLARE_LIST(wxDateTime,wxArrayDate);
+-#include <wx/listimpl.cpp>
+-WX_DEFINE_LIST(wxArrayDate)
++WX_DECLARE_OBJARRAY(wxDateTime,wxArrayDate);
++#include <wx/arrimpl.cpp>
++WX_DEFINE_OBJARRAY(wxArrayDate)
+ 
+ class MyTextModel: public wxDataViewListModel
+ {
+@@ -54,8 +54,8 @@
+             { m_progress.Add( i/10 ); }
+         for (i = 0; i < 1000; i++)
+             {
+-                wxDateTime *date = new wxDateTime( wxDateTime::Now() );
+-                m_dates.Append( date );
++                wxDateTime date( wxDateTime::Now() );
++                m_dates.Add( date );
+             }
+     }
+ 
+@@ -83,7 +83,7 @@
+         {
+             if (col == 6)
+             {
+-                variant = (wxDateTime) *m_dates[row];
++                variant = (wxDateTime) m_dates[row];
+             } else
+             if (col == 5)
+             {
+@@ -95,7 +95,7 @@
+             } else
+             if (col == 3)
+             {
+-                variant = (bool) m_bools[row];
++                variant = (bool) (m_bools[row] != 0);
+             } else
+             if (col == 2)
+             {
+@@ -112,7 +112,7 @@
+         {
+             if (col == 6)
+             {
+-                *m_dates[row] = value.GetDateTime();
++                m_dates[row] = value.GetDateTime();
+             } else
+             if (col == 3)
+             {
+@@ -348,8 +348,8 @@
+     wxLog          *m_logOld;
+     wxTextCtrl     *m_logWindow;
+ 
+-    MyUnsortedTextModel        *m_unsorted_model;
+-    wxDataViewSortedListModel  *m_sorted_model;
++    wxObjectDataPtr<MyUnsortedTextModel> m_unsorted_model;
++    wxObjectDataPtr<wxDataViewSortedListModel> m_sorted_model;
+ 
+     DECLARE_EVENT_TABLE()
+ };
+@@ -372,7 +372,7 @@
+     frame2->Show(true);
+ 
+     SetTopWindow(frame);
+-    
++
+     return true;
+ }
+ 
+@@ -380,6 +380,7 @@
+ // MyFrame
+ // -------------------------------------
+ 
++
+ MyFrame::MyFrame(wxFrame *frame, wxChar *title, int x, int y, int w, int h):
+   wxFrame(frame, wxID_ANY, title, wxPoint(x, y), wxSize(w, h))
+ {
+@@ -407,8 +408,8 @@
+     // Left wxDataViewCtrl
+     dataview_left = new wxDataViewCtrl( panel, wxID_ANY );
+ 
+-    MyTextModel *model = new MyTextModel;
+-    dataview_left->AssociateModel( model );
++    wxObjectDataPtr<MyTextModel> model(new MyTextModel);
++    dataview_left->AssociateModel( model.get() );
+ 
+     dataview_left->AppendTextColumn( wxT("first"), 0 );
+     dataview_left->AppendTextColumn( wxT("second"), 1 );
+@@ -429,7 +430,7 @@
+ 
+     // Right wxDataViewCtrl using the same model
+     dataview_right = new wxDataViewCtrl( panel, wxID_ANY );
+-    dataview_right->AssociateModel( model );
++    dataview_right->AssociateModel( model.get() );
+ 
+     text_renderer = new wxDataViewTextRenderer( wxT("string"), wxDATAVIEW_CELL_EDITABLE );
+     column = new wxDataViewColumn( wxT("editable"), text_renderer, 2 );
+@@ -508,9 +509,10 @@
+ 
+     // Left wxDataViewCtrl
+     dataview_left = new wxDataViewCtrl( this, ID_UNSORTED, wxDefaultPosition, wxDefaultSize, wxDV_MULTIPLE );
++
++    m_unsorted_model.reset(new MyUnsortedTextModel);
++    dataview_left->AssociateModel( m_unsorted_model.get() );
+ 
+-    m_unsorted_model = new MyUnsortedTextModel;
+-    dataview_left->AssociateModel( m_unsorted_model );
+     wxDataViewTextRenderer *text_renderer = new wxDataViewTextRenderer( wxT("string"), wxDATAVIEW_CELL_EDITABLE );
+     wxDataViewColumn *column = new wxDataViewColumn( wxT("editable"), text_renderer, 0 );
+     dataview_left->AppendColumn( column );
+@@ -520,9 +522,10 @@
+ 
+     // Right wxDataViewCtrl using the sorting model
+     dataview_right = new wxDataViewCtrl( this, ID_SORTED );
+-    
+-    m_sorted_model = new wxDataViewSortedListModel( m_unsorted_model );
+-    dataview_right->AssociateModel( m_sorted_model );
++
++    m_sorted_model.reset(new wxDataViewSortedListModel( m_unsorted_model.get() ));
++    dataview_right->AssociateModel( m_sorted_model.get() );
++
+     text_renderer = new wxDataViewTextRenderer( wxT("string"), wxDATAVIEW_CELL_EDITABLE );
+     column = new wxDataViewColumn( wxT("editable"), text_renderer, 0, -1, wxDATAVIEW_COL_SORTABLE|wxDATAVIEW_COL_RESIZABLE );
+     dataview_right->AppendColumn( column );
+Index: src/common/datavcmn.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/datavcmn.cpp,v
+retrieving revision 1.32
+diff -u -r1.32 datavcmn.cpp
+--- src/common/datavcmn.cpp	2006/10/07 14:15:53	1.32
++++ src/common/datavcmn.cpp	2007/02/15 12:03:57
+@@ -25,18 +25,11 @@
+ 
+ const wxChar wxDataViewCtrlNameStr[] = wxT("dataviewCtrl");
+ 
+-// ---------------------------------------------------------
+-// wxDataViewModel
+-// ---------------------------------------------------------
+ 
+-IMPLEMENT_ABSTRACT_CLASS(wxDataViewModel, wxObject)
+-
+ // ---------------------------------------------------------
+ // wxDataViewListModel
+ // ---------------------------------------------------------
+ 
+-IMPLEMENT_ABSTRACT_CLASS(wxDataViewListModel, wxDataViewModel)
+-
+ wxDataViewListModel::wxDataViewListModel()
+ {
+     m_viewingColumns.DeleteContents( true );
+@@ -45,6 +38,13 @@
+ 
+ wxDataViewListModel::~wxDataViewListModel()
+ {
++    wxList::compatibility_iterator node = m_notifiers.GetFirst();
++    while (node)
++    {
++        wxDataViewListModelNotifier* notifier = (wxDataViewListModelNotifier*) node->GetData();
++        notifier->Freed();
++        node = node->GetNext();
++    }
+ }
+ 
+ bool wxDataViewListModel::RowAppended()
+@@ -242,6 +242,9 @@
+     virtual bool Cleared()
+         { return m_model->ChildCleared(); }
+ 
++    virtual bool Freed()
++        { m_model->m_child = NULL; return wxDataViewListModelNotifier::Freed(); }
++
+     wxDataViewSortedListModel *m_model;
+ };
+ 
+@@ -306,8 +309,6 @@
+ // wxDataViewSortedListModel
+ // ---------------------------------------------------------
+ 
+-IMPLEMENT_ABSTRACT_CLASS(wxDataViewSortedListModel, wxDataViewListModel)
+-
+ wxDataViewSortedListModel::wxDataViewSortedListModel( wxDataViewListModel *child ) :
+   m_array( wxDataViewIntermediateCmp )
+ {
+@@ -323,7 +324,8 @@
+ 
+ wxDataViewSortedListModel::~wxDataViewSortedListModel()
+ {
+-    m_child->RemoveNotifier( m_notifierOnChild );
++    if (m_child)
++        m_child->RemoveNotifier( m_notifierOnChild );
+ }
+ 
+ // FIXME
+@@ -784,11 +786,27 @@
+ 
+ wxDataViewCtrlBase::~wxDataViewCtrlBase()
+ {
++    // IMPORTANT: before calling DecRef() on our model (since it may 
++    //            result in a free() call), erase all columns (since
++    //            they hold a pointer to our model)
++    m_cols.Clear();
++
++    if (m_model)
++    {
++        m_model->DecRef();
++        m_model = NULL;
++    }
+ }
+ 
+ bool wxDataViewCtrlBase::AssociateModel( wxDataViewListModel *model )
+ {
++    if ( m_model )
++        m_model->DecRef();   // discard old model, if any
++
++    // add our own reference to the new model:
+     m_model = model;
++    if ( m_model )
++        m_model->IncRef(); 
+ 
+     return true;
+ }
+
+ 	  	 

@@ -1,0 +1,265 @@
+From b533a157459a3e35d22b1abfaf73b05f7b5e29b3 Mon Sep 17 00:00:00 2001
+From: Lauri Nurmi <lanurmi@iki.fi>
+Date: Sat, 20 Feb 2016 15:07:11 +0200
+Subject: [PATCH] Allow specifying character set for wxLogStderr and
+ wxLogStream.
+
+Until now, a mixture of non-UTF-8 and UTF-8 could be written in some circumstances.
+---
+ include/wx/log.h      | 10 ++++++++--
+ include/wx/msgout.h   |  5 ++++-
+ interface/wx/log.h    | 36 ++++++++++++++++++++++++++++++++++--
+ src/common/log.cpp    | 39 +++++++++++++++++++++++++++++++++++----
+ src/common/msgout.cpp | 30 ++++++++++++++++++++++++++++--
+ 5 files changed, 109 insertions(+), 11 deletions(-)
+
+diff --git a/include/wx/log.h b/include/wx/log.h
+index cbc15ef..ac4f43d 100644
+--- a/include/wx/log.h
++++ b/include/wx/log.h
+@@ -720,13 +720,16 @@ class WXDLLIMPEXP_BASE wxLogStderr : public wxLog
+ {
+ public:
+     // redirect log output to a FILE
+-    wxLogStderr(FILE *fp = NULL);
++    wxLogStderr(FILE *fp = NULL,
++                const wxMBConv &conv = wxConvWhateverWorks);
++    virtual ~wxLogStderr();
+ 
+ protected:
+     // implement sink function
+     virtual void DoLogText(const wxString& msg) wxOVERRIDE;
+ 
+     FILE *m_fp;
++    const wxMBConv *m_conv;
+ 
+     wxDECLARE_NO_COPY_CLASS(wxLogStderr);
+ };
+@@ -738,7 +741,9 @@ class WXDLLIMPEXP_BASE wxLogStream : public wxLog
+ {
+ public:
+     // redirect log output to an ostream
+-    wxLogStream(wxSTD ostream *ostr = (wxSTD ostream *) NULL);
++    wxLogStream(wxSTD ostream *ostr = (wxSTD ostream *) NULL,
++                const wxMBConv &conv = wxConvWhateverWorks);
++    virtual ~wxLogStream();
+ 
+ protected:
+     // implement sink function
+@@ -746,6 +751,7 @@ protected:
+ 
+     // using ptr here to avoid including <iostream.h> from this file
+     wxSTD ostream *m_ostr;
++    const wxMBConv *m_conv;
+ };
+ 
+ #endif // wxUSE_STD_IOSTREAM
+diff --git a/include/wx/msgout.h b/include/wx/msgout.h
+index 006e065..8f0aa85 100644
+--- a/include/wx/msgout.h
++++ b/include/wx/msgout.h
+@@ -64,7 +64,9 @@ private:
+ class WXDLLIMPEXP_BASE wxMessageOutputStderr : public wxMessageOutput
+ {
+ public:
+-    wxMessageOutputStderr(FILE *fp = stderr) : m_fp(fp) { }
++    wxMessageOutputStderr(FILE *fp = stderr,
++                          const wxMBConv &conv = wxConvWhateverWorks);
++    virtual ~wxMessageOutputStderr();
+ 
+     virtual void Output(const wxString& str) wxOVERRIDE;
+ 
+@@ -74,6 +76,7 @@ protected:
+     wxString AppendLineFeedIfNeeded(const wxString& str);
+ 
+     FILE *m_fp;
++    const wxMBConv *m_conv;
+ };
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/interface/wx/log.h b/interface/wx/log.h
+index d365548..6d4beb3 100644
+--- a/interface/wx/log.h
++++ b/interface/wx/log.h
+@@ -756,8 +756,24 @@ public:
+     /**
+         Constructs a log target which sends all the log messages to the given
+         output stream. If it is @NULL, the messages are sent to @c cerr.
++        The messages will be written in the encoding specified by the
++        given @c wxMBConv.
++
++        The @a conv argument is only available in wxWidgets 3.1.1 and later.
++
++        @note
++            In practice, it is only advisable to specify @c wxConvUTF8 as
++            the @a conv.
++            If using @c wxMBConvUTF16(), the file should be opened in
++            @c std::ios::binary mode.
++
++        @warning
++            If a log message contains any characters that cannot be converted
++            to the character set given by @a conv, that message will be
++            silently ignored, i.e. it will not be written at all.
+     */
+-    wxLogStream(std::ostream *ostr = NULL);
++    wxLogStream(std::ostream *ostr = NULL,
++                const wxMBConv &conv = wxConvWhateverWorks);
+ };
+ 
+ 
+@@ -782,8 +798,24 @@ public:
+     /**
+         Constructs a log target which sends all the log messages to the given
+         @c FILE. If it is @NULL, the messages are sent to @c stderr.
++        The messages will be written in the encoding specified by the
++        given @c wxMBConv.
++
++		The @a conv argument is only available in wxWidgets 3.1.1 and later.
++
++        @note
++            In practice, it is only advisable to specify @c wxConvUTF8 as
++            the @a conv.
++            If using @c wxMBConvUTF16(), the file should be opened in
++            @c "wb" mode.
++
++        @warning
++            If a log message contains any characters that cannot be converted
++            to the character set given by @a conv, that message will be
++            silently ignored, i.e. it will not be written at all.
+     */
+-    wxLogStderr(FILE* fp = NULL);
++    wxLogStderr(FILE *fp = NULL,
++                const wxMBConv &conv = wxConvWhateverWorks);
+ };
+ 
+ 
+diff --git a/src/common/log.cpp b/src/common/log.cpp
+index 94a6aed..18954ec 100644
+--- a/src/common/log.cpp
++++ b/src/common/log.cpp
+@@ -837,7 +837,8 @@ void wxLogBuffer::DoLogTextAtLevel(wxLogLevel level, const wxString& msg)
+ // wxLogStderr class implementation
+ // ----------------------------------------------------------------------------
+ 
+-wxLogStderr::wxLogStderr(FILE *fp)
++wxLogStderr::wxLogStderr(FILE *fp, const wxMBConv &conv):
++m_conv(conv.Clone())
+ {
+     if ( fp == NULL )
+         m_fp = stderr;
+@@ -845,12 +846,17 @@ wxLogStderr::wxLogStderr(FILE *fp)
+         m_fp = fp;
+ }
+ 
++wxLogStderr::~wxLogStderr()
++{
++    delete m_conv;
++}
++
+ void wxLogStderr::DoLogText(const wxString& msg)
+ {
+     // First send it to stderr, even if we don't have it (e.g. in a Windows GUI
+     // application under) it's not a problem to try to use it and it's easier
+     // than determining whether we do have it or not.
+-    wxMessageOutputStderr(m_fp).Output(msg);
++    wxMessageOutputStderr(m_fp, *m_conv).Output(msg);
+ 
+     // under GUI systems such as Windows or Mac, programs usually don't have
+     // stderr at all, so show the messages also somewhere else, typically in
+@@ -872,7 +878,8 @@ void wxLogStderr::DoLogText(const wxString& msg)
+ 
+ #if wxUSE_STD_IOSTREAM
+ #include "wx/ioswrap.h"
+-wxLogStream::wxLogStream(wxSTD ostream *ostr)
++wxLogStream::wxLogStream(wxSTD ostream *ostr, const wxMBConv &conv):
++m_conv(conv.Clone())
+ {
+     if ( ostr == NULL )
+         m_ostr = &wxSTD cerr;
+@@ -880,9 +887,33 @@ wxLogStream::wxLogStream(wxSTD ostream *ostr)
+         m_ostr = ostr;
+ }
+ 
++wxLogStream::~wxLogStream()
++{
++    delete m_conv;
++}
++
+ void wxLogStream::DoLogText(const wxString& msg)
+ {
+-    (*m_ostr) << msg << wxSTD endl;
++    wxString msgLF(msg);
++    if ( msgLF.empty() || *msgLF.rbegin() != '\n' )
++        msgLF += '\n';
++
++    int lengthAdjust = 0;
++
++#if defined(__WINDOWS__)
++    // Determine whether the encoding is UTF-16. In that case, the file
++    // should have been opened in "wb" mode, and EOL-style must be handled
++    // here. Also one bytes less should be written.
++
++    if (m_conv->GetMBNulLen() == 2)
++    {
++        msgLF.Replace("\n", "\r\n");
++        lengthAdjust = 1;
++    }
++#endif
++
++    const wxCharBuffer buf = m_conv->cWX2MB(msgLF);
++    m_ostr->write(buf, buf.length() - lengthAdjust);
+ }
+ #endif // wxUSE_STD_IOSTREAM
+ 
+diff --git a/src/common/msgout.cpp b/src/common/msgout.cpp
+index 9003413..c525e6c 100644
+--- a/src/common/msgout.cpp
++++ b/src/common/msgout.cpp
+@@ -136,6 +136,17 @@ void wxMessageOutputBest::Output(const wxString& str)
+ // wxMessageOutputStderr
+ // ----------------------------------------------------------------------------
+ 
++wxMessageOutputStderr::wxMessageOutputStderr(FILE *fp,
++                                             const wxMBConv &conv):
++m_fp(fp), m_conv(conv.Clone())
++{
++}
++
++wxMessageOutputStderr::~wxMessageOutputStderr()
++{
++    delete m_conv;
++}
++
+ wxString wxMessageOutputStderr::AppendLineFeedIfNeeded(const wxString& str)
+ {
+     wxString strLF(str);
+@@ -147,9 +158,24 @@ wxString wxMessageOutputStderr::AppendLineFeedIfNeeded(const wxString& str)
+ 
+ void wxMessageOutputStderr::Output(const wxString& str)
+ {
+-    const wxString strWithLF = AppendLineFeedIfNeeded(str);
++    wxString strWithLF = AppendLineFeedIfNeeded(str);
++    int lengthAdjust = 0;
++
++#if defined(__WINDOWS__)
++    // Determine whether the encoding is UTF-16. In that case, the file
++    // should have been opened in "wb" mode, and EOL-style must be handled
++    // here. Also one bytes less should be written.
++
++    if (m_conv->GetMBNulLen() == 2)
++    {
++        strWithLF.Replace("\n", "\r\n");
++        lengthAdjust = 1;
++    }
++#endif
++
++    const wxCharBuffer buf = m_conv->cWX2MB(strWithLF);
+ 
+-    fprintf(m_fp, "%s", (const char*) strWithLF.mb_str(wxConvWhateverWorks));
++    fwrite(buf, buf.length() - lengthAdjust, 1, m_fp);
+     fflush(m_fp);
+ }
+ 
+-- 
+2.6.1.windows.1
+

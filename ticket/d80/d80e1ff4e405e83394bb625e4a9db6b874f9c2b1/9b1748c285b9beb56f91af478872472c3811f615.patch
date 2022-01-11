@@ -1,0 +1,188 @@
+diff -uNr wxWidgets-3.1.0-orig/include/wx/gtk/control.h wxWidgets-3.1.0-mine/include/wx/gtk/control.h
+--- wxWidgets-3.1.0-orig/include/wx/gtk/control.h	2016-02-28 22:33:37.000000000 +0100
++++ wxWidgets-3.1.0-mine/include/wx/gtk/control.h	2016-03-24 16:12:51.434038864 +0100
+@@ -53,11 +53,12 @@
+ #endif // wxUSE_MARKUP
+ 
+     // GtkFrame helpers
+-    GtkWidget* GTKCreateFrame(const wxString& label);
++    GtkWidget* GTKCreateFrame(const wxString& label) const;
+     void GTKSetLabelForFrame(GtkFrame *w, const wxString& label);
+     void GTKFrameApplyWidgetStyle(GtkFrame* w, GtkRcStyle* rc);
+     void GTKFrameSetMnemonicWidget(GtkFrame* w, GtkWidget* widget);
+-
++    void GTKFrameGetBorders(int *borderTop, int *borderOther) const;
++    
+     // remove mnemonics ("&"s) from the label
+     static wxString GTKRemoveMnemonics(const wxString& label);
+ 
+@@ -86,6 +87,10 @@
+     // Inner margins in a GtkEntry
+     wxPoint GTKGetEntryMargins(GtkEntry* entry) const;
+ 
++    // Caching border sizes for GtkFrames here
++    int m_borderTop;
++    int m_borderOther;
++    
+ private:
+     wxDECLARE_DYNAMIC_CLASS(wxControl);
+ };
+diff -uNr wxWidgets-3.1.0-orig/include/wx/gtk/radiobox.h wxWidgets-3.1.0-mine/include/wx/gtk/radiobox.h
+--- wxWidgets-3.1.0-orig/include/wx/gtk/radiobox.h	2016-02-28 22:33:37.000000000 +0100
++++ wxWidgets-3.1.0-mine/include/wx/gtk/radiobox.h	2016-03-24 16:14:55.436008879 +0100
+@@ -81,6 +81,7 @@
+ 
+     virtual ~wxRadioBox();
+ 
++    virtual wxSize DoGetBestSize() const wxOVERRIDE;
+ 
+     // implement wxItemContainerImmutable methods
+     virtual unsigned int GetCount() const wxOVERRIDE;
+@@ -146,6 +147,8 @@
+     virtual bool GTKWidgetNeedsMnemonic() const wxOVERRIDE;
+     virtual void GTKWidgetDoSetMnemonic(GtkWidget* w) wxOVERRIDE;
+ 
++    GtkWidget *m_table;
++        
+ private:
+     wxDECLARE_DYNAMIC_CLASS(wxRadioBox);
+ };
+diff -uNr wxWidgets-3.1.0-orig/src/gtk/control.cpp wxWidgets-3.1.0-mine/src/gtk/control.cpp
+--- wxWidgets-3.1.0-orig/src/gtk/control.cpp	2016-02-28 22:33:37.000000000 +0100
++++ wxWidgets-3.1.0-mine/src/gtk/control.cpp	2016-03-24 16:19:09.972681006 +0100
+@@ -161,7 +161,7 @@
+ // instead (idea gleaned from the native gtk font dialog code in GTK)
+ // ----------------------------------------------------------------------------
+ 
+-GtkWidget* wxControl::GTKCreateFrame(const wxString& label)
++GtkWidget* wxControl::GTKCreateFrame(const wxString& label) const
+ {
+     const wxString labelGTK = GTKConvertMnemonics(label);
+     GtkWidget* labelwidget = gtk_label_new_with_mnemonic(wxGTK_CONV(labelGTK));
+@@ -174,6 +174,38 @@
+                         // only need to call wxControl::SetLabel afterwards
+ }
+ 
++void wxControl::GTKFrameGetBorders(int *borderTop, int *borderOther) const
++{
++    if (m_borderTop == -1 || m_borderOther == -1)
++    {    
++        GtkWidget *wnd = gtk_window_new(GTK_WINDOW_TOPLEVEL);
++        GtkWidget *frame = GTKCreateFrame(GetLabel()); 
++    
++        gtk_container_add(GTK_CONTAINER(wnd), frame);
++        GtkWidget* labelwidget = gtk_frame_get_label_widget(GTK_FRAME(frame));
++    
++        gtk_widget_show(frame);
++        gtk_widget_realize(labelwidget);
++
++        GtkAllocation alloc, child_alloc;
++        gtk_widget_get_allocation(frame, &alloc);
++
++        if (alloc.width < 50) alloc.width = 50;
++        if (alloc.height < 50) alloc.height = 50;
++        gtk_widget_set_allocation(frame, &alloc);
++    
++        GTK_FRAME_GET_CLASS(frame)->compute_child_allocation(GTK_FRAME(frame), &child_alloc);
++   
++        gtk_widget_destroy(wnd);
++    
++        wxConstCast(this, wxControl)->m_borderTop = child_alloc.y - alloc.y;
++        wxConstCast(this, wxControl)->m_borderOther = child_alloc.x - alloc.x;   	
++    }
++    
++    *borderTop = m_borderTop;
++    *borderOther = m_borderOther;
++}
++
+ void wxControl::GTKSetLabelForFrame(GtkFrame *w, const wxString& label)
+ {
+     wxControlBase::SetLabel(label);
+diff -uNr wxWidgets-3.1.0-orig/src/gtk/radiobox.cpp wxWidgets-3.1.0-mine/src/gtk/radiobox.cpp
+--- wxWidgets-3.1.0-orig/src/gtk/radiobox.cpp	2016-02-28 22:33:37.000000000 +0100
++++ wxWidgets-3.1.0-mine/src/gtk/radiobox.cpp	2016-03-24 16:33:24.896442867 +0100
+@@ -220,6 +220,9 @@
+         return false;
+     }
+ 
++    m_borderTop = -1;
++    m_borderOther = -1;
++    
+     m_widget = GTKCreateFrame(title);
+     g_object_ref(m_widget);
+     wxControl::SetLabel(title);
+@@ -241,6 +244,8 @@
+     GtkRadioButton *rbtn = NULL;
+ 
+     GtkWidget *table = gtk_table_new( num_of_rows, num_of_cols, FALSE );
++    m_table = table;
++    
+     gtk_table_set_col_spacings( GTK_TABLE(table), 1 );
+     gtk_table_set_row_spacings( GTK_TABLE(table), 1 );
+     gtk_widget_show( table );
+@@ -323,6 +328,28 @@
+     WX_CLEAR_LIST( wxRadioBoxButtonsInfoList, m_buttonsInfo );
+ }
+ 
++wxSize wxRadioBox::DoGetBestSize() const
++{
++    // Do not return any arbitrary default value...
++    wxASSERT_MSG( m_widget, wxT("DoGetBestSize called before creation") );
++
++    // This gives us the correct width, but not the correct height
++    wxSize best = GTKGetPreferredSize(m_widget);
++    
++    int width = best.x;
++    best = GTKGetPreferredSize(m_table);    
++
++    int borderTop, borderOther;
++    GTKFrameGetBorders(&borderTop, &borderOther);
++    
++    best.x = width + 2 * borderOther;
++    best.y += borderTop + borderOther;
++    
++    CacheBestSize(best);
++    
++    return best;
++}
++
+ bool wxRadioBox::Show( bool show )
+ {
+     wxCHECK_MSG( m_widget != NULL, false, wxT("invalid radiobox") );
+diff -uNr wxWidgets-3.1.0-orig/src/gtk/statbox.cpp wxWidgets-3.1.0-mine/src/gtk/statbox.cpp
+--- wxWidgets-3.1.0-orig/src/gtk/statbox.cpp	2016-02-28 22:33:37.000000000 +0100
++++ wxWidgets-3.1.0-mine/src/gtk/statbox.cpp	2016-03-24 16:33:05.132442546 +0100
+@@ -81,6 +81,9 @@
+         return false;
+     }
+ 
++    m_borderTop = -1;
++    m_borderOther = -1;
++    
+     m_widget = GTKCreateFrame(label);
+     g_object_ref(m_widget);
+ 
+@@ -158,22 +161,7 @@
+ 
+ void wxStaticBox::GetBordersForSizer(int *borderTop, int *borderOther) const
+ {
+-    GtkAllocation alloc, child_alloc;
+-    gtk_widget_get_allocation(m_widget, &alloc);
+-    const int w_save = alloc.width;
+-    const int h_save = alloc.height;
+-    if (alloc.width < 50) alloc.width = 50;
+-    if (alloc.height < 50) alloc.height = 50;
+-    gtk_widget_set_allocation(m_widget, &alloc);
+-
+-    GTK_FRAME_GET_CLASS(m_widget)->compute_child_allocation(GTK_FRAME(m_widget), &child_alloc);
+-
+-    alloc.width = w_save;
+-    alloc.height = h_save;
+-    gtk_widget_set_allocation(m_widget, &alloc);
+-
+-    *borderTop = child_alloc.y - alloc.y;
+-    *borderOther = child_alloc.x - alloc.x;
++    GTKFrameGetBorders(borderTop, borderOther);  
+ }
+ 
+ #endif // wxUSE_STATBOX

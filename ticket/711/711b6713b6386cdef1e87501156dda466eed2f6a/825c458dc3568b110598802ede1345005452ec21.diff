@@ -1,0 +1,299 @@
+Index: include/wx/gtk/spinctrl.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWidgets/include/wx/gtk/spinctrl.h,v
+retrieving revision 1.14
+diff -b -u -2 -r1.14 spinctrl.h
+--- include/wx/gtk/spinctrl.h	2004/06/14 17:31:26	1.14
++++ include/wx/gtk/spinctrl.h	2004/06/17 23:42:03
+@@ -13,5 +13,5 @@
+ 
+ #if defined(__GNUG__) && !defined(NO_GCC_PRAGMA)
+-#pragma interface
++#pragma interface "spinctrl.h"
+ #endif
+ 
+@@ -22,10 +22,17 @@
+ #include "wx/control.h"
+ 
++
+ //-----------------------------------------------------------------------------
+ // wxSpinCtrl
+ //-----------------------------------------------------------------------------
+ 
++void gtk_spinctrl_callback(GtkWidget *widget, wxSpinCtrl* win);
++void gtk_spinctrl_text_changed_callback(GtkWidget* widget, wxSpinCtrl* win);
++
+ class wxSpinCtrl : public wxControl
+ {
++    friend void gtk_spinctrl_callback(GtkWidget *widget, wxSpinCtrl *win);
++    friend void gtk_spinctrl_text_changed_callback(GtkWidget* widget, wxSpinCtrl* win);
++
+ public:
+     wxSpinCtrl() {}
+@@ -70,6 +77,13 @@
+     void GtkEnableEvents();
+ 
++    void SetTextFormatter(wxSpinTextFormatter* f);
++    wxSpinTextFormatter* GetTextFormatter();
++    
++private:
+     GtkAdjustment  *m_adjust;
+     float           m_oldPos;
++    wxSpinTextFormatter *m_textFormatter;
++    GtkWidget      *m_textEntry;
++    GtkWidget      *m_spinButtons;
+ 
+ protected:
+@@ -80,7 +94,11 @@
+     virtual bool UseGTKStyleBase() const { return true; }
+ 
++    wxString FormatText(const int value);
++    bool InterpretText(const wxString& text, int* value);
++
+ private:
+     DECLARE_DYNAMIC_CLASS(wxSpinCtrl)
+     DECLARE_EVENT_TABLE()
++
+ };
+ 
+Index: src/gtk/spinctrl.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWidgets/src/gtk/spinctrl.cpp,v
+retrieving revision 1.39
+diff -b -u -2 -r1.39 spinctrl.cpp
+--- src/gtk/spinctrl.cpp	2004/06/14 17:30:41	1.39
++++ src/gtk/spinctrl.cpp	2004/06/17 23:42:05
+@@ -44,9 +44,11 @@
+ 
+ //-----------------------------------------------------------------------------
+-// "value_changed"
++// Spin button sent "value_changed" signal:
+ //-----------------------------------------------------------------------------
+ 
+-static void gtk_spinctrl_callback( GtkWidget *WXUNUSED(widget), wxSpinCtrl *win )
++void gtk_spinctrl_callback( GtkWidget *widget, wxSpinCtrl *win )
+ {
++    // widget is a GtkAdjustment
++
+     if (g_isIdle) wxapp_install_idle_handler();
+ 
+@@ -63,15 +65,20 @@
+     // values in range 5..50 is then, ummm, quite challenging (hint: you can't
+     // enter 1!) (VZ)
+-    event.SetInt( (int)ceil(win->m_adjust->value) );
++    int value = (int)ceil(win->m_adjust->value);
++    event.SetInt(value);
+     win->GetEventHandler()->ProcessEvent( event );
++
++    wxString text = win->FormatText(value);
++    gtk_entry_set_text(GTK_ENTRY(win->m_textEntry), text.c_str()); 
+ }
+ 
+ //-----------------------------------------------------------------------------
+-//  "changed"
++//  Text entry sent "changed" signal:
+ //-----------------------------------------------------------------------------
+ 
+-static void
+-gtk_spinctrl_text_changed_callback( GtkWidget *WXUNUSED(widget), wxSpinCtrl *win )
++void gtk_spinctrl_text_changed_callback( GtkWidget *widget, wxSpinCtrl *win )
+ {
++    // widget is a GtkEntry.
++
+     if (!win->m_hasVMT) return;
+ 
+@@ -81,10 +88,21 @@
+     wxCommandEvent event( wxEVT_COMMAND_TEXT_UPDATED, win->GetId() );
+     event.SetEventObject( win );
++    
++    int value;
++    const gchar* text = gtk_entry_get_text(GTK_ENTRY(win->m_textEntry));
++    wxString str(text);
++
++    if(text && win->InterpretText(str, &value)) {
++        event.SetInt(value);
++    } else {
++        return;
++    }
+     
+-    // see above
+-    event.SetInt( (int)ceil(win->m_adjust->value) );
++    gtk_spin_button_set_value(GTK_SPIN_BUTTON(win->m_spinButtons), value);
++
+     win->GetEventHandler()->ProcessEvent( event );
+ }
+ 
++
+ //-----------------------------------------------------------------------------
+ // wxSpinCtrl
+@@ -118,9 +136,20 @@
+     m_adjust = (GtkAdjustment*) gtk_adjustment_new( initial, min, max, 1.0, 5.0, 0.0);
+ 
+-    m_widget = gtk_spin_button_new( m_adjust, 1, 0 );
++    m_widget = gtk_hbox_new(FALSE, 0);
++    m_textEntry = gtk_entry_new();
++    wxString text = FormatText(initial);
++    gtk_entry_set_text(GTK_ENTRY(m_textEntry), text.c_str());
++    m_spinButtons = gtk_spin_button_new( m_adjust, 1, 0 );
++    gtk_box_pack_start(GTK_BOX(m_widget), m_textEntry, FALSE, FALSE, 0);
++    gtk_box_pack_start(GTK_BOX(m_widget), m_spinButtons, FALSE, FALSE, 0);
++
++    // this hides the normal text input field. GTK2 prefers the identical 
++    // "gtk_widget_set_size_request" but that's not in 1.2.
++    gtk_widget_set_usize(m_spinButtons, 16, 26);
+     
+-    gtk_spin_button_set_wrap( GTK_SPIN_BUTTON(m_widget),
++    gtk_spin_button_set_wrap( GTK_SPIN_BUTTON(m_spinButtons),
+                               (int)(m_windowStyle & wxSP_WRAP) );
+ 
++
+     GtkEnableEvents();
+     
+@@ -131,4 +160,7 @@
+     SetValue( value );
+ 
++    gtk_widget_show(m_textEntry);
++    gtk_widget_show(m_spinButtons);
++
+     return TRUE;
+ }
+@@ -140,7 +172,8 @@
+                         (gpointer) this );
+ 
+-    gtk_signal_disconnect_by_func( GTK_OBJECT(m_widget),
++    gtk_signal_disconnect_by_func( GTK_OBJECT(m_textEntry),
+                         GTK_SIGNAL_FUNC(gtk_spinctrl_text_changed_callback),
+                         (gpointer) this );
++
+ }
+ 
+@@ -150,10 +183,11 @@
+                         "value_changed",
+                         GTK_SIGNAL_FUNC(gtk_spinctrl_callback),
+-                        (gpointer) this );
++                        (gpointer)this);
+     
+-    gtk_signal_connect( GTK_OBJECT(m_widget),
++    gtk_signal_connect( GTK_OBJECT(m_textEntry),
+                         "changed",
+                         GTK_SIGNAL_FUNC(gtk_spinctrl_text_changed_callback),
+                         (gpointer)this);
++
+ }
+ 
+@@ -176,5 +210,5 @@
+     wxCHECK_MSG( (m_widget != NULL), 0, wxT("invalid spin button") );
+ 
+-    gtk_spin_button_update( GTK_SPIN_BUTTON(m_widget) );
++    gtk_spin_button_update( GTK_SPIN_BUTTON(m_spinButtons) );
+ 
+     return (int)ceil(m_adjust->value);
+@@ -185,6 +219,8 @@
+     wxCHECK_RET( (m_widget != NULL), wxT("invalid spin button") );
+ 
++//    wxLogMessage("wxSpinCtrl::SetValue(const wxSting&) called with \"%s\"", value.c_str());
++
+     int n;
+-    if ( (wxSscanf(value, wxT("%d"), &n) == 1) )
++    if ( InterpretText(value, &n) )
+     {
+         // a number - set it
+@@ -195,5 +231,5 @@
+         // invalid number - set text as is (wxMSW compatible)
+         GtkDisableEvents();
+-        gtk_entry_set_text( GTK_ENTRY(m_widget), wxGTK_CONV( value ) );
++        gtk_entry_set_text( GTK_ENTRY(m_textEntry), wxGTK_CONV( value ) );
+         GtkEnableEvents();
+     }
+@@ -203,9 +239,9 @@
+ {
+     wxCHECK_RET( (m_widget != NULL), wxT("invalid spin button") );
++//    wxLogMessage("wxSpinCtrl::SetValue(int) called with %d", value);
+ 
+     float fpos = (float)value;
+     m_oldPos = fpos;
+     if (fabs(fpos-m_adjust->value) < sensitivity) return;
+-
+     m_adjust->value = fpos;
+ 
+@@ -213,4 +249,7 @@
+     gtk_signal_emit_by_name( GTK_OBJECT(m_adjust), "value_changed" );
+     GtkEnableEvents();
++
++    wxString text = FormatText(value);
++    gtk_entry_set_text(GTK_ENTRY(m_textEntry), text.c_str()); 
+ }
+ 
+@@ -225,5 +264,5 @@
+     }
+ 
+-    gtk_editable_select_region( GTK_EDITABLE(m_widget), (gint)from, (gint)to );
++    gtk_editable_select_region( GTK_EDITABLE(m_textEntry), (gint)from, (gint)to );
+ }
+ 
+@@ -281,5 +320,5 @@
+         wxCommandEvent evt( wxEVT_COMMAND_TEXT_ENTER, m_windowId );
+         evt.SetEventObject(this);
+-        GtkSpinButton *gsb = GTK_SPIN_BUTTON(m_widget);
++        GtkSpinButton *gsb = GTK_SPIN_BUTTON(m_spinButtons);
+         wxString val = wxGTK_CONV_BACK( gtk_entry_get_text( &gsb->entry ) );
+         evt.SetString( val );
+@@ -292,7 +331,7 @@
+ bool wxSpinCtrl::IsOwnGtkWindow( GdkWindow *window )
+ {
+-    if (GTK_SPIN_BUTTON(m_widget)->entry.text_area == window) return TRUE;
++    if (GTK_ENTRY(m_textEntry)->text_area == window) return TRUE;
+     
+-    if (GTK_SPIN_BUTTON(m_widget)->panel == window) return TRUE;
++    if (GTK_SPIN_BUTTON(m_spinButtons)->panel == window) return TRUE;
+ 
+     return FALSE;
+@@ -302,5 +341,7 @@
+ {
+     wxSize ret( wxControl::DoGetBestSize() );
+-    return wxSize(95, ret.y);
++    if(!m_textEntry || !m_spinButtons) return ret;
++    ret.x = m_textEntry->allocation.width + m_spinButtons->allocation.width; 
++    return ret;
+ }
+ 
+@@ -313,4 +354,37 @@
+     return GetDefaultAttributesFromGTKWidget(gtk_entry_new, true);
+ }
++
++wxString wxSpinCtrl::FormatText(const int value) {
++    if(m_textFormatter) 
++        return m_textFormatter->FormatText(value);
++    else
++        return wxString::Format(wxT("%d"), value);
++}
++
++bool wxSpinCtrl::InterpretText(const wxString& text, int* value) {
++    if(m_textFormatter) {
++        return m_textFormatter->InterpretText(text, value);
++    } else {
++        long l;
++        if(text.ToLong(&l) && (l > INT_MIN) && (l < INT_MAX)) {
++            *value = (int)l;
++            return TRUE;
++        } else {
++            return FALSE;
++        }
++    }
++}
++
++void wxSpinCtrl::SetTextFormatter(wxSpinTextFormatter* f) {
++    if(m_textFormatter)
++        delete m_textFormatter;
++    m_textFormatter = f;
++}
++
++wxSpinTextFormatter* wxSpinCtrl::GetTextFormatter() {
++    return m_textFormatter;
++}
++
++
+ 
+ #endif
+
+ 	  	 

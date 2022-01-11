@@ -1,0 +1,252 @@
+Index: src/common/cmdline.cpp
+===================================================================
+RCS file: /home/wxcvs/wxWindows/src/common/cmdline.cpp,v
+retrieving revision 1.23
+diff -u -r1.23 cmdline.cpp
+--- src/common/cmdline.cpp	24 Jun 2002 20:09:46 -0000	1.23
++++ src/common/cmdline.cpp	13 Jul 2002 22:17:44 -0000
+@@ -51,8 +51,14 @@
+ 
+ static wxString GetTypeName(wxCmdLineParamType type);
+ 
++static wxString GetOptionName(const wxChar *p, const wxChar *allowedChars);
++
++static wxString GetShortOptionName(const wxChar *p);
++
++static wxString GetLongOptionName(const wxChar *p);
++
+ // ----------------------------------------------------------------------------
+-// private classes
++// private structs
+ // ----------------------------------------------------------------------------
+ 
+ // an internal representation of an option
+@@ -68,6 +74,18 @@
+         wxASSERT_MSG( !shrt.empty() || !lng.empty(),
+                       _T("option should have at least one name") );
+ 
++        wxASSERT_MSG
++            (
++                GetShortOptionName(shrt).Len() == shrt.Len(),
++                wxT("Short option contains invalid characters")
++            );
++
++        wxASSERT_MSG
++            (
++                GetLongOptionName(lng).Len() == lng.Len(),
++                wxT("Long option contains invalid characters")
++            );
++
+         kind = k;
+ 
+         shortName = shrt;
+@@ -280,6 +298,11 @@
+     m_data->m_enableLongOptions = enable;
+ }
+ 
++bool wxCmdLineParser::AreLongOptionsEnabled()
++{
++    return m_data->m_enableLongOptions;
++}
++
+ void wxCmdLineParser::SetLogo(const wxString& logo)
+ {
+     m_data->m_logo = logo;
+@@ -519,23 +542,35 @@
+             int optInd = wxNOT_FOUND;   // init to suppress warnings
+ 
+             // an option or a switch: find whether it's a long or a short one
+-            if ( m_data->m_enableLongOptions &&
+-                    arg[0u] == _T('-') && arg[1u] == _T('-') )
++            if ( arg[0u] == _T('-') && arg[1u] == _T('-') )
+             {
+                 // a long one
+                 isLong = TRUE;
+ 
++                // Skip leading "--"
+                 const wxChar *p = arg.c_str() + 2;
+-                while ( wxIsalnum(*p) || (*p == _T('_')) || (*p == _T('-')) )
++
++                bool longOptionsEnabled = AreLongOptionsEnabled();
++
++                name = GetLongOptionName(p);
++
++                if (longOptionsEnabled)
+                 {
+-                    name += *p++;
++                    optInd = m_data->FindOptionByLongName(name);
++                    if ( optInd == wxNOT_FOUND )
++                    {
++                        wxLogError(_("Unknown long option '%s'"), name.c_str());
++                    }
+                 }
+-
+-                optInd = m_data->FindOptionByLongName(name);
+-                if ( optInd == wxNOT_FOUND )
++                else
+                 {
+-                    wxLogError(_("Unknown long option '%s'"), name.c_str());
++                    optInd = wxNOT_FOUND; // Sanity check
++
++                    // Print the argument including leading "--"
++                    name.Prepend( wxT("--") );
++                    wxLogError(_("Unknown option '%s'"), name.c_str());
+                 }
++
+             }
+             else
+             {
+@@ -544,10 +579,8 @@
+                 // a short one: as they can be cumulated, we try to find the
+                 // longest substring which is a valid option
+                 const wxChar *p = arg.c_str() + 1;
+-                while ( wxIsalnum(*p) || (*p == _T('_')) )
+-                {
+-                    name += *p++;
+-                }
++
++                name = GetShortOptionName(p);
+ 
+                 size_t len = name.length();
+                 do
+@@ -842,6 +875,7 @@
+     wxChar chSwitch = !m_data->m_switchChars ? _T('-')
+                                              : m_data->m_switchChars[0u];
+ 
++    bool areLongOptionsEnabled = AreLongOptionsEnabled();
+     size_t n, count = m_data->m_options.GetCount();
+     for ( n = 0; n < count; n++ )
+     {
+@@ -857,13 +891,21 @@
+         {
+             brief << chSwitch << opt.shortName;
+         }
+-        else if ( !opt.longName.empty() )
++        else if ( areLongOptionsEnabled && !opt.longName.empty() )
+         {
+             brief << _T("--") << opt.longName;
+         }
+         else
+         {
+-            wxFAIL_MSG( _T("option without neither short nor long name?") );
++            if (!opt.longName.empty())
++            {
++                wxFAIL_MSG( wxT("option with only a long name while long ")
++                    wxT("options are disabled") );
++            }
++            else
++            {
++                wxFAIL_MSG( _T("option without neither short nor long name") );
++            }
+         }
+ 
+         wxString option;
+@@ -873,7 +915,7 @@
+             option << _T("  ") << chSwitch << opt.shortName;
+         }
+ 
+-        if ( !opt.longName.empty() )
++        if ( areLongOptionsEnabled && !opt.longName.empty() )
+         {
+             option << (option.empty() ? _T("  ") : _T(", "))
+                    << _T("--") << opt.longName;
+@@ -980,6 +1022,48 @@
+     }
+ 
+     return s;
++}
++
++/*
++Returns a string which is equal to the string pointed to by p, but up to the
++point where p contains an character that's not allowed.
++Allowable characters are letters and numbers, and characters pointed to by
++the parameter allowedChars.
++
++For example, if p points to "abcde-@-_", and allowedChars is "-_",
++this function returns "abcde-".
++*/
++static wxString GetOptionName(const wxChar *p,
++    const wxChar *allowedChars)
++{
++    wxString argName;
++
++    while ( *p && (wxIsalnum(*p) || wxStrchr(allowedChars, *p)) )
++    {
++        argName += *p++;
++    }
++
++    return argName;
++}
++
++// Besides alphanumeric characters, short and long options can
++// have other characters.
++
++// A short option additionally can have these
++#define wxCMD_LINE_CHARS_ALLOWED_BY_SHORT_OPTION wxT("_?")
++
++// A long option can have the same characters as a short option and a '-'.
++#define wxCMD_LINE_CHARS_ALLOWED_BY_LONG_OPTION \
++    wxCMD_LINE_CHARS_ALLOWED_BY_SHORT_OPTION wxT("-")
++
++static wxString GetShortOptionName(const wxChar *p)
++{
++    return GetOptionName(p, wxCMD_LINE_CHARS_ALLOWED_BY_SHORT_OPTION);
++}
++
++static wxString GetLongOptionName(const wxChar *p)
++{
++    return GetOptionName(p, wxCMD_LINE_CHARS_ALLOWED_BY_LONG_OPTION);
+ }
+ 
+ #endif // wxUSE_CMDLINE_PARSER
+Index: include/wx/cmdline.h
+===================================================================
+RCS file: /home/wxcvs/wxWindows/include/wx/cmdline.h,v
+retrieving revision 1.10
+diff -u -r1.10 cmdline.h
+--- include/wx/cmdline.h	26 Jan 2002 21:59:52 -0000	1.10
++++ include/wx/cmdline.h	13 Jul 2002 22:08:36 -0000
+@@ -130,6 +130,8 @@
+     void EnableLongOptions(bool enable = TRUE);
+     void DisableLongOptions() { EnableLongOptions(FALSE); }
+ 
++    bool AreLongOptionsEnabled();
++
+     // extra text may be shown by Usage() method if set by this function
+     void SetLogo(const wxString& logo);
+ 
+Index: docs/latex/wx/cmdlpars.tex
+===================================================================
+RCS file: /home/wxcvs/wxWindows/docs/latex/wx/cmdlpars.tex,v
+retrieving revision 1.9
+diff -u -r1.9 cmdlpars.tex
+--- docs/latex/wx/cmdlpars.tex	7 Jun 2002 20:15:22 -0000	1.9
++++ docs/latex/wx/cmdlpars.tex	13 Jul 2002 22:09:25 -0000
+@@ -335,13 +335,23 @@
+ 
+ \wxheading{See also}
+ 
+-\helpref{Customization}{wxcmdlineparsercustomization}
++\helpref{Customization}{wxcmdlineparsercustomization} and \helpref{AreLongOptionsEnabled}{wxcmdlineparserarelongoptionsenabled}
+ 
+ \membersection{wxCmdLineParser::DisableLongOptions}\label{wxcmdlineparserdisablelongoptions}
+ 
+ \func{void}{DisableLongOptions}{\void}
+ 
+-Ientical to \helpref{EnableLongOptions(FALSE)}{wxcmdlineparserenablelongoptions}.
++Identical to \helpref{EnableLongOptions(FALSE)}{wxcmdlineparserenablelongoptions}.
++
++\membersection{wxCmdLineParser::AreLongOptionsEnabled}\label{wxcmdlineparserarelongoptionsenabled}
++
++\func{bool}{AreLongOptionsEnabled}{\void}
++
++Returns TRUE if long options are enabled, otherwise FALSE.
++
++\wxheading{See also}
++
++\helpref{EnableLongOptions}{wxcmdlineparserenablelongoptions}
+ 
+ \membersection{wxCmdLineParser::SetLogo}\label{wxcmdlineparsersetlogo}
+ 
+
+ 	  	 

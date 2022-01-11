@@ -1,0 +1,265 @@
+Index: wxWidgets-2.8/src/common/dbtable.cpp
+===================================================================
+--- wxWidgets-2.8/src/common/dbtable.cpp	(revision 47742)
++++ wxWidgets-2.8/src/common/dbtable.cpp	(working copy)
+@@ -142,6 +142,7 @@
+     hstmtDefault        = 0;                        // Initialized below
+     hstmtCount          = 0;                        // Initialized first time it is needed
+     hstmtInsert         = 0;
++	hstmtInsertPartialBinds = 0;
+     hstmtDelete         = 0;
+     hstmtUpdate         = 0;
+     hstmtInternal       = 0;
+@@ -220,6 +221,9 @@
+         // Allocate a separate statement handle for performing inserts
+         if (SQLAllocStmt(hdbc, &hstmtInsert) != SQL_SUCCESS)
+             pDb->DispAllErrors(henv, hdbc);
++		// Allocate a separate statement handle for performing inserts where only some variables are bound
++        if (SQLAllocStmt(hdbc, &hstmtInsertPartialBinds) != SQL_SUCCESS)
++            pDb->DispAllErrors(henv, hdbc);
+         // Allocate a separate statement handle for performing deletes
+         if (SQLAllocStmt(hdbc, &hstmtDelete) != SQL_SUCCESS)
+             pDb->DispAllErrors(henv, hdbc);
+@@ -293,6 +297,9 @@
+         // Set the cursor type for the INSERT statement handle
+         if (SQLSetStmtOption(hstmtInsert, SQL_CURSOR_TYPE, SQL_CURSOR_FORWARD_ONLY) != SQL_SUCCESS)
+             pDb->DispAllErrors(henv, hdbc, hstmtInsert);
++		// Set the cursor type for the INSERT statement handle (when only some columns will be bound)
++        if (SQLSetStmtOption(hstmtInsertPartialBinds, SQL_CURSOR_TYPE, SQL_CURSOR_FORWARD_ONLY) != SQL_SUCCESS)
++            pDb->DispAllErrors(henv, hdbc, hstmtInsertPartialBinds);
+         // Set the cursor type for the DELETE statement handle
+         if (SQLSetStmtOption(hstmtDelete, SQL_CURSOR_TYPE, SQL_CURSOR_FORWARD_ONLY) != SQL_SUCCESS)
+             pDb->DispAllErrors(henv, hdbc, hstmtDelete);
+@@ -372,6 +379,16 @@
+                 pDb->DispAllErrors(henv, hdbc);
+         }
+ 
++		if (hstmtInsertPartialBinds)
++        {
++/*
++ODBC 3.0 says to use this form
++            if (SQLFreeHandle(*hstmtDel, SQL_DROP) != SQL_SUCCESS)
++*/
++            if (SQLFreeStmt(hstmtInsertPartialBinds, SQL_DROP) != SQL_SUCCESS)
++                pDb->DispAllErrors(henv, hdbc);
++        }
++
+         if (hstmtDelete)
+         {
+ /*
+@@ -456,6 +473,82 @@
+     }
+ }
+ 
++/********** wxDbTable::bindParamsSelective(anColsToBind) **********/
++bool wxDbTable::bindParamsSelective(const wxArrayInt& anColsToBind)
++{
++	wxASSERT(!queryOnly);
++    if (queryOnly)
++	{
++        return false;
++	}
++
++	SWORD   fSqlType    = 0;
++    SDWORD  precision   = 0;
++    SWORD   scale       = 0;
++
++    // Bind each column of the table that should be bound
++    // to a parameter marker
++    for (unsigned int i=0;i<anColsToBind.size();i++)
++    {
++		int nColToBind = anColsToBind[i];
++
++        if (!colDefs[nColToBind].InsertAllowed)
++			continue;
++
++        switch(colDefs[nColToBind].DbDataType)
++        {
++            case DB_DATA_TYPE_VARCHAR:
++                fSqlType = pDb->GetTypeInfVarchar().FsqlType;
++                precision = colDefs[nColToBind].SzDataObj;
++                scale = 0;
++                break;
++            case DB_DATA_TYPE_INTEGER:
++                fSqlType = pDb->GetTypeInfInteger().FsqlType;
++                precision = pDb->GetTypeInfInteger().Precision;
++                scale = 0;
++                break;
++            case DB_DATA_TYPE_FLOAT:
++                fSqlType = pDb->GetTypeInfFloat().FsqlType;
++                precision = pDb->GetTypeInfFloat().Precision;
++                scale = pDb->GetTypeInfFloat().MaximumScale;
++                // SQL Sybase Anywhere v5.5 returned a negative number for the
++                // MaxScale.  This caused ODBC to kick out an error on ibscale.
++                // I check for this here and set the scale = precision.
++                //if (scale < 0)
++                // scale = (short) precision;
++                break;
++            case DB_DATA_TYPE_DATE:
++                fSqlType = pDb->GetTypeInfDate().FsqlType;
++                precision = pDb->GetTypeInfDate().Precision;
++                scale = 0;
++                break;
++            case DB_DATA_TYPE_BLOB:
++                fSqlType = pDb->GetTypeInfBlob().FsqlType;
++                precision = colDefs[nColToBind].SzDataObj;
++                scale = 0;
++                break;
++			case DB_DATA_TYPE_MEMO:
++                fSqlType = pDb->GetTypeInfMemo().FsqlType;
++                precision = colDefs[nColToBind].SzDataObj;
++                scale = 0;
++                break;
++        }
++
++        setCbValueForColumn(nColToBind);
++
++		if (SQLBindParameter(hstmtInsertPartialBinds, nColToBind+1, SQL_PARAM_INPUT, colDefs[nColToBind].SqlCtype,
++			fSqlType, precision, scale, (UCHAR*) colDefs[nColToBind].PtrDataObj,
++			precision+1, &colDefs[nColToBind].CbValue) != SQL_SUCCESS)
++            {
++                return(pDb->DispAllErrors(henv, hdbc, hstmtInsert));
++            }
++    }
++
++    // Completed successfully
++    return true;
++
++}
++
+ /********** wxDbTable::bindParams() **********/
+ bool wxDbTable::bindParams(bool forUpdate)
+ {
+@@ -1926,6 +2019,102 @@
+ }  // wxDbTable::SetOrderByColNums()
+ 
+ 
++/********** wxDbTable::Insert(sInsertString,const std::vector<int>& anBindCols) **********/
++int wxDbTable::Insert(wxString sInsertValues,const wxArrayInt& anColsToBind)
++{
++	wxASSERT(sInsertValues.Replace(wxT("?"),wxT("?")) == anColsToBind.size());
++	if(sInsertValues.Replace(wxT("?"),wxT("?")) != anColsToBind.size())
++	{
++		return(DB_FAILURE);
++	}
++	wxASSERT(anColsToBind.size() <= m_numCols);
++	if(anColsToBind.size() > m_numCols)
++	{
++		return(DB_FAILURE);
++	}
++	wxASSERT(!queryOnly);
++    if (queryOnly || !insertable)
++	{
++        return(DB_FAILURE);
++	}
++
++	bool needComma = false;
++	wxString sqlStmt = wxString::Format(wxT("INSERT INTO %s ("),pDb->SQLTableName(tableName.c_str()).c_str());
++    for (int i = 0; i < m_numCols; i++)
++    {
++		if (! colDefs[i].InsertAllowed)
++			continue;
++		if (needComma)
++			sqlStmt += wxT(",");
++        sqlStmt += pDb->SQLColumnName(colDefs[i].ColName);
++        needComma = true;
++    }
++    sqlStmt += wxT(") VALUES (");
++    sqlStmt += sInsertValues;
++	sqlStmt += wxT(")");
++
++	if(!bindParamsSelective(anColsToBind))
++	{
++		return false;
++	}
++
++	if (SQLPrepare(hstmtInsertPartialBinds, (SQLTCHAR FAR *) sqlStmt.c_str(), SQL_NTS) != SQL_SUCCESS)
++		return(pDb->DispAllErrors(henv, hdbc, hstmtInsertPartialBinds));
++
++	RETCODE retcode = SQLExecute(hstmtInsertPartialBinds);
++	if (retcode != SQL_SUCCESS && retcode != SQL_SUCCESS_WITH_INFO &&
++        retcode != SQL_NEED_DATA)
++    {
++        // Check to see if integrity constraint was violated
++        pDb->GetNextError(henv, hdbc, hstmtInsertPartialBinds);
++        if (! wxStrcmp(pDb->sqlState, wxT("23000")))  // Integrity constraint violated
++            return(DB_ERR_INTEGRITY_CONSTRAINT_VIOL);
++        else
++        {
++            pDb->DispNextError();
++            pDb->DispAllErrors(henv, hdbc, hstmtInsertPartialBinds);
++            return(DB_FAILURE);
++        }
++    }
++    if (retcode == SQL_NEED_DATA)
++    {
++        PTR pParmID;
++        retcode = SQLParamData(hstmtInsertPartialBinds, &pParmID);
++        while (retcode == SQL_NEED_DATA)
++        {
++            // Find the parameter
++            int i;
++            for (i=0; i < m_numCols; i++)
++            {
++                if (colDefs[i].PtrDataObj == pParmID)
++                {
++                    // We found it.  Store the parameter.
++                    retcode = SQLPutData(hstmtInsertPartialBinds, pParmID, colDefs[i].SzDataObj);
++                    if (retcode != SQL_SUCCESS)
++                    {
++                        pDb->DispNextError();
++                        pDb->DispAllErrors(henv, hdbc, hstmtInsertPartialBinds);
++                        return(DB_FAILURE);
++                    }
++                    break;
++                }
++            }
++            retcode = SQLParamData(hstmtInsertPartialBinds, &pParmID);
++            if (retcode != SQL_SUCCESS &&
++                retcode != SQL_SUCCESS_WITH_INFO)
++            {
++                // record was not inserted
++                pDb->DispNextError();
++                pDb->DispAllErrors(henv, hdbc, hstmtInsertPartialBinds);
++                return(DB_FAILURE);
++            }
++        }
++    }
++
++    // Record inserted into the datasource successfully
++    return(DB_SUCCESS);
++}
++
+ /********** wxDbTable::Insert() **********/
+ int wxDbTable::Insert(void)
+ {
+Index: wxWidgets-2.8/include/wx/dbtable.h
+===================================================================
+--- wxWidgets-2.8/include/wx/dbtable.h	(revision 47742)
++++ wxWidgets-2.8/include/wx/dbtable.h	(working copy)
+@@ -97,6 +97,7 @@
+     void        cleanup();
+ 
+     void        setCbValueForColumn(int columnIndex);
++	bool		bindParamsSelective(const wxArrayInt& anColsToBind);
+     bool        bindParams(bool forUpdate);  // called by the other 'bind' functions
+     bool        bindInsertParams(void);
+     bool        bindUpdateParams(void);
+@@ -120,6 +121,7 @@
+     HSTMT       hstmt;          // ODBC Statement handle
+     HSTMT      *hstmtDefault;   // Default cursor
+     HSTMT       hstmtInsert;    // ODBC Statement handle used specifically for inserts
++	HSTMT       hstmtInsertPartialBinds;// ODBC Statement handle used specifically for inserts where only some of the variables are bound (EG/ if we u se Now() instead of a variable for a date
+     HSTMT       hstmtDelete;    // ODBC Statement handle used specifically for deletes
+     HSTMT       hstmtUpdate;    // ODBC Statement handle used specifically for updates
+     HSTMT       hstmtInternal;  // ODBC Statement handle used internally only
+@@ -231,6 +233,7 @@
+     const wxString &From()    { return from; }
+ #endif
+     int             Insert(void);
++	int             Insert(wxString sInsertValues,const wxArrayInt& anColsToBind);
+     bool            Update(void);
+     bool            Update(const wxString &pSqlStmt);
+     bool            UpdateWhere(const wxString &pWhereClause);
+
+ 	  	 

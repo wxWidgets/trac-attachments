@@ -1,0 +1,1121 @@
+Index: include/wx/ribbon/art.h
+===================================================================
+--- include/wx/ribbon/art.h	(revision 72357)
++++ include/wx/ribbon/art.h	(working copy)
+@@ -21,6 +21,7 @@
+ #include "wx/font.h"
+ #include "wx/pen.h"
+ #include "wx/bitmap.h"
++#include "wx/ribbon/bar.h"
+ 
+ class WXDLLIMPEXP_FWD_CORE wxDC;
+ class WXDLLIMPEXP_FWD_CORE wxWindow;
+@@ -306,8 +307,13 @@
+                         wxDC& dc,
+                         wxRibbonBar* wnd,
+                         const wxRect& rect,
+-                        bool upBitmap) = 0;
++                        wxRibbonDisplayMode mode) = 0;
+ 
++    virtual void DrawHelpButton(
++                        wxDC& dc,
++                        wxRibbonBar* wnd,
++                        const wxRect& rect) = 0;
++
+     virtual void GetBarTabWidth(
+                         wxDC& dc,
+                         wxWindow* wnd,
+@@ -392,9 +398,9 @@
+                         bool is_last,
+                         wxRect* dropdown_region) = 0;
+ 
+-    virtual wxRect GetBarToggleButtonArea(wxDC& dc,
+-                                          const wxRibbonBar* wnd,
+-                                          wxRect rect)= 0;
++    virtual wxRect GetBarToggleButtonArea(wxRect rect)= 0;
++
++    virtual wxRect GetRibbonHelpButtonArea(wxRect rect) = 0;
+ };
+ 
+ class WXDLLIMPEXP_RIBBON wxRibbonMSWArtProvider : public wxRibbonArtProvider
+@@ -510,8 +516,13 @@
+                         wxDC& dc,
+                         wxRibbonBar* wnd,
+                         const wxRect& rect,
+-                        bool upBitmap);
++                        wxRibbonDisplayMode mode);
+ 
++    void DrawHelpButton(
++                        wxDC& dc,
++                        wxRibbonBar* wnd,
++                        const wxRect& rect);
++
+     void GetBarTabWidth(
+                         wxDC& dc,
+                         wxWindow* wnd,
+@@ -591,10 +602,10 @@
+                         bool is_last,
+                         wxRect* dropdown_region);
+ 
+-    wxRect GetBarToggleButtonArea(wxDC& dc,
+-                                  const wxRibbonBar* wnd,
+-                                  wxRect rect);
++    wxRect GetBarToggleButtonArea(wxRect rect);
+ 
++    wxRect GetRibbonHelpButtonArea(wxRect rect);
++
+ protected:
+     void ReallyDrawTabSeparator(wxWindow* wnd, const wxRect& rect, double visibility);
+     void DrawPartialPageBackground(wxDC& dc, wxWindow* wnd, const wxRect& rect,
+@@ -632,6 +643,8 @@
+     wxBitmap m_panel_extension_bitmap[2];
+     wxBitmap m_ribbon_toggle_up_bitmap[2];
+     wxBitmap m_ribbon_toggle_down_bitmap[2];
++    wxBitmap m_ribbon_toggle_pin_bitmap[2];
++    wxBitmap m_ribbon_bar_help_button_bitmap[2];
+ 
+     wxColour m_primary_scheme_colour;
+     wxColour m_secondary_scheme_colour;
+@@ -745,6 +758,8 @@
+     int m_gallery_bitmap_padding_right_size;
+     int m_gallery_bitmap_padding_top_size;
+     int m_gallery_bitmap_padding_bottom_size;
++    int m_toggle_button_offset;
++    int m_help_button_offset;
+ };
+ 
+ class WXDLLIMPEXP_RIBBON wxRibbonAUIArtProvider : public wxRibbonMSWArtProvider
+Index: include/wx/ribbon/bar.h
+===================================================================
+--- include/wx/ribbon/bar.h	(revision 72357)
++++ include/wx/ribbon/bar.h	(working copy)
+@@ -29,11 +29,13 @@
+     wxRIBBON_BAR_SHOW_PANEL_MINIMISE_BUTTONS = 1 << 4,
+     wxRIBBON_BAR_ALWAYS_SHOW_TABS = 1 << 5,
+     wxRIBBON_BAR_SHOW_TOGGLE_BUTTON = 1 << 6,
++    wxRIBBON_BAR_SHOW_HELP_BUTTON = 1 << 7,
+ 
+     wxRIBBON_BAR_DEFAULT_STYLE =  wxRIBBON_BAR_FLOW_HORIZONTAL
+                                 | wxRIBBON_BAR_SHOW_PAGE_LABELS
+                                 | wxRIBBON_BAR_SHOW_PANEL_EXT_BUTTONS
+-                                | wxRIBBON_BAR_SHOW_TOGGLE_BUTTON,
++                                | wxRIBBON_BAR_SHOW_TOGGLE_BUTTON
++                                | wxRIBBON_BAR_SHOW_HELP_BUTTON,
+ 
+     wxRIBBON_BAR_FOLDBAR_STYLE =  wxRIBBON_BAR_FLOW_VERTICAL
+                                 | wxRIBBON_BAR_SHOW_PAGE_ICONS
+@@ -41,6 +43,13 @@
+                                 | wxRIBBON_BAR_SHOW_PANEL_MINIMISE_BUTTONS
+ };
+ 
++enum wxRibbonDisplayMode
++{
++    wxRIBBON_BAR_TOGGLE_BUTTON_PINNED,
++    wxRIBBON_BAR_TOGGLE_BUTTON_MINIMIZED,
++    wxRIBBON_BAR_TOGGLE_BUTTON_EXPANDED
++};
++
+ class WXDLLIMPEXP_RIBBON wxRibbonBarEvent : public wxNotifyEvent
+ {
+ public:
+@@ -144,14 +153,17 @@
+ 
+     // Implementation only.
+     bool IsToggleButtonHovered() const { return m_toggle_button_hovered; }
++    bool IsHelpButtonHovered() const { return m_help_button_hovered; }
+ 
++    void HideIfExpanded();
++
+ protected:
+     friend class wxRibbonPage;
+ 
+     virtual wxSize DoGetBestSize() const;
+     wxBorder GetDefaultBorder() const { return wxBORDER_NONE; }
+     wxRibbonPageTabInfo* HitTestTabs(wxPoint position, int* index = NULL);
+-    void HitTestToggleButton(wxPoint position);
++    void HitTestRibbonButton(wxRect rect, wxPoint position, bool &hover_flag);
+ 
+     void CommonInit(long style);
+     void AddPage(wxRibbonPage *page);
+@@ -175,11 +187,13 @@
+     void OnMouseLeave(wxMouseEvent& evt);
+     void OnMouseDoubleClick(wxMouseEvent& evt);
+     void DoMouseButtonCommon(wxMouseEvent& evt, wxEventType tab_event_type);
++    void OnKillFocus(wxFocusEvent& WXUNUSED(evt));    
+ 
+     wxRibbonPageTabInfoArray m_pages;
+     wxRect m_tab_scroll_left_button_rect;
+     wxRect m_tab_scroll_right_button_rect;
+     wxRect m_toggle_button_rect;
++    wxRect m_help_button_rect;
+     long m_flags;
+     int m_tabs_total_width_ideal;
+     int m_tabs_total_width_minimum;
+@@ -195,7 +209,10 @@
+     bool m_arePanelsShown;
+     bool m_bar_hovered;
+     bool m_toggle_button_hovered;
++    bool m_help_button_hovered;
+ 
++    wxRibbonDisplayMode m_ribbon_state;
++
+ #ifndef SWIG
+     DECLARE_CLASS(wxRibbonBar)
+     DECLARE_EVENT_TABLE()
+@@ -212,6 +229,7 @@
+ wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_RIBBON, wxEVT_COMMAND_RIBBONBAR_TAB_RIGHT_UP, wxRibbonBarEvent);
+ wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_RIBBON, wxEVT_COMMAND_RIBBONBAR_TAB_LEFT_DCLICK, wxRibbonBarEvent);
+ wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_RIBBON, wxEVT_COMMAND_RIBBONBAR_TOGGLED, wxRibbonBarEvent);
++wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_RIBBON, wxEVT_COMMAND_RIBBONBAR_HELP_CLICKED, wxRibbonBarEvent);
+ 
+ typedef void (wxEvtHandler::*wxRibbonBarEventFunction)(wxRibbonBarEvent&);
+ 
+@@ -234,6 +252,8 @@
+     wx__DECLARE_EVT1(wxEVT_COMMAND_RIBBONBAR_TAB_LEFT_DCLICK, winid, wxRibbonBarEventHandler(fn))
+ #define EVT_RIBBONBAR_TOGGLED(winid, fn) \
+     wx__DECLARE_EVT1(wxEVT_COMMAND_RIBBONBAR_TOGGLED, winid, wxRibbonBarEventHandler(fn))
++#define EVT_RIBBONBAR_HELP_CLICK(winid, fn) \
++    wx__DECLARE_EVT1(wxEVT_COMMAND_RIBBONBAR_HELP_CLICKED, winid, wxRibbonBarEventHandler(fn))
+ #else
+ 
+ // wxpython/swig event work
+@@ -245,6 +265,7 @@
+ %constant wxEventType wxEVT_COMMAND_RIBBONBAR_TAB_RIGHT_UP;
+ %constant wxEventType wxEVT_COMMAND_RIBBONBAR_TAB_LEFT_DCLICK;
+ %constant wxEventType wxEVT_COMMAND_RIBBONBAR_TOGGLED;
++%constant wxEventType wxEVT_COMMAND_RIBBONBAR_HELP_CLICKED;
+ 
+ %pythoncode {
+     EVT_RIBBONBAR_PAGE_CHANGED = wx.PyEventBinder( wxEVT_COMMAND_RIBBONBAR_PAGE_CHANGED, 1 )
+@@ -255,6 +276,7 @@
+     EVT_RIBBONBAR_TAB_RIGHT_UP = wx.PyEventBinder( wxEVT_COMMAND_RIBBONBAR_TAB_RIGHT_UP, 1 )
+     EVT_RIBBONBAR_TAB_LEFT_DCLICK = wx.PyEventBinder( wxEVT_COMMAND_RIBBONBAR_TAB_LEFT_DCLICK, 1 )
+     EVT_RIBBONBAR_TOGGLED = wx.PyEventBinder( wxEVT_COMMAND_RIBBONBAR_TOGGLED, 1 )
++    EVT_RIBBONBAR_HELP_CLICK = wx.PyEventBinder( wxEVT_COMMAND_RIBBONBAR_HELP_CLICKED, 1 )
+ }
+ #endif
+ 
+Index: include/wx/ribbon/page.h
+===================================================================
+--- include/wx/ribbon/page.h	(revision 72357)
++++ include/wx/ribbon/page.h	(working copy)
+@@ -61,6 +61,8 @@
+ 
+     virtual void RemoveChild(wxWindowBase *child);
+ 
++    void HideIfExpanded();
++
+ protected:
+     virtual wxSize DoGetBestSize() const;
+     virtual wxBorder GetDefaultBorder() const { return wxBORDER_NONE; }
+Index: include/wx/ribbon/panel.h
+===================================================================
+--- include/wx/ribbon/panel.h	(revision 72357)
++++ include/wx/ribbon/panel.h	(working copy)
+@@ -84,6 +84,8 @@
+ 
+     long GetFlags() { return m_flags; }
+ 
++    void HideIfExpanded();
++
+ protected:
+     virtual wxSize DoGetBestSize() const;
+     virtual wxSize GetPanelSizerBestSize() const;
+Index: include/wx/ribbon/xpmfile.h
+===================================================================
+--- include/wx/ribbon/xpmfile.h	(revision 0)
++++ include/wx/ribbon/xpmfile.h	(working copy)
+@@ -0,0 +1,234 @@
++static const char* const gallery_up_xpm[] = {
++  "5 5 2 1",
++  "  c None",
++  "x c #FF00FF",
++  "     ",
++  "  x  ",
++  " xxx ",
++  "xxxxx",
++  "     "};
++
++static const char* const gallery_down_xpm[] = {
++  "5 5 2 1",
++  "  c None",
++  "x c #FF00FF",
++  "     ",
++  "xxxxx",
++  " xxx ",
++  "  x  ",
++  "     "};
++
++static const char* const gallery_left_xpm[] = {
++  "5 5 2 1",
++  "  c None",
++  "x c #FF00FF",
++  "   x ",
++  "  xx ",
++  " xxx ",
++  "  xx ",
++  "   x "};
++
++static const char* const gallery_right_xpm[] = {
++  "5 5 2 1",
++  "  c None",
++  "x c #FF00FF",
++  " x   ",
++  " xx  ",
++  " xxx ",
++  " xx  ",
++  " x   "};
++
++static const char* const gallery_extension_xpm[] = {
++  "5 5 2 1",
++  "  c None",
++  "x c #FF00FF",
++  "xxxxx",
++  "     ",
++  "xxxxx",
++  " xxx ",
++  "  x  "};
++
++static const char* const panel_extension_xpm[] = {
++  "7 7 2 1",
++  "  c None",
++  "x c #FF00FF",
++  "xxxxxx ",
++  "x      ",
++  "x      ",
++  "x  x  x",
++  "x   xxx",
++  "x   xxx",
++  "   xxxx"};
++
++static const char* const panel_toggle_down_xpm[] = {
++  "7 9 2 1",
++  "  c None",
++  "x c #FF00FF",
++  "       ",
++  "x     x",
++  "xx   xx",
++  " xx xx ",
++  "x xxx x",
++  "xx x xx",
++  " xx xx ",
++  "  xxx  ",
++  "   x   ",};
++
++static const char* const panel_toggle_up_xpm[] = {
++  "7 9 2 1",
++  "  c None",
++  "x c #FF00FF",
++  "   x   ",
++  "  xxx  ",
++  " xx xx ",
++  "xx x xx",
++  "x xxx x",
++  " xx xx ",
++  "xx   xx",
++  "x     x",
++  "       ",};
++
++static const char* const ribbon_toggle_pin_xpm[] = {
++  "12 9 3 1",
++  "  c None",
++  "x c #FF00FF",
++  ". c #FF00FF",
++  "   xx       ",
++  "   x.x   xxx",
++  "   x..xxx..x",
++  "xxxx.......x",
++  "x..........x",
++  "xxxx.......x",
++  "   x..xxx..x",
++  "   x.x   xxx",
++  "   xx       "
++};
++
++static char *ribbon_help_button_xpm[] = {
++"12 12 112 2",
++"   c #163B95",
++".  c none",
++"X  c #1B3F98",
++"o  c #1B4097",
++"O  c #1D4198",
++"+  c #1E4298",
++"@  c #1E439B",
++"#  c #1A419F",
++"$  c #1E439D",
++"%  c #204398",
++"&  c #204399",
++"*  c #25479B",
++"=  c #25489A",
++"-  c #284A9D",
++";  c #2A4C9D",
++":  c #30519E",
++">  c #3B589A",
++",  c #3D599B",
++"<  c #1840A2",
++"1  c #1E45A1",
++"2  c #1E4AB4",
++"3  c #2D4FA0",
++"4  c #224AAC",
++"5  c #254DAC",
++"6  c #294FA9",
++"7  c #2B52AE",
++"8  c #3051A0",
++"9  c #3354A0",
++"0  c #3354A2",
++"q  c #3454A3",
++"w  c #3456A4",
++"e  c #3556A4",
++"r  c #3C5BA3",
++"t  c #395AA6",
++"y  c #3E5CA6",
++"u  c #3E5DA7",
++"i  c #3F5EA6",
++"p  c #2A51B0",
++"a  c #2E55B5",
++"s  c #2752BA",
++"d  c #3058B8",
++"f  c #3F61B2",
++"g  c #415FA7",
++"h  c #4562A7",
++"j  c #4864A7",
++"k  c #4D67A5",
++"l  c #4361A8",
++"z  c #4361A9",
++"x  c #4663A8",
++"c  c #4563AA",
++"v  c #4764AA",
++"b  c #4B68AE",
++"n  c #506AA8",
++"m  c #516DAD",
++"M  c #546EAC",
++"N  c #5F75AB",
++"B  c #5A72AC",
++"V  c #5C77B6",
++"C  c #6C7DA7",
++"Z  c #6077AD",
++"A  c #687DAF",
++"S  c #637BB4",
++"D  c #687FB7",
++"F  c #2D59C1",
++"G  c #2E5AC2",
++"H  c #2F5ECE",
++"J  c #3763CC",
++"K  c #4169CB",
++"L  c #7787AC",
++"P  c #7E8CAE",
++"I  c #7A8BB5",
++"U  c #7B8CB4",
++"Y  c #7C8FBD",
++"T  c #758FCA",
++"R  c #808CA8",
++"E  c #969DAF",
++"W  c #8291B4",
++"Q  c #8A95B0",
++"!  c #8B96B1",
++"~  c #8F9AB3",
++"^  c #8D98B5",
++"/  c #8E9AB7",
++"(  c #8997B8",
++")  c #949EB9",
++"_  c #99A1B4",
++"`  c #ADAFB7",
++"'  c #A5ABB8",
++"]  c #A6ABB8",
++"[  c #AAAFBE",
++"{  c #AFB2BE",
++"}  c #B0B1B6",
++"|  c #BAB8B6",
++" . c #B4B5BC",
++".. c #B6B9BF",
++"X. c #BBB9B8",
++"o. c #8C9DC3",
++"O. c #8EA3D4",
++"+. c #97AAD4",
++"@. c #ACB5C9",
++"#. c #B3B7C0",
++"$. c #A1B1D5",
++"%. c #BAC3D7",
++"&. c #BEC6D6",
++"*. c #D7D2C7",
++"=. c #C2C8D6",
++"-. c #D2D6DF",
++";. c #E8E4DA",
++":. c #CED5E4",
++">. c #FFF9EC",
++",. c #F3F4F5",
++"<. c #F6F8FB",
++"1. c None",
++/* pixels */
++"1.1.1.1.#./ W ~ } 1.1.1.",
++"1.1.1.U r c b t h Q 1.1.",
++"1.1.A 3 $.<.,.&.m w ^ 1.",
++"1.( 0 z :.%.=.;.) e x ` ",
++"1.n u v M * B *.R O @ P ",
++"' i z l - 9 { | > $ # Z ",
++"_ y l ; & [ X., 1 6 4 D ",
++"] g 8 o :  .C < 7 a s o.",
++"1.k X % = I S 5 d G K ..",
++"1.! .   j >.-.p F H +.1.",
++"1.1.L X + Y V 2 J O.1.1.",
++"1.1.1.E N q f T @.1.1.1."
++};
+Index: interface/wx/ribbon/art.h
+===================================================================
+--- interface/wx/ribbon/art.h	(revision 72357)
++++ interface/wx/ribbon/art.h	(working copy)
+@@ -660,8 +660,47 @@
+                         const wxBitmap& bitmap,
+                         wxRibbonButtonKind kind,
+                         long state) = 0;
+-
++    
+     /**
++        Draw Toggle button on wxRibbonBar. This should draw a small toggle button
++        at top right corner of ribbon bar.
++        
++        @param dc
++            The device context to draw onto.
++        @param wnd
++            The window which is being drawn onto, which is always the panel
++            whose background and chrome is being drawn. The panel label and
++            other panel attributes can be obtained by querying this.
++        @param rect
++            The rectangle within which to draw.
++	@param mode
++	    The wxRibbonDisplayMode which should be applied to display button
++    */
++    virtual void DrawToggleButton(
++                        wxDC& dc,
++                        wxRibbonBar* wnd,
++                        const wxRect& rect,
++                        wxRibbonDisplayMode mode) = 0;
++    
++    /**
++        Draw help button on wxRibbonBar. This should draw a help button
++        at top right corner of ribbon bar.
++        
++        @param dc
++            The device context to draw onto.
++        @param wnd
++            The window which is being drawn onto, which is always the panel
++            whose background and chrome is being drawn. The panel label and
++            other panel attributes can be obtained by querying this.
++        @param rect
++            The rectangle within which to draw.
++    */
++    virtual void DrawHelpButton(
++                        wxDC& dc,
++                        wxRibbonBar* wnd,
++                        const wxRect& rect) = 0;
++    
++    /**
+         Calculate the ideal and minimum width (in pixels) of a tab in a ribbon
+         bar.
+         
+@@ -961,4 +1000,24 @@
+                         bool is_first,
+                         bool is_last,
+                         wxRect* dropdown_region) = 0;
++			
++    /**
++        Calculate the position and size of the ribbon's toggle button.
++
++        @param rect
++            The ribbon bar rectangle from which calculate toggle button rectangle.
++
++        @since 2.9.5
++    */
++    virtual wxRect GetBarToggleButtonArea(wxRect rect)= 0;
++
++    /**
++        Calculate the position and size of the ribbon's help button.
++
++        @param rect
++            The ribbon bar rectangle from which calculate help button rectangle.
++
++        @since 2.9.5
++    */
++    virtual wxRect GetRibbonHelpButtonArea(wxRect rect) = 0;
+ };
+Index: interface/wx/ribbon/bar.h
+===================================================================
+--- interface/wx/ribbon/bar.h	(revision 72357)
++++ interface/wx/ribbon/bar.h	(working copy)
+@@ -65,7 +65,7 @@
+     @style{wxRIBBON_BAR_DEFAULT_STYLE}
+         Defined as wxRIBBON_BAR_FLOW_HORIZONTAL |
+         wxRIBBON_BAR_SHOW_PAGE_LABELS | wxRIBBON_BAR_SHOW_PANEL_EXT_BUTTONS |
+-        wxRIBBON_BAR_SHOW_TOGGLE_BUTTON.
++        wxRIBBON_BAR_SHOW_TOGGLE_BUTTON | wxRIBBON_BAR_SHOW_HELP_BUTTON.
+     @style{wxRIBBON_BAR_FOLDBAR_STYLE}
+         Defined as wxRIBBON_BAR_FLOW_VERTICAL | wxRIBBON_BAR_SHOW_PAGE_ICONS
+         | wxRIBBON_BAR_SHOW_PANEL_EXT_BUTTONS |
+@@ -87,6 +87,9 @@
+     @style{wxRIBBON_BAR_SHOW_TOGGLE_BUTTON}
+         Causes a toggle button to appear on the ribbon bar at top-right corner.
+         This style is new since wxWidgets 2.9.5.
++    @style{wxRIBBON_BAR_SHOW_HELP_BUTTON)
++        Causes a help button to appear on the ribbon bar at the top-right corner.
++	This style is new since wxWidgets 2.9.5.
+     @endStyleTable
+ 
+ 
+@@ -107,9 +110,12 @@
+         Triggered when the right mouse button is released on a tab.
+     @event{EVT_RIBBONBAR_TAB_LEFT_DCLICK(id, func)}
+         Triggered when the left mouse button is double clicked on a tab.
+-    @event{EVT_RIBBONBAR_TOGGLE_BUTTON_CLICK(id, func)}
++    @event{EVT_RIBBONBAR_TOGGLED(id, func)}
+         Triggered when the button triggering the ribbon bar is clicked. This
+         event is new since wxWidgets 2.9.5.
++    @event{EVT_RIBBONBAR_HELP_CLICK(id, func)}
++        Triggered when the help button is clicked. This even is new since 
++	wxWidgets 2.9.5.
+     @endEventTable
+ 
+     @library{wxribbon}
+Index: samples/ribbon/ribbondemo.cpp
+===================================================================
+--- samples/ribbon/ribbondemo.cpp	(revision 72357)
++++ samples/ribbon/ribbondemo.cpp	(working copy)
+@@ -135,6 +135,7 @@
+     void OnShowPages(wxRibbonButtonBarEvent& evt);
+     void OnTogglePanels(wxCommandEvent& evt);
+     void OnRibbonBarToggled(wxRibbonBarEvent& evt);
++    void OnRibbonBarHelpClicked(wxRibbonBarEvent& evt);
+ 
+     void OnExtButton(wxRibbonPanelEvent& evt);
+ 
+@@ -236,6 +237,7 @@
+ EVT_RIBBONBUTTONBAR_CLICKED(ID_HIDE_PAGES, MyFrame::OnHidePages)
+ EVT_RIBBONBUTTONBAR_CLICKED(ID_SHOW_PAGES, MyFrame::OnShowPages)
+ EVT_RIBBONBAR_TOGGLED(wxID_ANY, MyFrame::OnRibbonBarToggled)
++EVT_RIBBONBAR_HELP_CLICK(wxID_ANY, MyFrame::OnRibbonBarHelpClicked)
+ END_EVENT_TABLE()
+ 
+ #include "align_center.xpm"
+@@ -264,7 +266,12 @@
+ MyFrame::MyFrame()
+     : wxFrame(NULL, wxID_ANY, wxT("wxRibbon Sample Application"), wxDefaultPosition, wxSize(800, 600), wxDEFAULT_FRAME_STYLE)
+ {
+-    m_ribbon = new wxRibbonBar(this);
++    m_ribbon = new wxRibbonBar(this,-1,wxDefaultPosition, wxDefaultSize, wxRIBBON_BAR_FLOW_HORIZONTAL
++                                | wxRIBBON_BAR_SHOW_PAGE_LABELS
++                                | wxRIBBON_BAR_SHOW_PANEL_EXT_BUTTONS
++                                | wxRIBBON_BAR_SHOW_TOGGLE_BUTTON
++                                | wxRIBBON_BAR_SHOW_HELP_BUTTON
++                                );
+ 
+     {
+         wxRibbonPage* home = new wxRibbonPage(m_ribbon, wxID_ANY, wxT("Examples"), ribbon_xpm);
+@@ -1017,3 +1024,8 @@
+                                 ? "expanded"
+                                 : "collapsed"));
+ }
++
++void MyFrame::OnRibbonBarHelpClicked(wxRibbonBarEvent& WXUNUSED(evt))
++{
++    AddText("Ribbon bar help clicked");
++}
+\ No newline at end of file
+Index: src/ribbon/art_msw.cpp
+===================================================================
+--- src/ribbon/art_msw.cpp	(revision 72357)
++++ src/ribbon/art_msw.cpp	(working copy)
+@@ -19,10 +19,10 @@
+ 
+ #include "wx/ribbon/art.h"
+ #include "wx/ribbon/art_internal.h"
+-#include "wx/ribbon/bar.h"
+ #include "wx/ribbon/buttonbar.h"
+ #include "wx/ribbon/gallery.h"
+ #include "wx/ribbon/toolbar.h"
++#include "wx/ribbon/xpmfile.h"
+ 
+ #ifndef WX_PRECOMP
+ #include "wx/dcmemory.h"
+@@ -32,96 +32,7 @@
+ #include "wx/msw/private.h"
+ #endif
+ 
+-static const char* const gallery_up_xpm[] = {
+-  "5 5 2 1",
+-  "  c None",
+-  "x c #FF00FF",
+-  "     ",
+-  "  x  ",
+-  " xxx ",
+-  "xxxxx",
+-  "     "};
+ 
+-static const char* const gallery_down_xpm[] = {
+-  "5 5 2 1",
+-  "  c None",
+-  "x c #FF00FF",
+-  "     ",
+-  "xxxxx",
+-  " xxx ",
+-  "  x  ",
+-  "     "};
+-
+-static const char* const gallery_left_xpm[] = {
+-  "5 5 2 1",
+-  "  c None",
+-  "x c #FF00FF",
+-  "   x ",
+-  "  xx ",
+-  " xxx ",
+-  "  xx ",
+-  "   x "};
+-
+-static const char* const gallery_right_xpm[] = {
+-  "5 5 2 1",
+-  "  c None",
+-  "x c #FF00FF",
+-  " x   ",
+-  " xx  ",
+-  " xxx ",
+-  " xx  ",
+-  " x   "};
+-
+-static const char* const gallery_extension_xpm[] = {
+-  "5 5 2 1",
+-  "  c None",
+-  "x c #FF00FF",
+-  "xxxxx",
+-  "     ",
+-  "xxxxx",
+-  " xxx ",
+-  "  x  "};
+-
+-static const char* const panel_extension_xpm[] = {
+-  "7 7 2 1",
+-  "  c None",
+-  "x c #FF00FF",
+-  "xxxxxx ",
+-  "x      ",
+-  "x      ",
+-  "x  x  x",
+-  "x   xxx",
+-  "x   xxx",
+-  "   xxxx"};
+-
+-static const char* const panel_toggle_down_xpm[] = {
+-  "7 9 2 1",
+-  "  c None",
+-  "x c #FF00FF",
+-  "       ",
+-  "x     x",
+-  "xx   xx",
+-  " xx xx ",
+-  "x xxx x",
+-  "xx x xx",
+-  " xx xx ",
+-  "  xxx  ",
+-  "   x   ",};
+-
+-static const char* const panel_toggle_up_xpm[] = {
+-  "7 9 2 1",
+-  "  c None",
+-  "x c #FF00FF",
+-  "   x   ",
+-  "  xxx  ",
+-  " xx xx ",
+-  "xx x xx",
+-  "x xxx x",
+-  " xx xx ",
+-  "xx   xx",
+-  "x     x",
+-  "       ",};
+-
+ wxRibbonMSWArtProvider::wxRibbonMSWArtProvider(bool set_colour_scheme)
+ {
+     m_flags = 0;
+@@ -154,6 +65,8 @@
+     m_gallery_bitmap_padding_right_size = 4;
+     m_gallery_bitmap_padding_top_size = 4;
+     m_gallery_bitmap_padding_bottom_size = 4;
++    m_toggle_button_offset = 22;
++    m_help_button_offset = 22;
+ }
+ 
+ wxRibbonMSWArtProvider::~wxRibbonMSWArtProvider()
+@@ -343,6 +256,8 @@
+         copy->m_panel_extension_bitmap[i] = m_panel_extension_bitmap[i];
+         copy->m_ribbon_toggle_up_bitmap[i] = m_ribbon_toggle_up_bitmap[i];
+         copy->m_ribbon_toggle_down_bitmap[i] = m_ribbon_toggle_down_bitmap[i];
++        copy->m_ribbon_toggle_pin_bitmap[i] = m_ribbon_toggle_pin_bitmap[i];
++        copy->m_ribbon_bar_help_button_bitmap[i] = m_ribbon_bar_help_button_bitmap[i];
+     }
+     copy->m_toolbar_drop_bitmap = m_toolbar_drop_bitmap;
+ 
+@@ -1023,11 +938,15 @@
+             m_page_toggle_face_colour = colour;
+             m_ribbon_toggle_down_bitmap[0] = wxRibbonLoadPixmap(panel_toggle_down_xpm, colour);
+             m_ribbon_toggle_up_bitmap[0] = wxRibbonLoadPixmap(panel_toggle_up_xpm, colour);
++            m_ribbon_toggle_pin_bitmap[0] = wxRibbonLoadPixmap(ribbon_toggle_pin_xpm, colour);
++            m_ribbon_bar_help_button_bitmap[0] = wxRibbonLoadPixmap(ribbon_help_button_xpm, colour);
+             break;
+         case wxRIBBON_ART_PAGE_TOGGLE_HOVER_FACE_COLOUR:
+             m_page_toggle_hover_face_colour = colour;
+             m_ribbon_toggle_down_bitmap[1] = wxRibbonLoadPixmap(panel_toggle_down_xpm, colour);
+             m_ribbon_toggle_up_bitmap[1] = wxRibbonLoadPixmap(panel_toggle_up_xpm, colour);
++            m_ribbon_toggle_pin_bitmap[1] = wxRibbonLoadPixmap(ribbon_toggle_pin_xpm, colour);
++            m_ribbon_bar_help_button_bitmap[1] = wxRibbonLoadPixmap(ribbon_help_button_xpm, colour);
+             break;
+         default:
+             wxFAIL_MSG(wxT("Invalid Metric Ordinal"));
+@@ -2517,8 +2436,9 @@
+ wxRibbonMSWArtProvider::DrawToggleButton(wxDC& dc,
+                                          wxRibbonBar* wnd,
+                                          const wxRect& rect,
+-                                         bool upBitmap)
++                                         wxRibbonDisplayMode mode)
+ {
++    int bindex = 0;
+     DrawPartialPageBackground(dc, wnd, rect, false);
+ 
+     dc.DestroyClippingRegion();
+@@ -2528,19 +2448,44 @@
+     {
+         dc.SetPen(m_ribbon_toggle_pen);
+         dc.SetBrush(m_ribbon_toggle_brush);
+-        dc.DrawRoundedRectangle(rect.GetX(), rect.GetY(), 12, 12, 1.0);
+-        if(upBitmap)
+-            dc.DrawBitmap(m_ribbon_toggle_up_bitmap[1], rect.GetX()+2, rect.GetY()+2, true);
+-        else
+-            dc.DrawBitmap(m_ribbon_toggle_down_bitmap[1], rect.GetX()+2, rect.GetY()+2, true);
++		dc.DrawRoundedRectangle(rect.GetX(), rect.GetY(), 20, 20, 1.0);
++        bindex = 1; 
+     }
++    switch(mode)
++    {
++        case wxRIBBON_BAR_TOGGLE_BUTTON_PINNED:
++            dc.DrawBitmap(m_ribbon_toggle_up_bitmap[bindex], rect.GetX()+7, rect.GetY()+6, true);
++            break;
++        case wxRIBBON_BAR_TOGGLE_BUTTON_MINIMIZED:
++            dc.DrawBitmap(m_ribbon_toggle_down_bitmap[bindex], rect.GetX()+7, rect.GetY()+6, true);
++            break;
++        case wxRIBBON_BAR_TOGGLE_BUTTON_EXPANDED:
++            dc.DrawBitmap(m_ribbon_toggle_pin_bitmap[bindex], rect.GetX ()+4, rect.GetY ()+5, true);
++            break;
++    }
++}
++
++void wxRibbonMSWArtProvider::DrawHelpButton(wxDC& dc,
++                                       wxRibbonBar* wnd,
++                                       const wxRect& rect)
++{
++    DrawPartialPageBackground(dc, wnd, rect, false);
++
++    dc.DestroyClippingRegion();
++    dc.SetClippingRegion(rect);
++
++    if(wnd->IsHelpButtonHovered())
++    {
++        dc.SetPen(m_ribbon_toggle_pen);
++        dc.SetBrush(m_ribbon_toggle_brush);
++		dc.DrawRoundedRectangle(rect.GetX(), rect.GetY(), 20, 20, 1.0);
++        dc.DrawBitmap(m_ribbon_bar_help_button_bitmap[1], rect.GetX ()+4, rect.GetY()+5, true);
++    }
+     else
+     {
+-        if(upBitmap)
+-            dc.DrawBitmap(m_ribbon_toggle_up_bitmap[0], rect.GetX()+2, rect.GetY()+2, true);
+-        else
+-            dc.DrawBitmap(m_ribbon_toggle_down_bitmap[0], rect.GetX()+2, rect.GetY()+2, true);
++        dc.DrawBitmap(m_ribbon_bar_help_button_bitmap[0], rect.GetX ()+4, rect.GetY()+5, true);
+     }
++    
+ }
+ 
+ void wxRibbonMSWArtProvider::GetBarTabWidth(
+@@ -2998,12 +2943,21 @@
+ }
+ 
+ wxRect
+-wxRibbonMSWArtProvider::GetBarToggleButtonArea(wxDC& WXUNUSED(dc),
+-                                               const wxRibbonBar* WXUNUSED(wnd),
+-                                               wxRect rect)
++wxRibbonMSWArtProvider::GetBarToggleButtonArea(wxRect rect)
+ {
+-    rect = wxRect(rect.GetWidth()-30, 6, 12, 12);
++    rect = wxRect(rect.GetWidth()-m_toggle_button_offset, 2, 20, 20);
++    if( (m_toggle_button_offset==22) && (m_help_button_offset==22) )
++        m_help_button_offset += 22;
+     return rect;
+ }
+ 
++wxRect
++wxRibbonMSWArtProvider::GetRibbonHelpButtonArea(wxRect rect)
++{
++    rect = wxRect(rect.GetWidth()-m_help_button_offset, 2, 20, 20);
++    if( (m_toggle_button_offset==22) && (m_help_button_offset==22) )
++        m_toggle_button_offset += 22;
++    return rect;
++}
++
+ #endif // wxUSE_RIBBON
+Index: src/ribbon/bar.cpp
+===================================================================
+--- src/ribbon/bar.cpp	(revision 72357)
++++ src/ribbon/bar.cpp	(working copy)
+@@ -41,6 +41,7 @@
+ wxDEFINE_EVENT(wxEVT_COMMAND_RIBBONBAR_TAB_RIGHT_UP, wxRibbonBarEvent);
+ wxDEFINE_EVENT(wxEVT_COMMAND_RIBBONBAR_TAB_LEFT_DCLICK, wxRibbonBarEvent);
+ wxDEFINE_EVENT(wxEVT_COMMAND_RIBBONBAR_TOGGLED, wxRibbonBarEvent);
++wxDEFINE_EVENT(wxEVT_COMMAND_RIBBONBAR_HELP_CLICKED, wxRibbonBarEvent);
+ 
+ IMPLEMENT_CLASS(wxRibbonBar, wxRibbonControl)
+ IMPLEMENT_DYNAMIC_CLASS(wxRibbonBarEvent, wxNotifyEvent)
+@@ -58,6 +59,7 @@
+   EVT_RIGHT_UP(wxRibbonBar::OnMouseRightUp)
+   EVT_LEFT_DCLICK(wxRibbonBar::OnMouseDoubleClick)
+   EVT_SIZE(wxRibbonBar::OnSize)
++  EVT_KILL_FOCUS(wxRibbonBar::OnKillFocus)
+ END_EVENT_TABLE()
+ 
+ void wxRibbonBar::AddPage(wxRibbonPage *page)
+@@ -245,7 +247,8 @@
+     {
+         RefreshTabBar();
+     }
+-    HitTestToggleButton(evt.GetPosition());
++    HitTestRibbonButton(m_toggle_button_rect, evt.GetPosition(), m_toggle_button_hovered);
++    HitTestRibbonButton(m_help_button_rect, evt.GetPosition(), m_help_button_hovered);
+ }
+ 
+ void wxRibbonBar::OnMouseLeave(wxMouseEvent& WXUNUSED(evt))
+@@ -746,6 +749,8 @@
+ 
+     m_toggle_button_hovered = false;
+     m_bar_hovered = false;
++
++    m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_PINNED;
+ }
+ 
+ void wxRibbonBar::SetArtProvider(wxRibbonArtProvider* art)
+@@ -783,8 +788,11 @@
+ 
+     DoEraseBackground(dc);
+ 
+-    m_toggle_button_rect = m_art->GetBarToggleButtonArea(dc, this, GetSize());
+-
++    if ( m_flags & wxRIBBON_BAR_SHOW_HELP_BUTTON  )
++        m_help_button_rect = m_art->GetRibbonHelpButtonArea(GetSize());
++    if ( m_flags & wxRIBBON_BAR_SHOW_TOGGLE_BUTTON  )
++        m_toggle_button_rect = m_art->GetBarToggleButtonArea(GetSize());
++    
+     size_t numtabs = m_pages.GetCount();
+     double sep_visibility = 0.0;
+     bool draw_sep = false;
+@@ -858,9 +866,12 @@
+             m_art->DrawScrollButton(dc, this, m_tab_scroll_right_button_rect, wxRIBBON_SCROLL_BTN_RIGHT | m_tab_scroll_right_button_state | wxRIBBON_SCROLL_BTN_FOR_TABS);
+         }
+     }
+-    wxRect rect(GetClientSize().GetWidth() - 30, 6, 12, 12);
++    
++    if ( m_flags & wxRIBBON_BAR_SHOW_HELP_BUTTON  )
++        m_art->DrawHelpButton(dc, this, m_help_button_rect);
+     if ( m_flags & wxRIBBON_BAR_SHOW_TOGGLE_BUTTON  )
+-        m_art->DrawToggleButton(dc, this, rect, ArePanelsShown());
++        m_art->DrawToggleButton(dc, this, m_toggle_button_rect, m_ribbon_state);
++    
+ }
+ 
+ void wxRibbonBar::OnEraseBackground(wxEraseEvent& WXUNUSED(evt))
+@@ -931,6 +942,28 @@
+ void wxRibbonBar::OnMouseLeftDown(wxMouseEvent& evt)
+ {
+     wxRibbonPageTabInfo *tab = HitTestTabs(evt.GetPosition());
++    SetFocus();
++    if(tab)
++    {
++        if(m_ribbon_state == wxRIBBON_BAR_TOGGLE_BUTTON_MINIMIZED)
++        {
++            ShowPanels();
++            m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_EXPANDED;
++        }		
++        else if((tab == &m_pages.Item(m_current_page)) && (m_ribbon_state == wxRIBBON_BAR_TOGGLE_BUTTON_EXPANDED))
++        {
++            HidePanels();
++            m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_MINIMIZED;
++        }
++    }
++    else 
++    {
++        if(m_ribbon_state == wxRIBBON_BAR_TOGGLE_BUTTON_EXPANDED)
++        {
++            HidePanels();
++            m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_MINIMIZED;
++        }
++    }
+     if(tab && tab != &m_pages.Item(m_current_page))
+     {
+         wxRibbonBarEvent query(wxEVT_COMMAND_RIBBONBAR_PAGE_CHANGING, GetId(), tab->page);
+@@ -968,11 +1001,22 @@
+         {
+             if(m_toggle_button_rect.Contains(position))
+             {
+-                ShowPanels(!ArePanelsShown());
++                bool pshown = ArePanelsShown();
++                ShowPanels(!pshown);
++                if(pshown)
++		            m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_MINIMIZED;
++                else
++                    m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_PINNED;
+                 wxRibbonBarEvent event(wxEVT_COMMAND_RIBBONBAR_TOGGLED, GetId());
+                 event.SetEventObject(this);
+                 ProcessWindowEvent(event);
+             }
++            if(m_help_button_rect.Contains(position))
++            {
++                wxRibbonBarEvent event(wxEVT_COMMAND_RIBBONBAR_HELP_CLICKED, GetId());
++                event.SetEventObject(this);
++                ProcessWindowEvent(event);
++            }
+         }
+     }
+ }
+@@ -1091,7 +1135,21 @@
+ 
+ void wxRibbonBar::OnMouseDoubleClick(wxMouseEvent& evt)
+ {
+-    DoMouseButtonCommon(evt, wxEVT_COMMAND_RIBBONBAR_TAB_LEFT_DCLICK);
++    wxRibbonPageTabInfo *tab = HitTestTabs(evt.GetPosition());
++    SetFocus();
++    if(tab && tab == &m_pages.Item(m_current_page))
++    {
++        if(m_ribbon_state == wxRIBBON_BAR_TOGGLE_BUTTON_PINNED)
++        {
++            m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_MINIMIZED;
++            HidePanels();
++        }
++        else
++        {
++            m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_PINNED;
++            ShowPanels();
++        }
++    }
+ }
+ 
+ void wxRibbonBar::DoMouseButtonCommon(wxMouseEvent& evt, wxEventType tab_event_type)
+@@ -1158,7 +1216,7 @@
+     return best;
+ }
+ 
+-void wxRibbonBar::HitTestToggleButton(wxPoint position)
++void wxRibbonBar::HitTestRibbonButton(wxRect rect, wxPoint position, bool &hover_flag)
+ {
+     bool hovered = false, toggle_button_hovered = false;
+     if(position.x >= 0 && position.y >= 0)
+@@ -1171,16 +1229,34 @@
+     }
+     if(hovered)
+     {
+-        toggle_button_hovered = (m_flags & wxRIBBON_BAR_SHOW_TOGGLE_BUTTON) &&
+-                                    m_toggle_button_rect.Contains(position);
++        toggle_button_hovered = rect.Contains(position);
+ 
+-        if(hovered != m_bar_hovered || toggle_button_hovered != m_toggle_button_hovered)
++        if(hovered != m_bar_hovered || toggle_button_hovered != hover_flag )
+         {
+             m_bar_hovered = hovered;
+-            m_toggle_button_hovered = toggle_button_hovered;
++            hover_flag = toggle_button_hovered;
+             Refresh(false);
+         }
+     }
+ }
+ 
++void wxRibbonBar::HideIfExpanded()
++{
++    if( m_ribbon_state == wxRIBBON_BAR_TOGGLE_BUTTON_EXPANDED)
++    {
++        HidePanels();
++        m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_MINIMIZED;
++    }
++    else
++    {
++        ShowPanels();
++        m_ribbon_state = wxRIBBON_BAR_TOGGLE_BUTTON_PINNED;
++    }
++}
++
++void wxRibbonBar::OnKillFocus(wxFocusEvent& WXUNUSED(evt))
++{
++    HideIfExpanded();
++}
++
+ #endif // wxUSE_RIBBON
+Index: src/ribbon/buttonbar.cpp
+===================================================================
+--- src/ribbon/buttonbar.cpp	(revision 72357)
++++ src/ribbon/buttonbar.cpp	(working copy)
+@@ -17,6 +17,7 @@
+ 
+ #if wxUSE_RIBBON
+ 
++#include "wx/ribbon/panel.h"
+ #include "wx/ribbon/buttonbar.h"
+ #include "wx/ribbon/art.h"
+ #include "wx/dcbuffer.h"
+@@ -1100,6 +1101,8 @@
+                 m_lock_active_state = true;
+                 ProcessWindowEvent(notification);
+                 m_lock_active_state = false;
++
++                wxStaticCast(m_parent, wxRibbonPanel)->HideIfExpanded();
+             } while(false);
+             if(m_active_button) // may have been NULLed by event handler
+             {
+Index: src/ribbon/page.cpp
+===================================================================
+--- src/ribbon/page.cpp	(revision 72357)
++++ src/ribbon/page.cpp	(working copy)
+@@ -1091,4 +1091,9 @@
+     return best;
+ }
+ 
++void wxRibbonPage::HideIfExpanded()
++{
++    wxStaticCast(m_parent, wxRibbonBar)->HideIfExpanded();
++}
++
+ #endif // wxUSE_RIBBON
+Index: src/ribbon/panel.cpp
+===================================================================
+--- src/ribbon/panel.cpp	(revision 72357)
++++ src/ribbon/panel.cpp	(working copy)
+@@ -218,6 +218,7 @@
+         m_ext_button_hovered = ext_button_hovered;
+         Refresh(false);
+     }
++	
+ }
+ 
+ void wxRibbonPanel::AddChild(wxWindowBase *child)
+@@ -1099,4 +1100,9 @@
+     return best;
+ }
+ 
++void wxRibbonPanel::HideIfExpanded()
++{
++    wxStaticCast(m_parent, wxRibbonPage)->HideIfExpanded();
++}
++
+ #endif // wxUSE_RIBBON
+Index: src/ribbon/toolbar.cpp
+===================================================================
+--- src/ribbon/toolbar.cpp	(revision 72357)
++++ src/ribbon/toolbar.cpp	(working copy)
+@@ -1149,6 +1149,8 @@
+             notification.SetEventObject(this);
+             notification.SetBar(this);
+             ProcessEvent(notification);
++
++            wxStaticCast(m_parent, wxRibbonPanel)->HideIfExpanded();
+         }
+ 
+         // Notice that m_active_tool could have been reset by the event handler

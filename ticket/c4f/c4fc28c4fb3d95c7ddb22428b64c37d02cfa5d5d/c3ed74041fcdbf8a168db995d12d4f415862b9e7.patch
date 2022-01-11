@@ -1,0 +1,184 @@
+Index: droptgt.cpp
+===================================================================
+--- droptgt.cpp	(revision 61760)
++++ droptgt.cpp	(working copy)
+@@ -47,6 +47,9 @@
+ #endif
+ 
+ #include "wx/dnd.h"
++#include "wx/file.h"
++#include "wx/filename.h"
++#include "wx/utils.h"
+ 
+ #include "wx/msw/ole/oleutils.h"
+ 
+@@ -91,6 +94,8 @@
+ 
+ static wxDragResult ConvertDragEffectToResult(DWORD dwEffect);
+ static DWORD ConvertDragResultToEffect(wxDragResult result);
++static HRESULT StreamToFile(IStream *stream, const char *file_name);
++static HRESULT createDropData(IDataObject *pDataObj, STGMEDIUM &stm);   
+ 
+ // ============================================================================
+ // wxIDropTarget implementation
+@@ -452,8 +457,15 @@
+     fmtMemory.tymed     = TYMED_HGLOBAL;  // TODO to add other media
+ 
+     bool rc = false;
+-
+-    HRESULT hr = m_pIDataSource->GetData(&fmtMemory, &stm);
++    HRESULT hr;
++    if (format == CFSTR_FILEDESCRIPTOR) {
++        hr = createDropData(m_pIDataSource, stm);
++        fmtMemory.cfFormat = wxDF_FILENAME;
++    }
++    else {
++        hr = m_pIDataSource->GetData(&fmtMemory, &stm);
++    }
++    
+     if ( SUCCEEDED(hr) ) {
+         IDataObject *dataObject = m_dataObject->GetInterface();
+ 
+@@ -517,6 +529,8 @@
+ 
+     m_dataObject->GetAllFormats(formats, wxDataObject::Set);
+ 
++    unsigned short cp_format_descriptor = RegisterClipboardFormat(CFSTR_FILEDESCRIPTOR);
++
+     // cycle through all supported formats
+     size_t n;
+     for ( n = 0; n < nFormats; n++ ) {
+@@ -529,6 +543,14 @@
+ 
+             break;
+         }
++        // This will accept a virtual drop, if *normal* drop is accepted.
++        if (s_fmtMemory.cfFormat == wxDF_FILENAME) {
++          s_fmtMemory.cfFormat = cp_format_descriptor;
++          if ( pIDataSource->QueryGetData(&s_fmtMemory) == S_OK ) {
++            format = CFSTR_FILEDESCRIPTOR;
++            break;
++          }
++        }
+     }
+ 
+     if ( formats != &format ) {
+@@ -585,4 +607,118 @@
+     }
+ }
+ 
++
++const unsigned int BLOCK_SIZE = 1024;
++HRESULT StreamToFile(IStream *stream, const wxString file_name)  
++{
++    byte buffer[BLOCK_SIZE];
++    unsigned long bytes_read = 0;
++    int bytes_written = 0;
++    HRESULT hr = S_OK;
++
++    wxFile newFile(file_name, wxFile::write);
++    if (newFile.IsOpened()) 
++    {
++        do 
++        {
++            hr = stream->Read(buffer, BLOCK_SIZE, &bytes_read);
++            if (bytes_read)
++                bytes_written = newFile.Write(buffer, bytes_read);
++        } 
++        while (S_OK == hr && bytes_read == BLOCK_SIZE);
++        
++        newFile.Close();
++        if (bytes_written == 0) {
++            wxLogError(wxT("0 bytes written to file '%s'."), file_name.c_str());
++            if (!wxRemoveFile(file_name))
++              wxLogDebug(wxT("Failed to delete the empty file '%s'."), file_name.c_str());
++            hr = S_FALSE;
++        }
++    }
++    else 
++    {
++        wxLogError(wxT("Unable to open file '%s' with write access."), file_name.c_str());
++        hr = S_FALSE;
++    }
++    return hr;
++}
++
++HRESULT createDropData(IDataObject *pDataObj, STGMEDIUM &stm) 
++{
++    // Function gets information from IdataObject, 
++    // it contains the "virtual drop" (filenames + binary content)
++    // Eatch filecontent is saved to a tempoerery file.
++    
++    HRESULT hr = S_OK;
++    if (pDataObj) 
++    {
++        FILEGROUPDESCRIPTOR *file_group_descriptor;
++        FILEDESCRIPTOR      file_descriptor;
++
++        unsigned short cp_format_descriptor = RegisterClipboardFormat(CFSTR_FILEDESCRIPTOR);
++        unsigned short cp_format_contents   = RegisterClipboardFormat(CFSTR_FILECONTENTS);
++
++        //Set up format structure for the descriptor and contents
++        FORMATETC descriptor_format = { cp_format_descriptor, 
++                                        NULL, 
++                                        DVASPECT_CONTENT, 
++                                        -1, 
++                                        TYMED_HGLOBAL };
++        
++        FORMATETC contents_format =   { cp_format_contents,
++                                        NULL, 
++                                        DVASPECT_CONTENT, 
++                                        -1, 
++                                        TYMED_ISTREAM };
++
++        // Get the descriptor information
++        STGMEDIUM storage;
++
++        hr = pDataObj->GetData(&descriptor_format, &storage);
++        wxFileDataObject dropFiles;
++        
++        if (hr == S_OK) 
++        {
++            file_group_descriptor = (FILEGROUPDESCRIPTOR *) GlobalLock(storage.hGlobal);
++
++            // For each file, get the name and copy the stream to a file
++            for (unsigned int file_index = 0; file_index < file_group_descriptor->cItems; file_index++) 
++            {
++                file_descriptor = file_group_descriptor->fgd[file_index];
++                contents_format.lindex = file_index;
++                hr = pDataObj->GetData(&contents_format, &storage);
++
++                if (hr == S_OK) {
++                    //find temp path
++                    wxFileName filePath;
++                    filePath.AssignDir(wxFileName::GetTempDir());
++                    filePath.SetFullName(file_descriptor.cFileName);
++                    if (filePath.IsOk())  // Dump stream to a file
++                    { 
++                        hr = StreamToFile(storage.pstm, filePath.GetFullPath());
++                        if (hr == S_OK) {
++                            dropFiles.AddFile(filePath.GetFullPath());
++                      }
++                  }
++              }
++          }
++          GlobalUnlock(storage.hGlobal);
++          GlobalFree(storage.hGlobal);
++        }
++      
++        stm.tymed   = TYMED_HGLOBAL;
++        stm.pUnkForRelease = NULL;
++
++        wxASSERT(!dropFiles.GetFilenames().IsEmpty());
++        
++        // allocate and lock a global memory buffer. Make it fixed
++        // data so we don't have to use GlobalLock
++        void  *ptr;
++        ptr = (void *)::GlobalAlloc(GPTR, dropFiles.GetDataSize()); 
++        dropFiles.GetDataHere(ptr);
++        stm.hGlobal = ptr;
++    }
++    return hr;
++}
++
+ #endif // wxUSE_OLE && wxUSE_DRAG_AND_DROP

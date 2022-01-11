@@ -1,0 +1,348 @@
+diff --git a/build/files b/build/files
+index 5c1ba64..726d869 100644
+--- a/build/files
++++ b/build/files
+@@ -2670,6 +2670,7 @@ ADVANCED_OSX_COCOA_SRC =
+     src/osx/dataview_osx.cpp
+     src/osx/cocoa/dataview.mm
+     src/osx/cocoa/datetimectrl.mm
++    src/osx/cocoa/notifmsg.mm
+     src/osx/cocoa/taskbar.mm
+     src/osx/core/hidjoystick.cpp
+ 
+@@ -2681,6 +2682,7 @@ ADVANCED_OSX_COCOA_HDR =
+     wx/osx/dvrenderer.h
+     wx/osx/dvrenderers.h
+     wx/osx/joystick.h
++    wx/osx/notifmsg.h
+     wx/osx/sound.h
+     wx/osx/taskbarosx.h
+     wx/osx/timectrl.h
+diff --git a/include/wx/notifmsg.h b/include/wx/notifmsg.h
+index fe49c87..4b0a32d 100644
+--- a/include/wx/notifmsg.h
++++ b/include/wx/notifmsg.h
+@@ -126,16 +126,14 @@ private:
+     wxDECLARE_NO_COPY_CLASS(wxNotificationMessageBase);
+ };
+ 
+-/*
+-    TODO: Implement under OS X using notification centre (10.8+) or
+-          Growl (http://growl.info/) for the previous versions.
+- */
+ #if defined(__WXGTK__) && wxUSE_LIBNOTIFY
+     #include "wx/gtk/notifmsg.h"
+ #elif defined(__WXGTK__) && (wxUSE_LIBHILDON || wxUSE_LIBHILDON2)
+     #include "wx/gtk/hildon/notifmsg.h"
+ #elif defined(__WXMSW__) && wxUSE_TASKBARICON && wxUSE_TASKBARICON_BALLOONS
+     #include "wx/msw/notifmsg.h"
++#elif defined(__WXMAC__)
++    #include "wx/osx/notifmsg.h"
+ #else
+     #include "wx/generic/notifmsg.h"
+ 
+diff --git a/include/wx/osx/notifmsg.h b/include/wx/osx/notifmsg.h
+new file mode 100644
+index 0000000..ac5fc89
+--- /dev/null
++++ b/include/wx/osx/notifmsg.h
+@@ -0,0 +1,60 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/osx/notifmsg.h
++// Purpose:     implementation of wxNotificationMessage for OSX
++// Author:      Tobias Taschner
++// Created:     2014-10-22
++// Copyright:   (c) 2014 wxWidgets development team
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_OSX_NOTIFMSG_H_
++#define _WX_OSX_NOTIFMSG_H_
++
++// ----------------------------------------------------------------------------
++// wxNotificationMessage
++// ----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_ADV wxNotificationMessage : public wxNotificationMessageBase
++{
++public:
++    wxNotificationMessage() { Init(); }
++    wxNotificationMessage(const wxString& title,
++                          const wxString& message = wxString(),
++                          wxWindow *parent = NULL,
++                          int flags = wxICON_INFORMATION)
++        : wxNotificationMessageBase(title, message, parent, flags)
++    {
++        Init();
++    }
++
++    virtual ~wxNotificationMessage();
++
++
++    virtual bool Show(int timeout = Timeout_Auto);
++    virtual bool Close();
++
++    // OSX implementation-specific methods
++
++    // call this to always use the generic implementation, even if the system
++    // supports notification center used by the native one
++    static void AlwaysUseGeneric(bool alwaysUseGeneric)
++    {
++        ms_alwaysUseGeneric = alwaysUseGeneric;
++    }
++
++private:
++    // common part of all ctors
++    void Init();
++
++    // flag indicating whether we should always use generic implementation
++    static bool ms_alwaysUseGeneric;
++
++    // the real implementation of this class (selected during run-time because
++    // the notification center is not available in all OS X versions)
++    class wxNotifMsgImpl *m_impl;
++
++    wxDECLARE_NO_COPY_CLASS(wxNotificationMessage);
++};
++
++#endif // _WX_OSX_NOTIFMSG_H_
++
+diff --git a/interface/wx/notifmsg.h b/interface/wx/notifmsg.h
+index 3b5d119..6ef3c88 100644
+--- a/interface/wx/notifmsg.h
++++ b/interface/wx/notifmsg.h
+@@ -10,7 +10,7 @@
+ 
+     This class allows to show the user a message non intrusively.
+ 
+-    Currently it is implemented natively for Windows and GTK and uses
++    Currently it is implemented natively for Windows, OS X, GTK and uses
+     (non-modal) dialogs for the display of the notifications under the other
+     platforms.
+ 
+diff --git a/src/osx/cocoa/notifmsg.mm b/src/osx/cocoa/notifmsg.mm
+new file mode 100644
+index 0000000..4d45de8
+--- /dev/null
++++ b/src/osx/cocoa/notifmsg.mm
+@@ -0,0 +1,220 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        src/osx/notifmsg.cpp
++// Purpose:     implementation of wxNotificationMessage for OSX
++// Author:      Tobias Taschner
++// Created:     2014-10-22
++// Copyright:   (c) 2014 wxWidgets development team
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++// ============================================================================
++// declarations
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// for compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#if wxUSE_NOTIFICATION_MESSAGE
++
++#include "wx/notifmsg.h"
++
++#ifndef WX_PRECOMP
++    #include "wx/toplevel.h"
++    #include "wx/app.h"
++    #include "wx/string.h"
++#endif // WX_PRECOMP
++
++#include "wx/osx/private.h"
++#include "wx/generic/notifmsg.h"
++#include "wx/timer.h"
++#include "wx/frame.h"
++
++// ----------------------------------------------------------------------------
++// different implementations used by wxNotificationMessage
++// ----------------------------------------------------------------------------
++
++// base class for all available implementations
++class wxNotifMsgImpl
++{
++public:
++    wxNotifMsgImpl() { }
++    virtual ~wxNotifMsgImpl() { }
++
++    virtual bool DoShow(const wxString& title,
++                        const wxString& message,
++                        int timeout,
++                        int flags) = 0;
++    virtual bool DoClose() = 0;
++    virtual bool IsAutomatic() const = 0;
++    virtual void SetDeleteOnHide() = 0;
++
++private:
++    wxDECLARE_NO_COPY_CLASS(wxNotifMsgImpl);
++};
++
++// implementation which is simply a bridge to wxGenericNotificationMessage
++class wxGenericNotifMsgImpl : public wxNotifMsgImpl
++{
++public:
++    wxGenericNotifMsgImpl() : m_notif(new wxGenericNotificationMessage) { }
++    virtual ~wxGenericNotifMsgImpl() { delete m_notif; }
++
++    virtual bool DoShow(const wxString& title,
++                        const wxString& message,
++                        int timeout,
++                        int flags) wxOVERRIDE
++    {
++        m_notif->SetTitle(title);
++        m_notif->SetMessage(message);
++        m_notif->SetFlags(flags);
++        return m_notif->Show(timeout);
++    }
++
++    virtual bool DoClose() wxOVERRIDE
++    {
++        return m_notif->Close();
++    }
++
++    virtual bool IsAutomatic() const wxOVERRIDE { return false; }
++
++    virtual void SetDeleteOnHide() wxOVERRIDE { }
++
++private:
++    wxGenericNotificationMessage * const m_notif;
++};
++
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_8
++class wxUserNotificationMsgImpl : public wxNotifMsgImpl
++{
++public:
++    wxUserNotificationMsgImpl()
++    {
++        m_deleteOnHide = false;
++        m_notif = [[NSUserNotification alloc] init];
++        m_timer.Bind(wxEVT_TIMER, &wxUserNotificationMsgImpl::OnTimer, this);
++    }
++
++    virtual ~wxUserNotificationMsgImpl()
++    {
++        [m_notif release];
++    }
++
++    virtual bool DoShow(const wxString& title,
++                        const wxString& message,
++                        int timeout,
++                        int flags) wxOVERRIDE
++    {
++        wxCFStringRef cftitle(title);
++        m_notif.title = cftitle.AsNSString();
++        wxCFStringRef cfmsg(message);
++        m_notif.subtitle = cfmsg.AsNSString();
++
++        NSUserNotificationCenter* nc = [NSUserNotificationCenter defaultUserNotificationCenter];
++        [nc deliverNotification:m_notif];
++
++        if ( timeout != wxNotificationMessage::Timeout_Never )
++        {
++            if (timeout == wxNotificationMessage::Timeout_Auto)
++                timeout = wxGenericNotificationMessage::GetDefaultTimeout();
++            m_timer.StartOnce(timeout * 1000);
++        }
++
++        return true;
++    }
++
++    virtual bool DoClose() wxOVERRIDE
++    {
++        NSUserNotificationCenter* nc = [NSUserNotificationCenter defaultUserNotificationCenter];
++        [nc removeDeliveredNotification:m_notif];
++
++        if (m_deleteOnHide)
++            delete this;
++
++        return true;
++    }
++
++    virtual bool IsAutomatic() const wxOVERRIDE { return m_timer.IsRunning(); }
++
++    virtual void SetDeleteOnHide() wxOVERRIDE { m_deleteOnHide = true; }
++
++    void OnTimer( wxTimerEvent& event)
++    {
++        DoClose();
++    }
++
++private:
++    NSUserNotification* m_notif;
++
++    wxTimer m_timer;
++
++    bool m_deleteOnHide;
++};
++#endif
++
++// ============================================================================
++// implementation
++// ============================================================================
++
++
++// ----------------------------------------------------------------------------
++// wxNotificationMessage
++// ----------------------------------------------------------------------------
++
++/* static */
++bool wxNotificationMessage::ms_alwaysUseGeneric = false;
++
++void wxNotificationMessage::Init()
++{
++    m_impl = NULL;
++}
++
++bool wxNotificationMessage::Show(int timeout)
++{
++    if ( !m_impl )
++    {
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_8
++        if ( !ms_alwaysUseGeneric && UMAGetSystemVersion() >= 0x1080 )
++        {
++            m_impl = new wxUserNotificationMsgImpl;
++        }
++        else // no support for notification center
++#endif
++        {
++            m_impl = new wxGenericNotifMsgImpl;
++        }
++    }
++    //else: reuse the same implementation for the subsequent calls, it would
++    //      be too confusing if it changed
++
++    return m_impl->DoShow(GetTitle(), GetMessage(), timeout, GetFlags());
++}
++
++bool wxNotificationMessage::Close()
++{
++    wxCHECK_MSG( m_impl, false, "must show the notification first" );
++
++    return m_impl->DoClose();
++}
++
++wxNotificationMessage::~wxNotificationMessage()
++{
++    if (m_impl && m_impl->IsAutomatic())
++    {
++        // Delete implementation when timer runs so we can hide it first
++        m_impl->SetDeleteOnHide();
++    }
++    else
++    {
++        delete m_impl;
++    }
++}
++
++#endif // wxUSE_NOTIFICATION_MESSAGE

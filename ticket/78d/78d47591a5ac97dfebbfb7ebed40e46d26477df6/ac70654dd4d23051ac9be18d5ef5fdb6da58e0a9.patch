@@ -1,0 +1,248 @@
+Index: include/wx/msw/dcclient.h
+===================================================================
+--- include/wx/msw/dcclient.h	(revision 73426)
++++ include/wx/msw/dcclient.h	(working copy)
+@@ -76,7 +76,8 @@
+     virtual ~wxPaintDCImpl();
+ 
+     // find the entry for this DC in the cache (keyed by the window)
+-    static WXHDC FindDCInCache(wxWindow* win);
++    static WXHDC FindDCInCache(wxWindow *win);
++    static WXHDC FindDCInCache(wxWindow *win, HDC hdc);
+ 
+     // This must be called by the code handling WM_PAINT to remove the DC
+     // cached for this window for the duration of this message processing.
+@@ -84,7 +85,7 @@
+ 
+ protected:
+     // Find the DC for this window in the cache, return NULL if not found.
+-    static wxPaintDCInfo *FindInCache(wxWindow* win);
++    static wxPaintDCInfo *FindInCache(wxWindow *win);
+ 
+     DECLARE_CLASS(wxPaintDCImpl)
+     wxDECLARE_NO_COPY_CLASS(wxPaintDCImpl);
+Index: src/msw/bmpcbox.cpp
+===================================================================
+--- src/msw/bmpcbox.cpp	(revision 73426)
++++ src/msw/bmpcbox.cpp	(working copy)
+@@ -412,6 +412,8 @@
+     //if ( lpDrawItem->itemState & ODS_FOCUS )
+     //    DrawFocusRect(lpDrawItem->hDC, &lpDrawItem->rcItem);
+ 
++    wxPaintDCImpl::EndPaint((wxWindow *)this);
++
+     return TRUE;
+ }
+ 
+Index: src/msw/dcclient.cpp
+===================================================================
+--- src/msw/dcclient.cpp	(revision 73426)
++++ src/msw/dcclient.cpp	(working copy)
+@@ -46,8 +46,8 @@
+ class wxPaintDCInfo
+ {
+ public:
+-    wxPaintDCInfo(HDC hdc)
+-        : m_hdc(hdc)
++    wxPaintDCInfo(wxWindow *win, HDC hdc)
++        : m_win(win), m_hdc(hdc)
+     {
+     }
+ 
+@@ -55,9 +55,11 @@
+     virtual ~wxPaintDCInfo() = 0;
+ 
+     WXHDC GetHDC() const { return (WXHDC)m_hdc; }
++    const wxWindow *GetWin() const { return m_win; }
+ 
+ protected:
+     const HDC m_hdc;
++    const wxWindow *m_win;
+ 
+     wxDECLARE_NO_COPY_CLASS(wxPaintDCInfo);
+ };
+@@ -71,7 +73,7 @@
+ {
+ public:
+     wxPaintDCInfoOur(wxWindow* win)
+-        : wxPaintDCInfo(::BeginPaint(GetHwndOf(win), GetPaintStructPtr(m_ps))),
++        : wxPaintDCInfo(win, ::BeginPaint(GetHwndOf(win), GetPaintStructPtr(m_ps))),
+           m_hwnd(GetHwndOf(win))
+     {
+     }
+@@ -101,8 +103,8 @@
+ class wxPaintDCInfoExternal : public wxPaintDCInfo
+ {
+ public:
+-    wxPaintDCInfoExternal(HDC hdc)
+-        : wxPaintDCInfo(hdc),
++    wxPaintDCInfoExternal(wxWindow *win, HDC hdc)
++        : wxPaintDCInfo(win, hdc),
+           m_state(::SaveDC(hdc))
+     {
+     }
+@@ -118,7 +120,7 @@
+     wxDECLARE_NO_COPY_CLASS(wxPaintDCInfoExternal);
+ };
+ 
+-// The global map containing HDC to use for the given window. The entries in
++// The global list containing HDC to use for the given window. The entries in
+ // this map only exist during WM_PAINT processing and are destroyed when it is
+ // over.
+ //
+@@ -129,12 +131,80 @@
+ // all of them because we can't call BeginPaint() more than once. So we cache
+ // the first HDC created for the window in this map and then reuse it later if
+ // needed. And, of course, remove it from the map when the painting is done.
+-WX_DECLARE_HASH_MAP(wxWindow *, wxPaintDCInfo *,
+-                    wxPointerHash, wxPointerEqual,
+-                    PaintDCInfos);
++WX_DECLARE_LIST(wxPaintDCInfo, wxPaintDCInfoList);
+ 
+-PaintDCInfos gs_PaintDCInfos;
++#include <wx/listimpl.cpp>
++WX_DEFINE_LIST(wxPaintDCInfoList);
+ 
++class wxPaintDCInfoCache : public wxPaintDCInfoList
++{
++public:
++  wxPaintDCInfoCache()
++  {
++    DeleteContents(true);
++  };
++
++
++  ~wxPaintDCInfoCache()
++  {
++    // there should be no entries if this class gets destroyed
++    wxASSERT_MSG(GetCount()==0, wxT("wxPaintDCInfoCache should be empty before destruction."));
++
++    Clear();
++  };
++
++
++  wxPaintDCInfo *FindPaintDCInfo(const wxWindow *win)
++  {
++    wxPaintDCInfoList::iterator it;
++    for (it = begin(); it != end(); ++it)
++    {
++      wxPaintDCInfo *current = *it;
++
++      if( current->GetWin() == win )
++        return current;
++    }
++
++    return NULL;
++  };
++
++
++  wxPaintDCInfo *FindPaintDCInfo(const wxWindow *win, HDC hdc)
++  {
++    wxPaintDCInfoList::iterator it;
++    for (it = begin(); it != end(); ++it)
++    {
++      wxPaintDCInfo *current = *it;
++
++      if( current->GetWin() == win && current->GetHDC() == hdc)
++        return current;
++    }
++
++    return NULL;
++  };
++
++
++  // theoretically there can be multiple entries for the same wxWindow
++  // make sure to delete them all
++  void DeleteEntriesForWindow(const wxWindow *win)
++  {
++    wxPaintDCInfoList::iterator it, it_next;
++    for (it = begin(); it != end(); )
++    {
++      wxPaintDCInfo *current = *it;
++
++      if( current->GetWin() == win ) {
++        it = erase( it );
++      } else {
++        ++it;
++      }
++    }
++  };
++
++};
++
++wxPaintDCInfoCache gs_PaintDCInfoCache;
++
+ } // anonymous namespace
+ 
+ // ----------------------------------------------------------------------------
+@@ -286,7 +356,6 @@
+ 
+     wxDidCreatePaintDC = true;
+ 
+-
+     m_window = window;
+ 
+     // do we have a DC for this window in the cache?
+@@ -295,7 +364,7 @@
+     {
+         // not in cache, create a new one
+         wxPaintDCInfoOur* const info = new wxPaintDCInfoOur(m_window);
+-        gs_PaintDCInfos[m_window] = info;
++        gs_PaintDCInfoCache.Append( info );
+         m_hDC = info->GetHDC();
+     }
+ 
+@@ -324,28 +393,26 @@
+ /* static */
+ wxPaintDCInfo *wxPaintDCImpl::FindInCache(wxWindow *win)
+ {
+-    PaintDCInfos::const_iterator it = gs_PaintDCInfos.find( win );
+-
+-    return it != gs_PaintDCInfos.end() ? it->second : NULL;
++  return gs_PaintDCInfoCache.FindPaintDCInfo( win );
+ }
+ 
+ /* static */
+-WXHDC wxPaintDCImpl::FindDCInCache(wxWindow* win)
++WXHDC wxPaintDCImpl::FindDCInCache(wxWindow *win)
+ {
+-    wxPaintDCInfo* const info = FindInCache(win);
++    wxPaintDCInfo* const info = gs_PaintDCInfoCache.FindPaintDCInfo( win );
++    return info ? info->GetHDC() : 0;
++}
+ 
++WXHDC wxPaintDCImpl::FindDCInCache(wxWindow *win, HDC hdc)
++{
++    wxPaintDCInfo* const info = gs_PaintDCInfoCache.FindPaintDCInfo( win, hdc );
+     return info ? info->GetHDC() : 0;
+ }
+ 
+ /* static */
+ void wxPaintDCImpl::EndPaint(wxWindow *win)
+ {
+-    wxPaintDCInfo *info = FindInCache(win);
+-    if ( info )
+-    {
+-        gs_PaintDCInfos.erase(win);
+-        delete info;
+-    }
++    gs_PaintDCInfoCache.DeleteEntriesForWindow( win );
+ }
+ 
+ wxPaintDCInfo::~wxPaintDCInfo()
+@@ -378,12 +445,12 @@
+ 
+     m_window = window;
+ 
+-    m_hDC = FindDCInCache(m_window);
++    m_hDC = FindDCInCache(window, dc);
+     if ( !m_hDC )
+     {
+         // not in cache, record it there
+-        gs_PaintDCInfos[m_window] = new wxPaintDCInfoExternal(dc);
+-
++        wxPaintDCInfoExternal *info = new wxPaintDCInfoExternal(window, dc);
++        gs_PaintDCInfoCache.Append( info );
+         m_hDC = dc;
+     }
+ }

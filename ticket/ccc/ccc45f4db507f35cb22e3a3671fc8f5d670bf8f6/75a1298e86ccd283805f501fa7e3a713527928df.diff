@@ -1,0 +1,221 @@
+Index: docs/latex/wx/log.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/log.tex,v
+retrieving revision 1.34
+diff -u -r1.34 log.tex
+--- docs/latex/wx/log.tex	2006/06/22 00:20:57	1.34
++++ docs/latex/wx/log.tex	2006/07/11 09:36:09
+@@ -155,7 +155,9 @@
+ \helpref{SetTimestamp}{wxlogsettimestamp}\\
+ \helpref{GetTimestamp}{wxloggettimestamp}\\
+ \helpref{SetTraceMask}{wxlogsettracemask}\\
+-\helpref{GetTraceMask}{wxloggettracemask}
++\helpref{GetTraceMask}{wxloggettracemask}\\
++\helpref{SetRepetitionCounting}{wxlogsetrepetitioncounting}\\
++\helpref{GetRepetitionCounting}{wxloggetrepetitioncounting}
+ 
+ %%%%% MEMBERS HERE %%%%%
+ \helponly{\insertatlevel{2}{
+@@ -321,6 +323,18 @@
+ \func{static wxLogLevel}{GetLogLevel}{\void}
+ 
+ Returns the current log level limit.
++
++\membersection{wxLog::SetRepetitionCounting}\label{wxlogsetrepetitioncounting}
++\func{static void}{SetRepetitionCounting}{\param{bool }{ repetCounting = true}}
++
++Enables logging mode in which a log message is logged once, and in case exactly
++the same message successively repeats one or more times, only the number of 
++repetitions is logged.
++
++\membersection{wxLog::GetRepetitionCounting}\label{wxloggetrepetitioncounting}
++\func{static void}{GetRepetitionCounting}{\param{bool }{ repetCounting = true}}
++
++Returns whether the repetition counting mode is enabled.
+ 
+ \membersection{wxLog::SetTimestamp}\label{wxlogsettimestamp}
+ 
+Index: include/wx/log.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/log.h,v
+retrieving revision 1.109
+diff -u -r1.109 log.h
+--- include/wx/log.h	2005/09/25 20:23:21	1.109
++++ include/wx/log.h	2006/07/11 09:36:10
+@@ -139,15 +139,7 @@
+ 
+     // static sink function - see DoLog() for function to overload in the
+     // derived classes
+-    static void OnLog(wxLogLevel level, const wxChar *szString, time_t t)
+-    {
+-        if ( IsEnabled() && ms_logLevel >= level )
+-        {
+-            wxLog *pLogger = GetActiveTarget();
+-            if ( pLogger )
+-                pLogger->DoLog(level, szString, t);
+-        }
+-    }
++    static void OnLog(wxLogLevel level, const wxChar *szString, time_t t);
+ 
+     // message buffering
+ 
+@@ -195,6 +187,14 @@
+     // current is NULL?
+     static void DontCreateOnDemand();
+ 
++    // log the count of repeating messages instead of logging the messages
++    // multiple times
++    static void SetRepetitionCounting(bool bRepetCounting = true)
++    { ms_bRepetCounting = bRepetCounting; }
++
++    // gets duplicate counting status
++    static bool GetRepetitionCounting() { return ms_bRepetCounting; }
++
+     // trace mask (see wxTraceXXX constants for details)
+     static void SetTraceMask(wxTraceMask ulMask) { ms_ulTraceMask = ulMask; }
+ 
+@@ -242,7 +242,7 @@
+     static void TimeStamp(wxString *str);
+ 
+     // make dtor virtual for all derived classes
+-    virtual ~wxLog() { }
++    virtual ~wxLog();
+ 
+ 
+     // this method exists for backwards compatibility only, don't use
+@@ -259,9 +259,22 @@
+     // you override DoLog() you might not need it at all
+     virtual void DoLogString(const wxChar *szString, time_t t);
+ 
++    // log a line containing the number of times the previous message was
++    // repeated
++    // returns: the number
++    static long DoLogNumberOfRepeats();
++
+ private:
+     // static variables
+     // ----------------
++
++    // traditional behaviour or counting repetitions
++    static bool        ms_bRepetCounting;
++    static wxString    ms_prevString;   // previous message that was logged
++    // how many times the previous message was logged
++    static size_t      ms_prevCounter;
++    static time_t      ms_prevTimeStamp;// timestamp of the previous message
++    static wxLogLevel  ms_prevLevel;    // level of the previous message
+ 
+     static wxLog      *ms_pLogger;      // currently active log sink
+     static bool        ms_doLog;        // false => all logging disabled
+Index: src/common/log.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/log.cpp,v
+retrieving revision 1.168
+diff -u -r1.168 log.cpp
+--- src/common/log.cpp	2006/06/29 12:42:06	1.168
++++ src/common/log.cpp	2006/07/11 09:36:14
+@@ -357,6 +357,61 @@
+ // wxLog class implementation
+ // ----------------------------------------------------------------------------
+ 
++/* static */
++long wxLog::DoLogNumberOfRepeats()
++{
++    long retval = ms_prevCounter;
++    wxLog *pLogger = GetActiveTarget();
++    if( pLogger && ms_prevCounter > 0 ) {
++        wxString msg;
++        msg.Printf(wxPLURAL("The previous message repeated once.",
++                            "The previous message repeated %lu times.",
++                            ms_prevCounter),
++                   ms_prevCounter);
++        ms_prevCounter = 0;
++        ms_prevString = wxT("");
++        pLogger->DoLog(ms_prevLevel, msg.c_str(), ms_prevTimeStamp);
++    }
++    return retval;
++}
++
++wxLog::~wxLog()
++{
++    if(GetRepetitionCounting() == true && ms_prevCounter > 0)
++    {
++        // looks like the repeat count has not been logged yet,
++        // so let's do it now
++        wxLog::DoLogNumberOfRepeats();
++    }
++}
++
++/* static */
++void wxLog::OnLog(wxLogLevel level, const wxChar *szString, time_t t)
++{
++    if ( IsEnabled() && ms_logLevel >= level )
++    {
++        wxLog *pLogger = GetActiveTarget();
++        if ( pLogger )
++        {
++            if(GetRepetitionCounting() == true && ms_prevString == szString)
++            {
++                ms_prevCounter++;
++            }
++            else
++            {
++                if(GetRepetitionCounting() == true)
++                {
++                    pLogger->DoLogNumberOfRepeats();
++                }
++                ms_prevString = szString;
++                ms_prevLevel = level;
++                ms_prevTimeStamp = t;
++                pLogger->DoLog(level, szString, t);
++            }
++        }
++    }
++}
++
+ wxChar *wxLog::SetLogBuffer( wxChar *buf, size_t size)
+ {
+     wxChar *oldbuf = s_szBuf;
+@@ -695,6 +750,12 @@
+ // ----------------------------------------------------------------------------
+ // static variables
+ // ----------------------------------------------------------------------------
++
++bool            wxLog::ms_bRepetCounting= false;
++wxString        wxLog::ms_prevString;
++size_t          wxLog::ms_prevCounter  = 0;
++time_t          wxLog::ms_prevTimeStamp= 0;
++wxLogLevel      wxLog::ms_prevLevel;
+ 
+ wxLog          *wxLog::ms_pLogger      = (wxLog *)NULL;
+ bool            wxLog::ms_doLog        = true;
+Index: src/generic/logg.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/generic/logg.cpp,v
+retrieving revision 1.97
+diff -u -r1.97 logg.cpp
+--- src/generic/logg.cpp	2006/05/25 07:07:01	1.97
++++ src/generic/logg.cpp	2006/07/11 09:36:15
+@@ -243,7 +243,12 @@
+ 
+     // do it right now to block any new calls to Flush() while we're here
+     m_bHasMessages = false;
++    long repeatCount = 0;
+ 
++    if(wxLog::GetRepetitionCounting() == true) {
++        repeatCount = wxLog::DoLogNumberOfRepeats();
++    }
++
+     wxString appName = wxTheApp->GetAppName();
+     if ( !appName.empty() )
+         appName[0u] = (wxChar)wxToupper(appName[0u]);
+@@ -281,6 +286,8 @@
+     {
+ #if wxUSE_LOG_DIALOG
+ 
++        if(repeatCount > 0)
++            m_aMessages[nMsgCount-1] += wxString::Format(wxT(" (%s)"), m_aMessages[nMsgCount-2].c_str());
+         wxLogDialog dlg(NULL,
+                         m_aMessages, m_aSeverity, m_aTimes,
+                         title, style);
+
+ 	  	 

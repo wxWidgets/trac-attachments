@@ -1,0 +1,138 @@
+diff -u2 -r wxWidgets-20050323/include/wx/filesys.h wxWidgets-haze/include/wx/filesys.h
+--- wxWidgets-20050323/include/wx/filesys.h	2005-03-17 05:03:00.000000000 +0100
++++ wxWidgets-haze/include/wx/filesys.h	2005-03-24 15:11:08.000000000 +0100
+@@ -53,4 +53,5 @@
+     {
+         m_Stream = stream;
++	m_File   = NULL;
+         m_Location = loc;
+         m_MimeType = mimetype; m_MimeType.MakeLower();
+@@ -61,5 +62,23 @@
+     }
+ 
+-    virtual ~wxFSFile() { if (m_Stream) delete m_Stream; }
++    wxFSFile(wxInputStream *stream, wxFSFile *file, const wxString& loc,
++             const wxString& mimetype, const wxString& anchor
++#if wxUSE_DATETIME
++             , wxDateTime modif
++#endif // wxUSE_DATETIME
++             )
++    {
++        m_Stream = stream;	
++	m_File   = file;
++        m_Location = loc;
++        m_MimeType = mimetype; m_MimeType.MakeLower();
++        m_Anchor = anchor;
++#if wxUSE_DATETIME
++        m_Modif = modif;
++#endif // wxUSE_DATETIME
++    }
++
++
++    virtual ~wxFSFile() { if( m_Stream ) delete m_Stream; if( m_File ) delete m_File; }
+ 
+     // returns stream. This doesn't _create_ stream, it only returns
+@@ -81,4 +100,5 @@
+ private:
+     wxInputStream *m_Stream;
++    wxFSFile *m_File;
+     wxString m_Location;
+     wxString m_MimeType;
+diff -u2 -r wxWidgets-20050323/include/wx/zipstrm.h wxWidgets-haze/include/wx/zipstrm.h
+--- wxWidgets-20050323/include/wx/zipstrm.h	2005-02-11 05:03:28.000000000 +0100
++++ wxWidgets-haze/include/wx/zipstrm.h	2005-03-24 15:19:14.000000000 +0100
+@@ -348,5 +348,5 @@
+ 
+     wxZipInputStream(wxInputStream& stream, wxMBConv& conv = wxConvLocal);
+-    wxZipInputStream(const wxString& archive, const wxString& file);
++    wxZipInputStream(const wxString& archive, const wxString& file, wxMBConv& conv = wxConvLocal);
+     virtual ~wxZipInputStream();
+ 
+diff -u2 -r wxWidgets-20050323/src/common/fs_zip.cpp wxWidgets-haze/src/common/fs_zip.cpp
+--- wxWidgets-20050323/src/common/fs_zip.cpp	2005-02-20 05:03:38.000000000 +0100
++++ wxWidgets-haze/src/common/fs_zip.cpp	2005-03-24 15:11:08.000000000 +0100
+@@ -71,6 +71,5 @@
+ {
+     wxString p = GetProtocol(location);
+-    return (p == wxT("zip")) &&
+-           (GetProtocol(GetLeftLocation(location)) == wxT("file"));
++    return p==wxT("zip");
+ }
+ 
+@@ -78,5 +77,5 @@
+ 
+ 
+-wxFSFile* wxZipFSHandler::OpenFile(wxFileSystem& WXUNUSED(fs), const wxString& location)
++wxFSFile* wxZipFSHandler::OpenFile(wxFileSystem& fs, const wxString& location)
+ {
+     wxString right = GetRightLocation(location);
+@@ -84,10 +83,4 @@
+     wxInputStream *s;
+ 
+-    if (GetProtocol(left) != wxT("file"))
+-    {
+-        wxLogError(_("ZIP handler currently supports only local files!"));
+-        return NULL;
+-    }
+-
+     if (right.Contains(wxT("./")))
+     {
+@@ -100,10 +93,11 @@
+     if (right.GetChar(0) == wxT('/')) right = right.Mid(1);
+ 
+-    wxFileName leftFilename = wxFileSystem::URLToFileName(left);
++    wxFSFile* pFile = fs.OpenFile(left);
++    if( !pFile ) return NULL;
+ 
+-    s = new wxZipInputStream(leftFilename.GetFullPath(), right);
++    s = new wxZipInputStream( *pFile->GetStream(), right );    
+     if (s && s->IsOk() )
+     {
+-        return new wxFSFile(s,
++        return new wxFSFile(s, pFile, 
+                             left + wxT("#zip:") + right,
+                             GetMimeTypeFromExt(location),
+diff -u2 -r wxWidgets-20050323/src/common/zipstrm.cpp wxWidgets-haze/src/common/zipstrm.cpp
+--- wxWidgets-20050323/src/common/zipstrm.cpp	2005-03-15 05:04:34.000000000 +0100
++++ wxWidgets-haze/src/common/zipstrm.cpp	2005-03-24 15:16:34.000000000 +0100
+@@ -1185,4 +1185,28 @@
+ }
+ 
++// constructor
++// 
++wxZipInputStream::wxZipInputStream(wxInputStream& stream,
++                                   const wxString& file, wxMBConv& conv /*=wxConvLocal*/)
++  : wxArchiveInputStream(stream, conv)
++{
++    m_ffile = NULL;
++    
++    // no error messages
++    wxLogNull nolog;
++    Init();
++    _wxZipEntryPtr entry;
++    
++    if( stream.IsOk() ) {
++	do {
++    	    entry.reset(GetNextEntry());
++	}
++	while (entry.get() != NULL && entry->GetInternalName() != file);    
++    }
++
++    if (entry.get() == NULL)
++        m_lasterror = wxSTREAM_READ_ERROR;
++}
++
+ // Compatibility constructor
+ //
+@@ -1747,5 +1771,8 @@
+ wxFileOffset wxZipInputStream::OnSysSeek(wxFileOffset seek, wxSeekMode mode)
+ {
+-    if (!m_ffile || AtHeader())
++    if (!IsOpened())
++        if ((AtHeader() && !DoOpen()) || !OpenDecompressor())
++            m_lasterror = wxSTREAM_READ_ERROR;
++    if (!IsOk())
+         return wxInvalidOffset;
+ 
+
+ 	  	 

@@ -1,0 +1,245 @@
+Index: include/wx/msw/private.h
+===================================================================
+--- include/wx/msw/private.h	(revision 76467)
++++ include/wx/msw/private.h	(working copy)
+@@ -931,6 +931,30 @@
+ 
+ WXDLLIMPEXP_BASE wxWinVersion wxGetWinVersion();
+ 
++class WXDLLIMPEXP_BASE wxWinEvent
++{
++public:
++    wxWinEvent() : m_hObject(NULL) {}
++    ~wxWinEvent();
++
++    bool Create(bool bInitiallyOwn = false, bool bManualReset = false, const wxChar* pstrName = NULL);
++    void Close();
++
++    bool IsOpened() const
++    {
++        return m_hObject != NULL;
++    }
++    WXHANDLE GetHandle() const
++    {
++        return m_hObject;
++    }
++    bool SetEvent();
++    bool ResetEvent();
++private:
++    WXHANDLE m_hObject;
++};
++
++
+ #if wxUSE_GUI && defined(__WXMSW__)
+ 
+ // cursor stuff
+Index: src/msw/dialup.cpp
+===================================================================
+--- src/msw/dialup.cpp	(revision 76467)
++++ src/msw/dialup.cpp	(working copy)
+@@ -139,8 +139,6 @@
+     wxRasThreadData()
+     {
+         hWnd = 0;
+-        hEventRas =
+-        hEventQuit = 0;
+         dialUpManager = NULL;
+     }
+ 
+@@ -148,17 +146,11 @@
+     {
+         if ( hWnd )
+             DestroyWindow(hWnd);
+-
+-        if ( hEventQuit )
+-            CloseHandle(hEventQuit);
+-
+-        if ( hEventRas )
+-            CloseHandle(hEventRas);
+     }
+ 
+     HWND    hWnd;       // window to send notifications to
+-    HANDLE  hEventRas,  // automatic event which RAS signals when status changes
+-            hEventQuit; // manual event which we signal when we terminate
++    wxWinEvent hEventRas,  // automatic event which RAS signals when status changes
++               hEventQuit; // manual event which we signal when we terminate
+ 
+     class WXDLLIMPEXP_FWD_CORE wxDialUpManagerMSW *dialUpManager;  // the owner
+ };
+@@ -577,7 +569,7 @@
+ {
+     if ( m_hThread )
+     {
+-        if ( !SetEvent(m_data->hEventQuit) )
++        if ( !m_data->hEventQuit.SetEvent() )
+         {
+             wxLogLastError(wxT("SetEvent(RasThreadQuit)"));
+         }
+@@ -1068,14 +1060,11 @@
+     if ( ok )
+     {
+         // first create an event to wait on
+-        m_data->hEventRas = ::CreateEvent
++        if ( !m_data->hEventRas.Create
+                             (
+-                             NULL,      // security attribute (default)
+-                             FALSE,     // manual reset (no, it is automatic)
+-                             FALSE,     // initial state (not signaled)
+-                             NULL       // name (no)
+-                            );
+-        if ( !m_data->hEventRas )
++                             false,    // manual reset (no, it is automatic)
++                             false     // initial state (not signaled)
++                            ) )
+         {
+             wxLogLastError(wxT("CreateEvent(RasStatus)"));
+ 
+@@ -1089,14 +1078,11 @@
+         // here avoids problems with missing the event if wxDialUpManagerMSW
+         // is created and destroyed immediately, before wxRasStatusWindowProc
+         // starts waiting on the event
+-        m_data->hEventQuit = ::CreateEvent
++        if ( !m_data->hEventQuit.Create
+                              (
+-                                NULL,   // default security
+-                                TRUE,   // manual event
+-                                FALSE,  // initially non signalled
+-                                NULL    // nameless
+-                             );
+-        if ( !m_data->hEventQuit )
++                                true,  // manual event
++                                false  // initially non signalled
++                             ) )
+         {
+             wxLogLastError(wxT("CreateEvent(RasThreadQuit)"));
+ 
+@@ -1160,7 +1146,7 @@
+         DWORD dwRet = ms_pfnRasConnectionNotification
+                       (
+                         (HRASCONN)INVALID_HANDLE_VALUE,
+-                        m_data->hEventRas,
++                        m_data->hEventRas.GetHandle(),
+                         3 /* RASCN_Connection | RASCN_Disconnection */
+                       );
+ 
+@@ -1241,14 +1227,12 @@
+ 
+ static DWORD wxRasMonitorThread(wxRasThreadData *data)
+ {
+-    HANDLE handles[2];
+-    handles[0] = data->hEventRas;
+-    handles[1] = data->hEventQuit;
++    HANDLE handles[] = { data->hEventRas.GetHandle(), data->hEventQuit.GetHandle() };
+ 
+     bool cont = true;
+     while ( cont )
+     {
+-        DWORD dwRet = ::WaitForMultipleObjects(2, handles, FALSE, INFINITE);
++        DWORD dwRet = ::WaitForMultipleObjects(WXSIZEOF(handles), handles, FALSE, INFINITE);
+ 
+         switch ( dwRet )
+         {
+Index: src/msw/utils.cpp
+===================================================================
+--- src/msw/utils.cpp	(revision 76467)
++++ src/msw/utils.cpp	(working copy)
+@@ -1774,3 +1774,42 @@
+ 
+     return hwnd;
+ }
++
++// ----------------------------------------------------------------------------
++// wxWinEvent
++// ----------------------------------------------------------------------------
++
++bool wxWinEvent::Create(bool bInitiallyOwn, bool bManualReset, const wxChar* pstrName)
++{
++    wxCHECK_MSG(m_hObject, false, wxT("Cannot open twice"));
++    HANDLE handle = ::CreateEvent(NULL, bManualReset, bInitiallyOwn, pstrName);
++    if (handle == NULL)
++        return false;
++    m_hObject = handle;
++    return true;
++}
++
++wxWinEvent::~wxWinEvent()
++{
++    if (IsOpened())
++        Close();
++}
++
++void wxWinEvent::Close()
++{
++    wxCHECK_RET(m_hObject, wxT("Handle must be valid"));
++    ::CloseHandle(m_hObject);
++    m_hObject = NULL;
++}
++
++bool wxWinEvent::SetEvent()
++{
++    wxCHECK_MSG(m_hObject, false, wxT("Handle must be valid"));
++    return ::SetEvent(m_hObject) ? true : false;
++}
++
++bool wxWinEvent::ResetEvent()
++{
++    wxCHECK_MSG(m_hObject, false, wxT("Handle must be valid"));
++    return ::ResetEvent(m_hObject) ? true : false;
++}
+Index: src/msw/utilsexc.cpp
+===================================================================
+--- src/msw/utilsexc.cpp	(revision 76467)
++++ src/msw/utilsexc.cpp	(working copy)
+@@ -107,7 +107,7 @@
+ static const wxChar *gs_classForHiddenWindow = NULL;
+ 
+ // event used to wake up threads waiting in wxExecuteThread
+-static HANDLE gs_heventShutdown = NULL;
++static wxWinEvent gs_heventShutdown;
+ 
+ // handles of all threads monitoring the execution of asynchronously running
+ // processes
+@@ -152,17 +152,16 @@
+     virtual bool OnInit() { return true; }
+     virtual void OnExit()
+     {
+-        if ( gs_heventShutdown )
++        if ( gs_heventShutdown.IsOpened() )
+         {
+             // stop any threads waiting for the termination of asynchronously
+             // running processes
+-            if ( !::SetEvent(gs_heventShutdown) )
++            if ( !gs_heventShutdown.SetEvent() )
+             {
+                 wxLogDebug(wxT("Failed to set shutdown event in wxExecuteModule"));
+             }
+ 
+-            ::CloseHandle(gs_heventShutdown);
+-            gs_heventShutdown = NULL;
++            gs_heventShutdown.Close();
+ 
+             // now wait until they terminate
+             if ( !gs_asyncThreads.empty() )
+@@ -300,18 +299,17 @@
+     wxExecuteData * const data = (wxExecuteData *)arg;
+ 
+     // create the shutdown event if we're the first thread starting to wait
+-    if ( !gs_heventShutdown )
++    if ( !gs_heventShutdown.IsOpened() )
+     {
+         // create a manual initially non-signalled event object
+-        gs_heventShutdown = ::CreateEvent(NULL, TRUE, FALSE, NULL);
+-        if ( !gs_heventShutdown )
++        if ( !gs_heventShutdown.Create(true, false) )
+         {
+             wxLogDebug(wxT("CreateEvent() in wxExecuteThread failed"));
+         }
+     }
+ 
+-    HANDLE handles[2] = { data->hProcess, gs_heventShutdown };
+-    switch ( ::WaitForMultipleObjects(2, handles, FALSE, INFINITE) )
++    HANDLE handles[] = { data->hProcess, gs_heventShutdown.GetHandle() };
++    switch ( ::WaitForMultipleObjects(WXSIZEOF(handles), handles, FALSE, INFINITE) )
+     {
+         case WAIT_OBJECT_0:
+             // process terminated, get its exit code

@@ -1,0 +1,759 @@
+Index: src/unix/utilsunx.cpp
+===================================================================
+--- src/unix/utilsunx.cpp	(révision 64699)
++++ src/unix/utilsunx.cpp	(copie de travail)
+@@ -442,27 +442,30 @@
+ bool wxMacLaunch(char **argv);
+ #endif
+ 
+-long wxExecute(const wxString& command, int flags, wxProcess *process)
++long wxExecute(const wxString& command, int flags, wxProcess *process,
++        const wxExecuteEnv *env)
+ {
+     ArgsArray argv(wxCmdLineParser::ConvertStringToArgs(command,
+                                                         wxCMD_LINE_SPLIT_UNIX));
+ 
+-    return wxExecute(argv, flags, process);
++    return wxExecute(argv, flags, process, env);
+ }
+ 
+ #if wxUSE_UNICODE
+ 
+-long wxExecute(wchar_t **wargv, int flags, wxProcess *process)
++long wxExecute(wchar_t **wargv, int flags, wxProcess *process,
++        const wxExecuteEnv *env)
+ {
+     ArgsArray argv(wargv);
+ 
+-    return wxExecute(argv, flags, process);
++    return wxExecute(argv, flags, process, env);
+ }
+ 
+ #endif // wxUSE_UNICODE
+ 
+ // wxExecute: the real worker function
+-long wxExecute(char **argv, int flags, wxProcess *process)
++long wxExecute(char **argv, int flags, wxProcess *process,
++        const wxExecuteEnv *env)
+ {
+     // for the sync execution, we return -1 to indicate failure, but for async
+     // case we return 0 which is never a valid PID
+@@ -577,6 +580,32 @@
+             pipeErr.Close();
+         }
+ 
++        // Process additionnal environment
++        if(env!=NULL)
++        {
++            // Change working directory if any
++            if(!env->cwd.IsEmpty())
++                wxSetWorkingDirectory(env->cwd);
++
++            // Change environment if any
++            if(!env->env.empty())
++            {
++                wxEnvVariableHashMap oldenv;
++                wxGetEnvMap(oldenv);
++                // Remove unwanted env variables
++                wxEnvVariableHashMap::iterator iter;
++                for(iter=oldenv.begin(); iter!=oldenv.end(); iter++)
++                {
++                    if(env->env.find(iter->first)==env->env.end())
++                        wxUnsetEnv(iter->first);
++                }
++                // Set wanted env variables
++                wxEnvVariableHashMap::const_iterator it;
++                for(it=env->env.begin(); it!=env->env.end(); it++)
++                    wxSetEnv(it->first, it->second);
++            }
++        }
++
+         execvp(*argv, argv);
+ 
+         fprintf(stderr, "execvp(");
+Index: src/cocoa/utilsexc.mm
+===================================================================
+--- src/cocoa/utilsexc.mm	(révision 64699)
++++ src/cocoa/utilsexc.mm	(copie de travail)
+@@ -142,7 +142,8 @@
+ 
+ long wxExecute(const wxString& command,
+                int sync,
+-               wxProcess *handle)
++               wxProcess *handle,
++               const wxExecuteEnv *env)
+ {
+     NSTask* theTask = [[NSTask alloc] init];
+ 
+Index: src/msdos/utilsdos.cpp
+===================================================================
+--- src/msdos/utilsdos.cpp	(révision 64699)
++++ src/msdos/utilsdos.cpp	(copie de travail)
+@@ -314,7 +314,8 @@
+     return result == 0;
+ }
+ 
+-long wxExecute(const wxString& command, int flags, wxProcess *process)
++long wxExecute(const wxString& command, int flags, wxProcess *process,
++        const wxExecuteEnv *env)
+ {
+     // FIXME: shouldn't depend on wxCmdLineParser
+     wxArrayString args(wxCmdLineParser::ConvertStringToArgs(command));
+@@ -439,7 +440,8 @@
+ 
+ // wxExecute implementation
+ //
+-long wxExecute(wxChar **argv, int flags, wxProcess *process)
++long wxExecute(wxChar **argv, int flags, wxProcess *process,
++        const wxString* cwd, const wxEnvVariableHashMap* env)
+ {
+ #if wxUSE_STREAMS
+     const int STDIN = 0;
+Index: src/common/utilscmn.cpp
+===================================================================
+--- src/common/utilscmn.cpp	(révision 64699)
++++ src/common/utilscmn.cpp	(copie de travail)
+@@ -553,6 +553,39 @@
+ #endif // 0
+ 
+ // ----------------------------------------------------------------------------
++// Environment
++// ----------------------------------------------------------------------------
++
++bool wxGetEnvMap(wxEnvVariableHashMap& map)
++{
++#if defined(__GNUG__) || defined(__GNUWIN32__) || defined(__MINGW32__) || \
++    defined(__VISUALC__)
++#  if defined(__VISUALC__)
++    char ** env = _environ;
++#  else
++    char ** env = environ;
++#  endif
++
++    if(env!=NULL)
++    {
++        while(*env!=NULL)
++        {
++            wxString var(*env);
++            map[var.BeforeFirst('=')] = var.AfterFirst('=');
++            env++;
++        }
++        return true;
++    }
++    else
++    {
++        return false;
++    }
++#else
++    return false;
++#endif
++}
++
++// ----------------------------------------------------------------------------
+ // wxExecute
+ // ----------------------------------------------------------------------------
+ 
+@@ -599,13 +632,14 @@
+ static long wxDoExecuteWithCapture(const wxString& command,
+                                    wxArrayString& output,
+                                    wxArrayString* error,
+-                                   int flags)
++                                   int flags,
++                                   const wxExecuteEnv *env)
+ {
+     // create a wxProcess which will capture the output
+     wxProcess *process = new wxProcess;
+     process->Redirect();
+ 
+-    long rc = wxExecute(command, wxEXEC_SYNC | flags, process);
++    long rc = wxExecute(command, wxEXEC_SYNC | flags, process, env);
+ 
+ #if wxUSE_STREAMS
+     if ( rc != -1 )
+@@ -630,17 +664,19 @@
+     return rc;
+ }
+ 
+-long wxExecute(const wxString& command, wxArrayString& output, int flags)
++long wxExecute(const wxString& command, wxArrayString& output, int flags,
++               const wxExecuteEnv *env)
+ {
+-    return wxDoExecuteWithCapture(command, output, NULL, flags);
++    return wxDoExecuteWithCapture(command, output, NULL, flags, env);
+ }
+ 
+ long wxExecute(const wxString& command,
+                wxArrayString& output,
+                wxArrayString& error,
+-               int flags)
++               int flags,
++               const wxExecuteEnv *env)
+ {
+-    return wxDoExecuteWithCapture(command, output, &error, flags);
++    return wxDoExecuteWithCapture(command, output, &error, flags, env);
+ }
+ 
+ // ----------------------------------------------------------------------------
+Index: src/palmos/utilsexc.cpp
+===================================================================
+--- src/palmos/utilsexc.cpp	(révision 64699)
++++ src/palmos/utilsexc.cpp	(copie de travail)
+@@ -87,12 +87,14 @@
+ 
+ #endif // wxUSE_IPC
+ 
+-long wxExecute(const wxString& cmd, int flags, wxProcess *handler)
++long wxExecute(const wxString& cmd, int flags, wxProcess *handler,
++    const wxExecuteEnv *env)
+ {
+     return 0;
+ }
+ 
+-long wxExecute(wxChar **argv, int flags, wxProcess *handler)
++long wxExecute(wxChar **argv, int flags, wxProcess *handler,
++    const wxExecuteEnv *env)
+ {
+     return 0;
+ }
+Index: src/os2/utilsexc.cpp
+===================================================================
+--- src/os2/utilsexc.cpp	(révision 64699)
++++ src/os2/utilsexc.cpp	(copie de travail)
+@@ -128,7 +128,8 @@
+ 
+ long wxExecute( const wxString& rCommand,
+                 int flags,
+-                wxProcess* pHandler)
++                wxProcess* pHandler,
++                const wxExecuteEnv *env)
+ {
+     if (rCommand.empty())
+     {
+@@ -219,6 +220,7 @@
+   char**                            ppArgv
+ , int                               flags
+ , wxProcess*                        pHandler
++, const wxExecuteEnv *env
+ )
+ {
+     wxString                        sCommand;
+@@ -234,6 +236,7 @@
+     return wxExecute( sCommand
+                      ,flags
+                      ,pHandler
++                     , env
+                     );
+ }
+ 
+Index: src/msw/utilsexc.cpp
+===================================================================
+--- src/msw/utilsexc.cpp	(révision 64699)
++++ src/msw/utilsexc.cpp	(copie de travail)
+@@ -610,7 +610,10 @@
+ 
+ #endif // wxUSE_IPC
+ 
+-long wxExecute(const wxString& cmd, int flags, wxProcess *handler)
++#include "wx/wfstream.h"
++
++long wxExecute(const wxString& cmd, int flags, wxProcess *handler,
++               const wxExecuteEnv *env)
+ {
+     wxCHECK_MSG( !cmd.empty(), 0, wxT("empty command in wxExecute") );
+ 
+@@ -800,6 +803,37 @@
+     wxString arguments = command.AfterFirst(wxT(' '));
+ #endif
+ 
++    // Translate environment variable map into string array
++    wxCharBuffer envBuffer;
++    bool useEnv = false, useCwd = false;
++    if(env!=NULL)
++    {
++        useCwd = !env->cwd.IsEmpty();
++        if(!env->env.empty())
++        {
++            size_t envSz = 1; // ending '\0'
++            for(wxEnvVariableHashMap::const_iterator it=env->env.begin(); it!=env->env.end(); it++)
++            {
++                // Add size of env variable name and value, and '=' char and ending '\0'
++                envSz += it->first.Length() + it->second.Length() + 2;
++            }
++            envBuffer.extend(envSz);
++            size_t offset = 0;
++            for(wxEnvVariableHashMap::const_iterator it=env->env.begin(); it!=env->env.end(); it++)
++            {
++                wxString line = it->first + wxT("=") + it->second;
++                wxCharBuffer buff = line.mb_str();
++                size_t len = line.Len();
++                wxTmemcpy((char*)envBuffer.data()+offset, (const char*)buff.data(), len);
++                offset += len;
++                *(envBuffer.data()+offset) = 0;
++                offset ++;
++            }
++            *(envBuffer.data()+offset) = 0;
++            useEnv = true;
++        }
++    }
++
+     bool ok = ::CreateProcess
+                 (
+                     // WinCE requires appname to be non null
+@@ -818,8 +852,16 @@
+                  NULL,               //   the process and its main thread
+                  redirect,           // inherit handles if we use pipes
+                  dwFlags,            // process creation flags
+-                 NULL,               // environment (use the same)
+-                 NULL,               // current directory (use the same)
++                 useEnv?
++                   (wxChar *)
++                   envBuffer.data():
++                   NULL,             // environment (specified in parameter 
++                                     // or use the same)
++                 useCwd?
++                   (wxChar *)
++                   env->cwd.wx_str():
++                   NULL,             // current directory (specified in parameter 
++                                     // or use the same)
+                  &si,                // startup info (unused here)
+                  &pi                 // process info
+                 ) != 0;
+@@ -1039,7 +1081,8 @@
+ }
+ 
+ template <typename CharType>
+-long wxExecuteImpl(CharType **argv, int flags, wxProcess *handler)
++long wxExecuteImpl(CharType **argv, int flags, wxProcess *handler, 
++                   const wxExecuteEnv *env)
+ {
+     wxString command;
+     command.reserve(1024);
+@@ -1078,19 +1121,21 @@
+         command += ' ';
+     }
+ 
+-    return wxExecute(command, flags, handler);
++    return wxExecute(command, flags, handler, env);
+ }
+ 
+-long wxExecute(char **argv, int flags, wxProcess *handler)
++long wxExecute(char **argv, int flags, wxProcess *handler,
++               const wxExecuteEnv *env)
+ {
+-    return wxExecuteImpl(argv, flags, handler);
++    return wxExecuteImpl(argv, flags, handler, env);
+ }
+ 
+ #if wxUSE_UNICODE
+ 
+-long wxExecute(wchar_t **argv, int flags, wxProcess *handler)
++long wxExecute(wchar_t **argv, int flags, wxProcess *handler,
++               const wxExecuteEnv *env)
+ {
+-    return wxExecuteImpl(argv, flags, handler);
++    return wxExecuteImpl(argv, flags, handler, env);
+ }
+ 
+ #endif // wxUSE_UNICODE
+Index: include/wx/utils.h
+===================================================================
+--- include/wx/utils.h	(révision 64699)
++++ include/wx/utils.h	(copie de travail)
+@@ -19,6 +19,7 @@
+ #include "wx/object.h"
+ #include "wx/list.h"
+ #include "wx/filefn.h"
++#include "wx/hashmap.h"
+ 
+ #if wxUSE_GUI
+     #include "wx/gdicmn.h"
+@@ -294,6 +295,15 @@
+     wxEXEC_BLOCK = wxEXEC_SYNC | wxEXEC_NOEVENTS
+ };
+ 
++// Map storing environment variables.
++typedef wxStringToStringHashMap wxEnvVariableHashMap;
++
++// Struct to store extended parameters for program execution.
++struct wxExecuteEnv {
++    wxString cwd;
++    wxEnvVariableHashMap env;
++};
++
+ // Execute another program.
+ //
+ // If flags contain wxEXEC_SYNC, return -1 on failure and the exit code of the
+@@ -301,27 +311,32 @@
+ // failure and the PID of the launched process if ok.
+ WXDLLIMPEXP_BASE long wxExecute(const wxString& command,
+                                 int flags = wxEXEC_ASYNC,
+-                                wxProcess *process = NULL);
++                                wxProcess *process = NULL,
++                                const wxExecuteEnv *env = NULL);
+ WXDLLIMPEXP_BASE long wxExecute(char **argv,
+                                 int flags = wxEXEC_ASYNC,
+-                                wxProcess *process = NULL);
++                                wxProcess *process = NULL,
++                                const wxExecuteEnv *env = NULL);
+ #if wxUSE_UNICODE
+ WXDLLIMPEXP_BASE long wxExecute(wchar_t **argv,
+                                 int flags = wxEXEC_ASYNC,
+-                                wxProcess *process = NULL);
++                                wxProcess *process = NULL,
++                                const wxExecuteEnv *env = NULL);
+ #endif // wxUSE_UNICODE
+ 
+ // execute the command capturing its output into an array line by line, this is
+ // always synchronous
+ WXDLLIMPEXP_BASE long wxExecute(const wxString& command,
+                                 wxArrayString& output,
+-                                int flags = 0);
++                                int flags = 0,
++                                const wxExecuteEnv *env = NULL);
+ 
+ // also capture stderr (also synchronous)
+ WXDLLIMPEXP_BASE long wxExecute(const wxString& command,
+                                 wxArrayString& output,
+                                 wxArrayString& error,
+-                                int flags = 0);
++                                int flags = 0,
++                                const wxExecuteEnv *env = NULL);
+ 
+ #if defined(__WXMSW__) && wxUSE_IPC
+ // ask a DDE server to execute the DDE request with given parameters
+@@ -460,6 +475,10 @@
+ }
+ #endif // WXWIN_COMPATIBILITY_2_8
+ 
++// Retrieve the complete environment by filling specified map.
++// returns true if environment can be completly retrieved.
++WXDLLIMPEXP_BASE bool wxGetEnvMap(wxEnvVariableHashMap& map);
++
+ // ----------------------------------------------------------------------------
+ // Network and username functions.
+ // ----------------------------------------------------------------------------
+Index: interface/wx/utils.h
+===================================================================
+--- interface/wx/utils.h	(révision 64699)
++++ interface/wx/utils.h	(copie de travail)
+@@ -158,6 +158,15 @@
+ //@{
+ 
+ /**
++    This map presents name/value discribing environment.
++    
++    @since 2.9.2
++
++    @header{wx/utils.h}
++*/
++typedef wxStringToStringHashMap wxEnvVariableHashMap;
++
++/**
+     This is a macro defined as @c getenv() or its wide char version in Unicode
+     mode.
+ 
+@@ -217,6 +226,18 @@
+ */
+ bool wxUnsetEnv(const wxString& var);
+ 
++/**
++    Fill a map with the complete content of current environment.
++    The filled map is a wxMap<wxString varname, wxString value>.
++    
++    @param map
++        The environment map to fill.
++    @return
++        @true if environment can be retrieved or @false if not.
++
++    @header{wx/utils.h}
++*/
++bool wxGetEnvMap(wxEnvVariableHashMap& map);
+ //@}
+ 
+ 
+@@ -735,6 +756,30 @@
+ //@{
+ 
+ /**
++    @struct wxExecuteEnv
++    This structure can optionally be used with wxExecute() to 
++    specify additional environment to executed process.
++    
++    @since 2.9.2
++
++    @header{wx/utils.h}
++*/
++struct wxExecuteEnv {
++    /**
++        The working directory. Empty to use current.
++    */
++    wxString cwd;
++    
++    /**
++        The environment variable map. Empty to use current.
++        
++        @note On some plateforms, environment map overload current environment
++        where some variables can not be modified or removed.
++    */
++    wxEnvVariableHashMap env;
++};
++
++/**
+     Executes another program in Unix or Windows.
+ 
+     In the overloaded versions of this function, if @a flags parameter contains
+@@ -799,6 +844,10 @@
+         their combination, in wxEXEC_SYNC case.
+     @param callback
+         An optional pointer to wxProcess.
++    @param env
++        An optional struct which specify additionnal environment properties like
++        working directory or environment variables.
++    @since 2.9.2
+ 
+     @see wxShell(), wxProcess, @ref page_samples_exec,
+          wxLaunchDefaultApplication(), wxLaunchDefaultBrowser()
+@@ -810,8 +859,8 @@
+     @endWxPerlOnly
+ */
+ long wxExecute(const wxString& command, int flags = wxEXEC_ASYNC,
+-                wxProcess* callback = NULL);
+-
++                wxProcess* callback = NULL,
++                const wxExecuteEnv* env = NULL);
+ //@}
+ 
+ /** @addtogroup group_funcmacro_procctrl */
+@@ -834,7 +883,11 @@
+         their combination, in wxEXEC_SYNC case.
+     @param callback
+         An optional pointer to wxProcess.
+-
++    @param env
++        An optional struct which specify additionnal environment properties like
++        working directory or environment variables.
++    @since 2.9.2
++        
+     @see wxShell(), wxProcess, @ref page_samples_exec,
+          wxLaunchDefaultApplication(), wxLaunchDefaultBrowser()
+ 
+@@ -845,9 +898,11 @@
+     @endWxPerlOnly
+ */
+ long wxExecute(char** argv, int flags = wxEXEC_ASYNC,
+-                wxProcess* callback = NULL);
++                wxProcess* callback = NULL,
++                const wxExecuteEnv *env = NULL);
+ long wxExecute(wchar_t** argv, int flags = wxEXEC_ASYNC,
+-                wxProcess* callback = NULL);
++                wxProcess* callback = NULL,
++                const wxExecuteEnv *env = NULL);
+ //@}
+ 
+ /** @addtogroup group_funcmacro_procctrl */
+@@ -870,6 +925,10 @@
+         May include wxEXEC_NOHIDE, wxEXEC_MAKE_GROUP_LEADER (in either case) or
+         wxEXEC_NODISABLE and wxEXEC_NOEVENTS or wxEXEC_BLOCK, which is equal to
+         their combination. wxEXEC_SYNC is always implicitly added to the flags.
++    @param env
++        An optional struct which specify additionnal environment properties like
++        working directory or environment variables.
++    @since 2.9.2
+ 
+     @see wxShell(), wxProcess, @ref page_samples_exec,
+          wxLaunchDefaultApplication(), wxLaunchDefaultBrowser()
+@@ -882,7 +941,8 @@
+     where @c output in an array reference.
+     @endWxPerlOnly
+ */
+-long wxExecute(const wxString& command, wxArrayString& output, int flags = 0);
++long wxExecute(const wxString& command, wxArrayString& output, int flags = 0,
++                const wxExecuteEnv *env = NULL);
+ 
+ /**
+     This is an overloaded version of wxExecute(const wxString&,int,wxProcess*),
+@@ -903,6 +963,10 @@
+         May include wxEXEC_NOHIDE, wxEXEC_MAKE_GROUP_LEADER (in either case) or
+         wxEXEC_NODISABLE and wxEXEC_NOEVENTS or wxEXEC_BLOCK, which is equal to
+         their combination. wxEXEC_SYNC is always implicitly added to the flags.
++    @param env
++        An optional struct which specify additionnal environment properties like
++        working directory or environment variables.
++    @since 2.9.2
+ 
+     @see wxShell(), wxProcess, @ref page_samples_exec,
+          wxLaunchDefaultApplication(), wxLaunchDefaultBrowser()
+@@ -916,7 +980,8 @@
+     @endWxPerlOnly
+ */
+ long wxExecute(const wxString& command, wxArrayString& output,
+-                wxArrayString& errors, int flags = 0);
++                wxArrayString& errors, int flags = 0,
++                const wxExecuteEnv *env = NULL);
+ 
+ /**
+     Returns the number uniquely identifying the current process in the system.
+Index: samples/exec/exec.cpp
+===================================================================
+--- samples/exec/exec.cpp	(révision 64699)
++++ samples/exec/exec.cpp	(copie de travail)
+@@ -54,6 +54,8 @@
+ #include "wx/textdlg.h"
+ #include "wx/ffile.h"
+ #include "wx/stopwatch.h"
++#include "wx/stattext.h"
++#include "wx/checkbox.h"
+ 
+ #include "wx/process.h"
+ 
+@@ -660,6 +662,128 @@
+ }
+ 
+ // ----------------------------------------------------------------------------
++// exec dialog
++// ----------------------------------------------------------------------------
++
++enum ExecQueryDialogID {
++    TEXT_EXECUTABLE,
++    TEXT_WORKING_DIRECTORY,
++    TEXT_ENVIRONMENT
++};
++
++class ExecQueryDialog : public wxDialog
++{
++public:
++    ExecQueryDialog(const wxString& cmd);
++    
++    wxString GetExecutable(){return executable->GetValue();}
++    wxString GetWorkDir();
++    void GetEnvironment(wxEnvVariableHashMap& env);
++    
++protected:
++    void OnUpdateWorkingDirectoryUI(wxUpdateUIEvent& event){event.Enable(cbworkdir->GetValue());}
++    void OnUpdateEnvironmentUI(wxUpdateUIEvent& event){event.Enable(cbenv->GetValue());}
++
++    wxTextCtrl* executable;
++    wxTextCtrl* workdir;
++    wxTextCtrl* envtext;
++    wxCheckBox* cbworkdir;
++    wxCheckBox* cbenv;
++    
++    DECLARE_EVENT_TABLE()
++};
++
++BEGIN_EVENT_TABLE(ExecQueryDialog, wxDialog)
++    EVT_UPDATE_UI(TEXT_WORKING_DIRECTORY, ExecQueryDialog::OnUpdateWorkingDirectoryUI)
++    EVT_UPDATE_UI(TEXT_ENVIRONMENT, ExecQueryDialog::OnUpdateEnvironmentUI)
++END_EVENT_TABLE()
++
++ExecQueryDialog::ExecQueryDialog(const wxString& cmd):
++wxDialog(NULL, wxID_ANY, DIALOG_TITLE, wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER)
++{
++    wxSizer* globalSizer = new wxBoxSizer(wxVERTICAL);
++
++    executable = new wxTextCtrl(this, TEXT_EXECUTABLE, wxT(""));
++    workdir = new wxTextCtrl(this, TEXT_WORKING_DIRECTORY, wxT(""));
++    envtext = new wxTextCtrl(this, TEXT_ENVIRONMENT, wxT(""), wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE|wxHSCROLL);
++
++    
++    globalSizer->Add(new wxStaticText(this, wxID_ANY, wxT("Enter the command: ")), 0, wxEXPAND|wxALL, 4);
++    globalSizer->Add(executable, 0, wxEXPAND|wxALL, 4);
++
++    cbworkdir = new wxCheckBox(this, wxID_ANY, wxT("Working directory: "));
++    globalSizer->Add(cbworkdir, 0, wxEXPAND|wxALL, 4);
++    globalSizer->Add(workdir, 0, wxEXPAND|wxALL, 4);
++
++    cbenv = new wxCheckBox(this, wxID_ANY, wxT("Environment: "));
++    globalSizer->Add(cbenv, 0, wxEXPAND|wxALL, 4);
++    globalSizer->Add(envtext, 1, wxEXPAND|wxALL, 4);
++    
++    globalSizer->Add(CreateStdDialogButtonSizer(wxOK|wxCANCEL), 0, wxEXPAND|wxALL, 4);
++    SetSizer(globalSizer);
++    
++    
++    executable->SetValue(cmd);
++    workdir->SetValue(wxGetCwd());
++    wxEnvVariableHashMap env;
++    if(wxGetEnvMap(env))
++    {
++        wxEnvVariableHashMap::iterator it;
++        for(it = env.begin(); it != env.end(); ++it )
++        {
++            envtext->AppendText(it->first);
++            envtext->AppendText(wxT("="));
++            envtext->AppendText(it->second);
++            envtext->AppendText(wxT("\n"));
++        }
++    }
++    cbworkdir->SetValue(false);
++    cbenv->SetValue(false);
++}
++wxString ExecQueryDialog::GetWorkDir()
++{
++    if(cbworkdir->GetValue())
++        return workdir->GetValue();
++    else
++        return wxT("");
++}
++
++void ExecQueryDialog::GetEnvironment(wxEnvVariableHashMap& env)
++{
++    if(cbenv->GetValue())
++    {
++        int nb = envtext->GetNumberOfLines();
++        int l;
++        for(l=0; l<nb; l++)
++        {
++            wxString line = envtext->GetLineText(l);
++            line.Trim();
++            if(line.Len()>0)
++            {
++                env[line.BeforeFirst('=')] = line.AfterFirst('=');
++            }
++        }
++    }
++    else
++    {
++        env.clear();
++    }
++}
++
++static bool QueryExec(wxString& cmd, wxExecuteEnv& env)
++{
++    ExecQueryDialog dialog(cmd);
++
++    if(dialog.ShowModal()!=wxID_OK)
++        return false;
++
++    cmd = dialog.GetExecutable();
++    env.cwd = dialog.GetWorkDir();
++    dialog.GetEnvironment(env.env);
++    return true;
++}
++
++// ----------------------------------------------------------------------------
+ // event handlers: exec menu
+ // ----------------------------------------------------------------------------
+ 
+@@ -687,16 +811,15 @@
+ 
+ void MyFrame::OnSyncExec(wxCommandEvent& WXUNUSED(event))
+ {
+-    wxString cmd = wxGetTextFromUser(wxT("Enter the command: "),
+-                                     DIALOG_TITLE,
+-                                     m_cmdLast);
+-
+-    if ( !cmd )
++    wxString cmd;
++    wxExecuteEnv env;
++    if(!QueryExec(cmd, env))
+         return;
+ 
+     wxLogStatus( wxT("'%s' is running please wait..."), cmd.c_str() );
+ 
+-    int code = wxExecute(cmd, wxEXEC_SYNC);
++    
++    int code = wxExecute(cmd, wxEXEC_SYNC, NULL, &env);
+ 
+     wxLogStatus(wxT("Process '%s' terminated with exit code %d."),
+         cmd.c_str(), code);

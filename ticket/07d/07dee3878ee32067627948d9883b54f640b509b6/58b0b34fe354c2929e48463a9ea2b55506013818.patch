@@ -1,0 +1,241 @@
+From 8763e7d6f9e805308edb87454aa0b82849eedab0 Mon Sep 17 00:00:00 2001
+From: Rob Bresalier
+Date: Wed, 10 Jul 2013 03:34:58 +0000
+Subject: [PATCH] AddSourceForFd implementation for x11
+
+---
+ include/wx/x11/evtloopsrc.h |   42 ++++++++++++++++
+ src/x11/evtloop.cpp         |   35 ++++++++++++++
+ src/x11/utils.cpp           |  110 +++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 187 insertions(+), 0 deletions(-)
+ create mode 100644 include/wx/x11/evtloopsrc.h
+
+diff --git a/include/wx/x11/evtloopsrc.h b/include/wx/x11/evtloopsrc.h
+new file mode 100644
+index 0000000..7d2d03e
+--- /dev/null
++++ b/include/wx/x11/evtloopsrc.h
+@@ -0,0 +1,42 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/x11/evtloopsrc.h
++// Purpose:     wxX11EventLoopSource class
++// Author:      Rob Bresalier
++// Created:     2013-07-09
++// RCS-ID:      $Id$
++// Copyright:   (c) 2013 Rob Bresalier
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_X11_EVTLOOPSRC_H_
++#define _WX_X11_EVTLOOPSRC_H_
++
++class WXDLLIMPEXP_BASE wxX11EventLoopSource : public wxEventLoopSource
++{
++public:
++    // Create a new source in uninitialized state, call InitIds() later
++    // to associate it with the XtInputId's it is going to use.
++    wxX11EventLoopSource(wxEventLoopSourceHandler *handler, int flags)
++        : wxEventLoopSource(handler, flags)
++    {
++        m_flags = 0;
++    }
++
++    // Finish initialization of the event loop source by providing the
++    // associated XtInputIds.
++    void InitIds(int flags, XtInputId readId, XtInputId writeId, XtInputId exceptionId);
++
++    // Destructor deletes the associated socket.
++    virtual ~wxX11EventLoopSource();
++
++private:
++    int m_flags;
++    XtInputId m_readId;
++    XtInputId m_writeId;
++    XtInputId m_exceptionId;
++
++    wxDECLARE_NO_COPY_CLASS(wxX11EventLoopSource);
++};
++
++#endif // _WX_X11_EVTLOOPSRC_H_
++
+diff --git a/src/x11/evtloop.cpp b/src/x11/evtloop.cpp
+index e351092..3176a46 100644
+--- a/src/x11/evtloop.cpp
++++ b/src/x11/evtloop.cpp
+@@ -33,6 +33,8 @@
+ #include "wx/unix/private.h"
+ #include "wx/x11/private.h"
+ #include "wx/generic/private/timer.h"
++#include "wx/evtloopsrc.h"
++#include "wx/x11/evtloopsrc.h"
+ 
+ #if wxUSE_THREADS
+     #include "wx/thread.h"
+@@ -272,3 +274,36 @@ bool wxGUIEventLoop::YieldFor(long eventsToProcess)
+ 
+     return true;
+ }
++
++#if wxUSE_EVENTLOOP_SOURCE
++
++void wxX11EventLoopSource::InitIds(int flags, XtInputId readId, XtInputId writeId, XtInputId exceptionId)
++{
++    wxASSERT_MSG( !m_flags, "shouldn't be called more than once" );
++
++    m_flags = flags;
++    m_readId = readId;
++    m_writeId = writeId;
++    m_exceptionId = exceptionId;
++}
++
++wxX11EventLoopSource::~wxX11EventLoopSource()
++{
++    if ( m_flags & wxEVENT_SOURCE_INPUT )
++    {
++        XtRemoveInput(m_readId);
++    }
++
++    if ( m_flags & wxEVENT_SOURCE_OUTPUT )
++    {
++        XtRemoveInput(m_writeId);
++    }
++
++    if ( m_flags & wxEVENT_SOURCE_EXCEPTION )
++    {
++        XtRemoveInput(m_exceptionId);
++    }
++}
++
++#endif // #if wxUSE_EVENTLOOP_SOURCE
++
+diff --git a/src/x11/utils.cpp b/src/x11/utils.cpp
+index 47c6945..7ec2e51 100644
+--- a/src/x11/utils.cpp
++++ b/src/x11/utils.cpp
+@@ -61,6 +61,7 @@
+ #include "wx/x11/private.h"
+ 
+ #include "X11/Xutil.h"
++#include <X11/Xlib.h>
+ 
+ #ifdef __VMS__
+ #pragma message enable nosimpint
+@@ -118,6 +119,115 @@ wxEventLoopBase* wxGUIAppTraits::CreateEventLoop()
+     return new wxEventLoop;
+ }
+ 
++#if wxUSE_EVENTLOOP_SOURCE
++
++extern "C"
++{
++
++static void xt_OnReadWaiting(XtPointer data, int *fid, XtInputId *id)
++{
++    wxLogTrace(wxTRACE_EVT_SOURCE,
++               "xt_OnReadWaiting callback");
++
++    wxEventLoopSource * const
++        source = static_cast<wxEventLoopSource *>(data);
++
++    wxEventLoopSourceHandler * const
++        handler = source->GetHandler();
++
++    handler->OnReadWaiting();
++}
++
++static void xt_OnWriteWaiting(XtPointer data, int *fid,
++                                  XtInputId *id)
++{
++    wxLogTrace(wxTRACE_EVT_SOURCE,
++               "xt_OnWriteWaiting callback");
++
++    wxEventLoopSource * const
++        source = static_cast<wxEventLoopSource *>(data);
++
++    wxEventLoopSourceHandler * const
++        handler = source->GetHandler();
++
++    handler->OnWriteWaiting();
++}
++
++static void xt_OnExceptionWaiting(XtPointer data, int *fid,
++                                  XtInputId *id)
++{
++    wxLogTrace(wxTRACE_EVT_SOURCE,
++               "xt_OnExceptionWaiting callback");
++
++    wxEventLoopSource * const
++        source = static_cast<wxEventLoopSource *>(data);
++
++    wxEventLoopSourceHandler * const
++        handler = source->GetHandler();
++
++    handler->OnExceptionWaiting();
++}
++
++} // extern "C"
++
++class wxX11EventLoopSourcesManager : public wxEventLoopSourcesManagerBase
++{
++public:
++    wxEventLoopSource *
++    AddSourceForFD(int fd, wxEventLoopSourceHandler *handler, int flags)
++    {
++        XtInputId readId;
++        XtInputId writeId;
++        XtInputId exceptionId
++
++        wxCHECK_MSG( fd != -1, NULL, "can't monitor invalid fd" );
++
++        wxScopedPtr<wxX11EventLoopSource>
++            source(new wxX11EventLoopSource(handler, flags));
++
++        if ( flags & wxEVENT_SOURCE_INPUT )
++        {
++            readId = XtAppAddInput((XtAppContext) wxTheApp->GetAppContext(),
++                                   fd,
++                                   (XtPointer *) XtInputReadMask,
++                                   (XtInputCallbackProc) xt_OnReadWaiting,
++                                   (XtPointer) proc_data);
++        }
++
++        if ( flags & wxEVENT_SOURCE_OUTPUT )
++        {
++            writeId = XtAppAddInput((XtAppContext) wxTheApp->GetAppContext(),
++                                   fd,
++                                   (XtPointer *) XtInputWriteMask,
++                                   (XtInputCallbackProc) xt_OnWriteWaiting,
++                                   (XtPointer) proc_data);
++        }
++
++        if ( flags & wxEVENT_SOURCE_EXCEPTION)
++        {
++            exceptionId = XtAppAddInput((XtAppContext) wxTheApp->GetAppContext(),
++                                   fd,
++                                   (XtPointer *) XtInputExceptMask,
++                                   (XtInputCallbackProc) xt_OnExceptionWaiting,
++                                   (XtPointer) proc_data);
++        }
++
++        // Save the ids so that we can remove them later if asked to.
++        source->InitIds(flags, readId, writeId, exceptionId);
++
++        return source.release();
++    }
++};
++
++wxEventLoopSourcesManagerBase* wxGUIAppTraits::GetEventLoopSourcesManager()
++{
++    static wxX11EventLoopSourcesManager s_eventLoopSourcesManager;
++
++    return &s_eventLoopSourcesManager;
++}
++
++#endif // wxUSE_EVENTLOOP_SOURCE
++
+ // ----------------------------------------------------------------------------
+ // display info
+ // ----------------------------------------------------------------------------
+-- 
+1.7.9
+

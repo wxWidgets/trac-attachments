@@ -1,0 +1,334 @@
+--- wxWidgets-trunk/include/wx/msw/menuitem.h	2014-03-23
++++ wxWidgets-work/include/wx/msw/menuitem.h	2014-03-26
+@@ -17,10 +17,10 @@
+ 
+ #if wxUSE_OWNER_DRAWN
+     #include "wx/ownerdrw.h"
+-    #include "wx/bitmap.h"
+ 
+     struct tagRECT;
+ #endif
++#include "wx/bitmap.h"
+ 
+ // ----------------------------------------------------------------------------
+ // wxMenuItem: an item in the menu, optionally implements owner-drawn behaviour
+@@ -72,8 +72,6 @@
+     );
+ #endif
+ 
+-#if wxUSE_OWNER_DRAWN
+-
+     void SetBitmaps(const wxBitmap& bmpChecked,
+                     const wxBitmap& bmpUnchecked = wxNullBitmap)
+     {
+@@ -86,15 +84,16 @@
+         DoSetBitmap(bmp, bChecked);
+     }
+ 
++    const wxBitmap& GetBitmap(bool bChecked = true) const
++    { return (bChecked ? m_bmpChecked : m_bmpUnchecked); }
++
++#if wxUSE_OWNER_DRAWN
+     void SetDisabledBitmap(const wxBitmap& bmpDisabled)
+     {
+         m_bmpDisabled = bmpDisabled;
+         SetOwnerDrawn(true);
+     }
+ 
+-    const wxBitmap& GetBitmap(bool bChecked = true) const
+-        { return (bChecked ? m_bmpChecked : m_bmpUnchecked); }
+-
+     const wxBitmap& GetDisabledBitmap() const
+         { return m_bmpDisabled; }
+ 
+@@ -114,7 +113,8 @@
+     void DrawStdCheckMark(WXHDC hdc, const tagRECT* rc, wxODStatus stat);
+ 
+     // helper function to determine if the item must be owner-drawn
+-    bool MustUseOwnerDrawn();
++    bool MSWMustUseOwnerDrawn();
++#endif // wxUSE_OWNER_DRAWN
+ 
+     // helper function to get a handle of bitmap associated with item
+     WXHBITMAP GetHBitmapForMenu(bool checked = true);
+@@ -122,27 +122,16 @@
+     // helper function to set/change the bitmap
+     void DoSetBitmap(const wxBitmap& bmp, bool bChecked);
+ 
+-#else // !wxUSE_OWNER_DRAWN
+-    // Provide stubs for the public functions above to ensure that the code
+-    // still compiles without wxUSE_OWNER_DRAWN -- it makes sense to just drop
+-    // the bitmaps then instead of failing compilation.
+-    void SetBitmaps(const wxBitmap& WXUNUSED(bmpChecked),
+-                    const wxBitmap& WXUNUSED(bmpUnchecked) = wxNullBitmap) { }
+-    void SetBitmap(const wxBitmap& WXUNUSED(bmp),
+-                   bool WXUNUSED(bChecked) = true) { }
+-    const wxBitmap& GetBitmap() const { return wxNullBitmap; }
+-#endif // wxUSE_OWNER_DRAWN/!wxUSE_OWNER_DRAWN
+-
+ private:
+     // common part of all ctors
+     void Init();
+ 
+ 
++    wxBitmap m_bmpChecked,     // bitmap to put near the item
++             m_bmpUnchecked;   // (checked is used also for 'uncheckable' items)
+ #if wxUSE_OWNER_DRAWN
+     // item bitmaps
+-    wxBitmap m_bmpChecked,     // bitmap to put near the item
+-             m_bmpUnchecked,   // (checked is used also for 'uncheckable' items)
+-             m_bmpDisabled;
++    wxBitmap m_bmpDisabled;
+ #endif // wxUSE_OWNER_DRAWN
+ 
+     // Give wxMenu access to our MustUseOwnerDrawn() and GetHBitmapForMenu().
+--- wxWidgets-trunk/src/msw/menu.cpp	2014-03-23
++++ wxWidgets-work/src/msw/menu.cpp	2014-03-26
+@@ -62,9 +62,7 @@
+ // other standard headers
+ #include <string.h>
+ 
+-#if wxUSE_OWNER_DRAWN
+-    #include "wx/dynlib.h"
+-#endif
++#include "wx/dynlib.h"
+ 
+ #ifndef MNS_CHECKORBMP
+     #define MNS_CHECKORBMP 0x04000000
+@@ -413,6 +411,13 @@
+     return m_radioData && m_radioData->GetGroupRange(pos, start, end);
+ }
+ 
++// DMC at march 2007 didn't have e.g. MENUITEMINFO. Is it still valid?
++#if defined(__DMC__) || defined(__WXWINCE__)
++#define wxUSE_MENUITEMINFO 0
++#else
++#define wxUSE_MENUITEMINFO 1
++#endif
++
+ // append a new item or submenu to the menu
+ bool wxMenu::DoInsertOrAppend(wxMenuItem *pItem, size_t pos)
+ {
+@@ -498,21 +503,18 @@
+     // other items already are.
+     if ( m_ownerDrawn )
+         pItem->SetOwnerDrawn(true);
+-#endif // wxUSE_OWNER_DRAWN
+ 
+     // check if we have something more than a simple text item
+-#if wxUSE_OWNER_DRAWN
+     bool makeItemOwnerDrawn = false;
+-    if ( pItem->IsOwnerDrawn() )
+-    {
+-#ifndef __DMC__
++#endif // wxUSE_OWNER_DRAWN
+ 
+-        if ( !m_ownerDrawn && !pItem->IsSeparator() )
+-        {
+-            // use InsertMenuItem() if possible as it's guaranteed to look
+-            // correct while our owner-drawn code is not
+-            if ( !pItem->MustUseOwnerDrawn() )
++#if wxUSE_OWNER_DRAWN
++    if ( !pItem->IsOwnerDrawn() && !pItem->IsSeparator() )
++#else
++    if ( !pItem->IsSeparator() )
++#endif
+             {
++#if wxUSE_MENUITEMINFO
+                 WinStruct<MENUITEMINFO> mii;
+                 mii.fMask = MIIM_STRING | MIIM_DATA;
+ 
+@@ -556,6 +558,10 @@
+                 if ( !ok )
+                 {
+                     wxLogLastError(wxT("InsertMenuItem()"));
++#if wxUSE_OWNER_DRAWN
++            // In case of failure switch new item to the owner-drawn mode.
++            makeItemOwnerDrawn = true;
++#endif
+                 }
+                 else // InsertMenuItem() ok
+                 {
+@@ -580,16 +586,28 @@
+                             wxLogLastError(wxT("SetMenuInfo(MNS_NOCHECK)"));
+                         }
+                     }
+-
+-                    // tell the item that it's not really owner-drawn but only
+-                    // needs to draw its bitmap, the rest is done by Windows
+-                    pItem->SetOwnerDrawn(false);
+                 }
++#else
++        if( pItem->GetBitmap().IsOk() )
++        {
++            flags |= MF_BITMAP;
++            pData = reinterpret_cast<LPCTSTR>(pItem->GetHBitmapForMenu());
++        }
++        else
++        {
++            flags |= MF_STRING;
++#ifdef __WXWINCE__
++            itemText = wxMenuItem::GetLabelText(itemText);
++            pData = itemText.t_str();
++#else
++            pData = wxMSW_CONV_LPTSTR(itemText);
++#endif
+             }
++#endif // wxUSE_MENUITEMINFO / !wxUSE_MENUITEMINFO
+         }
+-#endif // __DMC__
+ 
+-        if ( !ok )
++#if wxUSE_OWNER_DRAWN
++    if ( pItem->IsOwnerDrawn() || makeItemOwnerDrawn )
+         {
+             // item draws itself, pass pointer to it in data parameter
+             flags |= MF_OWNERDRAW;
+@@ -641,9 +659,6 @@
+                 // set menu as ownerdrawn
+                 m_ownerDrawn = true;
+ 
+-                // also ensure that the new item itself is made owner drawn
+-                makeItemOwnerDrawn = true;
+-
+                 ResetMaxAccelWidth();
+             }
+             // only update our margin for equals alignment to other item
+@@ -652,19 +667,7 @@
+                 pItem->SetMarginWidth(m_maxBitmapWidth);
+             }
+         }
+-    }
+-    else
+ #endif // wxUSE_OWNER_DRAWN
+-    {
+-        // item is just a normal string (passed in data parameter)
+-        flags |= MF_STRING;
+-
+-#ifdef __WXWINCE__
+-        itemText = wxMenuItem::GetLabelText(itemText);
+-#endif
+-
+-        pData = itemText.t_str();
+-    }
+ 
+     // item might have already been inserted by InsertMenuItem() above
+     if ( !ok )
+@@ -679,6 +682,7 @@
+ #if wxUSE_OWNER_DRAWN
+         if ( makeItemOwnerDrawn )
+         {
++            pItem->SetOwnerDrawn(true);
+             SetOwnerDrawnMenuItem(GetHmenu(), pos,
+                                   reinterpret_cast<ULONG_PTR>(pItem), TRUE);
+         }
+--- wxWidgets-trunk/src/msw/menuitem.cpp	2014-03-23
++++ wxWidgets-work/src/msw/menuitem.cpp	2014-03-26
+@@ -738,8 +738,6 @@
+     }
+ }
+ 
+-#if wxUSE_OWNER_DRAWN
+-
+ void wxMenuItem::DoSetBitmap(const wxBitmap& bmp, bool bChecked)
+ {
+     if ( bChecked )
+@@ -757,16 +755,32 @@
+         m_bmpUnchecked = bmp;
+     }
+ 
++#if wxUSE_OWNER_DRAWN
+     // already marked as owner-drawn, cannot be reverted
+     if ( IsOwnerDrawn() )
+         return;
+ 
+-    // assume owner-drawn state, will be reset if we can use Windows bitmap
+-    // support instead of making the item owner-drawn
++    if ( MSWMustUseOwnerDrawn() )
++    {
+     SetOwnerDrawn(true);
+-
+-    if ( MustUseOwnerDrawn() )
++        // Parent menu has to be rearranged/recalculated in this case
++        // (all other menu items have to be also set to owner-drawn mode).
++        // TO DO: More elegant solution would be welcome.
++        if( m_parentMenu )
++        {
++            wxMenu *menu = m_parentMenu;
++            size_t pos;
++            wxMenuItem *item = menu->FindChildItem(GetMSWId(), &pos);
++            wxASSERT_MSG( !item || item == this, wxT("It seems there is another menu item with same id") );
++            if( item == this )
++            {
++                menu->Remove(this);
++                menu->Insert(pos, this);
++            }
++        }
+         return;
++    }
++#endif
+ 
+     // the item can be not attached to any menu yet and SetBitmap() is still
+     // valid to call in this case and should do nothing else
+@@ -802,14 +816,11 @@
+     if ( !::SetMenuItemInfo(hMenu, id, FALSE, &mii) )
+     {
+         wxLogLastError(wxT("SetMenuItemInfo"));
+-        return;
+     }
+-
+-    // No need to really make the item owner drawn, Windows will draw its
+-    // bitmap(s) for us.
+-    SetOwnerDrawn(false);
+ }
+ 
++#if wxUSE_OWNER_DRAWN
++
+ int wxMenuItem::MeasureAccelWidth() const
+ {
+     wxString accel = GetItemLabel().AfterFirst(wxT('\t'));
+@@ -1326,7 +1337,7 @@
+     }
+ }
+ 
+-bool wxMenuItem::MustUseOwnerDrawn()
++bool wxMenuItem::MSWMustUseOwnerDrawn()
+ {
+     // MIIM_BITMAP only works under WinME/2000+ so we always use owner
+     // drawn item under the previous versions and we also have to use
+@@ -1358,6 +1369,8 @@
+     return mustUseOwnerDrawn;
+ }
+ 
++#endif // wxUSE_OWNER_DRAWN
++
+ // returns the HBITMAP to use in MENUITEMINFO
+ HBITMAP wxMenuItem::GetHBitmapForMenu(bool checked)
+ {
+@@ -1377,7 +1390,6 @@
+ #if wxUSE_IMAGE
+     if ( wxGetWinVersion() >= wxWinVersion_Vista )
+     {
+-#if wxUSE_OWNER_DRAWN
+         wxBitmap bmp = GetBitmap(checked);
+         if ( bmp.IsOk() )
+         {
+@@ -1391,9 +1403,7 @@
+ 
+             return GetHbitmapOf(GetBitmap(checked));
+         }
+-#endif // wxUSE_OWNER_DRAWN
+         //else: bitmap is not set
+-
+         return NULL;
+     }
+ #endif // wxUSE_IMAGE
+@@ -1401,8 +1411,6 @@
+     return HBMMENU_CALLBACK;
+ }
+ 
+-#endif // wxUSE_OWNER_DRAWN
+-
+ // ----------------------------------------------------------------------------
+ // wxMenuItemBase
+ // ----------------------------------------------------------------------------

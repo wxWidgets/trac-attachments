@@ -1,0 +1,121 @@
+diff -uNr wxWidgets-trunk\src/common/dcgraph.cpp wxWidgets-work\src/common/dcgraph.cpp
+--- wxWidgets-trunk\src/common/dcgraph.cpp	2014-01-07 23:03:56.519381100 +0100
++++ wxWidgets-work\src/common/dcgraph.cpp	2014-01-13 22:10:50.478732300 +0100
+@@ -18,6 +18,7 @@
+ #if wxUSE_GRAPHICS_CONTEXT
+ 
+ #include "wx/dcgraph.h"
++#include "wx/rawbmp.h"
+ 
+ #ifndef WX_PRECOMP
+     #include "wx/icon.h"
+@@ -171,6 +172,57 @@
+ wxGCDCImpl::wxGCDCImpl( wxDC *owner, const wxMemoryDC& dc ) :
+    wxDCImpl( owner )
+ {
++#ifndef NEVER_USE_DIB
++    // It seems that GDI+ sets invalid values for alpha channel when a compatible bitmap (DDB) is processed.
++    // If we have a DDB selected into the source DC then it should be converted to DIB before we start
++    // to play with GDI+ in order to have correct output alpha channel values.
++
++    // GDI+ graphics is not yet associated with parent DC
++    // and we don't have to use AcquireHDC/ReleaseDC to obtain parent DC.
++
++    wxBitmap bmp = dc.GetSelectedBitmap(); // Get bitmap selected into parent DC.
++    // Extra conversions are necessary if 32-bit bitmap is a DDB or it has no alpha channel
++    if ( bmp.GetDepth() == 32 && (!bmp.IsDIB() || !bmp.HasAlpha()) )
++    {
++        const_cast<wxMemoryDC&>(dc).SelectObject(wxNullBitmap);
++
++        if( !bmp.IsDIB() )
++        {   // Input bitmap is a 32-bit DDB --> it should be converted to DIB before it will be passed to GDI+.
++            bmp.ConvertToDIB(); // Bitmap converted from DDB to DIB.
++        }
++
++        if( !bmp.HasAlpha() )
++        {   // GDI+ operates with RGBA graphics surface where opaque pixels have alpha value = FF
++            // For 32-bit DIB without alpha channel we need to reset fake alpha to the opaque value.
++            // Extra block is on purpose.
++            {
++                wxAlphaPixelData data(bmp);
++                if ( data )
++                {
++                    wxAlphaPixelData::Iterator p(data);
++                    for ( int y = 0; y < data.GetHeight(); y++ )
++                    {
++                        wxAlphaPixelData::Iterator rowStart = p;
++
++                        for ( int x = 0; x < data.GetWidth(); x++ )
++                        {
++                            p.Alpha() = wxALPHA_OPAQUE;
++                            ++p;
++                        }
++
++                        p = rowStart;
++                        p.OffsetY(data, 1);
++                    }
++                }
++            }
++            // Using wxAlphaPixelData sets the internal "has alpha" flag.
++            // In this case we need to get rid of alpha, not set it, so reset it back.
++            bmp.ResetAlpha();
++        }
++
++        const_cast<wxMemoryDC&>(dc).SelectObjectAsSource(bmp); // Select converted bitmap.
++    }
++#endif
+     Init(wxGraphicsContext::Create(dc));
+ }
+ 
+diff -uNr wxWidgets-trunk\src/msw/bitmap.cpp wxWidgets-work\src/msw/bitmap.cpp
+--- wxWidgets-trunk\src/msw/bitmap.cpp	2014-01-13 19:39:59.181197300 +0100
++++ wxWidgets-work\src/msw/bitmap.cpp	2014-01-13 19:52:25.132197300 +0100
+@@ -457,6 +457,36 @@
+     return true;
+ }
+ 
++bool wxBitmap::IsDIB() const
++{
++    return GetBitmapData() && GetBitmapData()->m_isDIB;
++}
++
++bool wxBitmap::ConvertToDIB()
++{
++    if(GetBitmapData()->m_isDIB)
++        return true;    // It's DIB already.
++
++    wxDIB dib(*this);
++    if ( !dib.IsOk() )
++        return false;
++
++    HBITMAP hbitmap = dib.Detach();
++
++    // Current wxBitmapRefData object is reused in order
++    // to preserve wxBitmap object identity (see function IsSameAs).
++    GetBitmapData()->Free();
++
++    GetBitmapData()->m_isDIB = true;
++    GetBitmapData()->m_hBitmap = (WXHBITMAP)hbitmap;
++    // Rather redundant assignments but just in case...
++    GetBitmapData()->m_width = dib.GetWidth();
++    GetBitmapData()->m_height = dib.GetHeight();
++    GetBitmapData()->m_depth = dib.GetDepth();
++
++    return true;
++}
++
+ #endif // NEVER_USE_DIB
+ 
+ wxBitmap::~wxBitmap()
+diff -uNr -x setup.h wxWidgets-trunk\include/wx/msw/bitmap.h wxWidgets-work\include/wx/msw/bitmap.h
+--- wxWidgets-trunk\include/wx/msw/bitmap.h	2014-01-13 19:39:59.885197300 +0100
++++ wxWidgets-work\include/wx/msw/bitmap.h	2014-01-13 19:50:14.128197300 +0100
+@@ -136,6 +136,8 @@
+ #if wxUSE_WXDIB
+     // copies from a device independent bitmap
+     bool CopyFromDIB(const wxDIB& dib);
++    bool IsDIB() const;
++    bool ConvertToDIB();
+ #endif
+ 
+     virtual bool Create(int width, int height, int depth = wxBITMAP_SCREEN_DEPTH);

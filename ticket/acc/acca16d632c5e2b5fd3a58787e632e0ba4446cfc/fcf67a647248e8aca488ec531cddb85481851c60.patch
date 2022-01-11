@@ -1,0 +1,195 @@
+Index: dcsvg.cpp
+===================================================================
+--- dcsvg.cpp	(working copy)
++++ dcsvg.cpp	(working copy)
+@@ -23,9 +23,11 @@
+     #include "wx/image.h"
+ #endif
+ 
++#include "wx/base64.h"
+ #include "wx/dcsvg.h"
+ #include "wx/wfstream.h"
+ #include "wx/filename.h"
++#include "wx/mstream.h"
+ 
+ #include "wx/private/markupparser.h"
+ 
+@@ -110,6 +112,100 @@
+ } // anonymous namespace
+ 
+ // ----------------------------------------------------------
++// wxSVGFileDCEmbedBitmapHandler
++// ----------------------------------------------------------
++
++bool wxSVGFileDCEmbedBitmapHandler::ProcessBitmap(wxBitmap bmp, wxCoord x, wxCoord y, wxFileOutputStream* filestream) const
++{
++    static int sub_images = 0;
++    wxString s, sPNG;
++
++    if ( wxImage::FindHandler(wxBITMAP_TYPE_PNG) == NULL )
++        wxImage::AddHandler(new wxPNGHandler);
++
++    int w = bmp.GetWidth();
++    int h = bmp.GetHeight();
++
++    // write the bitmap as a PNG to a memory stream and Base64 encode
++    wxMemoryOutputStream stream;
++    wxImage tmp = bmp.ConvertToImage();
++
++    tmp.SaveFile(stream, wxBITMAP_TYPE_PNG);
++    wxString data = wxBase64Encode(stream.GetOutputStreamBuffer()->GetBufferStart(), stream.GetSize());
++    
++    // write image meta information
++    s += wxString::Format (" <image x=\"%d\" y=\"%d\" width=\"%dpx\" height=\"%dpx\" ", x, y, w, h );
++    s += wxString::Format (" id=\"image%d\" title=\"Image from wxSVG\"", sub_images++);
++    s += wxString::Format (" xlink:href=\"data:image/png;base64,\n");
++
++    // write the Base64 encoded data on lines 76 characters long
++    for (size_t i = 0; i < data.size(); i += 76)
++    {
++        if (i < data.size() - 76)
++            s += data.Mid(i, 76) + "\n";
++        else
++            s += data.Mid(i, s.size() - i) + "\"\n/>"; // last line
++    }
++
++    // write to the SVG file
++    const wxCharBuffer buf = s.utf8_str();
++    filestream->Write(buf, strlen((const char *)buf));
++
++    return filestream->IsOk();
++}
++
++// ----------------------------------------------------------
++// wxSVGFileDCLinkBitmapHandler
++// ----------------------------------------------------------
++
++bool wxSVGFileDCLinkBitmapHandler::ProcessBitmap(wxBitmap bmp, wxCoord x, wxCoord y, wxFileOutputStream* filestream) const
++{
++    static int sub_images = 0;
++    wxString s, sPNG;
++    bool bPNG_OK;
++
++    if ( wxImage::FindHandler(wxBITMAP_TYPE_PNG) == NULL )
++        wxImage::AddHandler(new wxPNGHandler);
++
++    int w = bmp.GetWidth();
++    int h = bmp.GetHeight();
++
++    // find a suitable file name
++    do
++    {
++        sPNG = wxString::Format("image%d.png", sub_images++);
++    } 
++    while (wxFile::Exists(sPNG));
++
++    //create copy of bitmap (wxGTK doesn't like saving a constant bitmap) and save it
++    wxBitmap tmp = bmp;
++    bPNG_OK = tmp.SaveFile(sPNG, wxBITMAP_TYPE_PNG);
++
++    // reference the bitmap from the SVG doc using only filename & ext
++    sPNG = sPNG.AfterLast(wxFileName::GetPathSeparator());
++
++    // reference the bitmap from the SVG doc
++    s += wxString::Format(" <image x=\"%d\" y=\"%d\" width=\"%dpx\" height=\"%dpx\" ", x, y, w, h);
++    s += wxString::Format(" xlink:href=\"%s\"> \n", sPNG.c_str());
++    s += ("<title>Image from wxSVG 2</title>  </image>\n");
++
++    // write to the SVG file
++    const wxCharBuffer buf = s.utf8_str();
++    filestream->Write(buf, strlen((const char *)buf));
++
++    return filestream->IsOk() && bPNG_OK;
++}
++
++// ----------------------------------------------------------
++// wxSVGFileDC (specialisations)
++// ----------------------------------------------------------
++
++void wxSVGFileDC::SetBitmapHandler(wxSVGFileDCBitmapHandler* handler)
++{
++    ((wxSVGFileDCImpl*)GetImpl())->SetBitmapHandler(handler);
++}
++
++// ----------------------------------------------------------
+ // wxSVGFileDCImpl
+ // ----------------------------------------------------------
+ 
+@@ -150,6 +246,7 @@
+ 
+     ////////////////////code here
+ 
++    m_bmp_handler = new wxSVGFileDCLinkBitmapHandler(); // default bitmap handler
+     m_outfile = new wxFileOutputStream(filename);
+     m_OK = m_outfile->IsOk();
+     if (m_OK)
+@@ -570,6 +667,14 @@
+     m_backgroundMode = mode;
+ }
+ 
++void wxSVGFileDCImpl::SetBitmapHandler(wxSVGFileDCBitmapHandler* handler)
++{
++    if (handler)
++    {
++        delete m_bmp_handler; // delete the old handler
++        m_bmp_handler = handler;
++    }
++}
+ 
+ void wxSVGFileDCImpl::SetBrush(const wxBrush& brush)
+ {
+@@ -686,42 +791,7 @@
+ {
+     NewGraphicsIfNeeded();
+ 
+-    wxString sTmp, s, sPNG;
+-    if ( wxImage::FindHandler(wxBITMAP_TYPE_PNG) == NULL )
+-        wxImage::AddHandler(new wxPNGHandler);
+-
+-// create suitable file name
+-    sTmp.Printf ( wxT("_image%d.png"), m_sub_images);
+-    sPNG = m_filename.BeforeLast(wxT('.')) + sTmp;
+-    while (wxFile::Exists(sPNG) )
+-    {
+-        m_sub_images ++;
+-        sTmp.Printf ( wxT("_image%d.png"), m_sub_images);
+-        sPNG = m_filename.BeforeLast(wxT('.')) + sTmp;
+-    }
+-
+-//create copy of bitmap (wxGTK doesn't like saving a constant bitmap)
+-    wxBitmap myBitmap = bmp;
+-//save it
+-    bool bPNG_OK = myBitmap.SaveFile(sPNG,wxBITMAP_TYPE_PNG);
+-
+-// reference the bitmap from the SVG doc
+-// only use filename & ext
+-    sPNG = sPNG.AfterLast(wxFileName::GetPathSeparator());
+-
+-// reference the bitmap from the SVG doc
+-    int w = myBitmap.GetWidth();
+-    int h = myBitmap.GetHeight();
+-    sTmp.Printf ( wxT(" <image x=\"%d\" y=\"%d\" width=\"%dpx\" height=\"%dpx\" "), x,y,w,h );
+-    s += sTmp;
+-    sTmp.Printf ( wxT(" xlink:href=\"%s\"> \n"), sPNG.c_str() );
+-    s += sTmp + wxT("<title>Image from wxSVG</title>  </image>") + wxT("\n");
+-
+-    if (m_OK && bPNG_OK)
+-    {
+-        write(s);
+-    }
+-    m_OK = m_outfile->IsOk() && bPNG_OK;
++	m_bmp_handler->ProcessBitmap(bmp, x, y, m_outfile);
+ }
+ 
+ void wxSVGFileDCImpl::write(const wxString &s)
+
+Property changes on: dcsvg.cpp
+___________________________________________________________________
+Deleted: svn:keywords
+## -1 +0,0 ##
+-Author Date Id Revision
+\ No newline at end of property
+Deleted: svn:eol-style
+## -1 +0,0 ##
+-native
+\ No newline at end of property

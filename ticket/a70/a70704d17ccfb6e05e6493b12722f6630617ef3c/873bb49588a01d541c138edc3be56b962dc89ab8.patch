@@ -1,0 +1,103 @@
+# HG changeset patch
+# User rk
+# Date 1286197582 -7200
+# Node ID 4671faa2b786baf78f77b764a0663b6efcb71be5
+# Parent  38630270f75ae8512e121923d8b1ee25f0136972
+fixed the way wxDataViewCtrl handles adding/removing items to/from leaf nodes
+
+wxDataViewMainWindow::ItemAdded() did not account for an item being added to a leaf node.
+On the other hand wxDataViewMainWindow::ItemDeleted() did not 'convert' a node whose last child was deleted into a leaf node.
+
+diff --git a/src/generic/datavgen.cpp b/src/generic/datavgen.cpp
+--- a/src/generic/datavgen.cpp
++++ b/src/generic/datavgen.cpp
+@@ -1968,8 +1968,22 @@ bool wxDataViewMainWindow::ItemAdded(con
+     wxDataViewTreeNode * node;
+     node = FindNode(parent);
+ 
++    // It is possible that the given parent item is a leaf object.
++    // In that case, we have to find the tree node that this leaf belongs to
++    // remove the object from it and readd it as a container.
+     if( node == NULL )
+-        return false;
++    {
++        const wxDataViewItem& parentsParent = g_model->GetParent( parent );
++        wxDataViewTreeNode* parentsParentNode = FindNode(parentsParent);
++        if( parentsParentNode == NULL )
++            return false;
++
++        ItemDeleted(parentsParent, parent);
++        node = new wxDataViewTreeNode(parentsParentNode);
++        node->SetItem(parent);
++        parentsParentNode->AddNode(node);
++        parentsParentNode->ChangeSubTreeCount(1);
++    }
+ 
+     node->SetHasChildren( true );
+ 
+@@ -2031,40 +2045,40 @@ bool wxDataViewMainWindow::ItemDeleted(c
+     {
+         m_selection.Empty();
+     }
+-    bool isContainer = false;
+-    wxDataViewTreeNodes nds = node->GetNodes();
+-    for (size_t i = 0; i < nds.GetCount(); i ++)
++
++	// Remove the item from the nodes list of its parent
++    wxDataViewTreeNodes& nodes = node->GetNodes();
++    for (size_t i = 0; i < nodes.GetCount(); i ++)
+     {
+-        if (nds[i]->GetItem() == item)
++        if (nodes[i]->GetItem() == item)
+         {
+-            isContainer = true;
++            wxDataViewTreeNode * n = nodes[i];
++            nodes.Remove( n );
++            sub -= n->GetSubTreeCount();
++            ::DestroyTreeHelper(n);
+             break;
+         }
+     }
+-    if( isContainer )
+-    {
+-        wxDataViewTreeNode * n = NULL;
+-        wxDataViewTreeNodes nodes = node->GetNodes();
+-        int len = nodes.GetCount();
+-        for( int i = 0; i < len; i ++)
+-        {
+-            if( nodes[i]->GetItem() == item )
+-            {
+-                n = nodes[i];
+-                break;
+-            }
+-        }
+-
+-        wxCHECK_MSG( n != NULL, false, "item not found" );
+-
+-        node->GetNodes().Remove( n );
+-        sub -= n->GetSubTreeCount();
+-        ::DestroyTreeHelper(n);
+-    }
++
+     // Make the row number invalid and get a new valid one when user call GetRowCount
+     m_count = -1;
+     node->ChangeSubTreeCount(sub);
+ 
++    // if the node just became empty after the deletion of the item, we need to 'convert'
++    // it into a leaf node. Otherwise, strange things will happen
++    const wxDataViewModel* model = GetOwner()->GetModel();
++    if(!model->IsContainer(parent))
++    {
++        wxDataViewTreeNode* parentNode = node->GetParent();
++        if(parentNode)
++        {
++            wxDataViewTreeNodes& nodes = parentNode->GetNodes();
++            nodes.Remove(node);
++            delete node;
++            parentNode->AddLeaf(parent.GetID());
++        }
++    }
++
+     // Change the current row to the last row if the current exceed the max row number
+     if( m_currentRow > GetRowCount() )
+         m_currentRow = m_count - 1;

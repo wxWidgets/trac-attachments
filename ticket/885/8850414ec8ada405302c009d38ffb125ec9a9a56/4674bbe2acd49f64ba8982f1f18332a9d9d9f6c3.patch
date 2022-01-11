@@ -1,0 +1,268 @@
+Index: include/wx/quantize.h
+===================================================================
+--- include/wx/quantize.h	(revision 54661)
++++ include/wx/quantize.h	(working copy)
+@@ -33,6 +33,7 @@
+ #define wxQUANTIZE_INCLUDE_WINDOWS_COLOURS      0x01
+ #define wxQUANTIZE_RETURN_8BIT_DATA             0x02
+ #define wxQUANTIZE_FILL_DESTINATION_IMAGE       0x04
++#define wxQUANTIZE_NO_DITHER                    0x08
+ 
+ class WXDLLIMPEXP_CORE wxQuantize: public wxObject
+ {
+@@ -68,8 +69,8 @@
+     // in_rows and out_rows are arrays [0..h-1] of pointer to rows
+     // (in_rows contains w * 3 bytes per row, out_rows w bytes per row)
+     // fills out_rows with indexes into palette (which is also stored into palette variable)
+-    static void DoQuantize(unsigned w, unsigned h, unsigned char **in_rows, unsigned char **out_rows, unsigned char *palette, int desiredNoColours);
+-
++    static void DoQuantize(unsigned w, unsigned h, unsigned char **in_rows, unsigned char **out_rows, 
++                           unsigned char *palette, int desiredNoColours, bool dither = true);
+ };
+ 
+ #endif
+Index: interface/wx/quantize.h
+===================================================================
+--- interface/wx/quantize.h	(revision 54661)
++++ interface/wx/quantize.h	(working copy)
+@@ -32,10 +32,15 @@
+         (@a in_rows contains @a w * 3 bytes per row, @a out_rows @a w bytes per row).
+         Fills @a out_rows with indexes into palette (which is also stored into @a palette
+         variable).
++
++        @param dither
++            Recommended value is true for photo quality images, false for solid colour images
++
++        @since dither parameter since 2.8.9
+     */
+     void DoQuantize(unsigned w, unsigned h, unsigned char** in_rows,
+                     unsigned char** out_rows, unsigned char* palette,
+-                    int desiredNoColours);
++                    int desiredNoColours, bool dither = true);
+ 
+     /**
+         Reduce the colours in the source image and put the result into the destination image.
+@@ -43,6 +48,10 @@
+ 
+         Specify an optional palette pointer to receive the resulting palette.
+         This palette may be passed to ConvertImageToBitmap, for example.
++
++        Add wxQUANTIZE_NO_DITHER flag for solid colour images
++
++        @since wxQUANTIZE_NO_DITHER flag since 2.8.9
+     */
+     bool Quantize(const wxImage& src, wxImage& dest,
+                   wxPalette** pPalette, int desiredNoColours = 236,
+@@ -54,6 +63,9 @@
+     /**
+         This version sets a palette in the destination image so you don't
+         have to manage it yourself.
++        Add wxQUANTIZE_NO_DITHER flag for solid colour images
++
++        @since wxQUANTIZE_NO_DITHER flag since 2.8.9
+     */
+     bool Quantize(const wxImage& src, wxImage& dest,
+                   int desiredNoColours = 236,
+Index: src/common/quantize.cpp
+===================================================================
+--- src/common/quantize.cpp	(revision 54661)
++++ src/common/quantize.cpp	(working copy)
+@@ -319,6 +319,7 @@
+   FSERRPTR fserrors;        /* accumulated errors */
+   bool on_odd_row;      /* flag to remember which row we are on */
+   int * error_limiter;      /* table for clamping the applied error */
++  bool dither;
+ } my_cquantizer;
+ 
+ typedef my_cquantizer * my_cquantize_ptr;
+@@ -333,7 +334,7 @@
+  * NULL pointer).
+  */
+ 
+-void
++static void
+ prescan_quantize (j_decompress_ptr cinfo, JSAMPARRAY input_buf,
+           JSAMPARRAY WXUNUSED(output_buf), int num_rows)
+ {
+@@ -386,7 +387,7 @@
+ typedef box * boxptr;
+ 
+ 
+-boxptr
++static boxptr
+ find_biggest_color_pop (boxptr boxlist, int numboxes)
+ /* Find the splittable box with the largest color population */
+ /* Returns NULL if no splittable boxes remain */
+@@ -406,7 +407,7 @@
+ }
+ 
+ 
+-boxptr
++static boxptr
+ find_biggest_volume (boxptr boxlist, int numboxes)
+ /* Find the splittable box with the largest (scaled) volume */
+ /* Returns NULL if no splittable boxes remain */
+@@ -426,7 +427,7 @@
+ }
+ 
+ 
+-void
++static void
+ update_box (j_decompress_ptr cinfo, boxptr boxp)
+ /* Shrink the min/max bounds of a box to enclose only nonzero elements, */
+ /* and recompute its volume and population */
+@@ -537,7 +538,7 @@
+ }
+ 
+ 
+-int
++static int
+ median_cut (j_decompress_ptr cinfo, boxptr boxlist, int numboxes,
+         int desired_colors)
+ /* Repeatedly select and split the largest box until we have enough boxes */
+@@ -628,7 +629,7 @@
+ }
+ 
+ 
+-void
++static void
+ compute_color (j_decompress_ptr cinfo, boxptr boxp, int icolor)
+ /* Compute representative color for a box, put it in colormap[icolor] */
+ {
+@@ -1044,7 +1045,7 @@
+  * Map some rows of pixels to the output colormapped representation.
+  */
+ 
+-void
++static void
+ pass2_no_dither (j_decompress_ptr cinfo,
+          JSAMPARRAY input_buf, JSAMPARRAY output_buf, int num_rows)
+ /* This version performs no dithering */
+@@ -1077,8 +1078,7 @@
+   }
+ }
+ 
+-
+-void
++static void
+ pass2_fs_dither (j_decompress_ptr cinfo,
+          JSAMPARRAY input_buf, JSAMPARRAY output_buf, int num_rows)
+ /* This version performs Floyd-Steinberg dithering */
+@@ -1271,7 +1271,7 @@
+  * Finish up at the end of each pass.
+  */
+ 
+-void
++static void
+ finish_pass1 (j_decompress_ptr cinfo)
+ {
+   my_cquantize_ptr cquantize = (my_cquantize_ptr) cinfo->cquantize;
+@@ -1284,7 +1284,7 @@
+ }
+ 
+ 
+-void
++static void
+ finish_pass2 (j_decompress_ptr WXUNUSED(cinfo))
+ {
+   /* no work */
+@@ -1295,7 +1295,7 @@
+  * Initialize for each processing pass.
+  */
+ 
+-void
++static void
+ start_pass_2_quant (j_decompress_ptr cinfo, bool is_pre_scan)
+ {
+   my_cquantize_ptr cquantize = (my_cquantize_ptr) cinfo->cquantize;
+@@ -1308,7 +1308,7 @@
+     cquantize->needs_zeroed = true; /* Always zero histogram */
+   } else {
+     /* Set up method pointers */
+-    cquantize->pub.color_quantize = pass2_fs_dither;
++    cquantize->pub.color_quantize = cquantize->dither ? pass2_fs_dither : pass2_no_dither;
+     cquantize->pub.finish_pass = finish_pass2;
+ 
+     {
+@@ -1341,7 +1341,7 @@
+  * Switch to a new external colormap between output passes.
+  */
+ 
+-void
++static void
+ new_color_map_2_quant (j_decompress_ptr cinfo)
+ {
+   my_cquantize_ptr cquantize = (my_cquantize_ptr) cinfo->cquantize;
+@@ -1355,7 +1355,7 @@
+  * Module initialization routine for 2-pass color quantization.
+  */
+ 
+-void
++static void
+ jinit_2pass_quantizer (j_decompress_ptr cinfo)
+ {
+   my_cquantize_ptr cquantize;
+@@ -1405,16 +1405,7 @@
+   }
+ }
+ 
+-
+-
+-
+-
+-
+-
+-
+-
+-
+-void
++static void
+ prepare_range_limit_table (j_decompress_ptr cinfo)
+ /* Allocate and fill in the sample_range_limit table */
+ {
+@@ -1450,8 +1441,9 @@
+ 
+ IMPLEMENT_DYNAMIC_CLASS(wxQuantize, wxObject)
+ 
++/*static*/
+ void wxQuantize::DoQuantize(unsigned w, unsigned h, unsigned char **in_rows, unsigned char **out_rows,
+-    unsigned char *palette, int desiredNoColours)
++    unsigned char *palette, int desiredNoColours, bool dither)
+ {
+     j_decompress dec;
+     my_cquantize_ptr cquantize;
+@@ -1461,8 +1453,8 @@
+     prepare_range_limit_table(&dec);
+     jinit_2pass_quantizer(&dec);
+     cquantize = (my_cquantize_ptr) dec.cquantize;
++    cquantize->dither = dither;
+ 
+-
+     cquantize->pub.start_pass(&dec, true);
+     cquantize->pub.color_quantize(&dec, in_rows, out_rows, h);
+     cquantize->pub.finish_pass(&dec);
+@@ -1496,6 +1488,7 @@
+ // TODO: somehow make use of the Windows system colours, rather than ignoring them for the
+ // purposes of quantization.
+ 
++/*static*/
+ bool wxQuantize::Quantize(const wxImage& src, wxImage& dest,
+                           wxPalette** pPalette,
+                           int desiredNoColours,
+@@ -1537,7 +1530,7 @@
+         outrows[i] = data8bit + w * i;
+ 
+     //RGB->palette
+-    DoQuantize(w, h, rows, outrows, palette, desiredNoColours);
++    DoQuantize(w, h, rows, outrows, palette, desiredNoColours, !(flags & wxQUANTIZE_NO_DITHER));
+ 
+     delete[] rows;
+     delete[] outrows;
+@@ -1631,6 +1624,7 @@
+ // This version sets a palette in the destination image so you don't
+ // have to manage it yourself.
+ 
++/*static*/
+ bool wxQuantize::Quantize(const wxImage& src,
+                           wxImage& dest,
+                           int desiredNoColours,

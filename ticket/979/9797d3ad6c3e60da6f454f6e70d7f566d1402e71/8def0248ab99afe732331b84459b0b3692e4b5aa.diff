@@ -1,0 +1,178 @@
+Index: src/msw/window.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/window.cpp,v
+retrieving revision 1.441
+diff -b -u -2 -r1.441 window.cpp
+--- src/msw/window.cpp	2003/09/24 00:41:06	1.441
++++ src/msw/window.cpp	2003/09/29 18:34:48
+@@ -1852,4 +1852,7 @@
+             // should we process this message specially?
+             bool bProcess = TRUE;
++                /// wndProcess may change for the special case: VK_ENTER works as TAB
++            wxWindow *wndProcess=this;
++
+             switch ( msg->wParam )
+             {
+@@ -1884,13 +1887,68 @@
+                 case VK_RETURN:
+                     {
++                        /* VK_RETURN handles the following conditions
++                            #   The control has the DLGC_WANTMESSAGE style set
++                                and wants the return for itself and Control is
++                                not pressed
++                                return FALSE - do nothing.
++                            #   The control has the DLGC_BUTTON style set
++                                (is a button)
++                                -  if the control has the OWNERDRAW style set
++                                    -   simulate 'click' as IsDialogMessage
++                                        does not do this for ownerdraw buttons
++                                    -   pass the message to IsDialogMessage
++                                        nevertheless
++                                    -   bProcess = false
++                                -  if the control is NOT a checkbox
++                                    pass the message to IsDialogMessage
++                                    bProcess = false
++                                    break;
++                                -  else the control is a checkbox - in this
++                                    case we want VK_RETURN to act as TAB
++                                    continue...
++                            #  If the window has an enabled default pushbutton
++                                push it and return TRUE - we did something
++                            #  The control has the DLGC_WANTMESSAGE style set
++                                and wants the return for itself regardless if
++                                Control is pressed or not
++                                -   return FALSE - do nothing
++                            #  If the window is not a TopLevel window - let
++                                the parent have the event
++                                return FALSE - do nothing
++                            #  Finally... The window is a TopLevel window, no
++                                other window wanted the return code. Let the
++                                return code act as TAB - do nothing and let
++                                bProcess take its course.
++                        */
++                        /*  this switch branch can be exited in these ways...
++                            return false
++                                -   do nothing, neither call IsDialogMessage,
++                                    nor process the message
++                            return true
++                                -   do something, stop further processing
++                            bProcess=false 
++                                -   call IsDialogMessage, do not process the
++                                    message
++                            bProcess=true
++                                -   try to process the message. if there is no
++                                    handler, call IsDialogMessage
++                        */
+                         if ( (lDlgCode & DLGC_WANTMESSAGE) && !bCtrlDown )
+                         {
+-                            // control wants to process Enter itself, don't
+-                            // call IsDialogMessage() which would interpret
+-                            // it
++                            // control wants to process Enter itself and 
++                            // Control is not pressed, don't call 
++                            // IsDialogMessage() which would interpret it
+                             return FALSE;
+                         }
+-                        else if ( lDlgCode & DLGC_BUTTON )
++
++                        // there are several cases where we need to know what 
++                        // kind of window this is.
++                        wxWindow *wnd = wxFindWinFromHandle((WXHWND)msg->hwnd);
++                        if ( lDlgCode & DLGC_BUTTON )
+                         {
++                            wxWindow *btn = wnd;
++                            if (! (btn && btn->IsKindOf(CLASSINFO(wxCheckBox))) ) 
++                        {
++                                // control is a button, but not a checkbox
+                             // let IsDialogMessage() handle this for all
+                             // buttons except the owner-drawn ones which it
+@@ -1899,16 +1957,17 @@
+                             if ( (style & BS_OWNERDRAW) == BS_OWNERDRAW )
+                             {
++                                    // control is an ownerdraw button
+                                 // emulate the button click
+-                                wxWindow *btn = wxFindWinFromHandle((WXHWND)msg->hwnd);
+                                 if ( btn )
+                                     btn->MSWCommand(BN_CLICKED, 0 /* unused */);
+                             }
+ 
+-                            bProcess = FALSE;
++                                bProcess = FALSE; // call IsDialogMessage only
++                                break; // from VK_RETURN case
+                         }
++                        }
++
+                         // FIXME: this should be handled by
+                         //        wxNavigationKeyEvent handler and not here!!
+-                        else
+-                        {
+ #if wxUSE_BUTTON
+                             wxButton *btn = wxDynamicCast(GetDefaultItem(),
+@@ -1921,18 +1980,8 @@
+                                 return TRUE;
+                             }
+-                            else // no default button
+-                            {
++
+ #endif // wxUSE_BUTTON
+-                                // this is a quick and dirty test for a text
+-                                // control
+-                                if ( !(lDlgCode & DLGC_HASSETSEL) )
+-                                {
+-                                    // don't process Enter, the control might
+-                                    // need it for itself and don't let
+-                                    // ::IsDialogMessage() have it as it can
+-                                    // eat the Enter events sometimes
+-                                    return FALSE;
+-                                }
+-                                else if (!IsTopLevel())
++
++                        if (!IsTopLevel())
+                                 {
+                                     // if not a top level window, let parent
+@@ -1940,9 +1989,24 @@
+                                     return FALSE;
+                                 }
++
+                                 //else: treat Enter as TAB: pass to the next
+-                                //      control as this is the best thing to do
+-                                //      if the text doesn't handle Enter itself
+-                            }
+-                        }
++                        // control as this is the best thing to do if the 
++                        // control doesn't handle Enter itself (DLGC_WANTMESSAGE)
++
++                        //  note: we cannot rely on the default (pProcess) 
++                        //  handling below here because if return has been 
++                        //  pressed in a child window and there are panels 
++                        //  between the top window (this) and the child, 
++                        //  the default Navigation handling will set the TAB 
++                        //  to the next panel, not the next child inside the 
++                        //  panel. Because of this, we need to start the TAB 
++                        //  at the window where the the ENTER key was pressed. 
++                        //  nice enough, this information is preserved in 'msg'.
++                        HWND hwnd = msg->hwnd;
++                        wxWindow *wndThis = wxGetWindowFromHWND((WXHWND)hwnd);
++                        if (wndThis)
++                            wndProcess=wndThis;
++                        // else leave everything as is. The window that sent
++                        // the message is none of our child windows.
+                     }
+                     break;
+@@ -1957,7 +2021,12 @@
+                 event.SetDirection(bForward);
+                 event.SetWindowChange(bWindowChange);
+-                event.SetEventObject(this);
++                event.SetEventObject(wndProcess);
++                // return key events that are not handled by the switch
++                // statement above should be propagated upwards
++                // these events will act as if TAB was pressed
++                if (msg->wParam==VK_RETURN)
++                    event.ResumePropagation(wxEVENT_PROPAGATE_MAX);
+ 
+-                if ( GetEventHandler()->ProcessEvent(event) )
++                if ( wndProcess->GetEventHandler()->ProcessEvent(event) )
+                 {
+                     return TRUE;
+
+ 	  	 

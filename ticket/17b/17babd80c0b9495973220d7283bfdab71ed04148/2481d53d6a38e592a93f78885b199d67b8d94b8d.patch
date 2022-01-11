@@ -1,0 +1,2884 @@
+Index: configure
+===================================================================
+Index: Makefile.in
+===================================================================
+Index: autoconf_inc.m4
+===================================================================
+Index: src/gtk/filectrl.cpp
+===================================================================
+--- src/gtk/filectrl.cpp	(revision 0)
++++ src/gtk/filectrl.cpp	(revision 0)
+@@ -0,0 +1,428 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        src/gtk/filectrl.cpp
++// Purpose:     wxGtkFileCtrl Implementation
++// Author:      Diaa M. Sami
++// Modified by:
++// Created:     Aug-10-2007
++// RCS-ID:      $Id: $
++// Copyright:   (c) Diaa M. Sami
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++#if wxUSE_FILECTRL
++
++#include "wx/filectrl.h"
++
++#ifndef WX_PRECOMP
++#include "wx/sizer.h"
++#include "wx/debug.h"
++#endif
++
++#include "wx/filedlg.h"
++#include "wx/filename.h"
++#include "wx/tokenzr.h" // wxStringTokenizer
++
++//-----------------------------------------------------------------------------
++// wxGtkFileChooser Implementation
++//-----------------------------------------------------------------------------
++
++wxGtkFileChooser::wxGtkFileChooser()
++{
++}
++
++void wxGtkFileChooser::SetWidget(GtkFileChooser *w)
++{
++    // check arguments
++    wxASSERT( w );
++    wxASSERT( GTK_FILE_CHOOSER( w ) );
++
++    this->m_widget = w;
++}
++
++wxString wxGtkFileChooser::GetPath() const
++{
++    wxGtkString str( gtk_file_chooser_get_filename( m_widget ) );
++
++    if ( str.c_str() == NULL )
++        return wxEmptyString;
++
++    return wxConvFileName->cMB2WX( str );
++}
++
++void wxGtkFileChooser::GetFilenames( wxArrayString& files ) const
++{
++    GetPaths( files );
++    for ( size_t n = 0; n < files.GetCount(); ++n )
++    {
++        const wxFileName file( files[n] );
++        files[n] = file.GetFullName();
++    }
++}
++
++void wxGtkFileChooser::GetPaths( wxArrayString& paths ) const
++{
++    paths.Empty();
++    if ( gtk_file_chooser_get_select_multiple( m_widget ) )
++    {
++        GSList *gpathsi = gtk_file_chooser_get_filenames( m_widget );
++        GSList *gpaths = gpathsi;
++        while ( gpathsi )
++        {
++            wxString file( wxConvFileName->cMB2WX( ( gchar* ) gpathsi->data ) );
++            paths.Add( file );
++            g_free( gpathsi->data );
++            gpathsi = gpathsi->next;
++        }
++
++        g_slist_free( gpaths );
++    }
++    else
++        paths.Add( GetPath() );
++}
++
++bool wxGtkFileChooser::SetPath( const wxString& path )
++{
++    if ( path.empty() ) return true;
++
++    return gtk_file_chooser_set_filename( m_widget,
++                                          wxConvFileName->cWX2MB( path.c_str() ) );
++}
++
++bool wxGtkFileChooser::SetDirectory( const wxString& dir )
++{
++    const gboolean b =
++        gtk_file_chooser_set_current_folder( m_widget,
++                                             wxConvFileName->cWX2MB( dir.c_str() ) );
++    return b == TRUE;
++}
++
++wxString wxGtkFileChooser::GetDirectory() const
++{
++    const wxGtkString str( gtk_file_chooser_get_current_folder( m_widget ) );
++    return wxString( str, *wxConvFileName );
++}
++
++wxString wxGtkFileChooser::GetFilename() const
++{
++    return wxFileName( GetPath() ).GetFullName();
++}
++
++void wxGtkFileChooser::SetWildcard( const wxString& wildCard )
++{
++    // parse filters
++    wxArrayString wildDescriptions, wildFilters;
++
++    if ( !wxParseCommonDialogsFilter( wildCard, wildDescriptions, wildFilters ) )
++    {
++        wxFAIL_MSG( wxT( "wxGtkFileChooser::SetWildcard - bad wildcard string" ) );
++    }
++    else
++    {
++        // Parsing went fine. Set m_wildCard to be returned by wxGtkFileChooserBase::GetWildcard
++        GtkFileChooser* chooser = m_widget;
++
++        // empty current filter list:
++        GSList* ifilters = gtk_file_chooser_list_filters( chooser );
++        GSList* filters = ifilters;
++
++        while ( ifilters )
++        {
++            gtk_file_chooser_remove_filter( chooser, GTK_FILE_FILTER( ifilters->data ) );
++            ifilters = ifilters->next;
++        }
++        g_slist_free( filters );
++
++        // add parsed to GtkChooser
++        for ( size_t n = 0; n < wildFilters.GetCount(); ++n )
++        {
++            GtkFileFilter* filter = gtk_file_filter_new();
++
++            gtk_file_filter_set_name( filter, wxGTK_CONV_SYS( wildDescriptions[n] ) );
++
++            wxStringTokenizer exttok( wildFilters[n], wxT( ";" ) );
++            while ( exttok.HasMoreTokens() )
++            {
++                wxString token = exttok.GetNextToken();
++                gtk_file_filter_add_pattern( filter, wxGTK_CONV_SYS( token ) );
++            }
++
++            gtk_file_chooser_add_filter( chooser, filter );
++        }
++
++        // Reset the filter index
++        SetFilterIndex( 0 );
++    }
++}
++
++void wxGtkFileChooser::SetFilterIndex( int filterIndex )
++{
++    gpointer filter;
++    GtkFileChooser *chooser = m_widget;
++    GSList *filters = gtk_file_chooser_list_filters( chooser );
++
++    filter = g_slist_nth_data( filters, filterIndex );
++
++    if ( filter != NULL )
++    {
++        gtk_file_chooser_set_filter( chooser, GTK_FILE_FILTER( filter ) );
++    }
++    else
++    {
++        wxFAIL_MSG( wxT( "wxGtkFileChooser::SetFilterIndex - bad filter index" ) );
++    }
++
++    g_slist_free( filters );
++}
++
++int wxGtkFileChooser::GetFilterIndex() const
++{
++    GtkFileChooser *chooser = m_widget;
++    GtkFileFilter *filter = gtk_file_chooser_get_filter( chooser );
++    GSList *filters = gtk_file_chooser_list_filters( chooser );
++    const gint index = g_slist_index( filters, filter );
++    g_slist_free( filters );
++
++    if ( index == -1 )
++    {
++        wxFAIL_MSG( wxT( "wxGtkFileChooser::GetFilterIndex - bad filter index returned by gtk+" ) );
++        return 0;
++    }
++    else
++        return index;
++};
++
++//-----------------------------------------------------------------------------
++// end wxGtkFileChooser Implementation
++//-----------------------------------------------------------------------------
++
++// gtk signal handlers
++
++extern "C"
++{
++    static void
++    gtkfilechooserwidget_file_activated_callback( GtkWidget *WXUNUSED( widget ), wxGtkFileCtrl *fileCtrl )
++    {
++        GenerateFileActivatedEvent( fileCtrl );
++    }
++}
++
++extern "C"
++{
++    static void
++    gtkfilechooserwidget_selection_changed_callback( GtkWidget *WXUNUSED( widget ), wxGtkFileCtrl *fileCtrl )
++    {
++        // check next selection event and ignore it if it has 0 files
++        // because such events are redundantly generated by gtk.
++        if ( fileCtrl->m_checkNextSelEvent )
++        {
++            wxArrayString filenames;
++            fileCtrl->GetFilenames( filenames );
++
++            if ( filenames.Count() != 0 )
++                fileCtrl->m_checkNextSelEvent = false;
++        }
++
++        if ( !fileCtrl->m_checkNextSelEvent )
++            GenerateSelectionChangedEvent( fileCtrl );
++    }
++}
++
++extern "C"
++{
++    static void
++    gtkfilechooserwidget_folder_changed_callback( GtkWidget *WXUNUSED( widget ), wxGtkFileCtrl *fileCtrl )
++    {
++        if ( fileCtrl->m_ignoreNextFolderChangeEvent )
++        {
++            fileCtrl->m_ignoreNextFolderChangeEvent = false;
++        }
++        else
++        {
++            GenerateFolderChangedEvent( fileCtrl );
++        }
++
++        fileCtrl->m_checkNextSelEvent = true;
++    }
++}
++
++// wxGtkFileCtrl implementation
++
++IMPLEMENT_DYNAMIC_CLASS( wxGtkFileCtrl, wxControl )
++
++void wxGtkFileCtrl::Init()
++{
++    m_hasFocus = false;
++    m_checkNextSelEvent = false;
++
++    // ignore the first folder change event which is fired upon startup.
++    m_ignoreNextFolderChangeEvent = true;
++}
++
++bool wxGtkFileCtrl::Create( wxWindow *parent,
++                            wxWindowID id,
++                            const wxString& defaultDirectory,
++                            const wxString& defaultFileName,
++                            const wxString& wildCard,
++                            long style,
++                            const wxPoint& pos,
++                            const wxSize& size,
++                            const wxString& name )
++{
++    if ( !PreCreation( parent, pos, size ) ||
++            !CreateBase( parent, id, pos, size, style, wxDefaultValidator, name ) )
++    {
++        wxFAIL_MSG( wxT( "wxGtkFileCtrl creation failed" ) );
++        return false;
++    }
++
++    GtkFileChooserAction gtkAction;
++
++    if ( style & wxFC_SAVE )
++    {
++        gtkAction = GTK_FILE_CHOOSER_ACTION_SAVE;
++    }
++    else if ( style & wxFC_OPEN )
++    {
++        gtkAction = GTK_FILE_CHOOSER_ACTION_OPEN;
++    }
++
++    m_widget =  gtk_alignment_new ( 0, 0, 1, 1 );
++    m_fcWidget = GTK_FILE_CHOOSER( gtk_file_chooser_widget_new( GTK_FILE_CHOOSER_ACTION_OPEN ) );
++    gtk_widget_show ( GTK_WIDGET( m_fcWidget ) );
++    gtk_container_add ( GTK_CONTAINER ( m_widget ), GTK_WIDGET( m_fcWidget ) );
++
++    m_focusWidget = GTK_WIDGET( m_fcWidget );
++
++    g_signal_connect ( m_fcWidget, "file-activated",
++                       G_CALLBACK ( gtkfilechooserwidget_file_activated_callback ),
++                       this );
++
++    g_signal_connect ( m_fcWidget, "current-folder-changed",
++                       G_CALLBACK ( gtkfilechooserwidget_folder_changed_callback ),
++                       this );
++
++    g_signal_connect ( m_fcWidget, "selection-changed",
++                       G_CALLBACK ( gtkfilechooserwidget_selection_changed_callback ),
++                       this );
++
++    m_fc.SetWidget( m_fcWidget );
++
++    if ( style & wxFC_MULTIPLE )
++        gtk_file_chooser_set_select_multiple( m_fcWidget, true );
++
++    SetWildcard( wildCard );
++
++    // if defaultDir is specified it should contain the directory and
++    // defaultFileName should contain the default name of the file, however if
++    // directory is not given, defaultFileName contains both
++    wxFileName fn;
++    if ( defaultDirectory.empty() )
++        fn.Assign( defaultFileName );
++    else if ( !defaultFileName.empty() )
++        fn.Assign( defaultDirectory, defaultFileName );
++    else
++        fn.AssignDir( defaultDirectory );
++
++    // set the initial file name and/or directory
++    const wxString dir = fn.GetPath();
++    if ( !dir.empty() )
++    {
++        gtk_file_chooser_set_current_folder( m_fcWidget,
++                                             dir.fn_str() );
++    }
++
++    const wxString fname = fn.GetFullName();
++    if ( style & wxFC_SAVE )
++    {
++        if ( !fname.empty() )
++        {
++            gtk_file_chooser_set_current_name( m_fcWidget,
++                                               fname.fn_str() );
++        }
++    }
++    else // wxFC_OPEN
++    {
++        if ( !fname.empty() )
++        {
++            gtk_file_chooser_set_filename( m_fcWidget,
++                                           fn.GetFullPath().fn_str() );
++        }
++    }
++
++    m_parent->DoAddChild( this );
++
++    PostCreation( size );
++
++    return TRUE;
++}
++
++bool wxGtkFileCtrl::SetPath( const wxString& path )
++{
++    return m_fc.SetPath( path );
++}
++
++bool wxGtkFileCtrl::SetDirectory( const wxString& dir )
++{
++    return m_fc.SetDirectory( dir );
++}
++
++bool wxGtkFileCtrl::SetFilename( const wxString& name )
++{
++    if ( !gtk_check_version( 2, 4, 0 ) )
++    {
++        if ( HasFlag( wxFC_SAVE ) )
++        {
++            gtk_file_chooser_set_current_name( m_fcWidget, wxGTK_CONV( name ) );
++            return true;
++        }
++        else
++            return SetPath( wxFileName( GetDirectory(), name ).GetFullPath() );
++    }
++
++    return false;
++}
++
++void wxGtkFileCtrl::SetWildcard( const wxString& wildCard )
++{
++    m_wildCard = wildCard;
++
++    m_fc.SetWildcard( wildCard );
++}
++
++void wxGtkFileCtrl::SetFilterIndex( int filterIndex )
++{
++    m_fc.SetFilterIndex( filterIndex );
++}
++
++wxString wxGtkFileCtrl::GetPath() const
++{
++    return m_fc.GetPath();
++}
++
++void wxGtkFileCtrl::GetPaths( wxArrayString& paths ) const
++{
++    m_fc.GetPaths( paths );
++}
++
++wxString wxGtkFileCtrl::GetDirectory() const
++{
++    return m_fc.GetDirectory();
++}
++
++wxString wxGtkFileCtrl::GetFilename() const
++{
++    return m_fc.GetFilename();
++}
++
++void wxGtkFileCtrl::GetFilenames( wxArrayString& files ) const
++{
++    m_fc.GetFilenames( files );
++}
++
++#endif // wxUSE_FILECTRL
+Index: src/gtk/filedlg.cpp
+===================================================================
+--- src/gtk/filedlg.cpp	(revision 47901)
++++ src/gtk/filedlg.cpp	(working copy)
+@@ -198,6 +198,8 @@
+                    ok_btn_stock, GTK_RESPONSE_ACCEPT,
+                    NULL);
+ 
++    m_fc.SetWidget( GTK_FILE_CHOOSER(m_widget) );
++
+     gtk_dialog_set_default_response(GTK_DIALOG(m_widget), GTK_RESPONSE_ACCEPT);
+ 
+     if ( style & wxFD_MULTIPLE )
+@@ -318,8 +320,7 @@
+ {
+     if (!gtk_check_version(2,4,0))
+     {
+-        wxGtkString str(gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(m_widget)));
+-        return wxString(str, *wxConvFileName);
++        return m_fc.GetPath();
+     }
+ 
+     return wxGenericFileDialog::GetPath();
+@@ -329,12 +330,7 @@
+ {
+     if (!gtk_check_version(2,4,0))
+     {
+-        GetPaths(files);
+-        for (size_t n = 0; n < files.GetCount(); ++n )
+-        {
+-            wxFileName file(files[n]);
+-            files[n] = file.GetFullName();
+-        }
++        m_fc.GetFilenames( files );
+     }
+     else
+         wxGenericFileDialog::GetFilenames( files );
+@@ -344,23 +340,7 @@
+ {
+     if (!gtk_check_version(2,4,0))
+     {
+-        paths.Empty();
+-        if (gtk_file_chooser_get_select_multiple(GTK_FILE_CHOOSER(m_widget)))
+-        {
+-            GSList *gpathsi = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(m_widget));
+-            GSList *gpaths = gpathsi;
+-            while (gpathsi)
+-            {
+-                wxString file((gchar*) gpathsi->data, *wxConvFileName);
+-                paths.Add(file);
+-                g_free(gpathsi->data);
+-                gpathsi = gpathsi->next;
+-            }
+-
+-            g_slist_free(gpaths);
+-        }
+-        else
+-            paths.Add(GetPath());
++        m_fc.GetPaths( paths );
+     }
+     else
+         wxGenericFileDialog::GetPaths( paths );
+@@ -381,9 +361,7 @@
+ {
+     if (!gtk_check_version(2,4,0))
+     {
+-        if (path.empty()) return;
+-
+-        gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(m_widget), path.fn_str());
++        m_fc.SetPath( path );
+     }
+     else
+         wxGenericFileDialog::SetPath( path );
+@@ -393,10 +371,7 @@
+ {
+     if (!gtk_check_version(2,4,0))
+     {
+-        if (wxDirExists(dir))
+-        {
+-            gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(m_widget), dir.fn_str());
+-        }
++        m_fc.SetDirectory( dir );
+     }
+     else
+         wxGenericFileDialog::SetDirectory( dir );
+@@ -406,8 +381,7 @@
+ {
+     if (!gtk_check_version(2,4,0))
+     {
+-        wxGtkString str(gtk_file_chooser_get_current_folder(GTK_FILE_CHOOSER(m_widget)));
+-        return wxString(str, *wxConvFileName);
++        m_fc.GetDirectory();
+     }
+ 
+     return wxGenericFileDialog::GetDirectory();
+@@ -429,7 +403,7 @@
+ wxString wxFileDialog::GetFilename() const
+ {
+     if (!gtk_check_version(2,4,0))
+-        return wxFileName(GetPath()).GetFullName();
++        return m_fc.GetFilename();
+     else
+         return wxGenericFileDialog::GetFilename();
+ }
+@@ -438,49 +412,7 @@
+ {
+     if (!gtk_check_version(2,4,0))
+     {
+-        // parse filters
+-        wxArrayString wildDescriptions, wildFilters;
+-        if (!wxParseCommonDialogsFilter(wildCard, wildDescriptions, wildFilters))
+-        {
+-            wxFAIL_MSG( wxT("wxFileDialog::SetWildCard - bad wildcard string") );
+-        }
+-        else
+-        {
+-            // Parsing went fine. Set m_wildCard to be returned by wxFileDialogBase::GetWildcard
+-            m_wildCard = wildCard;
+-
+-            GtkFileChooser* chooser = GTK_FILE_CHOOSER(m_widget);
+-
+-            // empty current filter list:
+-            GSList* ifilters = gtk_file_chooser_list_filters(chooser);
+-            GSList* filters = ifilters;
+-
+-            while (ifilters)
+-            {
+-                gtk_file_chooser_remove_filter(chooser,GTK_FILE_FILTER(ifilters->data));
+-                ifilters = ifilters->next;
+-            }
+-            g_slist_free(filters);
+-
+-            // add parsed to GtkChooser
+-            for (size_t n = 0; n < wildFilters.GetCount(); ++n)
+-            {
+-                GtkFileFilter* filter = gtk_file_filter_new();
+-                gtk_file_filter_set_name(filter, wxGTK_CONV(wildDescriptions[n]));
+-
+-                wxStringTokenizer exttok(wildFilters[n], wxT(";"));
+-                while (exttok.HasMoreTokens())
+-                {
+-                    wxString token = exttok.GetNextToken();
+-                    gtk_file_filter_add_pattern(filter, wxGTK_CONV(token));
+-                }
+-
+-                gtk_file_chooser_add_filter(chooser, filter);
+-            }
+-
+-            // Reset the filter index
+-            SetFilterIndex(0);
+-        }
++        m_fc.SetWildcard( wildCard );
+     }
+     else
+         wxGenericFileDialog::SetWildcard( wildCard );
+@@ -491,22 +423,7 @@
+ 
+     if (!gtk_check_version(2,4,0))
+     {
+-        gpointer filter;
+-        GtkFileChooser *chooser = GTK_FILE_CHOOSER(m_widget);
+-        GSList *filters = gtk_file_chooser_list_filters(chooser);
+-
+-        filter = g_slist_nth_data(filters, filterIndex);
+-
+-        if (filter != NULL)
+-        {
+-            gtk_file_chooser_set_filter(chooser, GTK_FILE_FILTER(filter));
+-        }
+-        else
+-        {
+-            wxFAIL_MSG( wxT("wxFileDialog::SetFilterIndex - bad filter index") );
+-        }
+-
+-        g_slist_free(filters);
++       m_fc.SetFilterIndex( filterIndex);
+     }
+     else
+         wxGenericFileDialog::SetFilterIndex( filterIndex );
+@@ -516,19 +433,7 @@
+ {
+     if (!gtk_check_version(2,4,0))
+     {
+-        GtkFileChooser *chooser = GTK_FILE_CHOOSER(m_widget);
+-        GtkFileFilter *filter = gtk_file_chooser_get_filter(chooser);
+-        GSList *filters = gtk_file_chooser_list_filters(chooser);
+-        gint index = g_slist_index(filters, filter);
+-        g_slist_free(filters);
+-
+-        if (index == -1)
+-        {
+-            wxFAIL_MSG( wxT("wxFileDialog::GetFilterIndex - bad filter index returned by gtk+") );
+-            return 0;
+-        }
+-        else
+-            return index;
++        return m_fc.GetFilterIndex();
+     }
+     else
+                 return wxGenericFileDialog::GetFilterIndex();
+Index: src/common/filectrlcmn.cpp
+===================================================================
+--- src/common/filectrlcmn.cpp	(revision 0)
++++ src/common/filectrlcmn.cpp	(revision 0)
+@@ -0,0 +1,94 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        src/common/filectrlcmn.cpp
++// Purpose:     Implementation for wxFileCtrlBase and other common functions used by
++//              platform-specific wxFileCtrl's
++// Author:      Diaa M. Sami
++// Modified by:
++// Created:     Jul-07-2007
++// RCS-ID:      $Id: $
++// Copyright:   (c) Diaa M. Sami
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++#if wxUSE_FILECTRL
++
++#include "wx/filectrl.h"
++
++#ifndef WX_PRECOMP
++#include "wx/debug.h"
++#endif
++
++const wxChar wxFileCtrlNameStr[] = wxT( "wxfilectrl" );
++
++DEFINE_EVENT_TYPE( wxEVT_FILECTRL_SELECTIONCHANGED );
++DEFINE_EVENT_TYPE( wxEVT_FILECTRL_FILEACTIVATED );
++DEFINE_EVENT_TYPE( wxEVT_FILECTRL_FOLDERCHANGED );
++
++IMPLEMENT_DYNAMIC_CLASS( wxFileCtrlEvent, wxCommandEvent )
++
++// some helper functions
++
++void GenerateFolderChangedEvent( wxFileCtrl *fileCtrl )
++{
++    wxFileCtrlEvent event( wxEVT_FILECTRL_FOLDERCHANGED, fileCtrl, fileCtrl->GetId() );
++
++    event.SetDirectory( fileCtrl->GetDirectory() );
++
++    fileCtrl->GetEventHandler()->ProcessEvent( event );
++}
++
++void GenerateSelectionChangedEvent( wxFileCtrl *fileCtrl )
++{
++    wxFileCtrlEvent event( wxEVT_FILECTRL_SELECTIONCHANGED, fileCtrl, fileCtrl->GetId() );
++    event.SetDirectory( fileCtrl->GetDirectory() );
++
++    wxArrayString filenames;
++    fileCtrl->GetFilenames( filenames );
++    event.SetFiles( filenames );
++
++    fileCtrl->GetEventHandler()->ProcessEvent( event );
++}
++
++void GenerateFileActivatedEvent( wxFileCtrl *fileCtrl, const wxString filename )
++{
++    wxFileCtrlEvent event( wxEVT_FILECTRL_FILEACTIVATED, fileCtrl, fileCtrl->GetId() );
++    event.SetDirectory( fileCtrl->GetDirectory() );
++
++    wxArrayString filenames;
++
++    if ( filename.empty() )
++    {
++        fileCtrl->GetFilenames( filenames );
++    }
++    else
++    {
++        filenames.Add( filename );
++    }
++
++    event.SetFiles( filenames );
++
++    fileCtrl->GetEventHandler()->ProcessEvent( event );
++}
++
++///////////////////////////////////////////////////////////////////////////////
++// wxFileCtrlEvent implementation
++///////////////////////////////////////////////////////////////////////////////
++
++wxString wxFileCtrlEvent::GetFile() const
++{
++    wxASSERT_MSG( !wxDynamicCast( GetEventObject(), wxFileCtrl )->HasMultipleFileSelection(),
++                  wxT( "Please use GetFiles() to get all files instead of this function" ) );
++
++    if ( files.Count() == 0 )
++        return wxEmptyString;
++    else
++        return files[0];
++}
++
++#endif // wxUSE_FILECTRL
+Index: src/generic/filedlgg.cpp
+===================================================================
+--- src/generic/filedlgg.cpp	(revision 47901)
++++ src/generic/filedlgg.cpp	(working copy)
+@@ -435,29 +435,29 @@
+ }
+ 
+ //-----------------------------------------------------------------------------
+-//  wxFileCtrl
++//  wxFileList
+ //-----------------------------------------------------------------------------
+ 
+ static bool ignoreChanges = false;
+ 
+-IMPLEMENT_DYNAMIC_CLASS(wxFileCtrl,wxListCtrl)
++IMPLEMENT_DYNAMIC_CLASS(wxFileList,wxListCtrl)
+ 
+-BEGIN_EVENT_TABLE(wxFileCtrl,wxListCtrl)
+-    EVT_LIST_DELETE_ITEM(wxID_ANY, wxFileCtrl::OnListDeleteItem)
+-    EVT_LIST_DELETE_ALL_ITEMS(wxID_ANY, wxFileCtrl::OnListDeleteAllItems)
+-    EVT_LIST_END_LABEL_EDIT(wxID_ANY, wxFileCtrl::OnListEndLabelEdit)
+-    EVT_LIST_COL_CLICK(wxID_ANY, wxFileCtrl::OnListColClick)
++BEGIN_EVENT_TABLE(wxFileList,wxListCtrl)
++    EVT_LIST_DELETE_ITEM(wxID_ANY, wxFileList::OnListDeleteItem)
++    EVT_LIST_DELETE_ALL_ITEMS(wxID_ANY, wxFileList::OnListDeleteAllItems)
++    EVT_LIST_END_LABEL_EDIT(wxID_ANY, wxFileList::OnListEndLabelEdit)
++    EVT_LIST_COL_CLICK(wxID_ANY, wxFileList::OnListColClick)
+ END_EVENT_TABLE()
+ 
+ 
+-wxFileCtrl::wxFileCtrl()
++wxFileList::wxFileList()
+ {
+     m_showHidden = false;
+     m_sort_foward = 1;
+     m_sort_field = wxFileData::FileList_Name;
+ }
+ 
+-wxFileCtrl::wxFileCtrl(wxWindow *win,
++wxFileList::wxFileList(wxWindow *win,
+                        wxWindowID id,
+                        const wxString& wild,
+                        bool showHidden,
+@@ -484,14 +484,14 @@
+         ChangeToReportMode();
+ }
+ 
+-void wxFileCtrl::ChangeToListMode()
++void wxFileList::ChangeToListMode()
+ {
+     ClearAll();
+     SetSingleStyle( wxLC_LIST );
+     UpdateFiles();
+ }
+ 
+-void wxFileCtrl::ChangeToReportMode()
++void wxFileList::ChangeToReportMode()
+ {
+     ClearAll();
+     SetSingleStyle( wxLC_REPORT );
+@@ -518,20 +518,20 @@
+     UpdateFiles();
+ }
+ 
+-void wxFileCtrl::ChangeToSmallIconMode()
++void wxFileList::ChangeToSmallIconMode()
+ {
+     ClearAll();
+     SetSingleStyle( wxLC_SMALL_ICON );
+     UpdateFiles();
+ }
+ 
+-void wxFileCtrl::ShowHidden( bool show )
++void wxFileList::ShowHidden( bool show )
+ {
+     m_showHidden = show;
+     UpdateFiles();
+ }
+ 
+-long wxFileCtrl::Add( wxFileData *fd, wxListItem &item )
++long wxFileList::Add( wxFileData *fd, wxListItem &item )
+ {
+     long ret = -1;
+     item.m_mask = wxLIST_MASK_TEXT + wxLIST_MASK_DATA + wxLIST_MASK_IMAGE;
+@@ -550,7 +550,7 @@
+     return ret;
+ }
+ 
+-void wxFileCtrl::UpdateItem(const wxListItem &item)
++void wxFileList::UpdateItem(const wxListItem &item)
+ {
+     wxFileData *fd = (wxFileData*)GetItemData(item);
+     wxCHECK_RET(fd, wxT("invalid filedata"));
+@@ -567,7 +567,7 @@
+     }
+ }
+ 
+-void wxFileCtrl::UpdateFiles()
++void wxFileList::UpdateFiles()
+ {
+     // don't do anything before ShowModal() call which sets m_dirName
+     if ( m_dirName == wxT("*") )
+@@ -674,7 +674,7 @@
+     SortItems(m_sort_field, m_sort_foward);
+ }
+ 
+-void wxFileCtrl::SetWild( const wxString &wild )
++void wxFileList::SetWild( const wxString &wild )
+ {
+     if (wild.Find(wxT('|')) != wxNOT_FOUND)
+         return;
+@@ -683,7 +683,7 @@
+     UpdateFiles();
+ }
+ 
+-void wxFileCtrl::MakeDir()
++void wxFileList::MakeDir()
+ {
+     wxString new_name( _("NewName") );
+     wxString path( m_dirName );
+@@ -731,7 +731,7 @@
+         delete fd;
+ }
+ 
+-void wxFileCtrl::GoToParentDir()
++void wxFileList::GoToParentDir()
+ {
+     if (!IsTopMostDir(m_dirName))
+     {
+@@ -762,13 +762,13 @@
+     }
+ }
+ 
+-void wxFileCtrl::GoToHomeDir()
++void wxFileList::GoToHomeDir()
+ {
+     wxString s = wxGetUserHome( wxString() );
+     GoToDir(s);
+ }
+ 
+-void wxFileCtrl::GoToDir( const wxString &dir )
++void wxFileList::GoToDir( const wxString &dir )
+ {
+     if (!wxDirExists(dir)) return;
+ 
+@@ -782,7 +782,7 @@
+     EnsureVisible( 0 );
+ }
+ 
+-void wxFileCtrl::FreeItemData(wxListItem& item)
++void wxFileList::FreeItemData(wxListItem& item)
+ {
+     if ( item.m_data )
+     {
+@@ -793,17 +793,17 @@
+     }
+ }
+ 
+-void wxFileCtrl::OnListDeleteItem( wxListEvent &event )
++void wxFileList::OnListDeleteItem( wxListEvent &event )
+ {
+     FreeItemData(event.m_item);
+ }
+ 
+-void wxFileCtrl::OnListDeleteAllItems( wxListEvent & WXUNUSED(event) )
++void wxFileList::OnListDeleteAllItems( wxListEvent & WXUNUSED(event) )
+ {
+     FreeAllItemsData();
+ }
+ 
+-void wxFileCtrl::FreeAllItemsData()
++void wxFileList::FreeAllItemsData()
+ {
+     wxListItem item;
+     item.m_mask = wxLIST_MASK_DATA;
+@@ -817,7 +817,7 @@
+     }
+ }
+ 
+-void wxFileCtrl::OnListEndLabelEdit( wxListEvent &event )
++void wxFileList::OnListEndLabelEdit( wxListEvent &event )
+ {
+     wxFileData *fd = (wxFileData*)event.m_item.m_data;
+     wxASSERT( fd );
+@@ -865,7 +865,7 @@
+     }
+ }
+ 
+-void wxFileCtrl::OnListColClick( wxListEvent &event )
++void wxFileList::OnListColClick( wxListEvent &event )
+ {
+     int col = event.GetColumn();
+ 
+@@ -886,7 +886,7 @@
+     SortItems(m_sort_field, m_sort_foward);
+ }
+ 
+-void wxFileCtrl::SortItems(wxFileData::fileListFieldType field, bool forward)
++void wxFileList::SortItems(wxFileData::fileListFieldType field, bool forward)
+ {
+     m_sort_field = field;
+     m_sort_foward = forward;
+@@ -913,11 +913,11 @@
+     }
+ }
+ 
+-wxFileCtrl::~wxFileCtrl()
++wxFileList::~wxFileList()
+ {
+     // Normally the data are freed via an EVT_LIST_DELETE_ALL_ITEMS event and
+-    // wxFileCtrl::OnListDeleteAllItems. But if the event is generated after
+-    // the destruction of the wxFileCtrl we need to free any data here:
++    // wxFileList::OnListDeleteAllItems. But if the event is generated after
++    // the destruction of the wxFileList we need to free any data here:
+     FreeAllItemsData();
+ }
+ 
+@@ -1115,7 +1115,7 @@
+     style2 |= wxSUNKEN_BORDER;
+ #endif
+ 
+-    m_list = new wxFileCtrl( this, ID_LIST_CTRL,
++    m_list = new wxFileList( this, ID_LIST_CTRL,
+                              wxEmptyString, ms_lastShowHidden,
+                              wxDefaultPosition, wxSize(540,200),
+                              style2);
+@@ -1477,7 +1477,7 @@
+     {
+         wxMessageBox(_("Please choose an existing file."), _("Error"),
+                      wxOK | wxICON_ERROR );
+-                     
++
+         return;
+     }
+ 
+Index: src/generic/filectrlg.cpp
+===================================================================
+--- src/generic/filectrlg.cpp	(revision 0)
++++ src/generic/filectrlg.cpp	(revision 0)
+@@ -0,0 +1,610 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        src/generic/filectrlg.cpp
++// Purpose:     wxGenericFileCtrl Implementation
++// Author:      Diaa M. Sami
++// Modified by:
++// Created:     Jul-07-2007
++// RCS-ID:      $Id: $
++// Copyright:   (c) Diaa M. Sami
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++#if wxUSE_FILECTRL
++
++#include "wx/filectrl.h"
++
++#ifndef WX_PRECOMP
++#include "wx/settings.h"
++#include "wx/sizer.h"
++#include "wx/stattext.h"
++#include "wx/checkbox.h"
++#include "wx/msgdlg.h"
++#include "wx/debug.h"
++#endif
++
++#include "wx/filename.h"
++#include "wx/clntdata.h"
++
++#if defined(__WXWINCE__)
++#define IsTopMostDir(dir) (dir == wxT("\\") || dir == wxT("/"))
++#elif (defined(__DOS__) || defined(__WINDOWS__) || defined (__OS2__))
++#define IsTopMostDir(dir)   (dir.empty())
++#else
++#define IsTopMostDir(dir)   (dir == wxT("/"))
++#endif
++
++#define  ID_CHOICE        (wxID_FILECTRL + 1)
++#define  ID_TEXT          (wxID_FILECTRL + 2)
++#define  ID_LIST_CTRL     (wxID_FILECTRL + 3)
++#define  ID_CHECK         (wxID_FILECTRL + 4)
++
++///////////////////////////////////////////////////////////////////////////////
++// wxGenericFileCtrl implementation
++///////////////////////////////////////////////////////////////////////////////
++
++IMPLEMENT_DYNAMIC_CLASS( wxGenericFileCtrl, wxPanel )
++
++BEGIN_EVENT_TABLE( wxGenericFileCtrl, wxPanel )
++    EVT_LIST_ITEM_SELECTED( ID_LIST_CTRL, wxGenericFileCtrl::OnSelected )
++    EVT_LIST_ITEM_ACTIVATED( ID_LIST_CTRL, wxGenericFileCtrl::OnActivated )
++    EVT_CHOICE( ID_CHOICE, wxGenericFileCtrl::OnChoiceFilter )
++    EVT_TEXT_ENTER( ID_TEXT, wxGenericFileCtrl::OnTextEnter )
++    EVT_TEXT( ID_TEXT, wxGenericFileCtrl::OnTextChange )
++    EVT_CHECKBOX( ID_CHECK, wxGenericFileCtrl::OnCheck )
++END_EVENT_TABLE()
++
++bool wxGenericFileCtrl::Create( wxWindow *parent,
++                                wxWindowID id,
++                                const wxString& defaultDirectory,
++                                const wxString& defaultFileName,
++                                const wxString& wildCard,
++                                long style,
++                                const wxPoint& pos,
++                                const wxSize& size,
++                                const wxString& name )
++{
++    this->m_style = style;
++    m_inSelected = false;
++    m_noSelChgEvent = false;
++
++    // check that the styles are not contradictory
++    wxASSERT_MSG( !( ( m_style & wxFC_SAVE ) && ( m_style & wxFC_OPEN ) ),
++                  wxT( "can't specify both wxFC_SAVE and wxFC_OPEN at once" ) );
++
++    wxASSERT_MSG( !( ( m_style & wxFC_SAVE ) && ( m_style & wxFC_MULTIPLE ) ),
++                  wxT( "wxFC_MULTIPLE can't be used with wxFC_SAVE" ) );
++
++    wxPanel::Create( parent, id, pos, size, wxTAB_TRAVERSAL, name );
++
++    m_dir = defaultDirectory;
++
++    m_ignoreChanges = true;
++
++    if ( ( m_dir.empty() ) || ( m_dir == wxT( "." ) ) )
++    {
++        m_dir = wxGetCwd();
++        if ( m_dir.empty() )
++            m_dir = wxFILE_SEP_PATH;
++    }
++
++    const size_t len = m_dir.length();
++    if ( ( len > 1 ) && ( wxEndsWithPathSeparator( m_dir ) ) )
++        m_dir.Remove( len - 1, 1 );
++
++    m_filterExtension = wxEmptyString;
++
++    // layout
++
++    const bool is_pda = ( wxSystemSettings::GetScreenType() <= wxSYS_SCREEN_PDA );
++
++    wxBoxSizer *mainsizer = new wxBoxSizer( wxVERTICAL );
++
++    wxBoxSizer *staticsizer = new wxBoxSizer( wxHORIZONTAL );
++    if ( is_pda )
++        staticsizer->Add( new wxStaticText( this, wxID_ANY, _( "Current directory:" ) ), 0, wxRIGHT, 10 );
++    m_static = new wxStaticText( this, wxID_ANY, m_dir );
++    staticsizer->Add( m_static, 1 );
++    mainsizer->Add( staticsizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10 );
++
++    long style2 = wxLC_LIST;
++    if ( !( m_style & wxFC_MULTIPLE ) )
++        style2 |= wxLC_SINGLE_SEL;
++
++#ifdef __WXWINCE__
++    style2 |= wxSIMPLE_BORDER;
++#else
++    style2 |= wxSUNKEN_BORDER;
++#endif
++
++    m_list = new wxFileList( this, ID_LIST_CTRL,
++                             wxEmptyString, false,
++                             wxDefaultPosition, wxSize( 400, 140 ),
++                             style2 );
++
++    m_text = new wxTextCtrl( this, ID_TEXT, wxEmptyString,
++                             wxDefaultPosition, wxDefaultSize,
++                             wxTE_PROCESS_ENTER );
++    m_choice = new wxChoice( this, ID_CHOICE );
++
++    if ( is_pda )
++    {
++        // PDAs have a different screen layout
++        mainsizer->Add( m_list, wxSizerFlags( 1 ).Expand().HorzBorder() );
++
++        wxBoxSizer *textsizer = new wxBoxSizer( wxHORIZONTAL );
++        textsizer->Add( m_text, wxSizerFlags( 1 ).Centre().Border() );
++        mainsizer->Add( textsizer, wxSizerFlags().Expand() );
++
++        m_check = NULL;
++        textsizer->Add( m_choice, wxSizerFlags( 1 ).Centre().Border() );
++    }
++    else // !is_pda
++    {
++        mainsizer->Add( m_list, wxSizerFlags( 1 ).Expand().DoubleHorzBorder() );
++
++        wxBoxSizer *textsizer = new wxBoxSizer( wxHORIZONTAL );
++        textsizer->Add( m_text, wxSizerFlags( 1 ).Centre().
++                        DoubleBorder( wxLEFT | wxRIGHT | wxTOP ) );
++        mainsizer->Add( textsizer, wxSizerFlags().Expand() );
++
++        wxSizerFlags flagsCentre;
++        flagsCentre.Centre().DoubleBorder();
++
++        wxBoxSizer *choicesizer = new wxBoxSizer( wxHORIZONTAL );
++        choicesizer->Add( m_choice, wxSizerFlags( flagsCentre ).Proportion( 1 ) );
++
++        m_check = new wxCheckBox( this, ID_CHECK, _( "Show &hidden files" ) );
++        m_check->SetValue( false );
++
++        choicesizer->Add( m_check, flagsCentre );
++        mainsizer->Add( choicesizer, wxSizerFlags().Expand() );
++    }
++
++
++    SetWildcard( wildCard );
++
++    SetAutoLayout( true );
++    SetSizer( mainsizer );
++
++    if ( !is_pda )
++    {
++        mainsizer->Fit( this );
++        mainsizer->SetSizeHints( this );
++    }
++
++    m_list->GoToDir( m_dir );
++    UpdateControls();
++    m_text->SetValue( m_fileName );
++
++    m_ignoreChanges = false;
++
++    // must be after m_ignoreChanges = false
++    SetFilename( defaultFileName );
++
++    return true;
++}
++
++wxString wxGenericFileCtrl::GetPath() const
++{
++    return DoGetFilename( true );
++}
++
++wxString wxGenericFileCtrl::GetFilename() const
++{
++    return DoGetFilename( false );
++}
++
++wxString wxGenericFileCtrl::DoGetFilename( const bool fullPath ) const
++{
++    wxASSERT_MSG( ( m_style & wxFC_MULTIPLE ) == 0,
++                  wxT( "With controls that has wxFC_MULTIPLE style " )
++                  wxT( "use GetFilenames/GetPaths to get all filenames/paths selected" ) );
++
++    const wxString value = m_text->GetValue();
++
++    if ( !value.empty() )
++        return value;
++    return fullPath ? ( GetProperFileListDir() + value ) : value;
++}
++
++void wxGenericFileCtrl::DoGetFilenames( wxArrayString& filenames, const bool fullPath ) const
++{
++    filenames.Empty();
++
++    const wxString dir = GetProperFileListDir();
++    const wxString value = m_text->GetValue();
++
++    if ( !value.empty() )
++    {
++        if ( fullPath )
++            filenames.Add( dir + value );
++        else
++            filenames.Add( value );
++        return;
++    }
++
++    if ( m_list->GetSelectedItemCount() == 0 )
++    {
++        return;
++    }
++
++    filenames.Alloc( m_list->GetSelectedItemCount() );
++
++    wxListItem item;
++    item.m_mask = wxLIST_MASK_TEXT;
++
++    item.m_itemId = m_list->GetNextItem( -1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED );
++    while ( item.m_itemId != -1 )
++    {
++        m_list->GetItem( item );
++
++        if ( fullPath )
++            filenames.Add( dir + item.m_text );
++        else
++            filenames.Add( item.m_text );
++
++        item.m_itemId = m_list->GetNextItem( item.m_itemId,
++                                             wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED );
++    }
++}
++
++bool wxGenericFileCtrl::SetDirectory( const wxString& dir )
++{
++    m_ignoreChanges = true;
++    m_list->GoToDir( dir );
++    UpdateControls();
++    m_ignoreChanges = false;
++
++    return wxFileName( dir ).SameAs( m_list->GetDir() );
++}
++
++wxString wxGenericFileCtrl::GetDirectory() const
++{
++    return m_list->GetDir();
++}
++
++bool wxGenericFileCtrl::SetFilename( const wxString& name )
++{
++    const long item = m_list->FindItem( -1, name );
++
++    if ( item == -1 ) // file not found either because it doesn't exist or the
++        // current filter doesn't show it.
++        return false;
++
++    m_noSelChgEvent = true;
++
++    // Deselect selected items
++    {
++        const int numSelectedItems = m_list->GetSelectedItemCount();
++
++        if ( numSelectedItems > 0 )
++        {
++            long itemIndex = -1;
++
++            for ( ;; )
++            {
++                itemIndex = m_list->GetNextItem( itemIndex, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED );
++                if ( itemIndex == -1 )
++                    break;
++
++                m_list->SetItemState( itemIndex, 0, wxLIST_STATE_SELECTED );
++            }
++        }
++    }
++
++    m_list->SetItemState( item, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED );
++    m_list->EnsureVisible( item );
++
++    m_noSelChgEvent = false;
++
++    return true;
++}
++
++void wxGenericFileCtrl::DoSetFilterIndex( int filterindex )
++{
++    const wxString &str = ( ( wxStringClientData* ) m_choice->GetClientObject( filterindex ) )->GetData();
++    m_list->SetWild( str );
++    m_filterIndex = filterindex;
++    if ( str.Left( 2 ) == wxT( "*." ) )
++    {
++        m_filterExtension = str.Mid( 1 );
++        if ( m_filterExtension == _T( ".*" ) )
++            m_filterExtension.clear();
++    }
++    else
++    {
++        m_filterExtension.clear();
++    }
++}
++
++void wxGenericFileCtrl::SetWildcard( const wxString& wildCard )
++{
++    if ( wildCard.empty() || wildCard == wxFileSelectorDefaultWildcardStr )
++    {
++        m_wildCard = wxString::Format( _( "All files (%s)|%s" ),
++                                       wxFileSelectorDefaultWildcardStr,
++                                       wxFileSelectorDefaultWildcardStr );
++    }
++    else
++        m_wildCard = wildCard;
++
++    wxArrayString wildDescriptions, wildFilters;
++    const size_t count = wxParseCommonDialogsFilter( m_wildCard,
++                         wildDescriptions,
++                         wildFilters );
++    wxCHECK_RET( count, wxT( "wxFileDialog: bad wildcard string" ) );
++
++    m_choice->Clear();
++
++    if ( wildCard.empty() )
++        m_choice->Show( false );
++    else
++        m_choice->Show( true );
++
++    size_t n;
++    for ( n = 0; n < count; n++ )
++    {
++        m_choice->Append( wildDescriptions[n], new wxStringClientData( wxString( wildFilters[n] ) ) );
++    }
++
++    SetFilterIndex( 0 );
++}
++
++void wxGenericFileCtrl::SetFilterIndex( int filterindex )
++{
++    m_choice->SetSelection( filterindex );
++
++    DoSetFilterIndex( filterindex );
++}
++
++void wxGenericFileCtrl::OnChoiceFilter( wxCommandEvent &event )
++{
++    DoSetFilterIndex( ( int )event.GetInt() );
++}
++
++void wxGenericFileCtrl::OnCheck( wxCommandEvent &event )
++{
++    m_list->ShowHidden( event.GetInt() != 0 );
++}
++
++void wxGenericFileCtrl::OnActivated( wxListEvent &event )
++{
++    HandleAction( event.m_item.m_text );
++}
++
++void wxGenericFileCtrl::OnTextEnter( wxCommandEvent &WXUNUSED( event ) )
++{
++    HandleAction( m_text->GetValue() );
++}
++
++void wxGenericFileCtrl::OnTextChange( wxCommandEvent &WXUNUSED( event ) )
++{
++    if ( !m_ignoreChanges )
++    {
++        // Clear selections.  Otherwise when the user types in a value they may
++        // not get the file whose name they typed.
++        if ( m_list->GetSelectedItemCount() > 0 )
++        {
++            long item = m_list->GetNextItem( -1, wxLIST_NEXT_ALL,
++                                             wxLIST_STATE_SELECTED );
++            while ( item != -1 )
++            {
++                m_list->SetItemState( item, 0, wxLIST_STATE_SELECTED );
++                item = m_list->GetNextItem( item, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED );
++            }
++        }
++    }
++}
++
++void wxGenericFileCtrl::OnSelected( wxListEvent &event )
++{
++    if ( m_ignoreChanges )
++        return;
++
++    if ( m_inSelected )
++        return;
++
++    m_inSelected = true;
++    const wxString filename( event.m_item.m_text );
++
++#ifdef __WXWINCE__
++    // No double-click on most WinCE devices, so do action immediately.
++    HandleAction( filename );
++#else
++    if ( filename == wxT( ".." ) )
++    {
++        m_inSelected = false;
++        return;
++    }
++
++    wxString dir = m_list->GetDir();
++    if ( !IsTopMostDir( dir ) )
++        dir += wxFILE_SEP_PATH;
++    dir += filename;
++    if ( wxDirExists( dir ) )
++    {
++        m_inSelected = false;
++
++        return;
++    }
++
++    m_ignoreChanges = true;
++    m_text->SetValue( filename );
++
++    if ( m_list->GetSelectedItemCount() > 1 )
++    {
++        m_text->Clear();
++    }
++
++    if ( !m_noSelChgEvent )
++        GenerateSelectionChangedEvent( this );
++
++    m_ignoreChanges = false;
++#endif
++    m_inSelected = false;
++}
++
++void wxGenericFileCtrl::HandleAction( const wxString &fn )
++{
++    if ( m_ignoreChanges )
++        return;
++
++    wxString filename( fn );
++    if ( filename.empty() )
++    {
++        return;
++    }
++    if ( filename == wxT( "." ) ) return;
++
++    wxString dir = m_list->GetDir();
++
++    // "some/place/" means they want to chdir not try to load "place"
++    const bool want_dir = filename.Last() == wxFILE_SEP_PATH;
++    if ( want_dir )
++        filename = filename.RemoveLast();
++
++    if ( filename == wxT( ".." ) )
++    {
++        m_ignoreChanges = true;
++        m_list->GoToParentDir();
++
++        GenerateFolderChangedEvent( this );
++
++        UpdateControls();
++        m_ignoreChanges = false;
++        return;
++    }
++
++#ifdef __UNIX__
++    if ( filename == wxT( "~" ) )
++    {
++        m_ignoreChanges = true;
++        m_list->GoToHomeDir();
++
++        GenerateFolderChangedEvent( this );
++
++        UpdateControls();
++        m_ignoreChanges = false;
++        return;
++    }
++
++    if ( filename.BeforeFirst( wxT( '/' ) ) == wxT( "~" ) )
++    {
++        filename = wxString( wxGetUserHome() ) + filename.Remove( 0, 1 );
++    }
++#endif // __UNIX__
++
++    if ( !( m_style & wxFC_SAVE ) )
++    {
++        if ( ( filename.Find( wxT( '*' ) ) != wxNOT_FOUND ) ||
++                ( filename.Find( wxT( '?' ) ) != wxNOT_FOUND ) )
++        {
++            if ( filename.Find( wxFILE_SEP_PATH ) != wxNOT_FOUND )
++            {
++                wxMessageBox( _( "Illegal file specification." ),
++                              _( "Error" ), wxOK | wxICON_ERROR, this );
++                return;
++            }
++            m_list->SetWild( filename );
++            return;
++        }
++    }
++
++    if ( !IsTopMostDir( dir ) )
++        dir += wxFILE_SEP_PATH;
++    if ( !wxIsAbsolutePath( filename ) )
++    {
++        dir += filename;
++        filename = dir;
++    }
++
++    if ( wxDirExists( filename ) )
++    {
++        m_ignoreChanges = true;
++        m_list->GoToDir( filename );
++        UpdateControls();
++
++        GenerateFolderChangedEvent( this );
++
++        m_ignoreChanges = false;
++        return;
++    }
++
++    // they really wanted a dir, but it doesn't exist
++    if ( want_dir )
++    {
++        wxMessageBox( _( "Directory doesn't exist." ), _( "Error" ),
++                      wxOK | wxICON_ERROR, this );
++        return;
++    }
++
++    // append the default extension to the filename if it doesn't have any
++    //
++    // VZ: the logic of testing for !wxFileExists() only for the open file
++    //     dialog is not entirely clear to me, why don't we allow saving to a
++    //     file without extension as well?
++    if ( !( m_style & wxFC_OPEN ) || !wxFileExists( filename ) )
++    {
++        filename = wxFileDialogBase::AppendExtension( filename, m_filterExtension );
++        GenerateFileActivatedEvent( this, wxFileName( filename ).GetFullName() );
++        return;
++    }
++
++    GenerateFileActivatedEvent( this );
++}
++
++bool wxGenericFileCtrl::SetPath( const wxString& path )
++{
++    if ( !wxFileName::FileExists( ( path ) ) )
++        return false;
++
++    wxString ext;
++    wxSplitPath( path, &m_dir, &m_fileName, &ext );
++    if ( !ext.empty() )
++    {
++        m_fileName += wxT( "." );
++        m_fileName += ext;
++    }
++
++    SetDirectory( m_dir );
++    SetFilename( m_fileName );
++
++    return true;
++}
++
++void wxGenericFileCtrl::GetPaths( wxArrayString& paths ) const
++{
++    DoGetFilenames( paths, true );
++}
++
++void wxGenericFileCtrl::GetFilenames( wxArrayString& files ) const
++{
++    DoGetFilenames( files, false );
++}
++
++void wxGenericFileCtrl::UpdateControls()
++{
++    const wxString dir = m_list->GetDir();
++    m_static->SetLabel( dir );
++}
++
++wxString wxGenericFileCtrl::GetProperFileListDir() const
++{
++    wxString dir = m_list->GetDir();
++#ifdef __UNIX__
++    if ( dir != wxT( "/" ) )
++#elif __WXWINCE__
++    if ( dir != wxT( "/" ) && dir != wxT( "\\" ) )
++#endif
++        dir += wxFILE_SEP_PATH;
++
++    return dir;
++}
++
++#endif // wxUSE_FILECTRL
+Index: docs/latex/wx/filectrl.tex
+===================================================================
+--- docs/latex/wx/filectrl.tex	(revision 0)
++++ docs/latex/wx/filectrl.tex	(revision 0)
+@@ -0,0 +1,198 @@
++%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++%% Name:        filectrl.tex
++%% Purpose:     wxFilerCtrl and wxFileCtrlEvent documentation
++%% Author:      Diaa M. Sami
++%% Created:     2007-07-25
++%% RCS-ID:      $Id: $
++%% Copyright:   (c) 2007 Diaa M. Sami
++%% License:     wxWindows license
++%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++
++\section{\class{wxFileCtrl}}\label{wxfilectrl}
++
++This control allows the user to select a file. two implemetations exist, one for Gtk and another generic one for anything other than Gtk.
++It is only available if \texttt{wxUSE\_FILECTRL} is set to $1$.
++
++\wxheading{Derived from}
++
++\helpref{wxWindow}{wxwindow}\\
++\helpref{wxEvtHandler}{wxevthandler}\\
++\helpref{wxObject}{wxobject}
++
++\wxheading{Include files}
++
++<wx/filectrl.h>
++
++\wxheading{Window styles}
++
++\twocolwidtha{5cm}%
++\begin{twocollist}\itemsep=0pt
++\twocolitem{\windowstyle{wxFC\_DEFAULT\_STYLE}}{The default style: includes wxFC\_OPEN}
++\twocolitem{\windowstyle{wxFC\_OPEN}}{Creates an file control suitable for opening files.
++Cannot be combined with wxFC\_SAVE.}
++\twocolitem{\windowstyle{wxFC\_SAVE}}{Creates an file control suitable for opening files. Cannot be combined with wxFC\_OPEN.}
++\twocolitem{\windowstyle{wxFC\_MULTIPLE}}{For open control only, Allows selecting multiple files. Cannot be combined with wxFC\_SAVE}
++
++\end{twocollist}
++
++\wxheading{Event handling}
++
++To process a file control event, use these event handler macros to direct input to member
++functions that take a \helpref{wxFileCtrlEvent}{wxfilectrlevent} argument.
++
++\twocolwidtha{7cm}%
++\begin{twocollist}\itemsep=0pt
++\twocolitem{{\bf EVT\_FILECTRL\_FILEACTIVATED(id, func)}}{The user activated a file(by double-clicking or pressing Enter)}
++\twocolitem{{\bf EVT\_FILECTRL\_SELECTIONCHANGED(id, func)}}{The user changed the current selection(selected or deselected a file)}
++\twocolitem{{\bf EVT\_FILECTRL\_FOLDERCHANGED(id, func)}}{The current folder of the file ctrl has been changed}
++\end{twocollist}
++
++\wxheading{See also}
++
++\helpref{wxFileDialog}{wxfiledialog}
++
++
++\latexignore{\rtfignore{\wxheading{Members}}}
++
++\membersection{wxFileCtrl::wxFileCtrl}\label{wxfilectrl}
++
++\func{}{wxFileCtrl}{\param{wxWindow *}{parent},\rtfsp
++\param{wxWindowID}{ id},\rtfsp
++\param{const wxString\& }{defaultDirectory = wxEmptyString},\rtfsp
++\param{const wxString\& }{defaultFilename = wxEmptyString},\rtfsp
++\param{const wxPoint\& }{wildCard = wxFileSelectorDefaultWildcardStr},\rtfsp
++\param{long}{ style = wxFC\_DEFAULT\_STYLE},\rtfsp
++\param{const wxPoint\& }{pos = wxDefaultPosition},
++\param{const wxSize\& }{size = wxDefaultSize},
++\param{const wxString\& }{name = ``filectrl"}}
++
++Initializes the object and calls \helpref{Create}{wxfilectrlcreate} with
++all the parameters.
++
++
++\membersection{wxFileCtrl::Create}\label{wxfilectrlcreate}
++
++\func{bool}{Create}{\param{wxWindow *}{parent},\rtfsp
++\param{wxWindowID}{ id},\rtfsp
++\param{const wxString\& }{defaultDirectory = wxEmptyString},\rtfsp
++\param{const wxString\& }{defaultFilename = wxEmptyString},\rtfsp
++\param{const wxPoint\& }{wildCard = wxFileSelectorDefaultWildcardStr},\rtfsp
++\param{long}{ style = wxFC\_DEFAULT\_STYLE},\rtfsp
++\param{const wxPoint\& }{pos = wxDefaultPosition},
++\param{const wxSize\& }{size = wxDefaultSize},
++\param{const wxString\& }{name = ``filectrl"}}
++
++\wxheading{Parameters}
++
++\docparam{parent}{Parent window, must not be non-\texttt{NULL}.}
++
++\docparam{id}{The identifier for the control.}
++
++\docparam{defaultDirectory}{The initial directory shown in the control. Must be a valid path to a directory or the empty string.
++In case it is the empty directory, the program's current working directory is used.}
++
++\docparam{defaultFilename}{The default filename, or the empty string.}
++
++\docparam{wildcard}{A wildcard, such as ``*.*" or ``BMP files (*.bmp)|*.bmp|GIF files (*.gif)|*.gif".}
++
++\docparam{style}{The window style, see {\tt wxFC\_*} flags.}
++
++\docparam{pos}{Initial position.}
++
++\docparam{size}{Initial size.}
++
++\docparam{name}{Control name.}
++
++\wxheading{Return value}
++
++\true if the control was successfully created or \false if creation failed.
++
++\membersection{wxFileDialog::GetFilename}\label{wxfilectrlgetfilename}
++
++\constfunc{wxString}{GetFilename}{\void}
++
++Returns the currently selected filename.
++for the controls having the {\tt wxFC\_MULTIPLE} style, use \helpref{GetFilenames}{wxfilectrlgetfilenames}
++
++\membersection{wxFileCtrl::GetDirectory}\label{wxfilectrlgetdirectory}
++
++\constfunc{wxString}{GetDirectory}{\void}
++
++Returns the current directory of the file ctrl.
++
++\membersection{wxFileCtrl::GetWildcard}\label{wxfilectrlgetwildcard}
++
++\constfunc{wxString}{GetWildcard}{\void}
++
++Returns the current wildcard.
++
++\membersection{wxFileCtrl::GetPath}\label{wxfilectrlgetpath}
++
++\constfunc{wxString}{GetPath}{\void}
++
++Returns the full path (directory and filename) of the currently selected file.
++
++\membersection{wxFileCtrl::GetPaths}\label{wxfilectrlgetpaths}
++
++\constfunc{void}{GetPaths}{\param{wxArrayString\& }{paths}}
++
++Fills the array {\it paths} with the full paths of the files chosen. This
++function should only be used with the controls having the {\tt wxFC\_MULTIPLE} style,
++use \helpref{GetPath}{wxfilectrlgetpath} for the others.
++
++note: {\it paths} is emptied first.
++
++\membersection{wxFileCtrl::GetFilenames}\label{wxfilectrlgetfilenames}
++
++\constfunc{void}{GetFilenames}{\param{wxArrayString\& }{filenames}}
++
++Fills the array {\it filenames} with the filenames only of selected items. This
++function should only be used with the controls having the {\tt wxFC\_MULTIPLE} style,
++use \helpref{GetFilename}{wxfilectrlgetfilename} for the others.
++
++note: {\it filenames} is emptied first.
++
++\membersection{wxFileCtrl::GetFilterIndex}\label{wxfilectrlgetfilterindex}
++
++\constfunc{int}{GetFilterIndex}{\void}
++
++Returns the index of the currently selected filter.
++
++\membersection{wxFileCtrl::SetWildcard}\label{wxfilectrlsetwildcard}
++
++\func{void}{SetWildcard}{\param{const wxString\& }{wildCard}}
++
++Sets the wildcard, which can contain multiple file types, for example:
++
++``BMP files (*.bmp)|*.bmp|GIF files (*.gif)|*.gif"
++
++\membersection{wxFileCtrl::SetFilterIndex}\label{wxfilectrlsetfilterindex}
++
++\func{void}{SetFilterIndex}{\param{int }{filterIndex}}
++
++Sets the current filter index, starting from zero.
++
++\membersection{wxFileCtrl::SetDirectory}\label{wxfilectrlsetdirectory}
++
++\func{bool}{SetDirectory}{\param{const wxString\& }{directory}}
++
++Sets(changes) the current directory displayed in the control.
++
++returns \true on success, \false otherwise.
++
++\membersection{wxFileCtrl::SetFilename}\label{wxfilectrlsetfilename}
++
++\func{bool}{SetFilename}{\param{const wxString\& }{filename}}
++
++Selects a certain file.
++
++returns \true on success, \false otherwise
++
++\membersection{wxFileCtrl::SetPath}\label{wxfilectrlsetpath}
++
++\func{bool}{SetPath}{\param{const wxString\& }{path}}
++
++Sets the path (the combined directory and filename that are currently used in the file ctrl).
++Equivalent to \helpref{SetPath}{wxfilectrlsetpath} then \helpref{SetFilename}{wxfilectrlsetfilename}.
++
++returns \true on success, \false otherwise.
+Index: docs/latex/wx/fileevt.tex
+===================================================================
+--- docs/latex/wx/fileevt.tex	(revision 0)
++++ docs/latex/wx/fileevt.tex	(revision 0)
+@@ -0,0 +1,68 @@
++\section{\class{wxFileCtrlEvent}}\label{wxfilectrlevent}
++
++A file control event holds information about events associated with wxFileCtrl objects.
++
++\wxheading{Derived from}
++
++\helpref{wxCommandEvent}{wxcommandevent}\\
++\helpref{wxEvent}{wxevent}\\
++\helpref{wxObject}{wxobject}
++
++\wxheading{Include files}
++
++<wx/filectrl.h>
++
++\wxheading{Event table macros}
++
++To process input from a file control, use these event handler macros to direct input to member
++functions that take a wxFileCtrlEvent argument.
++
++\twocolwidtha{7cm}
++\begin{twocollist}\itemsep=0pt
++\twocolitem{{\bf EVT\_FILECTRL\_FILEACTIVATED(id, func)}}{The user activated a file(by double-clicking or pressing Enter)}
++\twocolitem{{\bf EVT\_FILECTRL\_SELECTIONCHANGED(id, func)}}{The user changed the current selection(selected or deselected a file)}
++\twocolitem{{\bf EVT\_FILECTRL\_FOLDERCHANGED(id, func)}}{The current folder of the file ctrl has been changed}
++\end{twocollist}%
++
++\wxheading{See also}
++
++\helpref{wxListCtrl}{wxlistctrl}
++
++\latexignore{\rtfignore{\wxheading{Members}}}
++
++\membersection{wxFileCtrlEvent::wxFileCtrlEvent}\label{wxfilectrleventctor}
++
++\func{}{wxFileCtrlEvent}{\param{wxEventType }{type}, \param{wxObject }{evtObject}, \param{int }{id}}
++
++Constructor.
++
++\membersection{wxFileCtrlEvent::GetFiles}\label{wxfilectrleventgetfiles}
++
++\constfunc{wxArrayString}{GetFiles}{\void}
++
++returns the files selected.
++
++\membersection{wxFileCtrlEvent::GetDirectory}\label{wxfilectrleventgetdirectory}
++
++\constfunc{wxString}{GetDirectory}{\void}
++
++returns the current directory.
++In case of a {\bf EVT\_FILECTRL\_FOLDERCHANGED}, this method returns the new directory.
++
++\membersection{wxFileCtrlEvent::GetFile}\label{wxfilectrleventgetfile}
++
++\constfunc{wxString}{GetFile}{\void}
++
++returns the file selected(assuming it is only one file).
++
++\membersection{wxFileCtrlEvent::SetFiles}\label{wxfilectrleventsetfiles}
++
++\func{}{wxFileCtrlEvent::SetFiles}{\param{const wxArrayString &}{files}}
++
++Sets the files changed by this event
++
++\membersection{wxFileCtrlEvent::SetDirectory}\label{wxfilectrleventsetdirectory}
++
++\func{}{wxFileCtrlEvent::SetDirectory}{\param{const wxString &}{directory}}
++
++Sets the current directory of this event.
+Index: setup.h.in
+===================================================================
+--- setup.h.in	(revision 47901)
++++ setup.h.in	(working copy)
+@@ -333,6 +333,7 @@
+ #define wxUSE_DIRPICKERCTRL 0
+ #define wxUSE_EDITABLELISTBOX 0
+ #define wxUSE_FILEPICKERCTRL 0
++#define wxUSE_FILECTRL 0
+ #define wxUSE_FONTPICKERCTRL 0
+ #define wxUSE_GAUGE         0
+ #define wxUSE_HYPERLINKCTRL 0
+Index: include/wx/filectrl.h
+===================================================================
+--- include/wx/filectrl.h	(revision 0)
++++ include/wx/filectrl.h	(revision 0)
+@@ -0,0 +1,142 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/filectrl.h
++// Purpose:     Header for wxFileCtrlBase and other common functions used by
++//              platform-specific wxFileCtrl's
++// Author:      Diaa M. Sami
++// Modified by:
++// Created:     Jul-07-2007
++// RCS-ID:      $Id: $
++// Copyright:   (c) Diaa M. Sami
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_FILECTRL_H_BASE_
++#define _WX_FILECTRL_H_BASE_
++
++#include "wx/defs.h"
++
++#if wxUSE_FILECTRL
++
++#include "wx/string.h"
++#include "wx/event.h"
++
++enum
++{
++    wxFC_OPEN              = 0x0001,
++    wxFC_SAVE              = 0x0002,
++    wxFC_MULTIPLE          = 0x0004
++};
++
++#define wxFC_DEFAULT_STYLE wxFC_OPEN
++extern WXDLLEXPORT_DATA( const wxChar ) wxFileCtrlNameStr[];
++
++BEGIN_DECLARE_EVENT_TYPES()
++DECLARE_EXPORTED_EVENT_TYPE( WXDLLIMPEXP_CORE, wxEVT_FILECTRL_SELECTIONCHANGED, 1150 )
++DECLARE_EXPORTED_EVENT_TYPE( WXDLLIMPEXP_CORE, wxEVT_FILECTRL_FILEACTIVATED, 1151 )
++DECLARE_EXPORTED_EVENT_TYPE( WXDLLIMPEXP_CORE, wxEVT_FILECTRL_FOLDERCHANGED, 1152 )
++END_DECLARE_EVENT_TYPES()
++
++class WXDLLIMPEXP_CORE wxFileCtrlBase
++{
++public:
++    virtual ~wxFileCtrlBase() {}
++
++    virtual void SetWildcard( const wxString& wildCard ) = 0;
++    virtual void SetFilterIndex( int filterindex ) = 0;
++    virtual bool SetDirectory( const wxString& dir ) = 0;
++
++    // Selects a certain file.
++    // In case the filename specified isn't found/couldn't be shown with
++    // currently selected filter, false is returned and nothing happens
++    virtual bool SetFilename( const wxString& name ) = 0;
++
++    // chdirs to a certain directory and selects a certain file.
++    // In case the filename specified isn't found/couldn't be shown with
++    // currently selected filter, false is returned and if directory exists
++    // it's chdir'ed to
++    virtual bool SetPath( const wxString& path ) = 0;
++
++    virtual wxString GetFilename() const = 0;
++    virtual wxString GetDirectory() const = 0;
++    virtual wxString GetWildcard() const = 0;
++    virtual wxString GetPath() const = 0;
++    virtual void GetPaths( wxArrayString& paths ) const = 0;
++    virtual void GetFilenames( wxArrayString& files ) const = 0;
++    virtual int GetFilterIndex() const = 0;
++
++    virtual bool HasMultipleFileSelection() const = 0;
++};
++
++#if defined(__WXGTK24__) && !defined(__WXUNIVERSAL__)
++	#define wxFileCtrl wxGtkFileCtrl
++#else
++	#define wxFileCtrl wxGenericFileCtrl
++#endif
++
++class WXDLLIMPEXP_FWD_CORE wxFileCtrl;
++
++void GenerateFolderChangedEvent( wxFileCtrl *fileCtrl );
++void GenerateSelectionChangedEvent( wxFileCtrl *fileCtrl );
++void GenerateFileActivatedEvent( wxFileCtrl *fileCtrl, const wxString filename = wxEmptyString );
++
++#if defined(__WXGTK24__) && !defined(__WXUNIVERSAL__)
++    #include "gtk/filectrl.h"
++#else
++    #include "generic/filectrlg.h"
++#endif
++
++// Some documentation
++// On wxEVT_FILECTRL_FOLDERCHANGED, only the value returned by GetDirectory is
++// valid and it represents the (new) current directory for the wxFileCtrl.
++// On wxEVT_FILECTRL_FILEACTIVATED, GetDirectory returns the current directory
++// for the wxFileCtrl and GetFiles returns the names of the file(s) activated.
++// On wxEVT_FILECTRL_SELECTIONCHANGED, GetDirectory returns the current directory
++// for the wxFileCtrl and GetFiles returns the names of the currently selected
++// file(s).
++// In wxGTK, after each wxEVT_FILECTRL_FOLDERCHANGED, wxEVT_FILECTRL_SELECTIONCHANGED
++// is fired automatically once or more with 0 files.
++class WXDLLIMPEXP_CORE wxFileCtrlEvent : public wxCommandEvent
++{
++public:
++    wxFileCtrlEvent() {}
++    wxFileCtrlEvent( wxEventType type, wxObject *evtObject, int id )
++            : wxCommandEvent( type, id )
++    {
++        SetEventObject( evtObject );
++    }
++
++    // no need for the copy constructor as the default one will be fine.
++    virtual wxEvent *Clone() const { return new wxFileCtrlEvent( *this ); }
++
++    void SetFiles( const wxArrayString &files ) { this->files = files; }
++    void SetDirectory( const wxString &directory ) { this->directory = directory; }
++
++    wxArrayString GetFiles() const { return files; }
++    wxString GetDirectory() const { return directory; }
++
++    wxString GetFile() const;
++
++protected:
++    wxString  directory;
++    wxArrayString files;
++
++    DECLARE_DYNAMIC_CLASS_NO_ASSIGN( wxFileCtrlEvent )
++};
++
++typedef void ( wxEvtHandler::*wxFileCtrlEventFunction )( wxFileCtrlEvent& );
++
++#define wxFileCtrlEventHandler(func) \
++    (wxObjectEventFunction)(wxEventFunction)wxStaticCastEvent(wxFileCtrlEventFunction, &func)
++
++#define EVT_FILECTRL_FILEACTIVATED(id, fn) \
++    wx__DECLARE_EVT1(wxEVT_FILECTRL_FILEACTIVATED, id, wxFileCtrlEventHandler(fn))
++
++#define EVT_FILECTRL_SELECTIONCHANGED(id, fn) \
++    wx__DECLARE_EVT1(wxEVT_FILECTRL_SELECTIONCHANGED, id, wxFileCtrlEventHandler(fn))
++
++#define EVT_FILECTRL_FOLDERCHANGED(id, fn) \
++    wx__DECLARE_EVT1(wxEVT_FILECTRL_FOLDERCHANGED, id, wxFileCtrlEventHandler(fn))
++
++#endif // wxUSE_FILECTRL
++
++#endif // _WX_FILECTRL_H_BASE_
+Index: include/wx/gtk/filectrl.h
+===================================================================
+--- include/wx/gtk/filectrl.h	(revision 0)
++++ include/wx/gtk/filectrl.h	(revision 0)
+@@ -0,0 +1,134 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/gtk/filectrl.h
++// Purpose:     wxGtkFileCtrl Header
++// Author:      Diaa M. Sami
++// Modified by:
++// Created:     Aug-10-2007
++// RCS-ID:      $Id: $
++// Copyright:   (c) Diaa M. Sami
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef FILECTRL_H
++#define FILECTRL_H
++
++#if wxUSE_FILECTRL
++
++#include <gtk/gtk.h>
++#include "wx/control.h"
++#include "wx/gtk/private.h"
++
++// [GTK] current problems:
++// All methods(e.g. SetFilename(), SetPath(), etc) which change the state of
++// the control result in events fired, such events should be suppressed.
++// ------
++// Sometimes a selection event(with 0 files) is fired before
++// wxEVT_FILECTRL_FOLDERCHANGED, unfortunately this can hardly be detected!
++
++// A wx wrapper for any Gtk object implementing the interface GtkFileChooser
++
++class WXDLLIMPEXP_CORE wxGtkFileChooser
++{
++public:
++    wxGtkFileChooser();
++
++    void SetWidget(GtkFileChooser *w);
++
++    wxString GetPath() const;
++    void GetPaths( wxArrayString& paths ) const;
++    wxString GetDirectory() const;
++    wxString GetFilename() const;
++    void GetFilenames( wxArrayString& files ) const;
++    int GetFilterIndex() const;
++
++    bool SetPath( const wxString& path );
++    bool SetDirectory( const wxString& dir );
++    void SetWildcard( const wxString& wildCard );
++    void SetFilterIndex( int filterIndex );
++
++private:
++    GtkFileChooser *m_widget;
++};
++
++class wxGtkFileCtrl;
++
++extern "C"
++{
++    static void
++    gtkfilechooserwidget_file_activated_callback( GtkWidget *WXUNUSED( widget ), wxGtkFileCtrl *filectrl );
++
++    static void
++    gtkfilechooserwidget_selection_changed_callback( GtkWidget *WXUNUSED( widget ), wxGtkFileCtrl *filectrl );
++
++    static void
++    gtkfilechooserwidget_folder_changed_callback( GtkWidget *WXUNUSED( widget ), wxGtkFileCtrl *filectrl );
++}
++
++class WXDLLIMPEXP_CORE wxGtkFileCtrl: public wxControl,
++            public wxFileCtrlBase
++{
++public:
++    wxGtkFileCtrl () { Init(); }
++
++    wxGtkFileCtrl ( wxWindow *parent,
++                    wxWindowID id,
++                    const wxString& defaultDirectory = wxEmptyString,
++                    const wxString& defaultFilename = wxEmptyString,
++                    const wxString& wildCard = wxFileSelectorDefaultWildcardStr,
++                    long style = wxFC_DEFAULT_STYLE,
++                    const wxPoint& pos = wxDefaultPosition,
++                    const wxSize& size = wxDefaultSize,
++                    const wxString& name = wxFileCtrlNameStr )
++    {
++        Init();
++        Create( parent, id, defaultDirectory, defaultFilename, wildCard, style, pos, size, name );
++    }
++
++    virtual ~wxGtkFileCtrl() {};
++
++    void Init();
++    bool Create( wxWindow *parent,
++                 wxWindowID id,
++                 const wxString& defaultDirectory = wxEmptyString,
++                 const wxString& defaultFileName = wxEmptyString,
++                 const wxString& wildCard = wxFileSelectorDefaultWildcardStr,
++                 long style = wxFC_DEFAULT_STYLE,
++                 const wxPoint& pos = wxDefaultPosition,
++                 const wxSize& size = wxDefaultSize,
++                 const wxString& name = wxFileCtrlNameStr );
++
++    virtual void SetWildcard( const wxString& wildCard );
++    virtual void SetFilterIndex( int filterIndex );
++    virtual bool SetDirectory( const wxString& dir );
++    virtual bool SetFilename( const wxString& name ); // TODO needs testing
++    virtual bool SetPath( const wxString& path ); // TODO needs testing
++
++    virtual wxString GetFilename() const;
++    virtual wxString GetDirectory() const;
++    virtual wxString GetWildcard() const { return this->m_wildCard; }
++    virtual wxString GetPath() const;
++    virtual void GetPaths( wxArrayString& paths ) const;
++    virtual void GetFilenames( wxArrayString& files ) const;
++    virtual int GetFilterIndex() const { return m_fc.GetFilterIndex(); }
++
++    virtual bool HasMultipleFileSelection() const { return HasFlag( wxFC_MULTIPLE ); }
++
++protected:
++    GtkFileChooser		*m_fcWidget;
++    wxGtkFileChooser	 m_fc;
++    wxString			 m_wildCard;
++
++    bool    m_checkNextSelEvent;
++    bool    m_ignoreNextFolderChangeEvent;
++
++    DECLARE_DYNAMIC_CLASS( wxGtkFileCtrl )
++
++    friend void gtkfilechooserwidget_file_activated_callback( GtkWidget *, wxGtkFileCtrl * );
++    friend void gtkfilechooserwidget_folder_changed_callback( GtkWidget *, wxGtkFileCtrl * );
++    friend void gtkfilechooserwidget_selection_changed_callback( GtkWidget *, wxGtkFileCtrl * );
++};
++
++#endif // wxUSE_FILECTRL
++
++#endif	// FILECTRL_H
++
+Index: include/wx/gtk/filedlg.h
+===================================================================
+--- include/wx/gtk/filedlg.h	(revision 47901)
++++ include/wx/gtk/filedlg.h	(working copy)
+@@ -11,6 +11,7 @@
+ #define __GTKFILEDLGH__
+ 
+ #include "wx/generic/filedlgg.h"
++#include "wx/filectrl.h"    // for wxGtkFileChooser
+ 
+ //-------------------------------------------------------------------------
+ // wxFileDialog
+@@ -64,6 +65,8 @@
+     DECLARE_DYNAMIC_CLASS(wxFileDialog)
+     DECLARE_EVENT_TABLE()
+     void OnFakeOk( wxCommandEvent &event );
++
++    wxGtkFileChooser    m_fc;
+ };
+ 
+ #endif // __GTKFILEDLGH__
+Index: include/wx/generic/filectrlg.h
+===================================================================
+--- include/wx/generic/filectrlg.h	(revision 0)
++++ include/wx/generic/filectrlg.h	(revision 0)
+@@ -0,0 +1,120 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/generic/filectrlg.h
++// Purpose:     wxGenericFileCtrl Header
++// Author:      Diaa M. Sami
++// Modified by:
++// Created:     Jul-07-2007
++// RCS-ID:      $Id: $
++// Copyright:   (c) Diaa M. Sami
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_GENERIC_FILECTRL_H_
++#define _WX_GENERIC_FILECTRL_H_
++
++#if wxUSE_FILECTRL
++
++#include "wx/panel.h"
++#include "wx/listctrl.h"
++#include "wx/choice.h"
++
++#include "wx/filedlg.h"
++#include "wx/generic/filedlgg.h"
++
++class WXDLLIMPEXP_CORE wxGenericFileCtrl: public wxPanel,
++            public wxFileCtrlBase
++{
++public:
++    wxGenericFileCtrl()
++    {
++        m_ignoreChanges = false;
++    }
++
++    wxGenericFileCtrl ( wxWindow *parent,
++                        wxWindowID id,
++                        const wxString& defaultDirectory = wxEmptyString,
++                        const wxString& defaultFilename = wxEmptyString,
++                        const wxString& wildCard = wxFileSelectorDefaultWildcardStr,
++                        long style = wxFC_DEFAULT_STYLE,
++                        const wxPoint& pos = wxDefaultPosition,
++                        const wxSize& size = wxDefaultSize,
++                        const wxString& name = wxFileCtrlNameStr )
++    {
++        m_ignoreChanges = false;
++        Create( parent, id, defaultDirectory, defaultFilename, wildCard, style, pos, size, name );
++    }
++
++    virtual ~wxGenericFileCtrl() {}
++
++    bool Create( wxWindow *parent,
++                 wxWindowID id,
++                 const wxString& defaultDirectory = wxEmptyString,
++                 const wxString& defaultFileName = wxEmptyString,
++                 const wxString& wildCard = wxFileSelectorDefaultWildcardStr,
++                 long style = wxFC_DEFAULT_STYLE,
++                 const wxPoint& pos = wxDefaultPosition,
++                 const wxSize& size = wxDefaultSize,
++                 const wxString& name = wxFileCtrlNameStr );
++
++    virtual void SetWildcard( const wxString& wildCard );
++    virtual void SetFilterIndex( int filterindex );
++    virtual bool SetDirectory( const wxString& dir );
++
++    // Selects a certain file.
++    // In case the filename specified isn't found/couldn't be shown with currently selected filter, false is returned and nothing happens
++    virtual bool SetFilename( const wxString& name );
++
++    // chdirs to a certain directory and selects a certain file.
++    // In case the filename specified isn't found/couldn't be shown with currently selected filter, false is returned and if directory exists it's chdir'ed to
++    virtual bool SetPath( const wxString& path );
++
++    virtual wxString GetFilename() const;
++    virtual wxString GetDirectory() const;
++    virtual wxString GetWildcard() const { return this->m_wildCard; }
++    virtual wxString GetPath() const;
++    virtual void GetPaths( wxArrayString& paths ) const;
++    virtual void GetFilenames( wxArrayString& files ) const;
++    virtual int GetFilterIndex() const { return m_filterIndex; }
++
++    virtual bool HasMultipleFileSelection() const { return m_style & wxFC_MULTIPLE; }
++
++private:
++    void OnChoiceFilter( wxCommandEvent &event );
++    void OnCheck( wxCommandEvent &event );
++    void OnActivated( wxListEvent &event );
++    void OnTextEnter( wxCommandEvent &WXUNUSED( event ) );
++    void OnTextChange( wxCommandEvent &WXUNUSED( event ) );
++    void OnSelected( wxListEvent &event );
++    void HandleAction( const wxString &fn );
++
++    void DoSetFilterIndex( int filterindex );
++    void UpdateControls();
++    wxString DoGetFilename( const bool fullPath ) const;
++    void DoGetFilenames( wxArrayString& filenames, const bool fullPath ) const;
++    wxString GetProperFileListDir() const;
++
++    int m_style;
++
++    wxString       m_filterExtension;
++    wxChoice      *m_choice;
++    wxTextCtrl    *m_text;
++    wxFileList    *m_list;
++    wxCheckBox    *m_check;
++    wxStaticText  *m_static;
++
++    wxString      m_dir;
++    wxString      m_fileName;
++    wxString      m_wildCard; // wild card in one string as passed to the object previously.
++
++    int     m_filterIndex;
++    bool m_inSelected;
++    bool    m_ignoreChanges;
++    bool m_noSelChgEvent; // suppress selection changed events.
++
++    DECLARE_DYNAMIC_CLASS( wxGenericFileCtrl )
++    DECLARE_EVENT_TABLE()
++};
++
++#endif // wxUSE_FILECTRL
++
++#endif // _WX_GENERIC_FILECTRL_H_
+Index: include/wx/generic/filedlgg.h
+===================================================================
+--- include/wx/generic/filedlgg.h	(revision 47901)
++++ include/wx/generic/filedlgg.h	(working copy)
+@@ -25,7 +25,7 @@
+ class WXDLLIMPEXP_FWD_CORE wxCheckBox;
+ class WXDLLIMPEXP_FWD_CORE wxChoice;
+ class WXDLLIMPEXP_FWD_CORE wxFileData;
+-class WXDLLIMPEXP_FWD_CORE wxFileCtrl;
++class WXDLLIMPEXP_FWD_CORE wxFileList;
+ class WXDLLIMPEXP_FWD_CORE wxGenericFileDialog;
+ class WXDLLIMPEXP_FWD_CORE wxListEvent;
+ class WXDLLIMPEXP_FWD_CORE wxListItem;
+@@ -108,7 +108,7 @@
+     wxString       m_filterExtension;
+     wxChoice      *m_choice;
+     wxTextCtrl    *m_text;
+-    wxFileCtrl    *m_list;
++    wxFileList    *m_list;
+     wxCheckBox    *m_check;
+     wxStaticText  *m_static;
+     wxBitmapButton *m_upDirButton;
+@@ -149,7 +149,7 @@
+ #endif // wxHAS_GENERIC_FILEDIALOG
+ 
+ //-----------------------------------------------------------------------------
+-//  wxFileData - a class to hold the file info for the wxFileCtrl
++//  wxFileData - a class to hold the file info for the wxFileList
+ //-----------------------------------------------------------------------------
+ 
+ class WXDLLEXPORT wxFileData
+@@ -206,7 +206,7 @@
+     // Get/Set the type of file, file/dir/drive/link
+     int GetType() const { return m_type; }
+ 
+-    // the wxFileCtrl fields in report view
++    // the wxFileList fields in report view
+     enum fileListFieldType
+     {
+         FileList_Name,
+@@ -219,7 +219,7 @@
+         FileList_Max
+     };
+ 
+-    // Get the entry for report view of wxFileCtrl
++    // Get the entry for report view of wxFileList
+     wxString GetEntry( fileListFieldType num ) const;
+ 
+     // Get a string representation of the file info
+@@ -244,14 +244,14 @@
+ };
+ 
+ //-----------------------------------------------------------------------------
+-//  wxFileCtrl
++//  wxFileList
+ //-----------------------------------------------------------------------------
+ 
+-class WXDLLEXPORT wxFileCtrl : public wxListCtrl
++class WXDLLEXPORT wxFileList : public wxListCtrl
+ {
+ public:
+-    wxFileCtrl();
+-    wxFileCtrl( wxWindow *win,
++    wxFileList();
++    wxFileList( wxWindow *win,
+                 wxWindowID id,
+                 const wxString &wild,
+                 bool showHidden,
+@@ -260,7 +260,7 @@
+                 long style = wxLC_LIST,
+                 const wxValidator &validator = wxDefaultValidator,
+                 const wxString &name = wxT("filelist") );
+-    virtual ~wxFileCtrl();
++    virtual ~wxFileList();
+ 
+     virtual void ChangeToListMode();
+     virtual void ChangeToReportMode();
+@@ -300,7 +300,7 @@
+     wxFileData::fileListFieldType m_sort_field;
+ 
+ private:
+-    DECLARE_DYNAMIC_CLASS(wxFileCtrl)
++    DECLARE_DYNAMIC_CLASS(wxFileList)
+     DECLARE_EVENT_TABLE()
+ };
+ 
+Index: include/wx/defs.h
+===================================================================
+--- include/wx/defs.h	(revision 47901)
++++ include/wx/defs.h	(working copy)
+@@ -1874,6 +1874,9 @@
+ 
+     /*  IDs used by generic file dialog (13 consecutive starting from this value) */
+     wxID_FILEDLGG = 5900,
++    
++    /*  IDs used by generic file ctrl (4 consecutive starting from this value) */
++    wxID_FILECTRL = 5950,
+ 
+     wxID_HIGHEST = 5999
+ };
+Index: configure.in
+===================================================================
+--- configure.in	(revision 47901)
++++ configure.in	(working copy)
+@@ -732,6 +732,7 @@
+   DEFAULT_wxUSE_DISPLAY=yes
+   DEFAULT_wxUSE_DETECT_SM=yes
+   DEFAULT_wxUSE_DIRPICKERCTRL=yes
++  DEFAULT_wxUSE_FILECTRL=yes
+   DEFAULT_wxUSE_FILEPICKERCTRL=yes
+   DEFAULT_wxUSE_FONTPICKERCTRL=yes
+   DEFAULT_wxUSE_GAUGE=yes
+@@ -785,6 +786,7 @@
+   DEFAULT_wxUSE_DISPLAY=no
+   DEFAULT_wxUSE_DETECT_SM=no
+   DEFAULT_wxUSE_DIRPICKERCTRL=no
++  DEFAULT_wxUSE_FILECTRL=no
+   DEFAULT_wxUSE_FILEPICKERCTRL=no
+   DEFAULT_wxUSE_FONTPICKERCTRL=no
+   DEFAULT_wxUSE_GAUGE=no
+@@ -842,6 +844,7 @@
+ WX_ARG_FEATURE(detect_sm,   [  --enable-detect_sm      use code to detect X11 session manager], wxUSE_DETECT_SM)
+ WX_ARG_FEATURE(editablebox, [  --enable-editablebox    use wxEditableListBox class], wxUSE_EDITABLELISTBOX)
+ WX_ARG_FEATURE(filepicker,  [  --enable-filepicker     use wxFilePickerCtrl class], wxUSE_FILEPICKERCTRL)
++WX_ARG_FEATURE(filectrl,  [  --enable-filectrl     use wxFileCtrl class], wxUSE_FILECTRL)
+ WX_ARG_FEATURE(fontpicker,  [  --enable-fontpicker     use wxFontPickerCtrl class], wxUSE_FONTPICKERCTRL)
+ WX_ARG_FEATURE(gauge,       [  --enable-gauge          use wxGauge class], wxUSE_GAUGE)
+ WX_ARG_FEATURE(grid,        [  --enable-grid           use wxGrid class], wxUSE_GRID)
+@@ -6679,6 +6682,11 @@
+   USES_CONTROLS=1
+ fi
+ 
++if test "$wxUSE_FILECTRL" = "yes"; then
++  AC_DEFINE(wxUSE_FILECTRL)
++  USES_CONTROLS=1
++fi
++
+ if test "$wxUSE_FILEPICKERCTRL" = "yes"; then
+   AC_DEFINE(wxUSE_FILEPICKERCTRL)
+   USES_CONTROLS=1
+Index: build/bakefiles/files.bkl
+===================================================================
+--- build/bakefiles/files.bkl	(revision 47901)
++++ build/bakefiles/files.bkl	(working copy)
+@@ -638,6 +638,7 @@
+     src/common/dseldlg.cpp
+     src/common/effects.cpp
+     src/common/fddlgcmn.cpp
++    src/common/filectrlcmn.cpp
+     src/common/filepickercmn.cpp
+     src/common/fontpickercmn.cpp
+     src/common/fldlgcmn.cpp
+@@ -770,6 +771,7 @@
+     wx/generic/dcpsg.h
+     wx/generic/dirctrlg.h
+     wx/generic/dragimgg.h
++    wx/generic/filectrlg.h
+     wx/generic/filedlgg.h
+     wx/generic/filepickerg.h
+     wx/generic/fontdlgg.h
+@@ -853,6 +855,7 @@
+     wx/effects.h
+     wx/evtloop.h
+     wx/fdrepdlg.h
++    wx/filectrl.h
+     wx/filepicker.h
+     wx/fontpicker.h
+     wx/fmappriv.h
+@@ -970,6 +973,7 @@
+     src/gtk/dcscreen.cpp
+     src/gtk/dnd.cpp
+     src/gtk/evtloop.cpp
++    src/gtk/filectrl.cpp
+     src/gtk/font.cpp
+     src/gtk/gsockgtk.cpp
+     src/gtk/minifram.cpp
+@@ -1763,6 +1767,7 @@
+ <set var="WINCE_SRC" hints="files">
+     src/generic/dirdlgg.cpp
+     src/generic/fdrepdlg.cpp
++    src/generic/filectrlg.cpp
+     src/generic/filedlgg.cpp
+     src/generic/fontdlgg.cpp
+     src/msw/wince/checklst.cpp
+@@ -2591,6 +2596,7 @@
+     src/generic/colrdlgg.cpp
+     src/generic/dirdlgg.cpp
+     src/generic/fdrepdlg.cpp
++    src/generic/filectrlg.cpp
+     src/generic/filedlgg.cpp
+     src/generic/fontdlgg.cpp
+     src/generic/listctrl.cpp
+Index: build/msw/makefile.vc
+===================================================================
+Index: build/msw/makefile.wat
+===================================================================
+Index: build/msw/wx_core.dsp
+===================================================================
+Index: build/msw/makefile.bcc
+===================================================================
+Index: build/msw/makefile.gcc
+===================================================================
+Index: samples/widgets/Makefile.in
+===================================================================
+Index: samples/widgets/makefile.vc
+===================================================================
+Index: samples/widgets/makefile.unx
+===================================================================
+Index: samples/widgets/widgets.dsp
+===================================================================
+Index: samples/widgets/makefile.wat
+===================================================================
+Index: samples/widgets/filectrl.cpp
+===================================================================
+--- samples/widgets/filectrl.cpp	(revision 0)
++++ samples/widgets/filectrl.cpp	(revision 0)
+@@ -0,0 +1,308 @@
++/////////////////////////////////////////////////////////////////////////////
++// Program:     wxWidgets Widgets Sample
++// Name:        filectrl.cpp
++// Purpose:     Part of the widgets sample showing wxFileCtrl
++// Author:      Diaa M. Sami
++// Created:     28 Jul 2007
++// Id:          $Id: $
++// Copyright:   (c) 2007 Diaa M. Sami
++// License:     wxWindows license
++/////////////////////////////////////////////////////////////////////////////
++
++// ============================================================================
++// declarations
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// for compilers that support precompilation, includes "wx/wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++#if wxUSE_FILECTRL
++
++// for all others, include the necessary headers
++#ifndef WX_PRECOMP
++#include "wx/wx.h"
++#endif
++
++#include "wx/filectrl.h"
++
++#include "wx/wupdlock.h"
++#include "wx/filename.h"
++
++#include "widgets.h"
++
++// TODO change this
++#include "icons/dirctrl.xpm"
++
++// ----------------------------------------------------------------------------
++// constants
++// ----------------------------------------------------------------------------
++
++// control ids
++enum
++{
++    FileCtrlPage_Reset = wxID_HIGHEST,
++    FileCtrlPage_SetPath,
++    FileCtrlPage_Ctrl
++};
++
++enum
++{
++    FileCtrlMode_Open = 0,
++    FileCtrlMode_Save
++};
++
++// ----------------------------------------------------------------------------
++// CheckBoxWidgetsPage
++// ----------------------------------------------------------------------------
++
++class FileCtrlWidgetsPage : public WidgetsPage
++{
++public:
++    FileCtrlWidgetsPage( WidgetsBookCtrl *book, wxImageList *imaglist );
++    virtual ~FileCtrlWidgetsPage() {}
++
++    virtual wxControl *GetWidget() const { return /*m_fileCtrl*/NULL; }
++    virtual void RecreateWidget() { CreateFileCtrl(); }
++
++    // lazy creation of the content
++    virtual void CreateContent();
++
++protected:
++    // event handlers
++    void OnButtonSetDirectory( wxCommandEvent& event );
++    void OnButtonReset( wxCommandEvent& event );
++    void OnCheckBox( wxCommandEvent& event );
++    void OnRadioBox( wxCommandEvent& event );
++    void OnFileCtrl( wxFileCtrlEvent& event );
++
++    // reset the control parameters
++    void Reset();
++
++    // (re)create the m_fileCtrl
++    void CreateFileCtrl();
++
++    // the controls
++    // ------------
++
++    // the control itself and the sizer it is in
++    wxFileCtrl *m_fileCtrl;
++
++    // the text entries for command parameters
++    wxTextCtrl *m_dir;
++
++    // flags
++    wxCheckBox *m_chkMultiple;
++
++    wxRadioBox *m_radioFileCtrlMode;
++
++    // filters
++    wxCheckBox *m_fltr[3];
++
++private:
++    DECLARE_EVENT_TABLE()
++    DECLARE_WIDGETS_PAGE( FileCtrlWidgetsPage )
++};
++
++// ----------------------------------------------------------------------------
++// event tables
++// ----------------------------------------------------------------------------
++
++BEGIN_EVENT_TABLE( FileCtrlWidgetsPage, WidgetsPage )
++    EVT_BUTTON( FileCtrlPage_Reset, FileCtrlWidgetsPage::OnButtonReset )
++    EVT_BUTTON( FileCtrlPage_SetPath, FileCtrlWidgetsPage::OnButtonSetDirectory )
++    EVT_CHECKBOX( wxID_ANY, FileCtrlWidgetsPage::OnCheckBox )
++    EVT_RADIOBOX( wxID_ANY, FileCtrlWidgetsPage::OnRadioBox )
++
++    EVT_FILECTRL_FOLDERCHANGED( wxID_ANY, FileCtrlWidgetsPage::OnFileCtrl )
++    EVT_FILECTRL_SELECTIONCHANGED( wxID_ANY, FileCtrlWidgetsPage::OnFileCtrl )
++    EVT_FILECTRL_FILEACTIVATED( wxID_ANY, FileCtrlWidgetsPage::OnFileCtrl )
++END_EVENT_TABLE()
++
++// ============================================================================
++// implementation
++// ============================================================================
++
++IMPLEMENT_WIDGETS_PAGE( FileCtrlWidgetsPage, wxT( "FileCtrl" ),
++                        GENERIC_CTRLS
++                      );
++
++FileCtrlWidgetsPage::FileCtrlWidgetsPage( WidgetsBookCtrl *book,
++        wxImageList *imaglist )
++        : WidgetsPage( book, imaglist, dirctrl_xpm )
++{
++}
++
++void FileCtrlWidgetsPage::CreateContent()
++{
++    wxSizer *sizerTop = new wxBoxSizer( wxHORIZONTAL );
++
++    // left pane
++    wxSizer *sizerLeft = new wxBoxSizer( wxVERTICAL );
++
++    static const wxString mode[] = { wxT( "open" ), wxT( "save" ) };
++    m_radioFileCtrlMode = new wxRadioBox( this, wxID_ANY, wxT( "wxFileCtrl mode" ),
++                                          wxDefaultPosition, wxDefaultSize,
++                                          WXSIZEOF( mode ), mode );
++
++    sizerLeft->Add( m_radioFileCtrlMode,
++                    0, wxALL | wxEXPAND , 5 );
++
++    sizerLeft->Add( CreateSizerWithTextAndButton( FileCtrlPage_SetPath , wxT( "Set &directory" ), wxID_ANY, &m_dir ),
++                    0, wxALL | wxEXPAND , 5 );
++
++    wxSizer *sizerUseFlags =
++        new wxStaticBoxSizer( wxVERTICAL, this, _T( "&Flags" ) );
++
++    m_chkMultiple   = CreateCheckBoxAndAddToSizer( sizerUseFlags, _T( "wxFC_MULTIPLE" ) );
++    sizerLeft->Add( sizerUseFlags, wxSizerFlags().Expand().Border() );
++
++    wxSizer *sizerFilters =
++        new wxStaticBoxSizer( wxVERTICAL, this, _T( "&Filters" ) );
++    m_fltr[0] = CreateCheckBoxAndAddToSizer( sizerFilters, wxString::Format( wxT( "all files (%s)|%s" ),
++                wxFileSelectorDefaultWildcardStr, wxFileSelectorDefaultWildcardStr ) );
++    m_fltr[1] = CreateCheckBoxAndAddToSizer( sizerFilters, wxT( "C++ files (*.cpp; *.h)|*.cpp;*.h" ) );
++    m_fltr[2] = CreateCheckBoxAndAddToSizer( sizerFilters, wxT( "PNG images (*.png)|*.png" ) );
++    sizerLeft->Add( sizerFilters, wxSizerFlags().Expand().Border() );
++
++    wxButton *btn = new wxButton( this, FileCtrlPage_Reset, _T( "&Reset" ) );
++    sizerLeft->Add( btn, 0, wxALIGN_CENTRE_HORIZONTAL | wxALL, 15 );
++
++    // right pane
++    m_fileCtrl = new wxFileCtrl(
++                     this,
++                     FileCtrlPage_Ctrl,
++                     wxEmptyString,
++                     wxEmptyString,
++                     wxEmptyString,
++                     wxFC_OPEN,
++                     wxDefaultPosition,
++                     wxDefaultSize
++                 );
++
++    // the 3 panes panes compose the window
++    sizerTop->Add( sizerLeft, 0, ( wxALL & ~wxLEFT ), 10 );
++    sizerTop->Add( m_fileCtrl, 1, wxGROW | ( wxALL & ~wxRIGHT ), 10 );
++
++    // final initializations
++    Reset();
++
++    SetSizer( sizerTop );
++}
++
++void FileCtrlWidgetsPage::Reset()
++{
++    m_dir->SetValue( m_fileCtrl->GetDirectory() );
++    m_radioFileCtrlMode->SetSelection( ( wxFC_DEFAULT_STYLE & wxFC_OPEN ) ?
++                                       FileCtrlMode_Open : FileCtrlMode_Save );
++}
++
++void FileCtrlWidgetsPage::CreateFileCtrl()
++{
++    wxWindowUpdateLocker noUpdates( this );
++
++    const int style =
++        ( m_radioFileCtrlMode->GetSelection() == FileCtrlMode_Open ?
++          wxFC_OPEN : wxFC_SAVE ) |
++        ( m_chkMultiple->IsChecked() ? wxFC_MULTIPLE : 0 );
++
++    wxFileCtrl *fileCtrl = new wxFileCtrl(
++                               this,
++                               FileCtrlPage_Ctrl,
++                               wxEmptyString,
++                               wxEmptyString,
++                               wxEmptyString,
++                               style,
++                               wxDefaultPosition,
++                               wxDefaultSize
++                           );
++
++    wxString wildcard;
++    for ( unsigned int i = 0; i < WXSIZEOF( m_fltr ); ++i )
++    {
++        if ( m_fltr[i]->IsChecked() )
++        {
++            if ( !wildcard.IsEmpty() )
++                wildcard += wxT( "|" );
++            wildcard += m_fltr[i]->GetLabel();
++        }
++    }
++    fileCtrl->SetWildcard( wildcard );
++
++    // update sizer's child window
++    GetSizer()->Replace( m_fileCtrl, fileCtrl, true );
++
++    // update our pointer
++    delete m_fileCtrl;
++    m_fileCtrl = fileCtrl;
++
++    // relayout the sizer
++    GetSizer()->Layout();
++}
++
++// ----------------------------------------------------------------------------
++// event handlers
++// ----------------------------------------------------------------------------
++
++void FileCtrlWidgetsPage::OnButtonSetDirectory( wxCommandEvent& WXUNUSED( event ) )
++{
++    m_fileCtrl->SetDirectory( m_dir->GetValue() );
++}
++
++void FileCtrlWidgetsPage::OnButtonReset( wxCommandEvent& WXUNUSED( event ) )
++{
++    Reset();
++
++    CreateFileCtrl();
++}
++
++void FileCtrlWidgetsPage::OnCheckBox( wxCommandEvent& WXUNUSED( event ) )
++{
++    CreateFileCtrl();
++}
++
++void FileCtrlWidgetsPage::OnRadioBox( wxCommandEvent& WXUNUSED( event ) )
++{
++    CreateFileCtrl();
++}
++
++void FileCtrlWidgetsPage::OnFileCtrl( wxFileCtrlEvent& event )
++{
++    if ( event.GetEventType() == wxEVT_FILECTRL_FOLDERCHANGED )
++        wxLogMessage( _T( "Folder changed event, new folder: %s" ), event.GetDirectory() );
++    else if ( event.GetEventType() == wxEVT_FILECTRL_FILEACTIVATED )
++    {
++        wxLogMessage( _T( "File activated event: " ) );
++        wxString filesString;
++
++        const wxArrayString &files = event.GetFiles();
++        for ( unsigned int i = 0; i < files.Count(); i ++ )
++        {
++            filesString += files[i] + _T( " " );
++        }
++
++        wxLogMessage( filesString );
++    }
++    else if ( event.GetEventType() == wxEVT_FILECTRL_SELECTIONCHANGED )
++    {
++        wxLogMessage( _T( "Selection changed event: " ) );
++        wxString filesString;
++
++        const wxArrayString &files = event.GetFiles();
++        for ( unsigned int i = 0; i < files.Count(); i ++ )
++        {
++            filesString += files[i] + _T( " " );
++        }
++
++        wxLogMessage( filesString );
++    }
++}
++
++#endif // wxUSE_FILECTRL
+Index: samples/widgets/makefile.bcc
+===================================================================
+Index: samples/widgets/makefile.gcc
+===================================================================
+Index: samples/widgets/widgets.bkl
+===================================================================
+--- samples/widgets/widgets.bkl	(revision 47901)
++++ samples/widgets/widgets.bkl	(working copy)
+@@ -4,6 +4,24 @@
+ 
+     <include file="../../build/bakefiles/common_samples.bkl"/>
+ 
++    <set var="GENERIC_FILECTRL_IN_NATIVE_BUILDS">
++        <if cond="OUT_OF_TREE_MAKEFILES=='1'">
++            <!-- no files that are not part of the sample in this case -->
++        </if>
++        <if cond="TOOLKIT=='MSW' and WXUNIV=='0' and SHARED=='0'">
++            $(WXTOPDIR)src/generic/filedlgg.cpp
++            $(WXTOPDIR)src/generic/filectrlg.cpp
++        </if>
++        <if cond="TOOLKIT=='MAC' and WXUNIV=='0' and SHARED=='0'">
++            $(WXTOPDIR)src/generic/filedlgg.cpp
++            $(WXTOPDIR)src/generic/filectrlg.cpp
++        </if>
++        <if cond="TOOLKIT=='PM' and WXUNIV=='0' and SHARED=='0'">
++            $(WXTOPDIR)src/generic/filedlgg.cpp
++            $(WXTOPDIR)src/generic/filectrlg.cpp
++        </if>
++    </set>
++
+     <exe id="widgets" template="wx_sample" template_append="wx_append">
+         <sources>
+             bmpcombobox.cpp
+@@ -15,6 +33,7 @@
+             datepick.cpp
+             dirctrl.cpp
+             dirpicker.cpp
++            filectrl.cpp
+             filepicker.cpp
+             fontpicker.cpp
+             gauge.cpp
+@@ -31,6 +50,7 @@
+             textctrl.cpp
+             toggle.cpp
+             widgets.cpp
++            $(GENERIC_FILECTRL_IN_NATIVE_BUILDS)
+         </sources>
+         <wx-lib>xml</wx-lib>
+         <wx-lib>adv</wx-lib>
+
+ 	  	 

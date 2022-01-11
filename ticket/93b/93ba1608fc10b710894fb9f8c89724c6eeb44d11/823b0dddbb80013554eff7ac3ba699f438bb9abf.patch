@@ -1,0 +1,143 @@
+diff -uNrB wxWidgets-trunk\src/msw/toolbar.cpp wxWidgets-work\src/msw/toolbar.cpp
+--- wxWidgets-trunk\src/msw/toolbar.cpp	2014-03-08
++++ wxWidgets-work\src/msw/toolbar.cpp	2014-03-09
+@@ -1317,11 +1317,17 @@
+     // check if we have any stretchable spacers in the first place
+     unsigned numSpaces = 0;
+     wxToolBarToolsList::compatibility_iterator node;
+-    for ( node = m_tools.GetFirst(); node; node = node->GetNext() )
++    int toolIndex = 0;
++    for ( node = m_tools.GetFirst(); node; node = node->GetNext(), toolIndex++ )
+     {
+         wxToolBarTool * const tool = (wxToolBarTool*)node->GetData();
+         if ( tool->IsStretchableSpace() )
+-            numSpaces++;
++        {
++            // Count only enabled items
++            const RECT rItem = wxGetTBItemRect(GetHwnd(), toolIndex);
++            if( !::IsRectEmpty(&rItem) )
++                numSpaces++;
++        }
+     }
+ 
+     if ( !numSpaces )
+@@ -1344,7 +1350,7 @@
+     // move the controls manually ourselves to ensure they remain at the
+     // correct place
+     int offset = 0;
+-    int toolIndex = 0;
++    toolIndex = 0;
+     for ( node = m_tools.GetFirst(); node; node = node->GetNext(), toolIndex++ )
+     {
+         wxToolBarTool * const tool = (wxToolBarTool*)node->GetData();
+@@ -1564,6 +1571,22 @@
+ 
+     m_maxRows = nRows;
+ 
++    // Enable stretchable spacers for single-row horizontal toobar or single-column vertical toolbar only.
++    const int state = (!IsVertical() && m_maxRows == 1) || (IsVertical() && (size_t)m_maxRows == m_nButtons) ? 
++                                TBSTATE_ENABLED : TBSTATE_HIDDEN;
++    wxToolBarToolsList::compatibility_iterator node;
++    for ( node = m_tools.GetFirst(); node; node = node->GetNext() )
++    {
++        wxToolBarTool * const tool = (wxToolBarTool*)node->GetData();
++        if ( tool->IsStretchableSpace() )
++        {
++            if( !::SendMessage(GetHwnd(), TB_SETSTATE, tool->GetId(), MAKELONG(state, 0)) )
++            {
++                wxLogLastError(wxT("TB_SETSTATE (stretchable spacer)"));
++            }
++        }
++    }
++
+     UpdateSize();
+ }
+ 
+@@ -1802,13 +1825,36 @@
+ 
+     // calculate our minor dimension ourselves - we're confusing the standard
+     // logic (TB_AUTOSIZE) with our horizontal toolbars and other hacks
+-    // Find bounding box for any toolbar item.
++    // Find bounding box for any toolbar row.
+     RECT r;
+     ::SetRectEmpty(&r);
++    // Bounding box for single (current) row
++    RECT rRow;
++    ::SetRectEmpty(&rRow);
++    int rowPosX = INT_MIN;
+     wxToolBarToolsList::compatibility_iterator node;
+     int i = 0;
+     for ( node = m_tools.GetFirst(); node; node = node->GetNext(), i++)
+     {
++        // Skip hidden buttons
++        RECT rItem = wxGetTBItemRect(GetHwnd(), i);
++        if( ::IsRectEmpty(&rItem) )
++            continue;
++
++        if( rItem.top > rowPosX )
++        {
++            // We have next row
++            rowPosX = rItem.top;
++
++            // Shift origin to (0,0)
++            ::OffsetRect(&rRow, -rRow.left, -rRow.top);
++            // Update bounding box for any row
++            ::UnionRect(&r, &r, &rRow);
++            
++            // Reset bounding box for new row
++            ::SetRectEmpty(&rRow);
++        }
++
+         wxToolBarTool * const tool = (wxToolBarTool*)node->GetData();
+ 
+         // Separators shouldn't be taken into account as they are sometimes
+@@ -1817,11 +1863,14 @@
+         // any case, so just skip them.
+         if( !tool->IsSeparator() )
+         {
+-            RECT ritem = wxGetTBItemRect(GetHwnd(), i);
+-            ::OffsetRect(&ritem, -ritem.left, -ritem.top); // Shift origin to (0,0)
+-            ::UnionRect(&r, &r, &ritem);
++            // Update bounding box of current row
++            ::UnionRect(&rRow, &rRow, &rItem);
+         }
+     }
++    // Shift origin to (0,0)
++    ::OffsetRect(&rRow, -rRow.left, -rRow.top);
++    // Update bounding box for any row
++    ::UnionRect(&r, &r, &rRow);
+ 
+     if ( !r.right )
+         return false;
+@@ -1831,10 +1880,6 @@
+     if ( IsVertical() )
+     {
+         w = r.right - r.left;
+-        if ( m_maxRows )
+-        {
+-            w *= (m_nButtons + m_maxRows - 1)/m_maxRows;
+-        }
+         h = HIWORD(lParam);
+     }
+     else
+@@ -1894,6 +1939,10 @@
+                 // shorter than the full window size (at least under Windows 7)
+                 // but we need to erase the full width/height below
+                 RECT rcItem = wxGetTBItemRect(GetHwnd(), toolIndex);
++                // Skip hidden buttons
++                if( ::IsRectEmpty(&rcItem) )
++                    continue;
++
+                 if ( IsVertical() )
+                 {
+                     rcItem.left = 0;
+@@ -1901,8 +1950,7 @@
+                 }
+                 else
+                 {
+-                    rcItem.top = 0;
+-                    rcItem.bottom = rectTotal.height;
++                    rcItem.bottom = rcItem.top + rectTotal.height / m_maxRows;
+                 }
+ 
+                 // Apparently, regions of height < 3 are not taken into account

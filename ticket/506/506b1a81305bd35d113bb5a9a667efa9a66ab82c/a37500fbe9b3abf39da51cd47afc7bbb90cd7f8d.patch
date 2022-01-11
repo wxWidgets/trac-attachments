@@ -1,0 +1,98 @@
+From 64cc9f5e409878ac66855ab91f7ed616b163b669 Mon Sep 17 00:00:00 2001
+From: Carsten Fuchs <carsten.fuchs@cafu.de>
+Date: Thu, 14 Aug 2014 23:28:58 +0200
+Subject: [PATCH 2/8] Build new wxDataViewTreeNode trees recursively, rather
+ than relying on the user's node expansion to grow the tree node by node.
+
+This is necessary because otherwise, if the user calls ItemAdded() for an item
+whose parent node has other items but until then has never been expanded, the
+constructed wxDataViewTreeNode tree will contain the item, but not its
+siblings, so that in fact the internal wxDataViewTreeNode mismatches the tree
+that is described by the user's wxDataViewModel implementation.
+
+The new method AlignTree() can achieve a bit more than is strictly necessary
+when an entirely new tree is constructed from scratch (it can also prune
+existing trees as required), but the extra functionality may later be used to
+simplify other methods (e.g. ItemAdded(), ItemDeleted(), etc.).
+---
+ src/generic/datavgen.cpp | 56 ++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 54 insertions(+), 2 deletions(-)
+
+diff --git a/src/generic/datavgen.cpp b/src/generic/datavgen.cpp
+index 60d9901..b67223a 100644
+--- a/src/generic/datavgen.cpp
++++ b/src/generic/datavgen.cpp
+@@ -420,6 +420,59 @@ public:
+         return m_branchData->children;
+     }
+ 
++    // Aligns the (sub-)tree that is rooted at this node to the tree that is
++    // described by the model, making all required adjustments recursively.
++    void AlignTree(const wxDataViewModel* model)
++    {
++        wxDataViewItemArray itemChildren;
++
++        model->GetChildren(m_item, itemChildren);
++
++        SetHasChildren(itemChildren.size() > 0);
++
++        if (itemChildren.size() == 0)
++        {
++            if (m_branchData)
++            {
++                delete m_branchData;
++                m_branchData = NULL;
++            }
++
++            return;
++        }
++
++        // This item has children (itemChildren.size() > 0).
++        if (!m_branchData)
++            m_branchData = new BranchNodeData;
++
++        wxDataViewTreeNodes& nodeChildren = m_branchData->children;
++
++        // If the item has fewer children than the node, remove node children accordingly.
++        while (itemChildren.size() < nodeChildren.size())
++            nodeChildren.RemoveAt(nodeChildren.size() - 1);
++
++        // If the item has more children than the node, add node children accordingly.
++        for (size_t i = nodeChildren.size(); i < itemChildren.size(); i++)
++            nodeChildren.Add(new wxDataViewTreeNode(this, itemChildren[i]));
++
++        wxASSERT(itemChildren.size() == nodeChildren.size());
++
++        // Make sure that the node's children match the item's children, then recurse.
++        for (size_t i = 0; i < itemChildren.size(); i++)
++        {
++            if (itemChildren[i].GetID() != nodeChildren[i]->GetItem().GetID())
++            {
++                delete nodeChildren[i];
++                nodeChildren[i] = new wxDataViewTreeNode(this, itemChildren[i]);
++            }
++
++            nodeChildren[i]->AlignTree(model);
++        }
++
++        if (g_column >= -1)
++            nodeChildren.Sort(&wxGenericTreeModelNodeCmp);
++    }
++
+     void InsertChild(wxDataViewTreeNode *node, unsigned index)
+     {
+         if ( !m_branchData )
+@@ -3538,9 +3591,8 @@ void wxDataViewMainWindow::BuildTree(wxDataViewModel * model)
+     m_root = wxDataViewTreeNode::CreateRootNode();
+ 
+     // First we define a invalid item to fetch the top-level elements
+-    wxDataViewItem item;
+     SortPrepare();
+-    BuildTreeHelper( model, item, m_root);
++    m_root->AlignTree(model);
+     m_count = -1;
+ }
+ 
+-- 
+1.8.4.msysgit.0
+

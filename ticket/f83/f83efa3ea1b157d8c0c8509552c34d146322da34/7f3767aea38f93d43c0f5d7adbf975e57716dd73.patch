@@ -1,0 +1,466 @@
+diff --git a/include/wx/ctrlsub.h b/include/wx/ctrlsub.h
+index 4ae66a7..4d4fb6b 100644
+--- a/include/wx/ctrlsub.h
++++ b/include/wx/ctrlsub.h
+@@ -42,7 +42,7 @@ public:
+     bool IsEmpty() const { return GetCount() == 0; }
+ 
+     virtual wxString GetString(unsigned int n) const = 0;
+-    wxArrayString GetStrings() const;
++    virtual wxArrayString GetStrings() const;
+     virtual void SetString(unsigned int n, const wxString& s) = 0;
+ 
+     // finding string natively is either case sensitive or insensitive
+@@ -139,22 +139,7 @@ private:
+     int InsertItems(const wxArrayStringsAdapter& items,
+                     unsigned int pos,
+                     void **clientData,
+-                    wxClientDataType type)
+-    {
+-        wxASSERT_MSG( !IsSorted(), wxT("can't insert items in sorted control") );
+-
+-        wxCHECK_MSG( pos <= GetCount(), wxNOT_FOUND,
+-                     wxT("position out of range") );
+-
+-        // not all derived classes handle empty arrays correctly in
+-        // DoInsertItems() and besides it really doesn't make much sense to do
+-        // this (for append it could correspond to creating an initially empty
+-        // control but why would anybody need to insert 0 items?)
+-        wxCHECK_MSG( !items.IsEmpty(), wxNOT_FOUND,
+-                     wxT("need something to insert") );
+-
+-        return DoInsertItems(items, pos, clientData, type);
+-    }
++                    wxClientDataType type);
+ 
+     int InsertItems(const wxArrayStringsAdapter& items, unsigned int pos)
+     {
+@@ -288,6 +273,7 @@ public:
+     // they implement sorting, typically by returning HasFlag(wxXX_SORT)
+     virtual bool IsSorted() const { return false; }
+ 
++    virtual bool AllowInsertWhileSorted() const { return false; }
+ 
+     // client data stuff
+     // -----------------
+@@ -474,6 +460,104 @@ private:
+     };
+ #endif
+ 
++
++class WXDLLIMPEXP_CORE wxDelegatingItemContainer : public wxItemContainer
++{
++public:
++    wxDelegatingItemContainer(wxItemContainer* container = NULL) : m_itemcontainer(container) {}
++    virtual ~wxDelegatingItemContainer() {}
++
++    //override functions from wxItemContainerImmutable
++    virtual unsigned int GetCount() const wxOVERRIDE;
++
++    virtual wxString GetString(unsigned int n) const wxOVERRIDE;
++
++    virtual void SetString(unsigned int n, const wxString& s) wxOVERRIDE;
++
++    virtual void SetSelection(int n) wxOVERRIDE;
++
++    virtual int GetSelection() const wxOVERRIDE;
++
++    virtual bool IsSorted() const wxOVERRIDE;
++
++    virtual bool AllowInsertWhileSorted() const wxOVERRIDE;
++
++    virtual wxClientDataType GetClientDataType() const wxOVERRIDE;
++
++protected:
++    virtual void EnsureSubContainer() {};
++    void EnsureSubContainer() const
++    {const_cast<wxDelegatingItemContainer*>(this)->EnsureSubContainer();}
++
++    void Create(wxItemContainer* container) { m_itemcontainer = container; }
++
++    //override functions from wxItemContainer
++    virtual void DoSetItemClientData(unsigned int n, void *clientData) wxOVERRIDE;
++
++    virtual void *DoGetItemClientData(unsigned int n) const wxOVERRIDE;
++
++    virtual void DoClear() wxOVERRIDE;
++    virtual void DoDeleteOneItem(unsigned int pos) wxOVERRIDE;
++
++    virtual int DoInsertItems(const wxArrayStringsAdapter & items,
++                              unsigned int pos,
++                              void **clientData,
++                              wxClientDataType type) wxOVERRIDE;
++
++    //do nothing because its current type is ignored
++    virtual void SetClientDataType(wxClientDataType WXUNUSED(type)) wxOVERRIDE
++    {}
++
++    wxItemContainer* m_itemcontainer;
++};
++
++
++class WXDLLIMPEXP_CORE wxSimpleItemContainer : public wxItemContainer
++{
++public:
++
++    virtual ~wxSimpleItemContainer() {}
++    
++    //override functions from wxItemContainerImmutable
++    virtual unsigned int GetCount() const wxOVERRIDE;
++    
++    virtual wxString GetString(unsigned int n) const wxOVERRIDE;
++    
++    virtual void SetString(unsigned int n, const wxString& s) wxOVERRIDE;
++    
++    virtual void SetSelection(int n) wxOVERRIDE;
++    
++    virtual int GetSelection() const wxOVERRIDE;
++    
++
++protected:
++    //override functions from wxItemContainer
++    virtual void DoSetItemClientData(unsigned int n, void *clientData) wxOVERRIDE;
++    
++    virtual void *DoGetItemClientData(unsigned int n) const wxOVERRIDE;
++    
++    virtual void DoClear() wxOVERRIDE;
++    
++    virtual void DoDeleteOneItem(unsigned int pos) wxOVERRIDE;
++
++    virtual int DoInsertOneItem(const wxString& item, unsigned int pos) wxOVERRIDE;
++    
++    virtual int DoAppendItems(const wxArrayStringsAdapter& items,
++                              void **clientData,
++                              wxClientDataType type) wxOVERRIDE;
++
++    virtual int DoInsertItems(const wxArrayStringsAdapter & items,
++                              unsigned int pos,
++                              void **clientData,
++                              wxClientDataType type) wxOVERRIDE;
++protected:
++
++    wxArrayString           m_strings;
++    wxArrayPtrVoid          m_clientDatas;
++    int                     m_selected;
++};
++
++
+ #endif // wxUSE_CONTROLS
+ 
+ #endif // _WX_CTRLSUB_H_BASE_
+diff --git a/src/common/ctrlsub.cpp b/src/common/ctrlsub.cpp
+index 81a5a39..ebe3f7e 100644
+--- a/src/common/ctrlsub.cpp
++++ b/src/common/ctrlsub.cpp
+@@ -108,7 +108,7 @@ void wxItemContainer::Clear()
+ 
+ void wxItemContainer::Delete(unsigned int pos)
+ {
+-    wxCHECK_RET( pos < GetCount(), wxT("invalid index") );
++    wxCHECK_RET( IsValid(pos), wxT("invalid index") );
+ 
+     if ( HasClientObjectData() )
+         ResetItemClientObject(pos);
+@@ -155,6 +155,26 @@ wxItemContainer::DoInsertOneItem(const wxString& WXUNUSED(item),
+ }
+ 
+ 
++int wxItemContainer::InsertItems(const wxArrayStringsAdapter& items,
++                    unsigned int pos,
++                    void **clientData,
++                    wxClientDataType type)
++    {
++        wxASSERT_MSG( !IsSorted(), wxT("can't insert items in sorted control") );
++
++        wxCHECK_MSG( IsValidInsert(pos), wxNOT_FOUND,
++                     wxT("position out of range") );
++
++        // not all derived classes handle empty arrays correctly in
++        // DoInsertItems() and besides it really doesn't make much sense to do
++        // this (for append it could correspond to creating an initially empty
++        // control but why would anybody need to insert 0 items?)
++        wxCHECK_MSG( !items.IsEmpty(), wxNOT_FOUND,
++                     wxT("need something to insert") );
++
++        return DoInsertItems(items, pos, clientData, type);
++    }
++
+ // ----------------------------------------------------------------------------
+ // client data
+ // ----------------------------------------------------------------------------
+@@ -166,12 +186,11 @@ void wxItemContainer::SetClientObject(unsigned int n, wxClientData *data)
+ 
+     wxCHECK_RET( IsValid(n), "Invalid index passed to SetClientObject()" );
+ 
++    wxClientData* clientDataOld = NULL;
++
+     if ( HasClientObjectData() )
+     {
+-        wxClientData * clientDataOld
+-            = static_cast<wxClientData *>(DoGetItemClientData(n));
+-        if ( clientDataOld )
+-            delete clientDataOld;
++        clientDataOld = static_cast<wxClientData *>(DoGetItemClientData(n));
+     }
+     else // didn't have any client data so far
+     {
+@@ -182,6 +201,10 @@ void wxItemContainer::SetClientObject(unsigned int n, wxClientData *data)
+     }
+ 
+     DoSetItemClientData(n, data);
++    
++    if ( clientDataOld )
++        delete clientDataOld;
++
+ }
+ 
+ wxClientData *wxItemContainer::GetClientObject(unsigned int n) const
+@@ -306,4 +329,248 @@ void wxControlWithItemsBase::SendSelectionChangedEvent(wxEventType eventType)
+     HandleWindowEvent(event);
+ }
+ 
++
++
++//override functions from wxItemContainerImmutable
++unsigned int wxDelegatingItemContainer::wxDelegatingItemContainer::GetCount() const wxOVERRIDE
++{
++    EnsureSubContainer();
++    return m_itemcontainer->GetCount();
++}
++
++wxString wxDelegatingItemContainer::GetString(unsigned int n) const wxOVERRIDE
++{
++    EnsureSubContainer();
++    return m_itemcontainer->GetString(n);
++}
++
++void wxDelegatingItemContainer::SetString(unsigned int n, const wxString& s) wxOVERRIDE
++{
++    EnsureSubContainer();
++    m_itemcontainer->SetString(n,s);
++}
++
++void wxDelegatingItemContainer::SetSelection(int n) wxOVERRIDE
++{
++    EnsureSubContainer();
++    m_itemcontainer->SetSelection(n);
++}
++
++int wxDelegatingItemContainer::GetSelection() const wxOVERRIDE
++{
++    EnsureSubContainer();
++    return m_itemcontainer->GetSelection();
++}
++
++bool wxDelegatingItemContainer::IsSorted() const
++{
++    EnsureSubContainer();
++    return m_itemcontainer->IsSorted();
++}
++
++bool wxDelegatingItemContainer::AllowInsertWhileSorted() const
++{
++    return m_itemcontainer->AllowInsertWhileSorted();
++}
++
++wxClientDataType wxDelegatingItemContainer::GetClientDataType() const
++{
++    EnsureSubContainer();
++    return m_itemcontainer->GetClientDataType();
++}
++
++//override functions from wxItemContainer
++void wxDelegatingItemContainer::DoSetItemClientData(unsigned int n, void *clientData)
++{
++    EnsureSubContainer();
++    
++    if(HasClientObjectData())
++        m_itemcontainer->SetClientObject(n,reinterpret_cast<wxClientData *>(clientData));
++    else
++        m_itemcontainer->SetClientData(n,clientData);
++}
++
++void* wxDelegatingItemContainer::DoGetItemClientData(unsigned int n) const
++{
++    EnsureSubContainer();
++    return HasClientObjectData() ? m_itemcontainer->GetClientObject(n) : m_itemcontainer->GetClientData(n);
++}
++
++void wxDelegatingItemContainer::DoClear()
++{
++    EnsureSubContainer();
++    m_itemcontainer->Clear();
++}
++
++void wxDelegatingItemContainer::DoDeleteOneItem(unsigned int pos)
++{
++    EnsureSubContainer();
++    m_itemcontainer->Delete(pos);
++}
++
++int wxDelegatingItemContainer::DoInsertItems(const wxArrayStringsAdapter & items,
++                                             unsigned int pos,
++                                             void **clientData,
++                                             wxClientDataType type)
++{
++     EnsureSubContainer();
++              
++     wxArrayString array_items = items.AsArrayString();
++     if(IsSorted())
++     {
++         if(type == wxClientData_Object)
++             return m_itemcontainer->Append(array_items, reinterpret_cast<wxClientData **>(clientData));
++         else if(type == wxClientData_Void)
++             return m_itemcontainer->Append(array_items, clientData);
++         else
++             return m_itemcontainer->Append(array_items);
++     
++     } else {
++         if(type == wxClientData_Object)
++             return m_itemcontainer->Insert(array_items, pos, reinterpret_cast<wxClientData **>(clientData));
++         else if(type == wxClientData_Void)
++             return m_itemcontainer->Insert(array_items, pos, clientData);
++         else
++             return m_itemcontainer->Insert(array_items, pos);
++     }
++}
++
++    //override functions from wxItemContainerImmutable
++unsigned int wxSimpleItemContainer::GetCount() const
++{
++    return m_strings.GetCount();
++}
++    
++wxString wxSimpleItemContainer::GetString(unsigned int n) const
++{
++    return IsValid(n) ? m_strings[n] : wxEmptyString;
++}
++    
++void wxSimpleItemContainer::SetString(unsigned int n, const wxString& s)
++{
++    m_strings[n] = s;
++}
++    
++void wxSimpleItemContainer::SetSelection(int n)
++{
++    m_selected = n;
++}
++    
++int wxSimpleItemContainer::GetSelection() const
++{
++    return m_selected;
++}
++
++//override functions from wxItemContainer
++void wxSimpleItemContainer::DoSetItemClientData(unsigned int n, void *clientData)
++{
++    //m_clientDatas.reserve(m_strings.GetCount());
++    m_clientDatas[n] = clientData;
++}
++
++void* wxSimpleItemContainer::DoGetItemClientData(unsigned int n) const
++{
++    return IsValid(n) && n < m_clientDatas.GetCount() ? m_clientDatas[n] : NULL;
++}
++    
++void wxSimpleItemContainer::DoClear()
++{
++    m_strings.Empty();
++    m_clientDatas.Empty();
++
++}
++
++void wxSimpleItemContainer::DoDeleteOneItem(unsigned int pos)
++{
++    // Remove client data, if set
++    if (pos < m_clientDatas.GetCount() )
++    {
++        m_clientDatas.RemoveAt(pos);
++    }
++
++    m_strings.RemoveAt(pos);
++}
++
++int wxSimpleItemContainer::DoInsertOneItem(const wxString& item, unsigned int pos)
++{
++
++    if(m_strings.Count() == 0)
++    {
++        m_strings.push_back(item);
++        m_clientDatas.push_back(NULL);
++        return 0;
++    }
++    
++    //Find position
++    // TODO: Could be optimized with binary search
++    wxArrayString strings = m_strings;
++    unsigned int i;
++
++    for ( i=0; i<strings.GetCount(); i++ )
++    {
++        if ( item.CmpNoCase(strings.Item(i)) <= 0 )
++        {
++            pos = (int)i;
++            break;
++        }
++    }
++    m_strings.insert(m_strings.begin() + pos, item);
++    m_clientDatas.insert(m_clientDatas.begin() + pos, NULL);
++    
++    return pos;
++}
++
++int wxSimpleItemContainer::DoAppendItems(const wxArrayStringsAdapter& items,
++                          void **clientData,
++                          wxClientDataType type)
++{
++    if(IsSorted())
++        return DoInsertItemsInLoop(items, GetCount(), clientData, type);
++    
++    wxArrayString new_items = items.AsArrayString();
++    size_t count = new_items.size();
++    
++    size_t end = m_strings.size();
++    
++    m_strings.insert(m_strings.end(), new_items.begin(), new_items.end());
++    
++    //m_clientDatas.reserve(GetCount());
++    m_clientDatas.resize(GetCount(), NULL);
++    //m_clientDatas.insert(m_clientDatas.end(), count, NULL);
++    
++    for(size_t i = 0; i < count; ++i)
++        AssignNewItemClientData(end + i, clientData, i, type);
++        
++     return end + count;
++}
++
++int wxSimpleItemContainer::DoInsertItems(const wxArrayStringsAdapter & items,
++                          unsigned int pos,
++                          void **clientData,
++                          wxClientDataType type)
++{
++    if(IsSorted())
++        return DoInsertItemsInLoop(items, GetCount(), clientData, type);
++    
++    wxArrayString new_items = items.AsArrayString();
++    
++    int new_pos = pos;
++    
++    if(pos < 0)
++        new_pos = GetCount() + pos + 1;
++    
++    size_t count = new_items.size();
++    
++    m_strings.insert(m_strings.begin() + pos, new_items.begin(), new_items.end());
++    
++    m_clientDatas.reserve(GetCount());
++    m_clientDatas.resize(GetCount(),NULL);
++    m_clientDatas.insert(m_clientDatas.begin() + pos, count, NULL);
++    
++    for(size_t i = 0; i < count; ++i)
++        AssignNewItemClientData(new_pos + i, clientData, i, type);
++
++    return new_pos + count;
++}
++
+ #endif // wxUSE_CONTROLS

@@ -1,0 +1,1022 @@
+Index: build/bakefiles/files.bkl
+===================================================================
+--- build/bakefiles/files.bkl	(revision 51010)
++++ build/bakefiles/files.bkl	(working copy)
+@@ -412,6 +412,7 @@
+     src/common/uri.cpp
+     src/common/variant.cpp
+     src/common/wfstream.cpp
++    src/common/windowid.cpp
+     src/common/wxcrt.cpp
+     src/common/wxprintf.cpp
+     src/common/xti.cpp
+@@ -539,6 +540,7 @@
+     wx/version.h
+     wx/volume.h
+     wx/wfstream.h
++    wx/windowid.h
+     wx/wx.h
+     wx/wxchar.h
+     wx/wxcrt.h
+Index: include/wx/defs.h
+===================================================================
+--- include/wx/defs.h	(revision 51010)
++++ include/wx/defs.h	(working copy)
+@@ -233,12 +233,6 @@
+ 
+ typedef short int WXTYPE;
+ 
+-/*  special care should be taken with this type under Windows where the real */
+-/*  window id is unsigned, so we must always do the cast before comparing them */
+-/*  (or else they would be always different!). Using wxGetWindowId() which does */
+-/*  the cast itself is recommended. Note that this type can't be unsigned */
+-/*  because wxID_ANY == -1 is a valid (and largely used) value for window id. */
+-typedef int wxWindowID;
+ 
+ /*  ---------------------------------------------------------------------------- */
+ /*  other feature tests */
+@@ -1782,8 +1776,18 @@
+        These ids delimit the range used by automatically-generated ids
+        (i.e. those used when wxID_ANY is specified during construction).
+      */
++#if defined(__WXMSW__) || (wxUSE_AUTOID_MANAGEMENT == 1)
++    /*
++       On MSW the range is always restricted no matter if id management
++       is used or not.  On others the range is only restricted if id
++       management is used so the reference count buffer won't be so big.
++     */
+     wxID_AUTO_LOWEST = -32000,
+     wxID_AUTO_HIGHEST = -2000,
++#else
++    wxID_AUTO_LOWEST = -1000000,
++    wxID_AUTO_HIGHEST = -2000,
++#endif
+ 
+     /* no id matches this one when compared to it */
+     wxID_NONE = -3,
+@@ -1920,6 +1924,19 @@
+ };
+ 
+ /*  ---------------------------------------------------------------------------- */
++/*  wxWindowID type (after wxID_XYZ enum, platform detection, and dlimpexp.h)    */
++/*  ---------------------------------------------------------------------------- */
++
++/*  special care should be taken with this type under Windows where the real */
++/*  window id is unsigned, so we must always do the cast before comparing them */
++/*  (or else they would be always different!). Using wxGetWindowId() which does */
++/*  the cast itself is recommended. Note that this type can't be unsigned */
++/*  because wxID_ANY == -1 is a valid (and largely used) value for window id. */
++#ifdef __cplusplus
++    #include "wx/windowid.h"
++#endif
++
++/*  ---------------------------------------------------------------------------- */
+ /*  other constants */
+ /*  ---------------------------------------------------------------------------- */
+ 
+Index: include/wx/menuitem.h
+===================================================================
+--- include/wx/menuitem.h	(revision 51010)
++++ include/wx/menuitem.h	(working copy)
+@@ -145,7 +145,7 @@
+     }
+ 
+ protected:
+-    int           m_id;             // numeric id of the item >= 0 or wxID_ANY or wxID_SEPARATOR
++    wxWindowIDRef m_id;             // numeric id of the item >= 0 or wxID_ANY or wxID_SEPARATOR
+     wxMenu       *m_parentMenu,     // the menu we belong to
+                  *m_subMenu;        // our sub menu or NULL
+     wxString      m_text,           // label of the item
+Index: include/wx/msw/radiobox.h
+===================================================================
+--- include/wx/msw/radiobox.h	(revision 51010)
++++ include/wx/msw/radiobox.h	(working copy)
+@@ -158,6 +158,7 @@
+ 
+     // the buttons we contain
+     wxSubwindows *m_radioButtons;
++    wxWindowIDRef *m_radioButtonIds;
+ 
+     // array of widths and heights of the buttons, may be wxDefaultCoord if the
+     // corresponding quantity should be computed
+Index: include/wx/msw/slider95.h
+===================================================================
+--- include/wx/msw/slider95.h	(revision 51010)
++++ include/wx/msw/slider95.h	(working copy)
+@@ -117,7 +117,8 @@
+     virtual wxSize DoGetBestSize() const;
+ 
+     // the labels windows, if any
+-    wxSubwindows *m_labels;
++    wxSubwindows  *m_labels;
++    wxWindowIDRef *m_labelIds;
+ 
+     int           m_rangeMin;
+     int           m_rangeMax;
+Index: include/wx/setup_inc.h
+===================================================================
+--- include/wx/setup_inc.h	(revision 51010)
++++ include/wx/setup_inc.h	(working copy)
+@@ -1207,6 +1207,13 @@
+ // Set to 1 to compile in wxPalette class
+ #define wxUSE_PALETTE       1
+ 
++// Use reference counted ID management
++#if defined(__WXMSW__)
++    #define wxUSE_AUTOID_MANAGEMENT 1
++#else
++    #define wxUSE_AUTOID_MANAGEMENT 0
++#endif
++
+ // ----------------------------------------------------------------------------
+ // wxUniversal-only options
+ // ----------------------------------------------------------------------------
+Index: include/wx/tbarbase.h
+===================================================================
+--- include/wx/tbarbase.h	(revision 51010)
++++ include/wx/tbarbase.h	(working copy)
+@@ -210,7 +210,7 @@
+ 
+     // tool parameters
+     int m_toolStyle;    // see enum wxToolBarToolStyle
+-    int m_id;           // the tool id, wxID_SEPARATOR for separator
++    wxWindowIDRef m_id; // the tool id, wxID_SEPARATOR for separator
+     wxItemKind m_kind;  // for normal buttons may be wxITEM_NORMAL/CHECK/RADIO
+ 
+     // as controls have their own client data, no need to waste memory
+Index: include/wx/window.h
+===================================================================
+--- include/wx/window.h	(revision 51010)
++++ include/wx/window.h	(working copy)
+@@ -228,17 +228,21 @@
+     void SetId( wxWindowID winid ) { m_windowId = winid; }
+     wxWindowID GetId() const { return m_windowId; }
+ 
+-        // returns true if this id value belong to the range reserved for the
+-        // auto-generated (by NewControlId()) ids (they're always negative)
+-    static bool IsAutoGeneratedId(wxWindowID id);
+-
+         // generate a unique id (or count of them consecutively), returns a
+-        // valid id in IsAutoGeneratedId() range or wxID_NONE if failed
+-    static wxWindowID NewControlId(int count = 1);
++        // valid id in the auto-id range or wxID_NONE if failed.  If using
++        // autoid management, it will mark the id as reserved until it is
++        // used (by assigning it to a wxWindowIDRef) or unreserved.
++    static wxWindowID NewControlId(int count = 1)
++    {
++        return wxIdManager::ReserveId(count);
++    }
+ 
+-        // mark an id previously returned by NewControlId() as being unused any
+-        // more so that it can be reused again for another control later
+-    static void ReleaseControlId(wxWindowID id);
++        // If an ID generated from NewControlId is not assigned to a wxWindowIDRef,
++        // it must be unreserved
++    static void UnreserveControlId(wxWindowID id, int count = 1)
++    {
++        wxIdManager::UnreserveId(id, count);
++    }
+ 
+ 
+     // moving/resizing
+@@ -1350,7 +1354,7 @@
+ 
+     // the window id - a number which uniquely identifies a window among
+     // its siblings unless it is wxID_ANY
+-    wxWindowID           m_windowId;
++    wxWindowIDRef        m_windowId;
+ 
+     // the parent window of this window (or NULL) and the list of the children
+     // of this window
+@@ -1419,10 +1423,6 @@
+     // Layout() window automatically when its size changes?
+     bool                 m_autoLayout:1;
+ 
+-    // true if we had automatically allocated the id value for this window
+-    // (i.e. wxID_ANY had been passed to the ctor)
+-    bool                 m_freeId:1;
+-
+     // window state
+     bool                 m_isShown:1;
+     bool                 m_isEnabled:1;
+@@ -1727,8 +1727,8 @@
+ 
+ #if WXWIN_COMPATIBILITY_2_6
+     // deprecated (doesn't start with 'wx' prefix), use wxWindow::NewControlId()
+-    wxDEPRECATED( int NewControlId() );
+-    inline int NewControlId() { return wxWindowBase::NewControlId(); }
++    wxDEPRECATED( wxWindowID NewControlId() );
++    inline wxWindowID NewControlId() { return wxWindowBase::NewControlId(); }
+ #endif // WXWIN_COMPATIBILITY_2_6
+ 
+ #if wxUSE_ACCESSIBILITY
+Index: include/wx/windowid.h
+===================================================================
+--- include/wx/windowid.h	(revision 0)
++++ include/wx/windowid.h	(revision 0)
+@@ -0,0 +1,180 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/windowid.h
++// Purpose:     wxWindowID class - a class for managing window ids
++// Author:      Brian Vanderburg II
++// Modified by: 
++// Created:     09/21/07
++// RCS-ID:      $Id: $
++// Copyright:   (c) Brian Vanderburg II
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_WINDOWID_H_
++#define _WX_WINDOWID_H_
++
++
++// ----------------------------------------------------------------------------
++// Needed headers
++// ----------------------------------------------------------------------------
++// Do not include defs.h as we are included from it
++
++
++// ----------------------------------------------------------------------------
++// wxWindowIDRef - Reference counted id values
++// ----------------------------------------------------------------------------
++typedef int wxWindowID;
++
++// Use a class to manage the id
++// it also does work with long values to avoid
++// some compiler complaints about ambiguity
++// Basically, anywhere there is an ID and you want to make sure
++// NewControlId/wxIdManager::ReserveId does not create the same id until
++// you are done with it, hold it in a wxWindowIDRef
++class WXDLLIMPEXP_BASE wxWindowIDRef
++{
++public:
++    // default ctor
++    wxWindowIDRef()
++    {
++        m_id = wxID_NONE;
++    }
++    
++    // ctor taking id values
++    wxWindowIDRef(int id)
++    {
++        m_id = wxID_NONE;
++        Ref((wxWindowID)id);
++    }
++    
++    wxWindowIDRef(long id)
++    {
++        m_id = wxID_NONE;
++        Ref((wxWindowID)id);
++    }
++    
++    wxWindowIDRef(const wxWindowIDRef& id)
++    {
++        m_id = wxID_NONE;
++        Ref(id.m_id);
++    }
++    
++    // dtor
++    ~wxWindowIDRef()
++    {
++        Ref(wxID_NONE);
++    }
++    
++    // assignment
++    wxWindowIDRef& operator =(int id)
++    {
++        Ref((wxWindowID)id);
++        return *this;    
++    }
++    
++    wxWindowIDRef& operator =(long id)
++    {
++        Ref((wxWindowID)id);
++        return *this;
++    }
++    
++    wxWindowIDRef& operator =(const wxWindowIDRef& id)
++    {
++        Ref(id.m_id);
++        return *this;
++    }
++    
++    operator wxWindowID() const
++    {
++        return m_id;
++    }
++    
++private:
++
++#if wxUSE_AUTOID_MANAGEMENT == 0
++    void Ref(wxWindowID id)
++    {
++        m_id = id;
++    }
++#else
++    void Ref(wxWindowID id);
++#endif
++    
++    wxWindowID m_id;
++};
++
++// comparison operators
++inline bool operator == (const wxWindowIDRef& lhs, const wxWindowIDRef& rhs)
++{
++    return (wxWindowID)lhs == (wxWindowID)rhs;
++}
++
++inline bool operator == (const wxWindowIDRef& lhs, int rhs)
++{
++    return (wxWindowID)lhs == (wxWindowID)rhs;
++}
++
++inline bool operator == (const wxWindowIDRef& lhs, long rhs)
++{
++    return (wxWindowID)lhs == (wxWindowID)rhs;
++}
++
++inline bool operator == (int lhs, const wxWindowIDRef& rhs)
++{
++    return (wxWindowID)lhs == (wxWindowID)rhs;
++}
++
++inline bool operator == (long lhs, const wxWindowIDRef& rhs)
++{
++    return (wxWindowID)lhs == (wxWindowID)rhs;
++}
++
++inline bool operator != (const wxWindowIDRef& lhs, const wxWindowIDRef& rhs)
++{
++    return !(lhs == rhs);
++}
++
++inline bool operator != (const wxWindowIDRef& lhs, int rhs)
++{
++    return !(lhs == rhs);
++}
++
++inline bool operator != (const wxWindowIDRef& lhs, long rhs)
++{
++    return !(lhs == rhs);
++}
++
++inline bool operator != (int lhs, const wxWindowIDRef& rhs)
++{
++    return !(lhs == rhs);
++}
++
++inline bool operator != (long lhs, const wxWindowIDRef& rhs)
++{
++    return !(lhs == rhs);
++}
++
++
++
++// ----------------------------------------------------------------------------
++// wxIdManager
++// ----------------------------------------------------------------------------
++class wxIdManager
++{
++public:
++    // This returns an id value and not an wxWindowIDRef.  The returned value
++    // should be assigned A.S.A.P to a wxWindowIDRef.  The IDs are marked as
++    // reserved so that another call to ReserveId before assigning the id to a
++    // wxWindowIDRef will not use the same ID
++    static wxWindowID ReserveId(int count = 1);
++    
++    // This will release an unused reserved ID.  This should only be called
++    // if the ID returned by ReserveId was NOT assigned to a wxWindowIDRef
++    // for some purpose, maybe an early return from a function
++    static void UnreserveId(wxWindowID id, int count = 1);
++};
++
++
++
++#endif // _WX_WINDOWID_H_
++
++
+Index: setup.h.in
+===================================================================
+--- setup.h.in	(revision 51010)
++++ setup.h.in	(working copy)
+@@ -534,6 +534,8 @@
+ 
+ #define wxUSE_PALETTE       0
+ 
++// Use reference counted ID management
++#define wxUSE_AUTOID_MANAGEMENT 0
+ 
+ #define wxUSE_ALL_THEMES    0
+ 
+Index: src/common/wincmn.cpp
+===================================================================
+--- src/common/wincmn.cpp	(revision 51010)
++++ src/common/wincmn.cpp	(working copy)
+@@ -173,7 +173,6 @@
+     m_windowSizer = (wxSizer *) NULL;
+     m_containingSizer = (wxSizer *) NULL;
+     m_autoLayout = false;
+-    m_freeId = false;
+ 
+ #if wxUSE_DRAG_AND_DROP
+     m_dropTarget = (wxDropTarget *)NULL;
+@@ -245,9 +244,6 @@
+     if ( id == wxID_ANY )
+     {
+         m_windowId = NewControlId();
+-
+-        // remember to call ReleaseControlId() when this window is destroyed
+-        m_freeId = true;
+     }
+     else // valid id specified
+     {
+@@ -308,10 +304,6 @@
+ {
+     wxASSERT_MSG( GetCapture() != this, wxT("attempt to destroy window with mouse capture") );
+ 
+-    // mark the id as unused if we allocated it for this control
+-    if ( m_freeId )
+-        ReleaseControlId(m_windowId);
+-
+     // FIXME if these 2 cases result from programming errors in the user code
+     //       we should probably assert here instead of silently fixing them
+ 
+@@ -3193,125 +3185,4 @@
+     return x;
+ }
+ 
+-// ----------------------------------------------------------------------------
+-// Window (and menu items) identifiers management
+-// ----------------------------------------------------------------------------
+ 
+-namespace
+-{
+-
+-// this array contains, in packed form, the "in use" flags for the entire
+-// auto-generated ids range: N-th element of the array contains the flags for
+-// ids in [wxID_AUTO_LOWEST + 8*N, wxID_AUTO_LOWEST + 8*N + 7] range
+-//
+-// initially no ids are in use and we allocate them consecutively, but after we
+-// exhaust the entire range, we wrap around and reuse the ids freed in the
+-// meanwhile
+-wxByte gs_autoIdsInUse[(wxID_AUTO_HIGHEST - wxID_AUTO_LOWEST + 1)/8 + 1] = { 0 };
+-
+-// this is an optimization used until we wrap around wxID_AUTO_HIGHEST: if this
+-// value is < wxID_AUTO_HIGHEST we know that we haven't wrapped yet and so can
+-// allocate the ids simply by incrementing it
+-static wxWindowID gs_nextControlId = wxID_AUTO_LOWEST;
+-
+-void MarkAutoIdUsed(wxWindowID id)
+-{
+-    id -= wxID_AUTO_LOWEST;
+-
+-    const int theByte = id / 8;
+-    const int theBit = id % 8;
+-
+-    gs_autoIdsInUse[theByte] |= 1 << theBit;
+-}
+-
+-void FreeAutoId(wxWindowID id)
+-{
+-    id -= wxID_AUTO_LOWEST;
+-
+-    const int theByte = id / 8;
+-    const int theBit = id % 8;
+-
+-    gs_autoIdsInUse[theByte] &= ~(1 << theBit);
+-}
+-
+-bool IsAutoIdInUse(wxWindowID id)
+-{
+-    id -= wxID_AUTO_LOWEST;
+-
+-    const int theByte = id / 8;
+-    const int theBit = id % 8;
+-
+-    return (gs_autoIdsInUse[theByte] & (1 << theBit)) != 0;
+-}
+-
+-} // anonymous namespace
+-
+-
+-/* static */
+-bool wxWindowBase::IsAutoGeneratedId(wxWindowID id)
+-{
+-    if ( id < wxID_AUTO_LOWEST || id > wxID_AUTO_HIGHEST )
+-        return false;
+-
+-    // we shouldn't have any stray ids in this range
+-    wxASSERT_MSG( IsAutoIdInUse(id), "unused automatically generated id?" );
+-
+-    return true;
+-}
+-
+-wxWindowID wxWindowBase::NewControlId(int count)
+-{
+-    wxASSERT_MSG( count > 0, "can't allocate less than 1 id" );
+-
+-    if ( gs_nextControlId + count - 1 <= wxID_AUTO_HIGHEST )
+-    {
+-        // we haven't wrapped yet, so we can just grab the next count ids
+-        wxWindowID id = gs_nextControlId;
+-
+-        while ( count-- )
+-            MarkAutoIdUsed(gs_nextControlId++);
+-
+-        return id;
+-    }
+-    else // we've already wrapped or are now going to
+-    {
+-        // brute-force search for the id values
+-
+-        // number of consecutive free ids found so far
+-        int found = 0;
+-
+-        for ( wxWindowID id = wxID_AUTO_LOWEST; id <= wxID_AUTO_HIGHEST; id++ )
+-        {
+-            if ( !IsAutoIdInUse(id) )
+-            {
+-                // found another consecutive available id
+-                found++;
+-                if ( found == count )
+-                {
+-                    // mark all count consecutive free ids we found as being in
+-                    // use now and rewind back to the start of available range
+-                    // in the process
+-                    while ( count-- )
+-                        MarkAutoIdUsed(id--);
+-
+-                    return id;
+-                }
+-            }
+-            else // this id is in use
+-            {
+-                // reset the number of consecutive free values found
+-                found = 0;
+-            }
+-        }
+-    }
+-
+-    // if we get here, there are not enough consecutive free ids
+-    return wxID_NONE;
+-}
+-
+-void wxWindowBase::ReleaseControlId(wxWindowID id)
+-{
+-    wxCHECK_RET( IsAutoGeneratedId(id), "can't release non auto-generated id" );
+-
+-    FreeAutoId(id);
+-}
+Index: src/common/windowid.cpp
+===================================================================
+--- src/common/windowid.cpp	(revision 0)
++++ src/common/windowid.cpp	(revision 0)
+@@ -0,0 +1,260 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        src/common/windowid.cpp
++// Purpose:     wxWindowID class - a class for managing window ids
++// Author:      Brian Vanderburg II
++// Modified by: 
++// Created:     09/21/07
++// RCS-ID:      $Id: $
++// Copyright:   (c) Brian Vanderburg II
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// Needed headers
++// ----------------------------------------------------------------------------
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#ifndef WX_PRECOMP
++    #include "wx/log.h"
++    #include "wx/intl.h"
++#endif //WX_PRECOMP
++
++// Not needed, included in defs.h
++// #include "wx/windowid.h"
++
++#define wxTRACE_WINDOWID _T("windowid")
++
++namespace
++{
++
++#if wxUSE_AUTOID_MANAGEMENT
++
++
++// initially no ids are in use and we allocate them consecutively, but after we
++// exhaust the entire range, we wrap around and reuse the ids freed in the
++// meanwhile
++#define ID_FREE       0
++#define ID_STARTCOUNT 1
++#define ID_MAXCOUNT   254
++#define ID_RESERVED   255
++
++wxUint8 gs_autoIdsRefCount[wxID_AUTO_HIGHEST - wxID_AUTO_LOWEST + 1] = { 0 };
++
++// this is an optimization used until we wrap around wxID_AUTO_HIGHEST: if this
++// value is < wxID_AUTO_HIGHEST we know that we haven't wrapped yet and so can
++// allocate the ids simply by incrementing it
++wxWindowID gs_nextAutoId = wxID_AUTO_LOWEST;
++
++// Reserve an ID
++void ReserveIdRefCount(wxWindowID id)
++{
++    wxCHECK_RET(id >= wxID_AUTO_LOWEST && id <= wxID_AUTO_HIGHEST,
++            wxT("invalid id range"));
++            
++    id -= wxID_AUTO_LOWEST;
++    
++    wxCHECK_RET(gs_autoIdsRefCount[id] == ID_FREE,
++            wxT("id already in use or already reserved"));
++    gs_autoIdsRefCount[id] = ID_RESERVED;
++}
++
++// Unreserve and id
++void UnreserveIdRefCount(wxWindowID id)
++{
++    wxCHECK_RET(id >= wxID_AUTO_LOWEST && id <= wxID_AUTO_HIGHEST,
++            wxT("invalid id range"));
++            
++    id -= wxID_AUTO_LOWEST;
++    
++    wxCHECK_RET(gs_autoIdsRefCount[id] == ID_RESERVED,
++            wxT("id already in use or not reserved"));
++    gs_autoIdsRefCount[id] = ID_FREE;
++}
++
++// Get the usage count of an id
++int GetIdRefCount(wxWindowID id)
++{
++    wxCHECK_MSG(id >= wxID_AUTO_LOWEST && id <= wxID_AUTO_HIGHEST, 0,
++            wxT("invalid id range"));
++            
++    id -= wxID_AUTO_LOWEST;
++    return gs_autoIdsRefCount[id];
++}
++
++// Increase the count for an id
++void IncIdRefCount(wxWindowID id)
++{
++    wxCHECK_RET(id >= wxID_AUTO_LOWEST && id <= wxID_AUTO_HIGHEST,
++            wxT("invalid id range"));
++    
++    id -= wxID_AUTO_LOWEST;
++    
++    wxCHECK_RET(gs_autoIdsRefCount[id] != ID_MAXCOUNT, wxT("id count at max"));
++    wxCHECK_RET(gs_autoIdsRefCount[id] != ID_FREE, wxT("id should first be reserved"));
++
++    if(gs_autoIdsRefCount[id] == ID_RESERVED)
++        gs_autoIdsRefCount[id] = ID_STARTCOUNT;
++    else
++        gs_autoIdsRefCount[id]++;
++    
++    wxLogTrace(wxTRACE_WINDOWID, wxT("Increasing ref count of ID %d to %d"),
++            id + wxID_AUTO_LOWEST, gs_autoIdsRefCount[id]);
++}
++
++// Decrease the count for an id
++void DecIdRefCount(wxWindowID id)
++{
++    wxCHECK_RET(id >= wxID_AUTO_LOWEST && id <= wxID_AUTO_HIGHEST,
++            wxT("invalid id range"));
++    
++    id -= wxID_AUTO_LOWEST;
++    
++    wxCHECK_RET(gs_autoIdsRefCount[id] != ID_FREE, wxT("id count already 0"));
++    
++    // DecIdRefCount is only called on an ID that has been IncIdRefCount'ed'
++    // so it should never be reserved, but test anyway
++    if(gs_autoIdsRefCount[id] == ID_RESERVED)
++    {
++        wxASSERT_MSG(false, wxT("reserve id being decreased"));
++        gs_autoIdsRefCount[id] = ID_FREE;
++    }
++    else
++        gs_autoIdsRefCount[id]--;
++    
++    wxLogTrace(wxTRACE_WINDOWID, wxT("Decreasing ref count of ID %d to %d"),
++            id + wxID_AUTO_LOWEST, gs_autoIdsRefCount[id]);
++}
++
++#else // wxUSE_AUTOID_MANAGEMENT
++
++static wxWindowID gs_nextAutoId = wxID_AUTO_HIGHEST;
++
++#endif
++
++} // anonymous namespace
++
++
++#if wxUSE_AUTOID_MANAGEMENT
++
++void wxWindowIDRef::Ref(wxWindowID id)
++{
++    if(id != m_id)
++    {
++        // decrease count if it is in the managed range
++        if(m_id >= wxID_AUTO_LOWEST && m_id <= wxID_AUTO_HIGHEST)
++            DecIdRefCount(m_id);
++            
++        m_id = id;
++        
++        // increase cound if it is in the managed range
++        if(m_id >= wxID_AUTO_LOWEST && m_id <= wxID_AUTO_HIGHEST)
++            IncIdRefCount(m_id);
++    }
++}
++
++#endif // wxUSE_AUTOID_MANAGEMENT
++
++
++
++wxWindowID wxIdManager::ReserveId(int count)
++{
++    wxASSERT_MSG(count > 0, wxT("can't allocate less than 1 id"));
++    
++
++#if wxUSE_AUTOID_MANAGEMENT
++
++    if(gs_nextAutoId + count - 1 <= wxID_AUTO_HIGHEST)
++    {
++        wxWindowID id = gs_nextAutoId;
++        
++        while(count--)
++        {
++            ReserveIdRefCount(gs_nextAutoId++);
++        }
++            
++        return id;
++    }
++    else
++    {
++        int found = 0;
++    
++        for(wxWindowID id = wxID_AUTO_LOWEST; id <= wxID_AUTO_HIGHEST; id++)
++        {
++            if(GetIdRefCount(id) == 0)
++            {
++                found++;
++                if(found == count)
++                {
++                    // Imagine this:  100 free IDs left.  Then NewId(50) takes 50
++                    // so 50 left.  Then, the 25 before that last 50 are freed, but
++                    // gs_nextAutoId does not decrement and stays where it is at
++                    // with 50 free. Then NewId(75) gets called, and since there
++                    // are only 50 left according to gs_nextAutoId, it does a 
++                    // search and finds the 75 at the end.  Then NewId(10) gets
++                    // called, and accorind to gs_nextAutoId, their are still
++                    // 50 at the end so it returns them without testing the ref
++                    // To fix this, the next ID is also updated here as needed
++                    if(id >= gs_nextAutoId)
++                        gs_nextAutoId = id + 1;
++                        
++                    while(count--)
++                        ReserveIdRefCount(id--);                
++                    
++                    return id;
++                }
++            }
++            else
++            {
++                found = 0;
++            }
++        }
++    }
++
++    ::wxLogError(_("Out of window IDs.  Recommend shutting down application."));
++    return wxID_NONE;
++#else
++    
++    // Make sure enough in the range
++    wxWindowID id;
++    
++    id = gs_nextAutoId - count + 1;
++
++    if(id >= wxID_AUTO_LOWEST && id <= wxID_AUTO_HIGHEST)
++    {
++        // There is enough, but it may be time to wrap
++        if(id == wxID_AUTO_LOWEST)
++            gs_nextAutoId = wxID_AUTO_HIGHEST;
++        else
++            gs_nextAutoId = id - 1;
++            
++        return id;
++    }
++    else
++    {
++        // There is not enough at the low end of the range or
++        // count was big enough to wrap around to the positive
++        // Surely 'count' is not so big to take up much of the range
++        gs_nextAutoId = wxID_AUTO_HIGHEST - count;
++        return gs_nextAutoId + 1;
++    }
++#endif    
++}
++
++void wxIdManager::UnreserveId(wxWindowID id, int count)
++{
++    wxASSERT_MSG(count > 0, wxT("can't unreserve less than 1 id"));
++    
++#if wxUSE_AUTOID_MANAGEMENT
++    while(count--)
++        UnreserveIdRefCount(id++);
++#else
++    wxUnusedVar(id);
++    wxUnusedVar(count);
++#endif
++}
++
++
+Index: src/generic/editlbox.cpp
+===================================================================
+--- src/generic/editlbox.cpp	(revision 51010)
++++ src/generic/editlbox.cpp	(working copy)
+@@ -197,12 +197,12 @@
+ 
+ // NB: generate the IDs at runtime to avoid conflict with XRCID values,
+ //     they could cause XRCCTRL() failures in XRC-based dialogs
+-const int wxID_ELB_DELETE = wxWindow::NewControlId();
+-const int wxID_ELB_EDIT = wxWindow::NewControlId();
+-const int wxID_ELB_NEW = wxWindow::NewControlId();
+-const int wxID_ELB_UP = wxWindow::NewControlId();
+-const int wxID_ELB_DOWN = wxWindow::NewControlId();
+-const int wxID_ELB_LISTCTRL = wxWindow::NewControlId();
++const wxWindowIDRef wxID_ELB_DELETE = wxWindow::NewControlId();
++const wxWindowIDRef wxID_ELB_EDIT = wxWindow::NewControlId();
++const wxWindowIDRef wxID_ELB_NEW = wxWindow::NewControlId();
++const wxWindowIDRef wxID_ELB_UP = wxWindow::NewControlId();
++const wxWindowIDRef wxID_ELB_DOWN = wxWindow::NewControlId();
++const wxWindowIDRef wxID_ELB_LISTCTRL = wxWindow::NewControlId();
+ 
+ BEGIN_EVENT_TABLE(wxEditableListBox, wxPanel)
+     EVT_LIST_ITEM_SELECTED(wxID_ELB_LISTCTRL, wxEditableListBox::OnItemSelected)
+Index: src/msw/bmpbuttn.cpp
+===================================================================
+--- src/msw/bmpbuttn.cpp	(revision 51010)
++++ src/msw/bmpbuttn.cpp	(working copy)
+@@ -175,7 +175,7 @@
+                     msStyle,
+                     0, 0, 0, 0,
+                     GetWinHwnd(parent),
+-                    (HMENU)m_windowId,
++                    (HMENU)(int)m_windowId,
+                     wxGetInstance(),
+                     NULL
+                    );
+Index: src/msw/mdi.cpp
+===================================================================
+--- src/msw/mdi.cpp	(revision 51010)
++++ src/msw/mdi.cpp	(working copy)
+@@ -694,7 +694,7 @@
+   if ( id != wxID_ANY )
+     m_windowId = id;
+   else
+-    m_windowId = (int)NewControlId();
++    m_windowId = NewControlId();
+ 
+   if ( parent )
+   {
+Index: src/msw/radiobox.cpp
+===================================================================
+--- src/msw/radiobox.cpp	(revision 51010)
++++ src/msw/radiobox.cpp	(working copy)
+@@ -129,6 +129,7 @@
+ {
+     m_selectedButton = wxNOT_FOUND;
+     m_radioButtons = NULL;
++    m_radioButtonIds = NULL;
+     m_radioWidth = NULL;
+     m_radioHeight = NULL;
+ }
+@@ -156,6 +157,7 @@
+ #endif // wxUSE_VALIDATORS/!wxUSE_VALIDATORS
+ 
+     m_radioButtons = new wxSubwindows(n);
++    m_radioButtonIds = new wxWindowIDRef[n + 1];
+     m_radioWidth = new int[n];
+     m_radioHeight = new int[n];
+ 
+@@ -167,14 +169,14 @@
+         if ( i == 0 )
+             styleBtn |= WS_GROUP;
+ 
+-        long newId = NewControlId();
++        m_radioButtonIds[i] = NewControlId();
+ 
+         HWND hwndBtn = ::CreateWindow(_T("BUTTON"),
+                                       choices[i].wx_str(),
+                                       styleBtn,
+                                       0, 0, 0, 0,   // will be set in SetSize()
+                                       GetHwndOf(parent),
+-                                      (HMENU)newId,
++                                      (HMENU)(wxWindowID)m_radioButtonIds[i],
+                                       wxGetInstance(),
+                                       NULL);
+ 
+@@ -189,15 +191,17 @@
+ 
+         SubclassRadioButton((WXHWND)hwndBtn);
+ 
+-        m_subControls.Add(newId);
++        m_subControls.Add(m_radioButtonIds[i]);
+     }
+ 
+     // Create a dummy radio control to end the group.
++    m_radioButtonIds[n] = NewControlId();
++    
+     (void)::CreateWindow(_T("BUTTON"),
+                          wxEmptyString,
+                          WS_GROUP | BS_AUTORADIOBUTTON | WS_CHILD,
+                          0, 0, 0, 0, GetHwndOf(parent),
+-                         (HMENU)NewControlId(), wxGetInstance(), NULL);
++                         (HMENU)(wxWindowID)m_radioButtonIds[n], wxGetInstance(), NULL);
+ 
+     m_radioButtons->SetFont(GetFont());
+ 
+@@ -237,6 +241,8 @@
+     m_isBeingDeleted = true;
+ 
+     delete m_radioButtons;
++    if(m_radioButtonIds)
++        delete[] m_radioButtonIds;
+     delete[] m_radioWidth;
+     delete[] m_radioHeight;
+ }
+Index: src/msw/slider95.cpp
+===================================================================
+--- src/msw/slider95.cpp	(revision 51010)
++++ src/msw/slider95.cpp	(working copy)
+@@ -135,6 +135,7 @@
+ void wxSlider::Init()
+ {
+     m_labels = NULL;
++    m_labelIds = NULL;
+ 
+     m_pageSize = 1;
+     m_lineSize = 1;
+@@ -204,10 +205,13 @@
+     if ( m_windowStyle & wxSL_LABELS )
+     {
+         m_labels = new wxSubwindows(SliderLabel_Last);
++        m_labelIds = new wxWindowIDRef[SliderLabel_Last];
+ 
+         HWND hwndParent = GetHwndOf(parent);
+         for ( size_t n = 0; n < SliderLabel_Last; n++ )
+         {
++            m_labelIds[n] = NewControlId();
++        
+             (*m_labels)[n] = ::CreateWindow
+                                (
+                                     wxT("STATIC"),
+@@ -215,7 +219,7 @@
+                                     WS_CHILD | WS_VISIBLE | SS_CENTER,
+                                     0, 0, 0, 0,
+                                     hwndParent,
+-                                    (HMENU)NewControlId(),
++                                    (HMENU)(wxWindowID)m_labelIds[n],
+                                     wxGetInstance(),
+                                     NULL
+                                );
+@@ -282,6 +286,7 @@
+ wxSlider::~wxSlider()
+ {
+     delete m_labels;
++    delete[] m_labelIds;
+ }
+ 
+ // ----------------------------------------------------------------------------
+Index: src/xrc/xmlres.cpp
+===================================================================
+--- src/xrc/xmlres.cpp	(revision 51010)
++++ src/xrc/xmlres.cpp	(working copy)
+@@ -1575,7 +1575,10 @@
+ 
+ struct XRCID_record
+ {
+-    int id;
++    /* Hold the id so that once an id is allocated for a name, it
++       does not get created again by NewControlId at least
++       until we are done with it */
++    wxWindowIDRef id;
+     char *key;
+     XRCID_record *next;
+ };
+@@ -1648,11 +1651,6 @@
+     {
+         CleanXRCID_Record(rec->next);
+ 
+-        // if we had generated the value of this id automatically, release it
+-        // now that we don't need it any longer
+-        if ( wxWindow::IsAutoGeneratedId(rec->id) )
+-            wxWindow::ReleaseControlId(rec->id);
+-
+         free(rec->key);
+         delete rec;
+     }
+
+ 	  	 

@@ -1,0 +1,137 @@
+--- a/src/msw/dc.cpp
++++ b/src/msw/dc.cpp
+@@ -129,6 +129,108 @@ static const int VIEWPORT_EXTENT = 134217727;
+ // private functions
+ // ---------------------------------------------------------------------------
+ 
++#if defined(__MINGW32__)
++namespace wxMinGWImpl
++{
++// Wrapper for the dynamically loaded GetLayout() function. It works
++// in exactly the same way as the standard functions and return GDI_ERROR if
++// they're not actually available.
++// It is necessary for a while because GetLayout()
++// is missing in MinGW libgdi32.a library (w32api 4.0.3).
++
++#if wxUSE_DYNLIB_CLASS
++// Needed to dynamically load GetLayout()
++#include "wx/dynlib.h"
++
++// helper class to cache dynamically loaded libraries and not attempt reloading
++// them if it fails
++class wxOnceOnlyDLLLoader
++{
++public:
++    // ctor argument must be a literal string as we don't make a copy of it!
++    wxOnceOnlyDLLLoader(const wxChar *dllName)
++        : m_dllName(dllName)
++    {
++    }
++
++    // return the symbol with the given name or NULL if the DLL not loaded
++    // or symbol not present
++    void *GetSymbol(const wxChar *name)
++    {
++        // we're prepared to handle errors here
++        wxLogNull noLog;
++
++        if ( m_dllName )
++        {
++            m_dll.Load(m_dllName);
++
++            // reset the name whether we succeeded or failed so that we don't
++            // try again the next time
++            m_dllName = NULL;
++        }
++
++        return m_dll.IsLoaded() ? m_dll.GetSymbol(name) : NULL;
++    }
++
++    void Unload()
++    {
++        if ( m_dll.IsLoaded() )
++        {
++            m_dll.Unload();
++        }
++    }
++
++private:
++    wxDynamicLibrary m_dll;
++    const wxChar *m_dllName;
++};
++
++static wxOnceOnlyDLLLoader wxMSIMG32DLL(wxT("msimg32"));
++
++// we must ensure that DLLs are unloaded before the static objects cleanup time
++// because we may hit the notorious DllMain() dead lock in this case if wx is
++// used as a DLL (attempting to unload another DLL from inside DllMain() hangs
++// under Windows because it tries to reacquire the same lock)
++class wxGDIDLLsCleanupModule : public wxModule
++{
++public:
++    virtual bool OnInit() { return true; }
++    virtual void OnExit() { wxMSIMG32DLL.Unload(); }
++
++private:
++    DECLARE_DYNAMIC_CLASS(wxGDIDLLsCleanupModule)
++};
++
++IMPLEMENT_DYNAMIC_CLASS(wxGDIDLLsCleanupModule, wxModule)
++
++DWORD GetLayout(HDC hdc)
++{
++    typedef DWORD (WINAPI *GetLayout_t)(HDC);
++    static GetLayout_t
++        wxDL_INIT_FUNC(s_pfn, GetLayout, wxDynamicLibrary(wxT("gdi32.dll")));
++
++    return s_pfnGetLayout ? s_pfnGetLayout(hdc) : GDI_ERROR;
++}
++#else // !wxUSE_DYNLIB_CLASS
++DWORD GetLayout(HDC WXUNUSED(hdc))
++{
++    return GDI_ERROR;
++}
++#endif // wxUSE_DYNLIB_CLASS/!wxUSE_DYNLIB_CLASS
++} // namespace wxMinGWImpl
++
++inline DWORD MSWGetLayout(HDC hdc)
++{
++    return wxMinGWImpl::GetLayout(hdc);
++}
++#else // !__MINGW32__
++
++inline DWORD MSWGetLayout(HDC hdc)
++{
++    return ::GetLayout(hdc);
++}
++#endif // __MINGW32__
++
+ // call AlphaBlend() to blit contents of hdcSrc to dcDst using alpha
+ //
+ // NB: bmpSrc is the bitmap selected in hdcSrc, it is not really needed
+@@ -2679,7 +2781,7 @@ HDC CreateCompatibleDCWithLayout(HDC hdc)
+     HDC hdcNew = ::CreateCompatibleDC(hdc);
+     if ( hdcNew )
+     {
+-        DWORD dwLayout = ::GetLayout(hdc);
++        DWORD dwLayout = MSWGetLayout(hdc);
+         if ( dwLayout != GDI_ERROR )
+             ::SetLayout(hdcNew, dwLayout);
+     }
+@@ -2691,7 +2793,7 @@ HDC CreateCompatibleDCWithLayout(HDC hdc)
+ 
+ wxLayoutDirection wxMSWDCImpl::GetLayoutDirection() const
+ {
+-    DWORD layout = ::GetLayout(GetHdc());
++    DWORD layout = MSWGetLayout(GetHdc());
+ 
+     if ( layout == GDI_ERROR )
+         return wxLayout_Default;
+@@ -2708,7 +2810,7 @@ void wxMSWDCImpl::SetLayoutDirection(wxLayoutDirection dir)
+             return;
+     }
+ 
+-    DWORD layout = ::GetLayout(GetHdc());
++    DWORD layout = MSWGetLayout(GetHdc());
+     if ( layout == GDI_ERROR )
+         return;

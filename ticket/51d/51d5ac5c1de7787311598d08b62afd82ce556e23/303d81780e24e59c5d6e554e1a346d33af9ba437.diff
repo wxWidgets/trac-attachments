@@ -1,0 +1,140 @@
+diff --git a/src/generic/datavgen.cpp b/src/generic/datavgen.cpp
+index e354704..5b5ed9e 100644
+--- a/src/generic/datavgen.cpp
++++ b/src/generic/datavgen.cpp
+@@ -741,6 +741,7 @@ class wxDataViewMainWindow: public wxWindow
+     bool HasCurrentRow() { return m_currentRow != (unsigned int)-1; }
+     void ChangeCurrentRow( unsigned int row );
+     bool TryAdvanceCurrentColumn(wxDataViewTreeNode *node, wxKeyEvent& event, bool forward);
++    bool TryAdvanceEditColumn(bool forward);
+ 
+     wxDataViewColumn *GetCurrentColumn() const { return m_currentCol; }
+     void ClearCurrentColumn() { m_currentCol = NULL; }
+@@ -839,6 +840,9 @@ class wxDataViewMainWindow: public wxWindow
+     // specified item in the given column.
+     void StartEditing(const wxDataViewItem& item, const wxDataViewColumn* col);
+     void FinishEditing();
++
++    void HandleTabInEditor(bool forward);
++
+     bool HasEditableColumn(const wxDataViewItem& item) const
+     {
+         return FindColumnForEditing(item, wxDATAVIEW_CELL_EDITABLE) != NULL;
+@@ -2435,6 +2439,22 @@ void wxDataViewMainWindow::FinishEditing()
+     }
+ }
+ 
++void wxDataViewMainWindow::HandleTabInEditor(bool forward)
++{
++    if ( !m_editorRenderer->FinishEditing() )
++        return;
++
++    if ( !TryAdvanceEditColumn(forward) )
++        return;
++
++    const wxDataViewItem item = GetItemByRow(m_currentRow);
++
++    if ( item.IsOk() && m_currentCol )
++    {
++        StartEditing(item, m_currentCol);
++    }
++}
++
+ void wxDataViewHeaderWindow::FinishEditing()
+ {
+     wxDataViewMainWindow *win = static_cast<wxDataViewMainWindow*>(GetOwner()->GetMainWindow());
+@@ -3807,16 +3827,22 @@ void wxDataViewMainWindow::OnCharHook(wxKeyEvent& event)
+                 // Shift-Enter is not special neither.
+                 if ( event.ShiftDown() )
+                     break;
+-                wxFALLTHROUGH;
+ 
+-            case WXK_TAB:
+-                // Ctrl/Alt-Tab or Enter could be used for something else, so
+-                // don't handle them here.
++                // Ctrl/Alt-Enter could be used for something else, so don't
++                // handle them here.
+                 if ( event.HasModifiers() )
+                     break;
+ 
+                 m_editorRenderer->FinishEditing();
+                 return;
++
++            case WXK_TAB:
++                // Ctrl/Alt-Tab shouldn't be caught here neither.
++                if ( event.HasModifiers() )
++                    break;
++
++                HandleTabInEditor(!event.m_shiftDown);
++                return;
+         }
+     }
+     else if ( m_useCellFocus )
+@@ -4228,6 +4254,67 @@ bool wxDataViewMainWindow::TryAdvanceCurrentColumn(wxDataViewTreeNode *node, wxK
+     return true;
+ }
+ 
++bool wxDataViewMainWindow::TryAdvanceEditColumn(bool forward)
++{
++    const int columnCount = GetOwner()->GetColumnCount();
++    if ( columnCount == 0 )
++        return false;
++
++    if ( !IsList() )
++    {
++        wxDataViewTreeNode* const node = GetTreeNodeByRow(m_currentRow);
++
++        // navigation shouldn't work in branch nodes without other columns:
++        if ( node->HasChildren() &&
++                !GetModel()->HasContainerColumns(node->GetItem()) )
++            return false;
++    }
++
++    for ( ;; )
++    {
++        int idx = GetOwner()->GetColumnIndex(m_currentCol) + (forward ? +1 : -1);
++
++        if ( idx >= columnCount )
++        {
++            if ( GetCurrentRow() == GetRowCount() - 1 )
++                break;
++
++            // go to the first column of the next row:
++            idx = 0;
++            OnVerticalNavigation(wxKeyEvent()/*dummy*/, +1);
++        }
++
++        if ( idx < 0 )
++        {
++            if ( GetCurrentRow() == 0 )
++                break;
++
++            // go to the last column of the previous row:
++            idx = columnCount - 1;
++            OnVerticalNavigation(wxKeyEvent()/*dummy*/, -1);
++        }
++
++        m_currentCol = GetOwner()->GetColumnAt(idx);
++        m_currentColSetByKeyboard = true;
++
++        if ( m_currentCol->IsHidden() )
++            continue;
++
++        const wxDataViewItem item = GetItemByRow(m_currentRow);
++        GetOwner()->EnsureVisible(item, m_currentCol);
++
++        if ( IsCellEditableInMode(item, m_currentCol, wxDATAVIEW_CELL_EDITABLE) )
++        {
++            RefreshRow(m_currentRow);
++            return true;
++        }
++    }
++
++    m_currentCol = NULL;
++    RefreshRow(m_currentRow);
++    return false;
++}
++
+ void wxDataViewMainWindow::OnMouse( wxMouseEvent &event )
+ {
+     if (event.GetEventType() == wxEVT_MOUSEWHEEL)

@@ -1,0 +1,344 @@
+Index: src/gtk/textmeasure.cpp
+===================================================================
+--- src/gtk/textmeasure.cpp	(revisión: 72781)
++++ src/gtk/textmeasure.cpp	(copia de trabajo)
+@@ -3,6 +3,7 @@
+ // Purpose:     wxTextMeasure implementation for wxGTK
+ // Author:      Manuel Martin
+ // Created:     2012-10-05
++// RCS-ID:      $Id:
+ // Copyright:   (c) 1997-2012 wxWidgets team
+ // Licence:     wxWindows licence
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -27,10 +28,14 @@
+ 
+ #include "wx/fontutil.h"
+ #include "wx/gtk/private.h"
++#include "wx/gtk/dc.h"
+ 
+ #ifndef __WXGTK3__
+     #include "wx/gtk/dcclient.h"
+ #endif
++#ifdef wxUSE_GRAPHICS_CONTEXT
++    #include "wx/dcgraph.h"
++#endif
+ 
+ // ============================================================================
+ // wxTextMeasure implementation
+@@ -45,6 +50,24 @@
+ #endif // GTK+ < 3
+     m_context = NULL;
+     m_layout = NULL;
++
++    if ( m_dc )
++    {
++        // We need the real hierarchy, so use DCImpl instead of DC
++        wxClassInfo *ci = m_dc->GetImpl()->GetClassInfo();
++        // Currently (2012 oct) just wxWindowDC (and derived, such as
++        // wxMemoryDC, wxScreenDC on wxGTK2) but not GCDC's one
++        if ( ci->IsKindOf(wxCLASSINFO(wxWindowDCImpl))
++#if wxUSE_GRAPHICS_CONTEXT || defined(__WXGTK3__)
++            && !ci->IsKindOf(wxCLASSINFO(wxGCDCImpl))
++#endif
++            )
++        {
++            m_useOwnGTE = true;
++        }
++    }
++    else
++        m_useOwnGTE = true;
+ }
+ 
+ // Get Gtk needed elements, if we have not them yet.
+Index: src/common/textmeasurecmn.cpp
+===================================================================
+--- src/common/textmeasurecmn.cpp	(revisión: 72781)
++++ src/common/textmeasurecmn.cpp	(copia de trabajo)
+@@ -3,6 +3,7 @@
+ // Purpose:     wxTextMeasureBase implementation
+ // Author:      Manuel Martin
+ // Created:     2012-10-05
++// RCS-ID:      $Id:
+ // Copyright:   (c) 1997-2012 wxWidgets team
+ // Licence:     wxWindows licence
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -35,6 +36,22 @@
+       m_font(theFont)
+ {
+     wxASSERT_MSG( dc, wxS("wxTextMeasure needs a valid wxDC") );
++
++    // Why do we need this? Because eventually we need to call
++    // DoGetTextExtent(), and our own wxTextMeasure::DoGetTextExtent() may
++    // not be appropriate for all DCs.
++    // If we have gathered that code (e.g. wxWindow and wxWindowDC) in
++    // this class, we call our version. For the rest we redirect the call
++    // by m_dc->GetTextExtent().
++    // So we need to tell if 'm_dc' (the wxDC we store) is one of those
++    // that we still let do that work or not.
++    //
++    // The day we have gathered all DoGetTextExtent() versions, we'll just
++    // need ctors for wxDC, wxGCDC and wxWindow.
++    //
++    // The decision (true/false) is made in each platform ctor
++
++    m_useOwnGTE = false;
+ }
+ 
+ wxTextMeasureBase::wxTextMeasureBase(const wxWindow *win, const wxFont *theFont)
+@@ -45,6 +62,18 @@
+     wxASSERT_MSG( win, wxS("wxTextMeasure needs a valid wxWindow") );
+ }
+ 
++void wxTextMeasureBase::TMGetTextExtent(const wxString& string,
++                                        wxCoord *width,
++                                        wxCoord *height,
++                                        wxCoord *descent,
++                                        wxCoord *externalLeading)
++{
++    if ( m_useOwnGTE )
++        DoGetTextExtent(string, width, height, descent, externalLeading);
++    else
++        m_dc->GetTextExtent(string, width, height, descent, externalLeading);
++}
++
+ void wxTextMeasureBase::GetTextExtent(const wxString& string,
+                                       wxCoord *width,
+                                       wxCoord *height,
+@@ -69,7 +98,7 @@
+ 
+     MeasuringGuard guard(*this);
+ 
+-    DoGetTextExtent(string, width, height, descent, externalLeading);
++    TMGetTextExtent(string, width, height, descent, externalLeading);
+ }
+ 
+ void wxTextMeasureBase::GetMultiLineTextExtent(const wxString& text,
+@@ -102,14 +131,14 @@
+                 {
+                     // but we don't know it yet - choose something reasonable
+                     int dummy;
+-                    DoGetTextExtent(wxS("W"), &dummy, &heightLineDefault);
++                    TMGetTextExtent(wxS("W"), &dummy, &heightLineDefault);
+                 }
+ 
+                 heightTextTotal += heightLineDefault;
+             }
+             else
+             {
+-                DoGetTextExtent(curLine, &widthLine, &heightLine);
++                TMGetTextExtent(curLine, &widthLine, &heightLine);
+                 if ( widthLine > widthTextMax )
+                     widthTextMax = widthLine;
+                 heightTextTotal += heightLine;
+@@ -138,18 +167,15 @@
+         *heightOneLine = heightLine;
+ }
+ 
+-void wxTextMeasureBase::GetLargestStringExtent(const wxVector<wxString>& strings,
+-                                               wxCoord *width,
+-                                               wxCoord *height)
++wxSize wxTextMeasureBase::GetLargestStringExtent(size_t n,
++                                                 const wxString* strings)
+ {
+     MeasuringGuard guard(*this);
+ 
+     wxCoord w, h, widthMax = 0, heightMax = 0;
+-    for ( wxVector<wxString>::const_iterator i = strings.begin();
+-          i != strings.end();
+-          ++i )
++    for ( size_t i = 0; i < n; ++i )
+     {
+-        DoGetTextExtent(*i, &w, &h);
++        TMGetTextExtent(strings[i], &w, &h);
+ 
+         if ( w > widthMax )
+             widthMax = w;
+@@ -157,10 +183,7 @@
+             heightMax = h;
+     }
+ 
+-    if ( width )
+-        *width = widthMax;
+-    if ( height )
+-        *height = heightMax;
++    return wxSize(widthMax, heightMax);
+ }
+ 
+ bool wxTextMeasureBase::GetPartialTextExtents(const wxString& text,
+Index: src/msw/textmeasure.cpp
+===================================================================
+--- src/msw/textmeasure.cpp	(revisión: 72781)
++++ src/msw/textmeasure.cpp	(copia de trabajo)
+@@ -2,9 +2,9 @@
+ // Name:        src/msw/textmeasure.cpp
+ // Purpose:     wxTextMeasure implementation for wxMSW
+ // Author:      Manuel Martin
+-// Created:     2012-19-05
+-// RCS-ID:
+-// Copyright:
++// Created:     2012-10-05
++// RCS-ID:      $Id:
++// Copyright:   (c) 1997-2012 wxWidgets team
+ // Licence:     wxWindows licence
+ ///////////////////////////////////////////////////////////////////////////////
+ 
+@@ -24,7 +24,6 @@
+ #endif
+ 
+ #include "wx/msw/private.h"
+-#include "wx/msw/dc.h"
+ 
+ #ifndef WX_PRECOMP
+     #include "wx/window.h"
+@@ -33,6 +32,16 @@
+ 
+ #include "wx/private/textmeasure.h"
+ 
++#if wxUSE_METAFILE
++    #include "wx/metafile.h"
++#endif
++#if wxUSE_GRAPHICS_CONTEXT
++    #include "wx/dcgraph.h"
++#endif
++#if wxUSE_PRINTING_ARCHITECTURE && wxUSE_POSTSCRIPT
++    #include "wx/dcps.h"
++#endif
++
+ // ============================================================================
+ // wxTextMeasure implementation
+ // ============================================================================
+@@ -41,6 +50,26 @@
+ {
+     m_hdc = NULL;
+     m_hfontOld = NULL;
++
++    m_useOwnGTE = true;
++
++    if ( m_dc )
++    {
++        // Currently (2012 oct) every wxDC (except wxMetafileDC and
++        // wxPostScriptDC), but not wxGCDC
++#if wxUSE_METAFILE
++        if ( m_dc->GetClassInfo()->IsKindOf(wxCLASSINFO(wxMetafileDC)) )
++            m_useOwnGTE = false;
++#endif
++#if wxUSE_GRAPHICS_CONTEXT
++        if ( m_dc->GetClassInfo()->IsKindOf(wxCLASSINFO(wxGCDC)) )
++            m_useOwnGTE = false;
++#endif
++#if wxUSE_PRINTING_ARCHITECTURE && wxUSE_POSTSCRIPT
++        if ( m_dc->GetClassInfo()->IsKindOf(wxCLASSINFO(wxPostScriptDC)) )
++            m_useOwnGTE = false;
++#endif
++    }
+ }
+ 
+ void wxTextMeasure::BeginMeasuring()
+@@ -79,10 +108,10 @@
+ 
+ // Notice we don't check here the font. It is supposed to be OK before the call.
+ void wxTextMeasure::DoGetTextExtent(const wxString& string,
+-                                       wxCoord *width,
+-                                       wxCoord *height,
+-                                       wxCoord *descent,
+-                                       wxCoord *externalLeading)
++                                    wxCoord *width,
++                                    wxCoord *height,
++                                    wxCoord *descent,
++                                    wxCoord *externalLeading)
+ {
+     SIZE sizeRect;
+     const size_t len = string.length();
+Index: include/wx/msw/private/textmeasure.h
+===================================================================
+--- include/wx/msw/private/textmeasure.h	(revisión: 72781)
++++ include/wx/msw/private/textmeasure.h	(copia de trabajo)
+@@ -3,6 +3,7 @@
+ // Purpose:     wxMSW-specific declaration of wxTextMeasure class
+ // Author:      Manuel Martin
+ // Created:     2012-10-05
++// RCS-ID:      $Id:
+ // Copyright:   (c) 1997-2012 wxWidgets team
+ // Licence:     wxWindows licence
+ ///////////////////////////////////////////////////////////////////////////////
+Index: include/wx/private/textmeasure.h
+===================================================================
+--- include/wx/private/textmeasure.h	(revisión: 72781)
++++ include/wx/private/textmeasure.h	(copia de trabajo)
+@@ -3,6 +3,7 @@
+ // Purpose:     declaration of wxTextMeasure class
+ // Author:      Manuel Martin
+ // Created:     2012-10-05
++// RCS-ID:      $Id:
+ // Copyright:   (c) 1997-2012 wxWidgets team
+ // Licence:     wxWindows licence
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -10,8 +11,6 @@
+ #ifndef _WX_PRIVATE_TEXTMEASURE_H_
+ #define _WX_PRIVATE_TEXTMEASURE_H_
+ 
+-#include "wx/vector.h"
+-
+ class WXDLLIMPEXP_FWD_CORE wxDC;
+ class WXDLLIMPEXP_FWD_CORE wxFont;
+ class WXDLLIMPEXP_FWD_CORE wxWindow;
+@@ -47,9 +46,11 @@
+                                 wxCoord *heightOneLine = NULL);
+ 
+     // Find the dimensions of the largest string.
+-    void GetLargestStringExtent(const wxVector<wxString>& strings,
+-                                wxCoord *width,
+-                                wxCoord *height);
++	wxSize GetLargestStringExtent(size_t n, const wxString* strings);
++	wxSize GetLargestStringExtent(const wxArrayString& strings)
++	{
++		return GetLargestStringExtent(strings.size(), &strings[0]);
++	}
+ 
+     // Fill the array with the widths for each "0..N" substrings for N from 1
+     // to text.length().
+@@ -61,6 +62,13 @@
+                                double scaleX);
+ 
+ protected:
++    // Tell if we call our own (virtual) version of DoGetTextExtent()
++    void TMGetTextExtent(const wxString& string,
++                         wxCoord *width,
++                         wxCoord *height,
++                         wxCoord *descent = NULL,
++                         wxCoord *externalLeading = NULL);
++
+     // These functions are called by our public methods before and after each
+     // call to DoGetTextExtent(). Derived classes may override them to prepare
+     // for -- possibly several -- subsequent calls to DoGetTextExtent().
+@@ -92,7 +100,7 @@
+ 
+ 
+     // The main function of this class, to be implemented in platform-specific
+-    // way used by all our public methods except GetLargestStringExtents().
++    // way used by all our public methods.
+     //
+     // The width and height pointers here are never NULL and the input string
+     // is not empty.
+@@ -115,6 +123,7 @@
+     // class.
+     const wxDC* const m_dc;
+     const wxWindow* const m_win;
++    bool m_useOwnGTE;
+ 
+     // This one can be NULL or not.
+     const wxFont* const m_font;
+Index: include/wx/gtk/private/textmeasure.h
+===================================================================
+--- include/wx/gtk/private/textmeasure.h	(revisión: 72781)
++++ include/wx/gtk/private/textmeasure.h	(copia de trabajo)
+@@ -2,7 +2,8 @@
+ // Name:        wx/gtk/private/textmeasure.h
+ // Purpose:     wxGTK-specific declaration of wxTextMeasure class
+ // Author:      Manuel Martin
+-// Created:     2012-19-05
++// Created:     2012-10-05
++// RCS-ID:      $Id:
+ // Copyright:   (c) 1997-2012 wxWidgets team
+ // Licence:     wxWindows licence
+ ///////////////////////////////////////////////////////////////////////////////

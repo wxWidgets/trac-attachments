@@ -1,0 +1,243 @@
+Index: include/wx/stdpaths.h
+===================================================================
+--- include/wx/stdpaths.h	(revision 73367)
++++ include/wx/stdpaths.h	(working copy)
+@@ -138,6 +138,10 @@
+     // application name/vendor if it exists or just GetDocumentsDir() otherwise
+     virtual wxString GetAppDocumentsDir() const;
+ 
++    // return the directory for the config files used by this application
++    // same as GetUserDataDir on most platforms except Linux/BSD/etc
++    virtual wxString GetUserAppConfigDir() const;
++
+     // return the temporary directory for the current user
+     virtual wxString GetTempDir() const;
+ 
+Index: include/wx/unix/stdpaths.h
+===================================================================
+--- include/wx/unix/stdpaths.h	(revision 73367)
++++ include/wx/unix/stdpaths.h	(working copy)
+@@ -49,6 +49,7 @@
+                                               ResourceCat category) const;
+ #ifndef __VMS
+     virtual wxString GetDocumentsDir() const;
++    virtual wxString GetUserAppConfigDir() const;
+ #endif
+ 
+ private:
+Index: interface/wx/stdpaths.h
+===================================================================
+--- interface/wx/stdpaths.h	(revision 73367)
++++ interface/wx/stdpaths.h	(working copy)
+@@ -235,17 +235,29 @@
+ 
+     /**
+         Return the directory for the user config files:
+-        - Unix: @c ~ (the home directory)
++        - Unix: @c ~/.config (the home directory)
+         - Windows: @c "C:\Documents and Settings\username\Application Data"
+         - Mac: @c ~/Library/Preferences
+ 
++        Under UNIX returns value of XDG_CONFIG_HOME environment variable if defined
++        or ~/.config otherwise.
+         Only use this method if you have a single configuration file to put in this
+-        directory, otherwise GetUserDataDir() is more appropriate as the latter
++        directory, otherwise GetUserAppConfigDir() is more appropriate as the latter
+         adds @c appinfo to the path, unlike this function.
+     */
+     virtual wxString GetUserConfigDir() const;
+ 
+     /**
++        Return the directory for the config files used by this application:
++        - Unix: @c ~/.config/appinfo
++        - Windows: @c "C:\Documents and Settings\username\Application Data\appinfo"
++        - Mac: @c "~/Library/Application Support/appinfo"
++
++        Same as GetUserDataDir() on most platforms except Linux/BSD/etc.
++    */
++    virtual wxString GetUserAppConfigDir() const;
++
++    /**
+         Return the directory for the user-dependent application data files:
+         - Unix: @c ~/.appinfo
+         - Windows: @c "C:\Documents and Settings\username\Application Data\appinfo"
+Index: src/common/fileconf.cpp
+===================================================================
+--- src/common/fileconf.cpp	(revision 73367)
++++ src/common/fileconf.cpp	(working copy)
+@@ -287,9 +287,7 @@
+ 
+     wxStandardPathsBase& stdp = wxStandardPaths::Get();
+ 
+-    // it so happens that user data directory is a subdirectory of user config
+-    // directory on all supported platforms, which explains why we use it here
+-    return style & wxCONFIG_USE_SUBDIR ? stdp.GetUserDataDir()
++    return style & wxCONFIG_USE_SUBDIR ? stdp.GetUserAppConfigDir()
+                                        : stdp.GetUserConfigDir();
+ }
+ 
+@@ -306,7 +304,7 @@
+ {
+     wxFileName fn(GetLocalDir(style), szFile);
+ 
+-#if defined( __UNIX__ ) && !defined( __WXMAC__ )
++#if defined( __VMS )
+     if ( !(style & wxCONFIG_USE_SUBDIR) )
+     {
+         // dot-files under Unix start with, well, a dot (but OTOH they usually
+@@ -314,11 +312,38 @@
+         fn.SetName(wxT('.') + fn.GetName());
+     }
+     else // we do append ".conf" extension to config files in subdirectories
+-#endif // defined( __UNIX__ ) && !defined( __WXMAC__ )
++#endif // defined( __VMS )
+     {
+         AddConfFileExtIfNeeded(fn);
+     }
+ 
++// fallback if config located in home dir, not in XDG_CONFIG
++#if defined( __UNIX__ ) && !defined( __WXMAC__ ) && !defined(__VMS)
++    if(!fn.FileExists())
++    {
++        wxStandardPathsBase& stdp = wxStandardPaths::Get();
++
++        // it so happens that user data directory is a subdirectory of user config
++        // directory on all supported platforms, which explains why we use it here
++        wxFileName fallback(style & wxCONFIG_USE_SUBDIR ? stdp.GetUserDataDir()
++                                                        : wxFileName::GetHomeDir(),
++                                                        szFile);
++
++        if ( !(style & wxCONFIG_USE_SUBDIR) )
++        {
++            // dot-files under Unix start with, well, a dot (but OTOH they usually
++            // don't have any specific extension)
++            fallback.SetName(wxT('.') + fallback.GetName());
++        }
++        else // we do append ".conf" extension to config files in subdirectories
++        {
++            AddConfFileExtIfNeeded(fallback);
++        }
++
++        if(fallback.FileExists())
++            fn = fallback;
++    }
++#endif // defined( __UNIX__ ) && !defined( __WXMAC__ ) && !defined(__VMS)
+     return fn;
+ }
+ 
+@@ -412,7 +437,27 @@
+     if ( !(style & wxCONFIG_USE_RELATIVE_PATH) )
+     {
+         if ( m_fnLocalFile.IsOk() )
++        {
+             m_fnLocalFile.MakeAbsolute(GetLocalDir(style));
++// fallback if config located in home dir, not in XDG_CONFIG
++#if defined( __UNIX__ ) && !defined( __WXMAC__ ) && !defined(__VMS)
++            if(!m_fnLocalFile.FileExists())
++            {
++                // it so happens that user data directory is a subdirectory of user config
++                // directory on all supported platforms, which explains why we use it here
++                wxFileName fallback(m_fnLocalFile);
++                if(style & wxCONFIG_USE_SUBDIR)
++                {
++                    wxStandardPathsBase& stdp = wxStandardPaths::Get();
++                    fallback.SetPath(stdp.GetUserDataDir());
++                } else {
++                    fallback.SetPath(wxFileName::GetHomeDir());
++                }
++                if(fallback.FileExists())
++                    m_fnLocalFile = fallback;
++            }
++#endif // defined( __UNIX__ ) && !defined( __WXMAC__ ) && !defined(__VMS)
++        }
+ 
+         if ( m_fnGlobalFile.IsOk() )
+             m_fnGlobalFile.MakeAbsolute(GetGlobalDir());
+Index: src/common/stdpbase.cpp
+===================================================================
+--- src/common/stdpbase.cpp	(revision 73367)
++++ src/common/stdpbase.cpp	(working copy)
+@@ -114,6 +114,11 @@
+     return wxDirExists(appDocsDir) ? appDocsDir : docsDir;
+ }
+ 
++wxString wxStandardPathsBase::GetUserAppConfigDir() const
++{
++    return GetUserDataDir();
++}
++
+ // return the temporary directory for the current user
+ wxString wxStandardPathsBase::GetTempDir() const
+ {
+Index: src/unix/stdpaths.cpp
+===================================================================
+--- src/unix/stdpaths.cpp	(revision 73367)
++++ src/unix/stdpaths.cpp	(working copy)
+@@ -51,12 +51,6 @@
+     m_prefix = prefix;
+ }
+ 
+-wxString wxStandardPaths::GetUserConfigDir() const
+-{
+-    return wxFileName::GetHomeDir();
+-}
+-
+-
+ // ============================================================================
+ // wxStandardPaths implementation for VMS
+ // ============================================================================
+@@ -78,6 +72,11 @@
+    return wxT("/sys$manager");
+ }
+ 
++wxString wxStandardPaths::GetUserConfigDir() const
++{
++    return wxFileName::GetHomeDir();
++}
++
+ wxString wxStandardPaths::GetDataDir() const
+ {
+    return AppendAppInfo(GetInstallPrefix() + wxT("/sys$share"));
+@@ -190,6 +189,16 @@
+    return wxT("/etc");
+ }
+ 
++wxString wxStandardPaths::GetUserConfigDir() const
++{
++    wxString configPath;
++    if (wxGetenv(wxT("XDG_CONFIG_HOME")))
++        configPath = wxGetenv(wxT("XDG_CONFIG_HOME"));
++    else
++        configPath = wxFileName::GetHomeDir() + wxT("/.config");
++    return configPath;
++}
++
+ wxString wxStandardPaths::GetDataDir() const
+ {
+     // allow to override the location of the data directory by setting
+@@ -239,12 +248,7 @@
+     {
+         wxLogNull logNull;
+         wxString homeDir = wxFileName::GetHomeDir();
+-        wxString configPath;
+-        if (wxGetenv(wxT("XDG_CONFIG_HOME")))
+-            configPath = wxGetenv(wxT("XDG_CONFIG_HOME"));
+-        else
+-            configPath = homeDir + wxT("/.config");
+-        wxString dirsFile = configPath + wxT("/user-dirs.dirs");
++        wxString dirsFile = GetUserConfigDir() + wxT("/user-dirs.dirs");
+         if (wxFileExists(dirsFile))
+         {
+             wxTextFile textFile;
+@@ -274,6 +278,11 @@
+     return wxStandardPathsBase::GetDocumentsDir();
+ }
+ 
++wxString wxStandardPaths::GetUserAppConfigDir() const
++{
++    return AppendAppInfo(GetUserConfigDir());
++}
++
+ #endif // __VMS/!__VMS
+ 
+ #endif // wxUSE_STDPATHS

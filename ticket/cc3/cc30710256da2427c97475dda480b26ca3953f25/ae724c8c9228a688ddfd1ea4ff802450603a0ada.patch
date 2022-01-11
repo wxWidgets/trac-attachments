@@ -1,0 +1,442 @@
+ samples/widgets/mswprintwindow.cpp | 318 +++++++++++++++++++++++++++++++++++++
+ samples/widgets/mswprintwindow.h   |  27 ++++
+ samples/widgets/widgets.cpp        |  34 ++++
+ 3 files changed, 379 insertions(+)
+
+diff --git a/samples/widgets/mswprintwindow.cpp b/samples/widgets/mswprintwindow.cpp
+new file mode 100644
+index 0000000..2508c06
+--- /dev/null
++++ b/samples/widgets/mswprintwindow.cpp
+@@ -0,0 +1,318 @@
++/////////////////////////////////////////////////////////////////////////////
++// Program:     PrintWindow for MSW
++// Name:        button.cpp
++// Purpose:     Print window and its children to wxBitmap for screenshot 
++//              functionality.
++// Author:      Peter Bannister
++// Created:     14.08.15
++// Copyright:   (c) 2015 Peter Bannister
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#include <map>
++#include <windows.h>
++#include <wx/clipbrd.h>
++#include <wx/dcmemory.h>
++#include <wx/msw/uxtheme.h>
++#include <wx/msw/dcclient.h>
++#include "mswprintwindow.h"
++
++#define EP_EDITTEXT         1
++#define ETS_NORMAL          1
++#define ETS_HOT             2
++#define ETS_SELECTED        3
++#define ETS_DISABLED        4
++#define ETS_FOCUSED         5
++#define ETS_READONLY        6
++#define ETS_ASSIST          7
++
++//=============================================================================
++// Functions
++//=============================================================================
++
++static wxBorder TranslateBorder(wxBorder border)
++{
++    if (border == wxBORDER_THEME)
++    {
++#if defined(__POCKETPC__) || defined(__SMARTPHONE__)
++        return wxBORDER_SIMPLE;
++#elif wxUSE_UXTHEME
++        if (wxUxThemeEngine::GetIfActive())
++            return wxBORDER_THEME;
++#endif
++        return wxBORDER_SUNKEN;
++    }
++
++    return border;
++}
++
++//-----------------------------------------------------------------------------
++// For subclassing / overriding a windows paint handler.
++//
++struct PaintOverride : public wxEvtHandler
++{
++    typedef wxEvtHandler  super;
++    typedef PaintOverride self;
++
++    PaintOverride(wxWindow* window, wxDC& dc, wxWindow* topwin)
++        : window_(window)
++        , dc_(dc)
++        , hdc_(dc.GetHDC())
++        , painting_(false)
++        , topwin_(topwin)
++    {
++        HWND hwnd = (HWND)window_->GetHWND();
++#ifdef _WIN64
++        wnd_proc_ = (WNDPROC)GetWindowLongPtr(hwnd, GWLP_WNDPROC);
++        SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG)&self::WndProc);
++#else
++        wnd_proc_ = (WNDPROC)GetWindowLongPtr(hwnd, GWL_WNDPROC);
++        SetWindowLongPtr(hwnd, GWL_WNDPROC, (LONG)&self::WndProc);
++#endif
++        wnd_map_[hwnd] = this;
++    }
++
++    ~PaintOverride() {
++        HWND hwnd = (HWND)window_->GetHWND();
++#ifdef _WIN64
++        SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG)wnd_proc_);
++#else
++        SetWindowLongPtr(hwnd, GWL_WNDPROC, (LONG)wnd_proc_);
++#endif
++
++        wnd_map_.erase(hwnd);
++    }
++    
++    //-----------------------------------------------------------------------------
++    static LRESULT CALLBACK
++    WndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
++    {
++        PaintOverride* obj = wnd_map_.find(hWnd)->second;
++        wxWindow* win = obj->window_;
++
++        switch (msg) {
++        case WM_PRINT:
++        {
++            LRESULT r = ::CallWindowProc(obj->wnd_proc_, hWnd, msg, wp, lp);
++            if (r == 0)
++            {
++                //wxPaintDCEx pdcex(obj->window_, obj->hdc_);
++                //obj->window_->Refresh();
++                //obj->window_->Update();
++                //return SendMessage(hWnd, WM_NCPAINT, 0, 0);
++                //return SendMessage(hWnd, WM_PAINT, (WPARAM)obj->hdc_, 0);
++            }
++            return r;
++        }
++
++        case WM_PRINTCLIENT:
++        {
++            LRESULT r = ::CallWindowProc(obj->wnd_proc_, hWnd, msg, wp, lp);
++            if (r == 0)
++            {
++                wxPaintDCEx pdcex(obj->window_, obj->hdc_);
++                return SendMessage(hWnd, WM_PAINT, (WPARAM)obj->hdc_, 0);
++            }
++            return r;
++        }
++
++#if 1
++        // If we want the default themed border then we need to draw it ourselves
++        case WM_NCCALCSIZE:
++        {
++            wxUxThemeEngine* theme = wxUxThemeEngine::GetIfActive();
++            LRESULT r = 0;
++            if (theme && TranslateBorder(win->GetBorder()) == wxBORDER_THEME)
++            {
++                // first ask the widget to calculate the border size
++                r = win->MSWDefWindowProc(msg, wp, lp);
++
++                // now alter the client size making room for drawing a themed border
++                NCCALCSIZE_PARAMS *csparam = NULL;
++                RECT rect;
++                if (wp)
++                {
++                    csparam = (NCCALCSIZE_PARAMS*)lp;
++                    rect = csparam->rgrc[0];
++                }
++                else
++                {
++                    rect = *((RECT*)lp);
++                }
++                wxUxThemeHandle hTheme(win, L"EDIT");
++                RECT rcClient = { 0, 0, 0, 0 };
++                wxDC& dc = obj->dc_;
++
++                if (theme->GetThemeBackgroundContentRect(
++                    hTheme, GetHdcOf(dc), EP_EDITTEXT, ETS_NORMAL,
++                    &rect, &rcClient) == S_OK)
++                {
++                    InflateRect(&rcClient, -1, -1);
++                    if (wp)
++                        csparam->rgrc[0] = rcClient;
++                    else
++                        *((RECT*)lp) = rcClient;
++                    r = WVR_REDRAW;
++                }
++            }
++        }
++        break;
++#endif
++
++#if 1
++        case WM_NCPAINT:
++        {
++            wxUxThemeEngine* theme = wxUxThemeEngine::GetIfActive();
++            LRESULT r = 0;
++            if (theme && TranslateBorder(win->GetBorder()) == wxBORDER_THEME)
++            {
++                // first ask the widget to paint its non-client area, such as scrollbars, etc.
++                r = win->MSWDefWindowProc(msg, wp, lp);
++
++                wxUxThemeHandle hTheme(win, L"EDIT");
++                //wxWindowDC wdc(win);
++                wxDC& dc = obj->dc_;
++                wxPoint p = obj->topwin_->ScreenToClient(win->GetScreenPosition());
++                dc.SetDeviceOrigin(p.x, p.y);
++
++                // Clip the DC so that you only draw on the non-client area
++                RECT rcBorder;
++                //wxCopyRectToRECT(win->GetSize(), rcBorder);
++                wxRect r = win->GetScreenRect();
++                r.SetPosition(
++                    obj->topwin_->ScreenToClient(r.GetPosition())
++                    );
++                r.Inflate(1, 1);
++                wxCopyRectToRECT(r, rcBorder);
++
++                RECT rcClient;
++                theme->GetThemeBackgroundContentRect(
++                    hTheme, GetHdcOf(dc), EP_EDITTEXT, ETS_NORMAL, &rcBorder, &rcClient);
++                InflateRect(&rcClient, -1, -1);
++
++#if 0
++                ::ExcludeClipRect(GetHdcOf(dc), rcClient.left, rcClient.top,
++                    rcClient.right, rcClient.bottom);
++#endif
++                // Make sure the background is in a proper state
++                if (theme->IsThemeBackgroundPartiallyTransparent(hTheme, EP_EDITTEXT, ETS_NORMAL))
++                {
++                    theme->DrawThemeParentBackground((HWND)win->GetHWND(), (HDC)dc.GetHDC(), &rcBorder);
++                }
++
++                // Draw the border
++                int nState;
++                if (!win->IsEnabled()) {
++                    nState = ETS_DISABLED;
++                }
++                // should we check this?
++                //else if ( ::GetWindowLong(GetHwnd(), GWL_STYLE) & ES_READONLY)
++                //    nState = ETS_READONLY;
++                else {
++                    nState = ETS_NORMAL;
++                }
++                theme->DrawThemeBackground(hTheme, GetHdcOf(dc), EP_EDITTEXT, nState, &rcBorder, NULL);
++
++                dc.SetDeviceOrigin(0, 0);
++                return 1;
++            }
++        }
++        break;
++#endif
++        default:
++            break;
++        }
++
++        // for all untreated messages, call the original wndproc
++        LRESULT r = ::CallWindowProc(obj->wnd_proc_, hWnd, msg, wp, lp);
++        return r;
++    }
++
++    wxWindow* topwin_;
++    wxWindow* window_;
++    wxDC& dc_;
++    WXHDC hdc_;
++    bool painting_;
++
++    static std::map<HWND, PaintOverride*> wnd_map_;
++    WNDPROC wnd_proc_;
++    void* data_;
++};
++
++std::map<HWND, PaintOverride*> PaintOverride::wnd_map_;
++
++//-----------------------------------------------------------------------------
++class PaintOverrides
++{
++public:
++    typedef wxVector<PaintOverride*> Storage;
++
++    PaintOverrides() {}
++
++    ~PaintOverrides() {
++        Storage::iterator i = overrides_.begin();
++        Storage::iterator e = overrides_.end();
++        for (; i != e; ++i) {
++            delete *i;
++            *i = 0;
++        }
++        overrides_.clear();
++    }
++    void add(wxWindow* window, wxDC& dc, wxWindow* topwin) {
++        overrides_.push_back(0);
++        overrides_.back() = new PaintOverride(window, dc, topwin);
++    }
++
++    void addTree(wxWindow* window, wxDC& dc, wxWindow* topwin) {
++        add(window, dc, topwin);
++        wxWindowList::iterator i = window->GetChildren().begin();
++        wxWindowList::iterator e = window->GetChildren().end();
++        for (; i != e; ++i) {
++            addTree(*i, dc, topwin);
++        }
++    }
++
++private:
++    wxDECLARE_NO_COPY_CLASS(PaintOverrides);
++    Storage overrides_;
++};
++
++//-----------------------------------------------------------------------------
++void wxPrintWindowToDC(wxWindow* window, wxDC& dc)
++{
++    // Iterate over window and its children.
++    // We need to temporarially subclass all of their window 
++    // procedures so that we can alter their painting.
++
++    WXHDC hdc = dc.GetHDC();
++
++    PaintOverrides overrides;
++    overrides.addTree(window, dc, window);
++
++    window->Refresh(); // <pb> Is this really required - need to check later.
++
++    ::SendMessage((HWND)window->GetHWND(), WM_PRINT, (WPARAM)hdc,
++        PRF_CHILDREN | PRF_CLIENT | PRF_ERASEBKGND | PRF_NONCLIENT | PRF_OWNED);
++    (void)::GdiFlush();
++}
++
++//-----------------------------------------------------------------------------
++void wxPrintWindowToBitmap(wxWindow* window, wxBitmap& bmp, int depth)
++{
++    int w = window->GetSize().x;
++    int h = window->GetSize().y;
++    bmp.Create(w, h, depth);
++    wxMemoryDC mdc(bmp);
++    wxPrintWindowToDC(window, mdc);
++}
++
++//-----------------------------------------------------------------------------
++void wxPrintWindowToClipboard(wxWindow* window)
++{
++    wxBitmap bmp;
++    wxPrintWindowToBitmap(window, bmp);
++    if (wxTheClipboard->Open()) {
++        wxTheClipboard->SetData(new wxBitmapDataObject(bmp));
++        wxTheClipboard->Close();
++    }
++}
+diff --git a/samples/widgets/mswprintwindow.h b/samples/widgets/mswprintwindow.h
+new file mode 100644
+index 0000000..263a342
+--- /dev/null
++++ b/samples/widgets/mswprintwindow.h
+@@ -0,0 +1,27 @@
++/////////////////////////////////////////////////////////////////////////////
++// Program:     PrintWindow for MSW
++// Name:        mswprintwindow.h
++// Purpose:     Print window and its children to wxBitmap for screenshot 
++//              functionality.  MSW only.
++// Author:      Peter Bannister
++// Created:     14.08.15
++// Copyright:   (c) 2015 Peter Bannister
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef MSWPRINTWINDOW_H_INCLUDED
++#define MSWPRINTWINDOW_H_INCLUDED
++
++// ----------------------------------------------------------------------------
++// Main interface
++// ----------------------------------------------------------------------------
++
++class wxWindow;
++class wxDC;
++class wxBitmap;
++
++void wxPrintWindowToDC(wxWindow* window, wxDC& dc);
++void wxPrintWindowToBitmap(wxWindow* window, wxBitmap& bmp, int depth = -1);
++void wxPrintWindowToClipboard(wxWindow* window);
++
++#endif /* Inclusion guard */
+diff --git a/samples/widgets/widgets.cpp b/samples/widgets/widgets.cpp
+index 2475913..d1425ae 100644
+--- a/samples/widgets/widgets.cpp
++++ b/samples/widgets/widgets.cpp
+@@ -58,6 +58,12 @@
+ 
+ #include "../sample.xpm"
+ 
++#ifdef __WXMSW__
++// <pb> Including cpp here to avoid needing to modify project files for 
++// widgets sample.
++#include "mswprintwindow.cpp"
++#endif
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -111,6 +117,10 @@ enum
+ 
+     TextEntry_SetHint,
+     TextEntry_End
++
++#ifdef __WXMSW__
++    , Menu_MSW_PrintClientTest
++#endif
+ };
+ 
+ const wxChar *WidgetsCategories[MAX_PAGES] = {
+@@ -195,6 +205,11 @@ protected:
+     {
+         event.Enable( CurrentPage()->GetTextEntry() != NULL );
+     }
++
++#ifdef __WXMSW__
++    void OnMswPrintClientTest(wxCommandEvent& event);
++#endif
++
+ #endif // wxUSE_MENUS
+ 
+     // initialize the book: add all pages to it
+@@ -320,6 +335,10 @@ wxBEGIN_EVENT_TABLE(WidgetsFrame, wxFrame)
+ 
+     EVT_MENU(TextEntry_SetHint, WidgetsFrame::OnSetHint)
+ 
++#ifdef __WXMSW__
++    EVT_MENU(Menu_MSW_PrintClientTest, WidgetsFrame::OnMswPrintClientTest)
++#endif
++
+     EVT_UPDATE_UI_RANGE(TextEntry_Begin, TextEntry_End - 1,
+                         WidgetsFrame::OnUpdateTextUI)
+ 
+@@ -450,6 +469,12 @@ WidgetsFrame::WidgetsFrame(const wxString& title)
+ 
+     SetMenuBar(mbar);
+ 
++#ifdef __WXMSW__
++    wxMenu *menuMSW = new wxMenu;
++    menuMSW->Append(Menu_MSW_PrintClientTest, "Print window to clipboard");    
++    mbar->Append(menuMSW, wxT("&MSW"));
++#endif
++
+     mbar->Check(Widgets_Enable, true);
+     mbar->Check(Widgets_Show, true);
+ 
+@@ -1168,6 +1193,15 @@ void WidgetsFrame::OnSetHint(wxCommandEvent& WXUNUSED(event))
+     }
+ }
+ 
++#ifdef __WXMSW__
++void 
++WidgetsFrame::OnMswPrintClientTest(wxCommandEvent& event)
++{
++    (void)event;
++    wxPrintWindowToClipboard(this);
++}
++#endif
++
+ #endif // wxUSE_MENUS
+ 
+ // ----------------------------------------------------------------------------

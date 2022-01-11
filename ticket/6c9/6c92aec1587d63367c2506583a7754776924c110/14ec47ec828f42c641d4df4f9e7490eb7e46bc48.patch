@@ -1,0 +1,187 @@
+ src/gtk/menu.cpp     | 115 +++++++++++++++++++++++++++++++++++++--------------
+ src/msw/menu.cpp     |   2 +-
+ src/msw/menuitem.cpp |   4 ++
+ 3 files changed, 90 insertions(+), 31 deletions(-)
+
+diff --git a/src/gtk/menu.cpp b/src/gtk/menu.cpp
+index 5740187..58f8479 100644
+--- a/src/gtk/menu.cpp
++++ b/src/gtk/menu.cpp
+@@ -71,15 +71,6 @@ static void DoCommonMenuCallbackCode(wxMenu *menu, wxMenuEvent& event)
+     wxMenu::ProcessMenuEvent(menu, event, menu->GetWindow());
+ }
+ 
+-// Return the top level menu containing this menu (possibly this menu itself).
+-static wxMenu* GetRootParentMenu(wxMenu* menu)
+-{
+-    while ( menu->GetParent() )
+-        menu = menu->GetParent();
+-
+-    return menu;
+-}
+-
+ // Call SetGtkLabel() to update the labels of all the items in this items sub
+ // menu, recursively.
+ static void UpdateSubMenuItemLabels(wxMenuItem* itemMenu)
+@@ -577,6 +568,81 @@ static void menuitem_deselect(GtkWidget*, wxMenuItem* item)
+ // wxMenuItem
+ //-----------------------------------------------------------------------------
+ 
++#if wxUSE_ACCEL
++
++// GtkAccelGroupFindFunc
++static gboolean wxGtkAccelEqual(GtkAccelKey *key, GClosure *WXUNUSED(closure), gpointer data)
++{
++    GtkAccelKey *wanted_key = (GtkAccelKey*)data;
++    if (key && wanted_key)
++    {
++        return (key->accel_key == wanted_key->accel_key) &&
++               (key->accel_mods == wanted_key->accel_mods);
++    }
++    return false;
++}
++
++static void wxRemoveGtkAccelerator(wxMenuItem* menuItem)
++{
++    if (!menuItem)
++        return;
++
++    GtkAccelKey accel_entry; 
++    wxGetGtkAccel(menuItem, &accel_entry.accel_key, &accel_entry.accel_mods);
++    if (accel_entry.accel_key)
++    {
++        // When created from XRC, the menu is not yet linked to the root menu. Thus, the accel entry
++        // is added to the accel group of the item's menu instead of the root menu
++        wxMenu* rootMenu = menuItem->GetMenu();
++        while ( rootMenu )
++        {
++            // Do not remove a non-existent entry to avoid "Gtk-WARNING: no accelerator installed in accel group".
++            // If the warning still remains, there is probably a conflict (same hotkey for different menu items).
++            if (gtk_accel_group_find(rootMenu->m_accel, wxGtkAccelEqual, &accel_entry))
++            {
++                gtk_widget_remove_accelerator(menuItem->GetMenuItem(), rootMenu->m_accel,
++                    accel_entry.accel_key, accel_entry.accel_mods);
++                break;
++            }
++            rootMenu = rootMenu->GetParent();
++        }
++    }
++}
++
++static void wxAddGtkAccelerator(wxMenuItem* menuItem)
++{
++    if (!menuItem)
++        return;
++
++    GtkAccelKey accel_entry; 
++    wxGetGtkAccel(menuItem, &accel_entry.accel_key, &accel_entry.accel_mods);
++    if (accel_entry.accel_key)
++    {
++        bool    found = false;
++        wxMenu* rootMenu = NULL;
++        wxMenu* parentMenu = menuItem->GetMenu();
++        while ( parentMenu )
++        {
++            rootMenu = parentMenu;
++            parentMenu = parentMenu->GetParent();
++
++            if (gtk_accel_group_find(rootMenu->m_accel, wxGtkAccelEqual, &accel_entry))
++            {
++                found = true;
++                break;
++            }
++        }
++
++        if (!found && rootMenu)
++        {
++            gtk_widget_add_accelerator(menuItem->GetMenuItem(), "activate", rootMenu->m_accel,
++                accel_entry.accel_key, accel_entry.accel_mods, GTK_ACCEL_VISIBLE);
++        }
++    }
++}
++
++#endif // wxUSE_ACCEL
++
+ wxMenuItem *wxMenuItemBase::New(wxMenu *parentMenu,
+                                 int id,
+                                 const wxString& name,
+@@ -631,18 +697,7 @@ void wxMenuItem::SetMenuItem(GtkWidget* menuItem)
+ void wxMenuItem::SetItemLabel( const wxString& str )
+ {
+ #if wxUSE_ACCEL
+-    if (m_menuItem)
+-    {
+-        // remove old accelerator
+-        guint accel_key;
+-        GdkModifierType accel_mods;
+-        wxGetGtkAccel(this, &accel_key, &accel_mods);
+-        if (accel_key)
+-        {
+-            gtk_widget_remove_accelerator(
+-                m_menuItem, GetRootParentMenu(m_parentMenu)->m_accel, accel_key, accel_mods);
+-        }
+-    }
++    wxRemoveGtkAccelerator(this);
+ #endif // wxUSE_ACCEL
+     wxMenuItemBase::SetItemLabel(str);
+     if (m_menuItem)
+@@ -655,15 +710,8 @@ void wxMenuItem::SetGtkLabel()
+     GtkLabel* label = GTK_LABEL(gtk_bin_get_child(GTK_BIN(m_menuItem)));
+     gtk_label_set_text_with_mnemonic(label, wxGTK_CONV_SYS(text));
+ #if wxUSE_ACCEL
+-    guint accel_key;
+-    GdkModifierType accel_mods;
+-    wxGetGtkAccel(this, &accel_key, &accel_mods);
+-    if (accel_key)
+-    {
+-        gtk_widget_add_accelerator(
+-            m_menuItem, "activate", GetRootParentMenu(m_parentMenu)->m_accel,
+-            accel_key, accel_mods, GTK_ACCEL_VISIBLE);
+-    }
++    if (IsEnabled())
++        wxAddGtkAccelerator(this);
+ #endif // wxUSE_ACCEL
+ }
+ 
+@@ -704,6 +752,13 @@ void wxMenuItem::Enable( bool enable )
+ 
+     gtk_widget_set_sensitive( m_menuItem, enable );
+     wxMenuItemBase::Enable( enable );
++
++#if wxUSE_ACCEL
++    if (enable)
++        wxAddGtkAccelerator(this);
++    else
++        wxRemoveGtkAccelerator(this);
++#endif // wxUSE_ACCEL
+ }
+ 
+ bool wxMenuItem::IsChecked() const
+diff --git a/src/msw/menu.cpp b/src/msw/menu.cpp
+index 86dd6df..c715793 100644
+--- a/src/msw/menu.cpp
++++ b/src/msw/menu.cpp
+@@ -381,7 +381,7 @@ void wxMenu::UpdateAccel(wxMenuItem *item)
+         }
+ 
+         // find the (new) accel for this item
+-        wxAcceleratorEntry *accel = wxAcceleratorEntry::Create(item->GetItemLabel());
++        wxAcceleratorEntry *accel = item->IsEnabled() ? wxAcceleratorEntry::Create(item->GetItemLabel()) : NULL;
+         if ( accel )
+             accel->m_command = item->GetId();
+ 
+diff --git a/src/msw/menuitem.cpp b/src/msw/menuitem.cpp
+index ef7b982..1c708df 100644
+--- a/src/msw/menuitem.cpp
++++ b/src/msw/menuitem.cpp
+@@ -573,6 +573,10 @@ void wxMenuItem::Enable(bool enable)
+     }
+ 
+     wxMenuItemBase::Enable(enable);
++
++#if wxUSE_ACCEL
++    m_parentMenu->UpdateAccel(this);
++#endif // wxUSE_ACCEL
+ }
+ 
+ void wxMenuItem::Check(bool check)

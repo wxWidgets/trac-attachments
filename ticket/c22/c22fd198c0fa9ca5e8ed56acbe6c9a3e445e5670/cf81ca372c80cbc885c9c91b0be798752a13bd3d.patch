@@ -1,0 +1,73 @@
+From 4bbdaf19625323abcc8f055ad70f9a632293e03c Mon Sep 17 00:00:00 2001
+From: Joost Nieuwenhuijse <joost@newhouse.nl>
+Date: Tue, 24 Dec 2013 19:08:05 +0100
+Subject: [PATCH] Fix "no modal session active" on Cocoa if EndModal() is
+ called from a scheduled event
+
+---
+ include/wx/osx/cocoa/evtloop.h |  2 ++
+ src/osx/cocoa/evtloop.mm       | 22 +++++++++++++++++++++-
+ 2 files changed, 23 insertions(+), 1 deletion(-)
+
+diff --git include/wx/osx/cocoa/evtloop.h include/wx/osx/cocoa/evtloop.h
+index ab15dd9..82455ee 100644
+--- include/wx/osx/cocoa/evtloop.h
++++ include/wx/osx/cocoa/evtloop.h
+@@ -42,6 +42,8 @@ protected:
+     int m_modalNestedLevel;
+     
+     bool m_osxLowLevelWakeUp;
++
++    bool m_modalSessionShouldEndAlready;
+ };
+ 
+ #endif // _WX_OSX_COCOA_EVTLOOP_H_
+diff --git src/osx/cocoa/evtloop.mm src/osx/cocoa/evtloop.mm
+index cf45e1f..97b9f74 100644
+--- src/osx/cocoa/evtloop.mm
++++ src/osx/cocoa/evtloop.mm
+@@ -106,6 +106,7 @@ wxGUIEventLoop::wxGUIEventLoop()
+     m_modalNestedLevel = 0;
+     m_modalWindow = NULL;
+     m_osxLowLevelWakeUp = false;
++    m_modalSessionShouldEndAlready = false;
+ }
+ 
+ wxGUIEventLoop::~wxGUIEventLoop()
+@@ -517,13 +518,32 @@ void wxGUIEventLoop::BeginModalSession( wxWindow* modalWindow )
+         [nsnow orderOut:nil];
+         m_dummyWindow = nsnow;
+     }
++    // Under certain circumstances EndModalSession may get called before [NSApp beginModalSessionForWindow]
++    // has returned or even before the modal session is started. 
++    // beginModalSessionForWindow (apparently -joostn) begins processing queued events right away
++    // and will only return once the queue is empty. It's possible that one of the queued events calls EndModal.
++    // If this happens, EndModalSession() will just set the m_modalSessionShouldEndAlready flag and we will
++    // call EndModalSession ourselves.
+     m_modalSession = [NSApp beginModalSessionForWindow:nsnow];
+     wxASSERT_MSG(m_modalSession != NULL, "modal session couldn't be started");
++    if( m_modalSessionShouldEndAlready )
++    {
++        // EndModal has been called already! This time do EndModalSession for real:
++        m_modalSessionShouldEndAlready = false;
++        EndModalSession();
++    }
+ }
+ 
+ void wxGUIEventLoop::EndModalSession()
+ {
+-    wxASSERT_MSG(m_modalSession != NULL, "no modal session active");
++    if ( m_modalSession == NULL )
++    {
++        // See comments in BeginModalSession above
++        m_modalSessionShouldEndAlready = true;
++        return;
++    }
++  
++    // wxASSERT_MSG(m_modalSession != NULL, "no modal session active");
+     
+     wxASSERT_MSG(m_modalNestedLevel > 0, "incorrect modal nesting level");
+     
+-- 
+1.8.3.4 (Apple Git-47)
+

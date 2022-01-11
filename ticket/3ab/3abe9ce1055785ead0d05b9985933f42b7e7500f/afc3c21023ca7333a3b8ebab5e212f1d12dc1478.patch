@@ -1,0 +1,587 @@
+Index: docs/changes.txt
+===================================================================
+--- docs/changes.txt	(revision 65591)
++++ docs/changes.txt	(working copy)
+@@ -415,6 +415,11 @@
+ - Add support for CP-866 encoding to wxEncodingConverter (madnut).
+ - Consistency fixes for keyboard events across all major ports.
+ 
++All:
++
++- wxPNGHandler: Palette save capability (troelsk)
++
++
+ MSW:
+ 
+ - Native implementation of wxHyperlinkCtrl and wxProgressDialog under modern
+Index: include/wx/imagpng.h
+===================================================================
+--- include/wx/imagpng.h	(revision 65591)
++++ include/wx/imagpng.h	(working copy)
+@@ -16,7 +16,7 @@
+ // wxPNGHandler
+ //-----------------------------------------------------------------------------
+ 
+-#if wxUSE_LIBPNG
++#if wxUSE_IMAGE && wxUSE_LIBPNG && wxUSE_STREAMS
+ 
+ #include "wx/image.h"
+ 
+@@ -32,34 +32,28 @@
+ {
+     wxPNG_TYPE_COLOUR = 0,
+     wxPNG_TYPE_GREY = 2,
+-    wxPNG_TYPE_GREY_RED = 3
++    wxPNG_TYPE_GREY_RED = 3,
++    wxPNG_TYPE_PALETTE = 4
+ };
+ 
++struct png_color_struct;
++
+ class WXDLLIMPEXP_CORE wxPNGHandler: public wxImageHandler
+ {
+ public:
+-    inline wxPNGHandler()
+-    {
+-        m_name = wxT("PNG file");
+-        m_extension = wxT("png");
+-        m_type = wxBITMAP_TYPE_PNG;
+-        m_mime = wxT("image/png");
+-    }
++    wxPNGHandler();
+ 
+-#if wxUSE_STREAMS
+     virtual bool LoadFile( wxImage *image, wxInputStream& stream, bool verbose=true, int index=-1 );
+     virtual bool SaveFile( wxImage *image, wxOutputStream& stream, bool verbose=true );
+ protected:
+     virtual bool DoCanRead( wxInputStream& stream );
+-#endif
+ 
++    static int PaletteFind(const struct png_color_struct& clr, const struct png_color_struct* pal, size_t palcount);
++
+ private:
+     DECLARE_DYNAMIC_CLASS(wxPNGHandler)
+ };
+ 
+-#endif
+-  // wxUSE_LIBPNG
++#endif // wxUSE_IMAGE && wxUSE_LIBPNG && wxUSE_STREAMS
+ 
+-#endif
+-  // _WX_IMAGPNG_H_
+-
++#endif // _WX_IMAGPNG_H_
+Index: interface/wx/image.h
+===================================================================
+--- interface/wx/image.h	(revision 65619)
++++ interface/wx/image.h	(working copy)
+@@ -55,7 +55,8 @@
+ {
+     wxPNG_TYPE_COLOUR = 0,      ///< Colour PNG image.
+     wxPNG_TYPE_GREY = 2,        ///< Greyscale PNG image converted from RGB.
+-    wxPNG_TYPE_GREY_RED = 3     ///< Greyscale PNG image using red as grey.
++    wxPNG_TYPE_GREY_RED = 3,    ///< Greyscale PNG image using red as grey.
++    wxPNG_TYPE_PALETTE = 4      ///< Palette encoding
+ };
+ 
+ /**
+Index: src/common/imagpng.cpp
+===================================================================
+--- src/common/imagpng.cpp	(revision 65591)
++++ src/common/imagpng.cpp	(working copy)
+@@ -22,7 +22,7 @@
+     #pragma hdrstop
+ #endif
+ 
+-#if wxUSE_IMAGE && wxUSE_LIBPNG
++#if wxUSE_IMAGE && wxUSE_LIBPNG && wxUSE_STREAMS
+ 
+ #include "wx/imagpng.h"
+ 
+@@ -53,6 +53,21 @@
+     Transparency_Alpha
+ };
+ 
++/*static*/
++int wxPNGHandler::PaletteFind(const png_color& clr, const png_color* pal, size_t palcount)
++{
++   for (size_t i = 0; i < palcount; i++)
++   {
++      if (    (clr.red   == pal[i].red)
++           && (clr.green == pal[i].green)
++           && (clr.blue  == pal[i].blue))
++      {
++         return (int)i;
++      }
++   }
++   return wxNOT_FOUND;
++}
++
+ // ----------------------------------------------------------------------------
+ // local functions
+ // ----------------------------------------------------------------------------
+@@ -60,28 +75,28 @@
+ // return the kind of transparency needed for this image assuming that it does
+ // have transparent pixels, i.e. either Transparency_Alpha or Transparency_Mask
+ static Transparency
+-CheckTransparency(unsigned char **lines,
++CheckTransparency(wxUint8 **lines,
+                   png_uint_32 x, png_uint_32 y, png_uint_32 w, png_uint_32 h,
+                   size_t numColBytes);
+ 
+ // init the alpha channel for the image and fill it with 1s up to (x, y)
+-static unsigned char *InitAlpha(wxImage *image, png_uint_32 x, png_uint_32 y);
++static wxUint8 *InitAlpha(wxImage *image, png_uint_32 x, png_uint_32 y);
+ 
+ // find a free colour for the mask in the PNG data array
+ static void
+-FindMaskColour(unsigned char **lines, png_uint_32 width, png_uint_32 height,
+-               unsigned char& rMask, unsigned char& gMask, unsigned char& bMask);
++FindMaskColour(wxUint8 **lines, png_uint_32 width, png_uint_32 height,
++               wxUint8& rMask, wxUint8& gMask, wxUint8& bMask);
+ 
+ // is the pixel with this value of alpha a fully opaque one?
+ static inline
+-bool IsOpaque(unsigned char a)
++bool IsOpaque(wxUint8 a)
+ {
+     return a == 0xff;
+ }
+ 
+ // is the pixel with this value of alpha a fully transparent one?
+ static inline
+-bool IsTransparent(unsigned char a)
++bool IsTransparent(wxUint8 a)
+ {
+     return !a;
+ }
+@@ -92,6 +107,14 @@
+ 
+ IMPLEMENT_DYNAMIC_CLASS(wxPNGHandler,wxImageHandler)
+ 
++wxPNGHandler::wxPNGHandler() : wxImageHandler()
++{
++    m_name = wxT("PNG file");
++    m_extension = wxT("png");
++    m_type = wxBITMAP_TYPE_PNG;
++    m_mime = wxT("image/png");
++}
++
+ #if wxUSE_STREAMS
+ 
+ #ifndef PNGLINKAGEMODE
+@@ -201,7 +224,7 @@
+ //      numColBytes     number of colour bytes (1 for grey scale, 3 for RGB)
+ //                      (NB: alpha always follows the colour bytes)
+ Transparency
+-CheckTransparency(unsigned char **lines,
++CheckTransparency(wxUint8 **lines,
+                   png_uint_32 x, png_uint_32 y, png_uint_32 w, png_uint_32 h,
+                   size_t numColBytes)
+ {
+@@ -218,7 +241,7 @@
+             // skip the grey or colour byte(s)
+             ptr += numColBytes;
+ 
+-            unsigned char a2 = *ptr++;
++            wxUint8 a2 = *ptr++;
+ 
+             if ( !IsTransparent(a2) && !IsOpaque(a2) )
+             {
+@@ -235,12 +258,12 @@
+     return Transparency_Mask;
+ }
+ 
+-unsigned char *InitAlpha(wxImage *image, png_uint_32 x, png_uint_32 y)
++wxUint8 *InitAlpha(wxImage *image, png_uint_32 x, png_uint_32 y)
+ {
+     // create alpha channel
+     image->SetAlpha();
+ 
+-    unsigned char *alpha = image->GetAlpha();
++    wxUint8 *alpha = image->GetAlpha();
+ 
+     // set alpha for the pixels we had so far
+     png_uint_32 end = y * image->GetWidth() + x;
+@@ -254,8 +277,8 @@
+ }
+ 
+ void
+-FindMaskColour(unsigned char **lines, png_uint_32 width, png_uint_32 height,
+-               unsigned char& rMask, unsigned char& gMask, unsigned char& bMask)
++FindMaskColour(wxUint8 **lines, png_uint_32 width, png_uint_32 height,
++               wxUint8& rMask, wxUint8& gMask, wxUint8& bMask)
+ {
+     // choosing the colour for the mask is more
+     // difficult: we need to iterate over the entire
+@@ -264,10 +287,10 @@
+     // can we do?)
+     wxImageHistogram h;
+     unsigned nentries = 0;
+-    unsigned char r2, g2, b2;
++    wxUint8 r2, g2, b2;
+     for ( png_uint_32 y2 = 0; y2 < height; y2++ )
+     {
+-        const unsigned char *p = lines[y2];
++        const wxUint8 *p = lines[y2];
+         for ( png_uint_32 x2 = 0; x2 < width; x2++ )
+         {
+             r2 = *p++;
+@@ -302,7 +325,7 @@
+ 
+ bool wxPNGHandler::DoCanRead( wxInputStream& stream )
+ {
+-    unsigned char hdr[4];
++    wxUint8 hdr[4];
+ 
+     if ( !stream.Read(hdr, WXSIZEOF(hdr)) )     // it's ok to modify the stream position here
+         return false;
+@@ -313,7 +336,7 @@
+ // convert data from RGB to wxImage format
+ static
+ void CopyDataFromPNG(wxImage *image,
+-                     unsigned char **lines,
++                     wxUint8 **lines,
+                      png_uint_32 width,
+                      png_uint_32 height,
+                      int color_type)
+@@ -321,25 +344,25 @@
+     Transparency transparency = Transparency_None;
+ 
+     // only non NULL if transparency == Transparency_Alpha
+-    unsigned char *alpha = NULL;
++    wxUint8 *alpha = NULL;
+ 
+     // RGB of the mask colour if transparency == Transparency_Mask
+     // (but init them anyhow to avoid compiler warnings)
+-    unsigned char rMask = 0,
++    wxUint8 rMask = 0,
+                   gMask = 0,
+                   bMask = 0;
+ 
+-    unsigned char *ptrDst = image->GetData();
++    wxUint8 *ptrDst = image->GetData();
+     if ( !(color_type & PNG_COLOR_MASK_COLOR) )
+     {
+         // grey image: GAGAGA... where G == grey component and A == alpha
+         for ( png_uint_32 y = 0; y < height; y++ )
+         {
+-            const unsigned char *ptrSrc = lines[y];
++            const wxUint8 *ptrSrc = lines[y];
+             for ( png_uint_32 x = 0; x < width; x++ )
+             {
+-                unsigned char g = *ptrSrc++;
+-                unsigned char a = *ptrSrc++;
++                wxUint8 g = *ptrSrc++;
++                wxUint8 a = *ptrSrc++;
+ 
+                 // the first time we encounter a transparent pixel we must
+                 // decide about what to do about them
+@@ -409,13 +432,13 @@
+     {
+         for ( png_uint_32 y = 0; y < height; y++ )
+         {
+-            const unsigned char *ptrSrc = lines[y];
++            const wxUint8 *ptrSrc = lines[y];
+             for ( png_uint_32 x = 0; x < width; x++ )
+             {
+-                unsigned char r = *ptrSrc++;
+-                unsigned char g = *ptrSrc++;
+-                unsigned char b = *ptrSrc++;
+-                unsigned char a = *ptrSrc++;
++                wxUint8 r = *ptrSrc++;
++                wxUint8 g = *ptrSrc++;
++                wxUint8 b = *ptrSrc++;
++                wxUint8 a = *ptrSrc++;
+ 
+                 // the logic here is the same as for the grey case except
+                 // where noted
+@@ -506,7 +529,7 @@
+     // VZ: as this function uses setjmp() the only fool-proof error handling
+     //     method is to use goto (setjmp is not really C++ dtors friendly...)
+ 
+-    unsigned char **lines = NULL;
++    wxUint8 **lines = NULL;
+     png_infop info_ptr = (png_infop) NULL;
+     wxPNGInfoStruct wxinfo;
+ 
+@@ -557,18 +580,18 @@
+ 
+     image->Create((int)width, (int)height, (bool) false /* no need to init pixels */);
+ 
+-    if (!image->Ok())
++    if (!image->IsOk())
+         goto error;
+ 
+     // initialize all line pointers to NULL to ensure that they can be safely
+     // free()d if an error occurs before all of them could be allocated
+-    lines = (unsigned char **)calloc(height, sizeof(unsigned char *));
++    lines = (wxUint8 **)calloc(height, sizeof(wxUint8 *));
+     if ( !lines )
+         goto error;
+ 
+     for (i = 0; i < height; i++)
+     {
+-        if ((lines[i] = (unsigned char *)malloc( (size_t)(width * (sizeof(unsigned char) * 4)))) == NULL)
++        if ((lines[i] = (wxUint8 *)malloc( (size_t)(width * (sizeof(wxUint8) * 4)))) == NULL)
+             goto error;
+     }
+ 
+@@ -579,9 +602,9 @@
+     if (color_type == PNG_COLOR_TYPE_PALETTE)
+     {
+         const size_t ncolors = info_ptr->num_palette;
+-        unsigned char* r = new unsigned char[ncolors];
+-        unsigned char* g = new unsigned char[ncolors];
+-        unsigned char* b = new unsigned char[ncolors];
++        wxUint8* r = new wxUint8[ncolors];
++        wxUint8* g = new wxUint8[ncolors];
++        wxUint8* b = new wxUint8[ncolors];
+ 
+         for (size_t j = 0; j < ncolors; j++)
+         {
+@@ -614,7 +637,7 @@
+        wxLogError(_("Couldn't load a PNG image - file is corrupted or not enough memory."));
+     }
+ 
+-    if ( image->Ok() )
++    if ( image->IsOk() )
+     {
+         image->Destroy();
+     }
+@@ -644,7 +667,7 @@
+ // writing PNGs
+ // ----------------------------------------------------------------------------
+ 
+-bool wxPNGHandler::SaveFile( wxImage *image, wxOutputStream& stream, bool verbose )
++bool wxPNGHandler::SaveFile( wxImage *image, wxOutputStream& stream, bool verbose)
+ {
+     wxPNGInfoStruct wxinfo;
+ 
+@@ -692,18 +715,95 @@
+     //     explanation why this line is mandatory
+     png_set_write_fn( png_ptr, &wxinfo, wx_PNG_stream_writer, NULL);
+ 
+-    const int iColorType = image->HasOption(wxIMAGE_OPTION_PNG_FORMAT)
++    int iColorType = image->HasOption(wxIMAGE_OPTION_PNG_FORMAT)
+                             ? image->GetOptionInt(wxIMAGE_OPTION_PNG_FORMAT)
+                             : wxPNG_TYPE_COLOUR;
+-    const int iBitDepth = image->HasOption(wxIMAGE_OPTION_PNG_BITDEPTH)
++    int iBitDepth = image->HasOption(wxIMAGE_OPTION_PNG_BITDEPTH)
+                             ? image->GetOptionInt(wxIMAGE_OPTION_PNG_BITDEPTH)
+                             : 8;
+ 
++    if (iBitDepth == 24)
++    {
++        iBitDepth = 16;
++    }
++
+     bool bHasAlpha = image->HasAlpha();
+     bool bHasMask = image->HasMask();
+-    bool bUseAlpha = bHasAlpha || bHasMask;
++    bool bHasPalette = 1 && image->HasPalette() && image->GetPalette().GetColoursCount();
++    bool bUseAlpha = (bHasAlpha || bHasMask) && !bHasPalette; // WHY !bHasPalette
+ 
++    wxImage temp_image(*image);
++    if (bHasPalette && bHasAlpha && !bHasMask)
++    {
++        if (temp_image.ConvertAlphaToMask())
++        {
++            image = &temp_image;
++            bHasMask = true;
++        }
++    }
++
++    png_color mask;
++    if ( bHasMask )
++    {
++        mask.red   = image->GetMaskRed();
++        mask.green = image->GetMaskGreen();
++        mask.blue  = image->GetMaskBlue();
++    }
++
+     int iPngColorType;
++#if wxUSE_PALETTE
++    if (bHasPalette)
++    {
++        iPngColorType = PNG_COLOR_TYPE_PALETTE;
++        iColorType = wxPNG_TYPE_PALETTE;
++        png_set_strip_16(png_ptr);
++        info_ptr->channels = 1;
++
++        const wxPalette& pal = image->GetPalette();
++        const size_t palcount = pal.GetColoursCount();
++        info_ptr->bit_depth = info_ptr->pixel_depth = (wxUint8)iBitDepth;
++        info_ptr->num_palette = palcount;
++		    info_ptr->palette = (png_color*)malloc(sizeof(png_color) * (info_ptr->num_palette + 1 /*headroom for trans */));
++		size_t i = 0, j;
++        for (j = 0; j < palcount; j++)
++        {
++            pal.GetRGB(j, &info_ptr->palette[j].red, &info_ptr->palette[j].green, &info_ptr->palette[j].blue);
++        }
++        if (bHasMask)
++        {
++            int index = PaletteFind(mask, info_ptr->palette, info_ptr->num_palette);
++            switch (index)
++            {
++                case 0:
++                    break;
++                case wxNOT_FOUND:
++                    info_ptr->palette[i++] = mask;
++                    info_ptr->num_palette++;
++                    for (j = 0; j < palcount; j++, i++)
++                    {
++                        pal.GetRGB(j, &info_ptr->palette[i].red, &info_ptr->palette[i].green, &info_ptr->palette[i].blue);
++                    }
++                    break;
++                default:
++                {
++                    png_color temp = info_ptr->palette[0];
++                    info_ptr->palette[0] = mask;
++                    info_ptr->palette[index] = temp;
++                    break;
++                }
++            }
++ 
++            info_ptr->num_trans = 1;
++            info_ptr->valid |= PNG_INFO_tRNS;
++
++            wxUint8 trans[1];
++            trans[0] = 0;
++            info_ptr->trans = trans;
++        }
++        info_ptr->valid |= PNG_INFO_PLTE;
++    }
++    else
++#endif // wxUSE_PALETTE
+     if ( iColorType==wxPNG_TYPE_COLOUR )
+     {
+         iPngColorType = bUseAlpha ? PNG_COLOR_TYPE_RGB_ALPHA
+@@ -792,38 +892,28 @@
+     png_set_shift( png_ptr, &sig_bit );
+     png_set_packing( png_ptr );
+ 
+-    unsigned char *
+-        data = (unsigned char *)malloc( image->GetWidth() * iElements );
++    wxUint8* data = (wxUint8*)malloc( image->GetWidth() * iElements );
+     if ( !data )
+     {
+         png_destroy_write_struct( &png_ptr, (png_infopp)NULL );
+         return false;
+     }
+ 
+-    unsigned char *
+-        pAlpha = (unsigned char *)(bHasAlpha ? image->GetAlpha() : NULL);
++    wxUint8* pAlpha = (wxUint8*)(bHasAlpha ? image->GetAlpha() : NULL);
+     int iHeight = image->GetHeight();
+     int iWidth = image->GetWidth();
+ 
+-    unsigned char uchMaskRed = 0, uchMaskGreen = 0, uchMaskBlue = 0;
++    const wxUint8 *pColors = image->GetData();
+ 
+-    if ( bHasMask )
++    for (int y = 0; y < iHeight; ++y)
+     {
+-        uchMaskRed = image->GetMaskRed();
+-        uchMaskGreen = image->GetMaskGreen();
+-        uchMaskBlue = image->GetMaskBlue();
+-    }
+-
+-    unsigned char *pColors = image->GetData();
+-
+-    for (int y = 0; y != iHeight; ++y)
+-    {
+-        unsigned char *pData = data;
+-        for (int x = 0; x != iWidth; x++)
++        wxUint8 *pData = data;
++        for (int x = 0; x < iWidth; x++)
+         {
+-            unsigned char uchRed = *pColors++;
+-            unsigned char uchGreen = *pColors++;
+-            unsigned char uchBlue = *pColors++;
++            png_color clr;
++            clr.red   = *pColors++;
++            clr.green = *pColors++;
++            clr.blue  = *pColors++;
+ 
+             switch ( iColorType )
+             {
+@@ -831,14 +921,19 @@
+                     wxFAIL_MSG( wxT("unknown wxPNG_TYPE_XXX") );
+                     // fall through
+ 
++                case wxPNG_TYPE_PALETTE:
++                    *pData = (wxUint8)PaletteFind(clr, info_ptr->palette, info_ptr->num_palette);
++                    pData++;
++                    break;
++
+                 case wxPNG_TYPE_COLOUR:
+-                    *pData++ = uchRed;
++                    *pData++ = clr.red;
+                     if ( iBitDepth == 16 )
+                         *pData++ = 0;
+-                    *pData++ = uchGreen;
++                    *pData++ = clr.green;
+                     if ( iBitDepth == 16 )
+                         *pData++ = 0;
+-                    *pData++ = uchBlue;
++                    *pData++ = clr.blue;
+                     if ( iBitDepth == 16 )
+                         *pData++ = 0;
+                     break;
+@@ -848,18 +943,18 @@
+                         // where do these coefficients come from? maybe we
+                         // should have image options for them as well?
+                         unsigned uiColor =
+-                            (unsigned) (76.544*(unsigned)uchRed +
+-                                        150.272*(unsigned)uchGreen +
+-                                        36.864*(unsigned)uchBlue);
++                            (unsigned) ( 76.544*(unsigned)clr.red +
++                                        150.272*(unsigned)clr.green +
++                                         36.864*(unsigned)clr.blue);
+ 
+-                        *pData++ = (unsigned char)((uiColor >> 8) & 0xFF);
++                        *pData++ = (wxUint8)((uiColor >> 8) & 0xFF);
+                         if ( iBitDepth == 16 )
+-                            *pData++ = (unsigned char)(uiColor & 0xFF);
++                            *pData++ = (wxUint8)(uiColor & 0xFF);
+                     }
+                     break;
+ 
+                 case wxPNG_TYPE_GREY_RED:
+-                    *pData++ = uchRed;
++                    *pData++ = clr.red;
+                     if ( iBitDepth == 16 )
+                         *pData++ = 0;
+                     break;
+@@ -867,16 +962,16 @@
+ 
+             if ( bUseAlpha )
+             {
+-                unsigned char uchAlpha = 255;
++                wxUint8 uchAlpha = 255;
+                 if ( bHasAlpha )
+                     uchAlpha = *pAlpha++;
+ 
+-                if ( bHasMask )
++                if (   bHasMask  
++                    && (clr.red   == mask.red  )
++                    && (clr.green == mask.green)
++                    && (clr.blue  == mask.blue ) )
+                 {
+-                    if ( (uchRed == uchMaskRed)
+-                            && (uchGreen == uchMaskGreen)
+-                                && (uchBlue == uchMaskBlue) )
+-                        uchAlpha = 0;
++                    uchAlpha = 0;
+                 }
+ 
+                 *pData++ = uchAlpha;
+@@ -900,6 +995,6 @@
+     #pragma warning(default:4611)
+ #endif /* VC++ */
+ 
+-#endif  // wxUSE_STREAMS
++#endif  // wxUSE_IMAGE && wxUSE_LIBPNG && wxUSE_STREAMS
+ 
+ #endif  // wxUSE_LIBPNG

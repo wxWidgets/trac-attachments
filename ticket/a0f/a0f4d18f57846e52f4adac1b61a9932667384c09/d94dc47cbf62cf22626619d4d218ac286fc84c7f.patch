@@ -1,0 +1,367 @@
+Index: src/gtk/webview_webkit.cpp
+===================================================================
+--- src/gtk/webview_webkit.cpp	(revision 72504)
++++ src/gtk/webview_webkit.cpp	(working copy)
+@@ -378,10 +378,25 @@
+             //Then we can redirect the call
+             webkit_network_request_set_uri(request, path.utf8_str());
+         }
+-
+     }
++    
+ }
+ 
++    static void
++    wxgtk_webview_webkit_load_progress(WebKitWebView*,
++                                       gint progress,
++                                       wxWebViewWebKit *webKitCtrl)
++    {
++        wxWebViewEvent event(wxEVT_COMMAND_WEB_VIEW_LOADING_PROGRESS,
++                             webKitCtrl->GetId(),
++                             webKitCtrl->GetCurrentURL(),
++                             "");  
++        event.SetInt(progress); //approximate percentage
++        if(webKitCtrl && webKitCtrl->GetEventHandler())
++            webKitCtrl->GetEventHandler()->ProcessEvent(event);
++
++	}
++
+ } // extern "C"
+ 
+ //-----------------------------------------------------------------------------
+@@ -400,8 +415,7 @@
+ {
+     m_busy = false;
+     m_guard = false;
+-    FindClear();
+-
++    m_cookieJar = NULL;//no cookie enabled
+     // We currently unconditionally impose scrolling in both directions as it's
+     // necessary to show arbitrary pages.
+     style |= wxHSCROLL | wxVSCROLL;
+@@ -424,8 +438,12 @@
+                            G_CALLBACK(wxgtk_webview_webkit_error),
+                            this);
+ 
+-    g_signal_connect_after(m_web_view, "new-window-policy-decision-requested",
+-                           G_CALLBACK(wxgtk_webview_webkit_new_window), this);
++    g_signal_connect_after(m_web_view, "title-changed",
++                           G_CALLBACK(wxgtk_webview_webkit_title_changed), this);
++                           
++    g_signal_connect_after(m_web_view, "load-progress-changed",
++                           G_CALLBACK(wxgtk_webview_webkit_load_progress), this);
++                           
+ 
+     g_signal_connect_after(m_web_view, "title-changed",
+                            G_CALLBACK(wxgtk_webview_webkit_title_changed), this);
+Index: src/gtk/webview_cookie_jar.cpp
+===================================================================
+--- src/gtk/webview_cookie_jar.cpp	(revision 0)
++++ src/gtk/webview_cookie_jar.cpp	(revision 0)
+@@ -0,0 +1,69 @@
++
++#include <libsoup/soup.h>
++#include <glib.h>
++#include <webkit/webkit.h>
++#include "wx/gtk/webview_cookie_jar.h" 
++#include "wx/filename.h"
++
++wxWebViewCookieJar::wxWebViewCookieJar(const wxString& path) 
++{
++    if(!wxFileExists(path))
++        return ;
++    m_path = path;
++    //split file
++    wxFileName fullPath;
++    wxString preservePath;
++    fullPath.Assign(path);
++    //set new path for saving cookies and other stuffs
++    //set this to CWD
++    wxFileName::SetCwd(fullPath.GetPath());
++    preservePath = wxFileName::GetCwd();
++    m_cookiejar = soup_cookie_jar_text_new(path.mb_str(wxConvUTF8), FALSE);//New cookie Jar to hold cookies
++    SoupSession* session = webkit_get_default_session();//load current session
++    //soup_session_remove_feature_by_type(session, SOUP_TYPE_COOKIE_JAR);//remove current cookie jar
++    soup_session_add_feature(session, (SoupSessionFeature*)m_cookiejar);//add new cookie jar
++    //restore CWD    
++    wxFileName::SetCwd(preservePath); 
++}
++
++bool wxWebViewCookieJar::AddCookie(const wxString& name, const wxString& value, const wxString& domain, const wxString& path, const int age)
++{
++    SoupCookie* cookie = soup_cookie_new(name.mb_str(wxConvUTF8), value.mb_str(wxConvUTF8), domain.mb_str(wxConvUTF8), path.mb_str(wxConvUTF8), age);
++    if(!cookie) {
++        return false;
++    }
++    soup_cookie_jar_add_cookie((SoupCookieJar*)m_cookiejar, cookie);
++    return true;
++}
++
++bool wxWebViewCookieJar::RemoveCookieByName(const wxString& name)
++{
++    for(GSList *l = soup_cookie_jar_all_cookies((SoupCookieJar*)m_cookiejar); l; l=l->next) {
++        if(l->data) {
++            const char* _domain = soup_cookie_get_domain((SoupCookie*)l->data);
++            if(wxString(_domain)==name) {
++                soup_cookie_jar_delete_cookie((SoupCookieJar*)m_cookiejar, (SoupCookie*)l->data);
++            }
++
++        } else {
++            return false;
++        }
++    }
++    return true;
++}
++
++bool wxWebViewCookieJar::RemoveCookieByDomain(const wxString& domain)
++{
++    for(GSList *l = soup_cookie_jar_all_cookies((SoupCookieJar*)m_cookiejar); l; l=l->next) {
++        if(l->data) {
++            const char* _name = soup_cookie_get_name((SoupCookie*)l->data);
++            if(wxString(_name)==domain) {
++                soup_cookie_jar_delete_cookie((SoupCookieJar*)m_cookiejar, (SoupCookie*)l->data);
++            }
++
++        } else {
++            return false;
++        }
++    }
++    return true;
++}
+Index: src/common/webview.cpp
+===================================================================
+--- src/common/webview.cpp	(revision 72504)
++++ src/common/webview.cpp	(working copy)
+@@ -28,7 +28,7 @@
+ 
+ // DLL options compatibility check:
+ #include "wx/app.h"
+-WX_CHECK_BUILD_OPTIONS("wxWEBVIEW")
++WX_CHECK_BUILD_OPTIONS("wxWEBVIEW") 
+ 
+ extern WXDLLIMPEXP_DATA_WEBVIEW(const char) wxWebViewNameStr[] = "wxWebView";
+ extern WXDLLIMPEXP_DATA_WEBVIEW(const char) wxWebViewDefaultURLStr[] = "about:blank";
+@@ -36,13 +36,13 @@
+ wxIMPLEMENT_ABSTRACT_CLASS(wxWebView, wxControl);
+ wxIMPLEMENT_DYNAMIC_CLASS(wxWebViewEvent, wxCommandEvent); 
++wxDEFINE_EVENT(wxEVT_COMMAND_WEB_VIEW_LOADING_PROGRESS, wxWebViewEvent);
++
++void  wxWebView::SetCookieJar(wxWebViewCookieJar* jar)
++{
++    m_cookieJar=jar;
++}
++
++wxWebViewCookieJar* wxWebView::GetCookieJar() const
++{
++    return m_cookieJar;
++}
++
++bool  wxWebView::HasCookieJar() const
++{
++    if(m_cookieJar!=NULL)
++        return true;
++    else
++        return false;
++}
++
+ #endif // wxUSE_WEBVIEW
+Index: include/wx/webview.h
+===================================================================
+@@ -24,6 +24,7 @@
+     #include "wx/osx/webviewhistoryitem_webkit.h"
+ #elif defined(__WXGTK__)
+     #include "wx/gtk/webviewhistoryitem_webkit.h"
++    #include "wx/gtk/webview_cookie_jar.h"
+ #elif defined(__WXMSW__)
+     #include "wx/msw/webviewhistoryitem_ie.h"
+ #else
+@@ -31,7 +32,7 @@
+ #endif
+ 
+ class wxFSFile; 
+ 
+ enum wxWebViewZoom
+ {
+@@ -102,6 +103,10 @@
+ 
+ class WXDLLIMPEXP_WEBVIEW wxWebView : public wxControl
+ {
++	
++protected:
++	wxWebViewCookieJar* m_cookieJar;// to store cookies
++	
+ public:
+     virtual ~wxWebView() {}
+ 
+@@ -148,6 +153,11 @@
+         DoSetPage(stream.GetString(), baseUrl);
+     }
+     virtual void Stop() = 0;
++	//cookie Issues
++	virtual void SetCookieJar(wxWebViewCookieJar* jar);	
++	virtual wxWebViewCookieJar* GetCookieJar() const;	
++	virtual bool HasCookieJar() const;
++	
+ 
+     //History
+     virtual bool CanGoBack() const = 0;
+@@ -226,7 +236,8 @@
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_WEBVIEW, wxEVT_COMMAND_WEB_VIEW_LOADED, wxWebViewEvent );
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_WEBVIEW, wxEVT_COMMAND_WEB_VIEW_ERROR, wxWebViewEvent );
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_WEBVIEW, wxEVT_COMMAND_WEB_VIEW_NEWWINDOW, wxWebViewEvent );
++wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_WEBVIEW, wxEVT_COMMAND_WEB_VIEW_LOADING_PROGRESS, wxWebViewEvent );
+ 
+ typedef void (wxEvtHandler::*wxWebViewEventFunction)
+              (wxWebViewEvent&);
+@@ -256,6 +267,10 @@
+ 
+ #define EVT_WEB_VIEW_TITLE_CHANGED(id, fn) \
+     wx__DECLARE_EVT1(wxEVT_COMMAND_WEB_VIEW_TITLE_CHANGED, id, \
++                     wxWebViewEventHandler(fn)) 
++					 
++#define EVT_COMMAND_WEB_VIEW_LOADING_PROGRESS(id, fn) \
++    wx__DECLARE_EVT1(wxEVT_COMMAND_WEB_VIEW_LOADING_PROGRESS, id, \
+                      wxWebViewEventHandler(fn))
+ 
+ #endif // wxUSE_WEBVIEW
+Index: include/wx/gtk/webview_cookie_jar.h
+===================================================================
+--- include/wx/gtk/webview_cookie_jar.h	(revision 0)
++++ include/wx/gtk/webview_cookie_jar.h	(revision 0)
+@@ -0,0 +1,35 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        include/wx/gtk/webview_cookie_jar.h
++// Purpose:     wxWebViewCookieJar header for GTK
++// Author:      Stefano Mtangoo
++// Id:          $Id: webview_cookie_jar.h  
++// Copyright:   (c) 2012 Hosanna Higher Technologies
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_GTK_WEBVIEWCOOKIEJAR_H_
++#define _WX_GTK_WEBVIEWCOOKIEJAR_H_
++
++#include "wx/setup.h"
++#include "wx/wx.h"
++
++#if wxUSE_WEBVIEW && wxUSE_WEBVIEW_WEBKIT && defined(__WXGTK__)
++
++class WXDLLIMPEXP_WEBVIEW wxWebViewCookieJar 
++{
++public:
++    wxWebViewCookieJar(const wxString& path);
++    virtual bool AddCookie(const wxString& name, const wxString& value, const wxString& domain, const wxString& path=wxEmptyString, const int age=0);
++    virtual bool RemoveCookieByName(const wxString& name);    
++    virtual bool RemoveCookieByDomain(const wxString& domain);    
++
++    friend class wxWebViewWebKit;
++
++private:
++    wxString m_path;//path to save the cookie file 
++    void* m_cookiejar;
++};
++
++#endif // wxUSE_WEBVIEW && wxUSE_WEBVIEW_WEBKIT && defined(__WXGTK__)
++
++#endif // _WX_GTK_WEBVIEWCOOKIEJAR_H_
+Index: build/bakefiles/files.bkl
+===================================================================
+--- build/bakefiles/files.bkl	(revision 72504)
++++ build/bakefiles/files.bkl	(working copy)
+@@ -3338,7 +3338,7 @@
+ 
+ <set var="WEBVIEW_SRC_PLATFORM">
+     <if cond="TOOLKIT=='MSW'">src/msw/webview_ie.cpp</if>
+-    <if cond="TOOLKIT=='GTK'">src/gtk/webview_webkit.cpp</if>
++    <if cond="TOOLKIT=='GTK'">src/gtk/webview_webkit.cpp src/gtk/webview_cookie_jar.cpp</if> 
+     <if cond="PLATFORM_MACOSX=='1'">src/osx/webview_webkit.mm</if>
+ </set>
+ <set var="WEBVIEW_SRC" hints="files">
+Index: interface/wx/webview.h
+===================================================================
+--- interface/wx/webview.h	(revision 72504)
++++ interface/wx/webview.h	(working copy)
+@@ -140,7 +140,50 @@
+     wxString GetTitle();
+ };
+ 
++
++
++
+ /**
++    @class wxWebViewCookieJar
++
++    A simple class that contains and manipulates the Cookies to give wxWebView persistsence
++    The class is currently available for wxGTK alone but the plan to add to other ports are in progress.
++    The Current limitation is that cookies are saved as text file. 
++
++    @since 2.9.5
++    @library{wxwebview}
++    @category{webview}
++
++    @see wxWebView
++ */
++class wxWebViewCookieJar
++{
++public:
++    /**
++        Construtor.
++    */
++    wxWebViewCookieJar(const wxString& path);
++
++    /**
++        Adds a cookie to a cookie jar
++        @return whether the cookie was added successfully.
++    */
++    virtual bool AddCookie(const wxString& name, const wxString& value, const wxString& domain, const wxString& path=wxEmptyString, const int age=0);
++
++    /**
++        Removes all cookies with a name specified from the jar (we expect to have one cookies with name but if they are more than one all gets removed)
++        @return whether the cookie was/were removed successfully.
++    */
++    virtual bool RemoveCookieByName(const wxString& name); 
++    
++    /**
++        Removes all cookies with a domain specified from the jar (we expect to have one cookies with name but if they are more than one all gets removed)
++        @return whether the cookie was/were removed successfully.
++    */   
++    virtual bool RemoveCookieByDomain(const wxString& domain);
++};
++
++/**
+     @class wxWebViewHandler
+ 
+     The base class for handling custom schemes in wxWebView, for example to
+@@ -267,6 +310,11 @@
+     @event{EVT_WEB_VIEW_TITLE_CHANGED(id, func)}
+        Process a @c wxEVT_COMMAND_WEB_VIEW_TITLE_CHANGED event, generated when
+        the page title changes. Use GetString to get the title.
++    
++    @event{EVT_WEB_VIEW_LOADING_PROGRESS(id, func)}
++       Process a @c wxEVT_COMMAND_WEB_VIEW_LOADING_PROGRESS event, generated when
++       The progress of the page as it is loading. Note that range between 0 to 100 Use GetInt() to get the value.
++        @since 2.9.5
+     @endEventTable
+ 
+     @since 2.9.3
+@@ -427,6 +475,23 @@
+                     relative paths, for instance.
+     */
+     virtual void SetPage(const wxString& html, const wxString& baseUrl) = 0;
++    
++     /**
++        Set the cookiejar object that will be used to handle cookies for different visited domains 
++        @param jar    The cookie Jar object. 
++    */
++	virtual void SetCookieJar(wxWebViewCookieJar* jar);	
++	
++	 /**
++        Gets the cookiejar object that contains cookies for different visited domains 
++        @return jar    returns the cookie Jar object. 
++    */
++	virtual wxWebViewCookieJar* GetCookieJar() const;
++    
++    /**
++        Returns whether the web control is having a valid cookiejar set
++    */	
++	virtual bool HasCookieJar() const;

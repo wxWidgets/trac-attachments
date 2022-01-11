@@ -1,0 +1,137 @@
+Index: docs/latex/wx/font.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/font.tex,v
+retrieving revision 1.28
+diff -b -u -2 -r1.28 font.tex
+--- docs/latex/wx/font.tex	2005/08/04 11:31:01	1.28
++++ docs/latex/wx/font.tex	2006/05/04 09:21:06
+@@ -307,8 +307,21 @@
+ Returns the platform-dependent string completely describing this font or an
+ empty string if the font wasn't constructed using the native font description.
++Note that the returned string is not meant to be shown or edited by the user: a typical
++use of this function is for serializing in string-form a wxFont object.
+ 
+ \wxheading{See also}
+ 
+-\helpref{wxFont::SetNativeFontInfo}{wxfontsetnativefontinfo}
++\helpref{wxFont::SetNativeFontInfo}{wxfontsetnativefontinfo},\helpref{wxFont::GetNativeFontInfoUserDesc}{wxfontgetnativefontinfouserdesc}
++
++
++\membersection{wxFont::GetNativeFontInfoUserDesc}\label{wxfontgetnativefontinfouserdesc}
++
++\func{wxString}{GetNativeFontInfoUserDesc}{\void}
++
++Returns a user-friendly string for this font object. Some examples of the formats of returned strings (which are platform-dependent) are in \helpref{SetNativeFontInfoUserDesc}{wxfontsetnativefontinfouserdesc}.
++
++\wxheading{See also}
++
++\helpref{wxFont::GetNativeFontInfoDesc}{wxfontgetnativefontinfodesc}
+ 
+ 
+@@ -458,5 +471,35 @@
+ which must have been previously returned by
+ \helpref{GetNativeFontInfoDesc}{wxfontgetnativefontinfodesc}. If the string is
+-invalid, font is unchanged.
++invalid, font is unchanged. This function is typically used for de-serializing a wxFont
++object previously saved in a string-form.
++
++\wxheading{See also}
++
++\helpref{wxFont::SetNativeFontInfoUserDesc}{wxfontsetnativefontinfouserdesc}
++
++
++\membersection{wxFont::SetNativeFontInfoUserDesc}\label{wxfontsetnativefontinfouserdesc}
++
++\func{void}{SetNativeFontInfoUserDesc}{\param{const wxString\& }{info}}
++
++Creates the font corresponding to the given native font description string.
++Unlike \helpref{SetNativeFontInfo}{wxfontsetnativefontinfo}, this function accepts
++strings which are user-friendly.
++Examples of accepted string formats are:
++
++\twocolwidtha{15cm}
++\begin{twocollist}\itemsep=0pt
++\twocolitem{Generic syntax}{Example}
++\twocolitem{on {\bf wxGTK2}: {\tt $[FACE-NAME]$ $[bold]$ $[oblique|italic]$ $[POINTSIZE]$}}{Monospace bold 10}
++\twocolitem{on {\bf wxMSW}: {\tt $[light|bold]$ $[italic]$ $[FACE-NAME]$ $[POINTSIZE]$ $[ENCODING]$}}{Tahoma 10 WINDOWS-1252}
++\twocolitem{on {\bf wxMac}: FIXME}{FIXME}
++\end{twocollist}
++
++For more detailed information about the allowed syntaxes you can look at the documentation of the native API used for font-rendering (e.g. \urlref{pango_font_description_from_string}{http://developer.gnome.org/doc/API/2.0/pango/pango-Fonts.html\#pango-font-description-from-string}).
++
++\wxheading{See also}
++
++\helpref{wxFont::SetNativeFontInfo}{wxfontsetnativefontinfo}
++
+ 
+ 
+Index: src/unix/fontutil.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/unix/fontutil.cpp,v
+retrieving revision 1.71
+diff -b -u -2 -r1.71 fontutil.cpp
+--- src/unix/fontutil.cpp	2006/05/02 10:39:18	1.71
++++ src/unix/fontutil.cpp	2006/05/04 09:21:07
+@@ -137,9 +137,15 @@
+ {
+     wxFontFamily ret = wxFONTFAMILY_DEFAULT;
++
++    wxASSERT(description);
++    const char *family_name = pango_font_description_get_family( description );
++    if (!family_name)
++        return ret;
++
+     // note: not passing -1 as the 2nd parameter to g_ascii_strdown to work
+     // around a bug in the 64-bit glib shipped with solaris 10, -1 causes it
+     // to try to allocate 2^32 bytes.
+-    const char *family_name = pango_font_description_get_family( description );
+     char *family_text = g_ascii_strdown( family_name, family_name ? strlen( family_name ) : 0 );
++
+     // Check for some common fonts, to salvage what we can from the current win32 centric wxFont API:
+     if (strncmp( family_text, "monospace", 9 ) == 0)
+@@ -275,8 +281,27 @@
+ bool wxNativeFontInfo::FromString(const wxString& s)
+ {
++    wxString str(s);
++    double n;
++
+     if (description)
+         pango_font_description_free( description );
++
++    // there is a bug in at least pango <= 1.13 which makes it (or its backends)
++    // segfault for very big point sizes and for negative point sizes.
++    // To workaround that bug for pango <= 1.13
++    // (see http://bugzilla.gnome.org/show_bug.cgi?id=340229)
++    // we do the check on the size here using same (arbitrary) limits used by
++    // pango > 1.13. Note that the segfault could happen also for pointsize
++    // smaller than this limit !!
++    wxString size = str.AfterLast(wxT(' '));
++    if (size.ToDouble(&n))
++    {
++        if (n < 1)
++            str = str.Left(str.Len() - size.Len()) + wxT("1");
++        else if (n >= 1E6)
++            str = str.Left(str.Len() - size.Len()) + wxT("1E6");
++    }
+ 
+-    description = pango_font_description_from_string( wxGTK_CONV_SYS( s ) );
++    description = pango_font_description_from_string( wxGTK_CONV_SYS( str ) );
+ 
+     return true;
+Index: samples/font/font.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/font/font.cpp,v
+retrieving revision 1.50
+diff -b -u -2 -r1.50 font.cpp
+--- samples/font/font.cpp	2005/08/24 17:46:54	1.50
++++ samples/font/font.cpp	2006/05/04 09:21:08
+@@ -791,4 +791,7 @@
+         {
+             wxChar c = (wxChar)(32 * (i + 1) + j);
++#if !wxUSE_UNICODE && defined(__WXGTK20__)
++            if (c < 0 ) c = 0;
++#endif
+ 
+             long charWidth, charHeight;
+
+ 	  	 

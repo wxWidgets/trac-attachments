@@ -1,0 +1,222 @@
+Index: include/wx/msw/glcanvas.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/msw/glcanvas.h,v
+retrieving revision 1.13
+diff -b -u -2 -r1.13 glcanvas.h
+--- include/wx/msw/glcanvas.h	2004/05/23 20:51:28	1.13
++++ include/wx/msw/glcanvas.h	2004/06/13 12:59:19
+@@ -3,5 +3,5 @@
+ // Purpose:     wxGLCanvas, for using OpenGL with wxWidgets under Windows
+ // Author:      Julian Smart
+-// Modified by:
++// Modified by: Greg Hazel
+ // Created:     04/01/98
+ // RCS-ID:      $Id: glcanvas.h,v 1.13 2004/05/23 20:51:28 JS Exp $
+@@ -66,7 +66,10 @@
+     ~wxGLContext();
+ 
++    bool IsCurrent(wxThread* thread = NULL);
+ 
+     void SetCurrent();
+ 
++    void UnsetCurrent();
++
+     void SetColour(const wxChar *colour);
+ 
+@@ -81,4 +84,7 @@
+ 
+ public:
++    wxMutex          m_glContextMutex;
++    bool             m_glContextMutexIsLocked;
++    wxThreadIdType   m_glContextThread;
+     HGLRC            m_glContext;
+     WXHDC            m_hDC;
+@@ -126,4 +132,6 @@
+     void SetCurrent();
+ 
++    void UnsetCurrent();
++
+ #ifdef __WXUNIVERSAL__
+     virtual bool SetCurrent(bool doit) { return wxWindow::SetCurrent(doit); };
+@@ -159,5 +167,29 @@
+     DECLARE_EVENT_TABLE()
+ };
++
++class WXDLLIMPEXP_GL wxGLCanvasScope
++{
++public:
++    wxGLCanvasScope::wxGLCanvasScope(wxGLCanvas* canvas)
++    {
++      wxCHECK_RET( canvas != NULL ,
++                   "wxGLCanvasScope ctor must have a valid wxGLCanvas" );
++
++      m_canvas = canvas;
++
++      //locks the mutex and sets current
++      m_canvas->SetCurrent();
++    }
++    wxGLCanvasScope::~wxGLCanvasScope()
++    {
++      //unlocks the mutex and sets current to NULL
++      m_canvas->UnsetCurrent();
++    }
++
++private:
++  wxGLCanvas* m_canvas;
++};
++
+ 
+ #endif
+Index: src/msw/glcanvas.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/glcanvas.cpp,v
+retrieving revision 1.26
+diff -b -u -2 -r1.26 glcanvas.cpp
+--- src/msw/glcanvas.cpp	2004/05/23 20:52:59	1.26
++++ src/msw/glcanvas.cpp	2004/06/13 12:59:27
+@@ -3,5 +3,5 @@
+ // Purpose:     wxGLCanvas, for using OpenGL with wxWidgets under MS Windows
+ // Author:      Julian Smart
+-// Modified by:
++// Modified by: Greg Hazel
+ // Created:     04/01/98
+ // RCS-ID:      $Id: glcanvas.cpp,v 1.26 2004/05/23 20:52:59 JS Exp $
+@@ -80,5 +80,8 @@
+   wxCHECK_RET( m_glContext, wxT("Couldn't create OpenGl context") );
+ 
+-  wglMakeCurrent((HDC) m_hDC, m_glContext);
++  m_glContextMutexIsLocked = false;
++  m_glContextThread = 0;
++
++  SetCurrent();
+ }
+ 
+@@ -99,5 +102,8 @@
+     wglShareLists( other->m_glContext, m_glContext );
+ 
+-  wglMakeCurrent((HDC) m_hDC, m_glContext);
++  m_glContextMutexIsLocked = false;
++  m_glContextThread = 0;
++
++  SetCurrent();
+ }
+ 
+@@ -106,5 +112,17 @@
+   if (m_glContext)
+   {
+-    wglMakeCurrent(NULL, NULL);
++    if (IsCurrent())
++    {
++      UnsetCurrent();
++    }
++
++    wxASSERT_MSG( !m_glContextMutexIsLocked , "wxGLContext::~wxGLContext the mutex is locked"
++                                              " during dtor. (did you forget to call "
++                                              "UnsetCurrent?)" );
++
++    wxASSERT_MSG( m_glContextThread == 0, "wxGLContext::~wxGLContext there is a thread "
++                                          "set current (did you forget to call "
++                                          "UnsetCurrent?)" );
++
+     wglDeleteContext(m_glContext);
+   }
+@@ -115,7 +133,28 @@
+   if (m_glContext)
+   {
+-    wglMakeCurrent((HDC) m_hDC, m_glContext);
++    //prevent this function from unsetting current if the user already has it set
++    //but unset current if we have to set it
++    bool need_to_lock = !IsCurrent();
++    wxThreadIdType foo = wxThread::GetCurrentId();
++    if (need_to_lock)
++    {
++      SetCurrent();
++    }
+     ::SwapBuffers((HDC) m_hDC);    //blits the backbuffer into DC
++    if (need_to_lock)
++    {
++      UnsetCurrent();
++    }
++  }
++}
++
++bool wxGLContext::IsCurrent(wxThread* thread)
++{
++  if (thread != NULL)
++  {
++    return (m_glContextThread == thread->GetCurrentId());
+   }
++
++  return (m_glContextThread == wxThread::GetCurrentId());
+ }
+ 
+@@ -124,4 +163,27 @@
+   if (m_glContext)
+   {
++    //if the mutex is already locked, don't bother trying to lock it again
++    if (!IsCurrent())
++    {
++      if (m_glContextMutex.Lock() != wxMUTEX_NO_ERROR)
++      {
++        //maybe I should notify the user that the lock failed
++        return;
++      }
++  
++      m_glContextMutexIsLocked = true;
++      m_glContextThread = wxThread::GetCurrentId();
++    }
++    else
++    {
++      wxCHECK_RET( m_glContextMutexIsLocked ,
++                   "wxGLContext::SetCurrent() m_glContextMutex is not locked, "
++                   "but the thread is marked as current.");
++    }
++
++
++    //set current even if the thread is current maybe there's no way
++    //for this stuff to change, so maybe it's not needed but calling
++    //this twice is safe
+     wglMakeCurrent((HDC) m_hDC, m_glContext);
+   }
+@@ -133,4 +195,25 @@
+ }
+ 
++void wxGLContext::UnsetCurrent()
++{
++  wxCHECK_RET( IsCurrent() , 
++               "wxGLContext::UnsetCurrent this thread is not current "
++               "(did you call UnsetCurrent twice?)");
++
++  wxCHECK_RET( m_glContextMutexIsLocked, 
++               "wxGLContext::UnsetCurrent m_glContextMutex is not locked");
++
++  m_glContextMutexIsLocked = false;
++  m_glContextThread = 0;
++
++  wxMutexError unlock_retval = m_glContextMutex.Unlock();
++
++  wxCHECK_RET( unlock_retval == wxMUTEX_NO_ERROR , 
++               "wxGLContext::UnsetCurrent m_glContextMutex failed to unlock");
++
++  //safe to call more than once, really
++  wglMakeCurrent(NULL, NULL);
++}
++
+ void wxGLContext::SetColour(const wxChar *colour)
+ {
+@@ -534,4 +617,13 @@
+   }
+ }
++
++void wxGLCanvas::UnsetCurrent()
++{
++  if (m_glContext)
++  {
++    m_glContext->UnsetCurrent();
++  }
++}
++
+ 
+ void wxGLCanvas::SetColour(const wxChar *colour)
+
+ 	  	 

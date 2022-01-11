@@ -1,0 +1,194 @@
+Index: include/wx/apptrait.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/apptrait.h,v
+retrieving revision 1.45
+diff -bu2 -r1.45 include/wx/apptrait.h
+--- include/wx/apptrait.h
++++ include/wx/apptrait.h
+@@ -139,5 +139,11 @@
+     // return the name of the Desktop Environment such as
+     // "KDE" or "GNOME". May return an empty string.
+-    virtual wxString GetDesktopEnvironment() const { return wxEmptyString; }
++    virtual wxString GetDesktopEnvironment() const = 0;
++
++    // returns a short string to identify the block of the standard command line options
++    // parsed automatically by current port; also fills passed arrays with the names
++    // and the descriptions of those options.
++    virtual wxString GetStandardCmdLineOptions(wxArrayString& names, wxArrayString& desc) const = 0;
++
+ 
+ protected:
+@@ -215,4 +221,7 @@
+ 
+     virtual bool IsUsingUniversalWidgets() const { return false; }
++    virtual wxString GetDesktopEnvironment() const { return wxEmptyString; }
++    virtual wxString GetStandardCmdLineOptions(wxArrayString& names, wxArrayString& desc) const 
++        { return wxEmptyString; }
+ };
+ 
+@@ -254,4 +263,8 @@
+     #endif
+     }
++
++    virtual wxString GetDesktopEnvironment() const { return wxEmptyString; }
++    virtual wxString GetStandardCmdLineOptions(wxArrayString& names, wxArrayString& desc) const 
++        { return wxEmptyString; }
+ };
+ 
+Index: include/wx/unix/apptrait.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/unix/apptrait.h,v
+retrieving revision 1.13
+diff -bu2 -r1.13 include/wx/unix/apptrait.h
+--- include/wx/unix/apptrait.h
++++ include/wx/unix/apptrait.h
+@@ -50,4 +50,5 @@
+     virtual void SetLocale();
+     virtual wxString GetDesktopEnvironment() const;
++    virtual wxString GetStandardCmdLineOptions(wxArrayString& names, wxArrayString& desc) const;
+ #endif
+ 
+Index: src/common/cmdline.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/cmdline.cpp,v
+retrieving revision 1.50
+diff -bu2 -r1.50 src/common/cmdline.cpp
+--- src/common/cmdline.cpp
++++ src/common/cmdline.cpp
+@@ -42,4 +42,5 @@
+ #include "wx/msgout.h"
+ #include "wx/filename.h"
++#include "wx/apptrait.h"
+ 
+ // ----------------------------------------------------------------------------
+@@ -180,5 +181,5 @@
+     // cmd line data
+     wxArrayString m_arguments;  // == argv, argc == m_arguments.GetCount()
+-    wxArrayOptions m_options;   // all possible options and switchrs
++    wxArrayOptions m_options;   // all possible options and switches
+     wxArrayParams m_paramDesc;  // description of all possible params
+     wxArrayString m_parameters; // all params found
+@@ -1069,8 +1070,16 @@
+     usage << _T('\n');
+ 
++    // number of options supported by this program (without counting std options):
++    count = namesOptions.size();
++
++    // get option names & descriptions for standard options:
++    wxAppTraits *traits = wxTheApp ? wxTheApp->GetTraits() : NULL;
++    wxString separator;
++    if (traits)
++        separator = wxT("\n") + traits->GetStandardCmdLineOptions(namesOptions, descOptions);
++
+     // now construct the detailed help message
+     size_t len, lenMax = 0;
+-    count = namesOptions.size();
+-    for ( n = 0; n < count; n++ )
++    for ( n = 0; n < namesOptions.size(); n++ )
+     {
+         len = namesOptions[n].length();
+@@ -1079,6 +1088,9 @@
+     }
+ 
+-    for ( n = 0; n < count; n++ )
++    for ( n = 0; n < namesOptions.size(); n++ )
+     {
++        if ( n == count )
++            usage << separator;     // now starts the help for the std options
++
+         len = namesOptions[n].length();
+         usage << namesOptions[n]
+Index: src/gtk/utilsgtk.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/utilsgtk.cpp,v
+retrieving revision 1.85
+diff -bu2 -r1.85 src/gtk/utilsgtk.cpp
+--- src/gtk/utilsgtk.cpp
++++ src/gtk/utilsgtk.cpp
+@@ -483,4 +483,84 @@
+ }
+ 
++#ifdef __WXGTK26__
+ 
++// see the hack below in wxCmdLineParser::GetUsageString().
++// TODO: replace this hack with a g_option_group_get_entries()
++//       call as soon as such function exists
++struct _GOptionGroup
++{
++  gchar           *name;
++  gchar           *description;
++  gchar           *help_description;
++
++  GDestroyNotify   destroy_notify;
++  gpointer         user_data;
++
++  GTranslateFunc   translate_func;
++  GDestroyNotify   translate_notify;
++  gpointer     translate_data;
++
++  GOptionEntry    *entries;
++  gint             n_entries;
++
++  GOptionParseFunc pre_parse_func;
++  GOptionParseFunc post_parse_func;
++  GOptionErrorFunc error_func;
++};
++
++wxString wxGetNameFromGtkOptionEntry(const GOptionEntry *opt)
++{
++    wxString ret;
++
++    if (opt->short_name)
++        ret << _T("-") << opt->short_name;
++    if (opt->long_name)
++    {
++        if (!ret.empty())
++            ret << _T(", ");
++        ret << _T("--") << opt->long_name;
++
++        if (opt->arg_description)
++            ret << _T("=") << opt->arg_description;
++    }
++
++    return _T("  ") + ret;
++}
++
++#endif
++
++wxString wxGUIAppTraits::GetStandardCmdLineOptions(wxArrayString& names, wxArrayString& desc) const
++{
++    wxString usage;
++
++#ifdef __WXGTK26__
++    // this check means: if GTK version is greater than 2.6 but lower than 2.12, then:
++    if (!gtk_check_version(2,6,0) &&
++        gtk_check_version(2,12,0))
++    {
++        usage << _("Standard GTK+ options:\n");
++
++        GOptionGroup *gtkOpts =
++            gtk_get_option_group(true /* open the default display when parsing (useless here) */);
++
++        // WARNING: here we access the internals of GOptionGroup:
++        GOptionEntry *entries = ((_GOptionGroup*)gtkOpts)->entries;
++        unsigned int n_entries = ((_GOptionGroup*)gtkOpts)->n_entries;
++        wxArrayString namesOptions, descOptions;
++
++        for ( size_t n = 0; n < n_entries; n++ )
++        {
++            if ( entries[n].flags & G_OPTION_FLAG_HIDDEN )
++                continue;       // skip
++
++            names.push_back(wxGetNameFromGtkOptionEntry(&entries[n]));
++            desc.push_back(entries[n].description ? wxString(entries[n].description) : _T(""));
++        }
++
++        g_option_group_free (gtkOpts);
++    }
++#endif
++
++    return usage;
++}
+ 
+
+ 	  	 

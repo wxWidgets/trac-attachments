@@ -1,0 +1,823 @@
+Index: docs/changes.txt
+===================================================================
+--- docs/changes.txt	(revision 65661)
++++ docs/changes.txt	(working copy)
+@@ -415,6 +415,10 @@
+ - Add support for CP-866 encoding to wxEncodingConverter (madnut).
+ - Consistency fixes for keyboard events across all major ports.
+ 
++All:
++
++- wxGIFHandler: GIF and Animated GIF saving (troelsk)
++
+ MSW:
+ 
+ - Native implementation of wxHyperlinkCtrl and wxProgressDialog under modern
+Index: include/wx/imaggif.h
+===================================================================
+--- include/wx/imaggif.h	(revision 65661)
++++ include/wx/imaggif.h	(working copy)
+@@ -1,9 +1,9 @@
+ /////////////////////////////////////////////////////////////////////////////
+ // Name:        wx/imaggif.h
+ // Purpose:     wxImage GIF handler
+-// Author:      Vaclav Slavik & Guillermo Rodriguez Garcia
++// Author:      Vaclav Slavik, Guillermo Rodriguez Garcia, Gershon Elber, Troels K
+ // RCS-ID:      $Id$
+-// Copyright:   (c) Guillermo Rodriguez Garcia
++// Copyright:   (c) 1999-2010 Vaclav Slavik, Guillermo Rodriguez Garcia, Gershon Elber, Troels K
+ // Licence:     wxWindows licence
+ /////////////////////////////////////////////////////////////////////////////
+ 
+@@ -12,22 +12,32 @@
+ 
+ #include "wx/image.h"
+ 
+-
+ //-----------------------------------------------------------------------------
+ // wxGIFHandler
+ //-----------------------------------------------------------------------------
+ 
+ #if wxUSE_GIF
+ 
++typedef struct _wxRGB
++{
++    wxUint8 red;
++    wxUint8 green;
++    wxUint8 blue;
++} wxRGB;
++
++struct _GifHashTableType;
++class WXDLLIMPEXP_FWD_CORE wxImageArray; // anidecod.h
++
+ class WXDLLIMPEXP_CORE wxGIFHandler : public wxImageHandler
+ {
+ public:
+-    inline wxGIFHandler()
++    inline wxGIFHandler() : wxImageHandler()
+     {
+         m_name = wxT("GIF file");
+         m_extension = wxT("gif");
+         m_type = wxBITMAP_TYPE_GIF;
+         m_mime = wxT("image/gif");
++        m_HashTable = NULL;
+     }
+ 
+ #if wxUSE_STREAMS
+@@ -36,11 +46,64 @@
+     virtual bool SaveFile(wxImage *image, wxOutputStream& stream,
+                           bool verbose=true);
+ 
++    // Save animated gif
++    bool SaveAnimation(const wxImageArray& images, wxOutputStream* stream, bool verbose = true, int delay_ms = 1000, 
++                       const wxString& comment = wxEmptyString);
++
+ protected:
+     virtual int DoGetImageCount(wxInputStream& stream);
+     virtual bool DoCanRead(wxInputStream& stream);
++
++protected:
++    bool DoSaveFile(const wxImage&, wxOutputStream*, bool verbose, bool first, int delay_ms, bool loop, 
++                    const wxRGB* pal, size_t palcount, int mask_index, const wxString& comment = wxEmptyString);
+ #endif // wxUSE_STREAMS
++protected:
+ 
++    // Declarations for saving
++
++    unsigned long m_CrntShiftDWord;   /* For bytes decomposition into codes. */
++    int m_PixelCount;
++    struct _GifHashTableType* m_HashTable;
++    wxInt16
++      m_EOFCode,     /* The EOF LZ code. */
++      m_ClearCode,   /* The CLEAR LZ code. */
++      m_RunningCode, /* The next code algorithm can generate. */
++      m_RunningBits, /* The number of bits required to represent RunningCode. */
++      m_MaxCode1,    /* 1 bigger than max. possible code, in RunningBits bits. */
++      m_CrntCode,    /* Current algorithm code. */
++      m_CrntShiftState;    /* Number of bits in CrntShiftDWord. */
++    wxUint8 m_LZBuf[256];   /* Compressed input is buffered here. */
++
++    bool InitHashTable(void);
++    void ClearHashTable(void);
++    void InsertHashTable(unsigned long Key, int Code);
++    int  ExistsHashTable(unsigned long Key);
++    static size_t GetPalette(const wxImage& image, wxRGB* pal, int* mask_index);
++
++    static int KeyItem(unsigned long Item);
++    static int BitSize(int n);
++    static int PaletteFind(const wxRGB& clr, const wxRGB* pal, size_t palcount);
++
++#if wxUSE_STREAMS
++    static bool Write       (wxOutputStream*, const void* buf, size_t len);
++    static bool WriteByte   (wxOutputStream*, wxUint8);
++    static bool WriteWord   (wxOutputStream*, wxUint16);
++    static bool WriteHeader (wxOutputStream*, int width, int height, bool loop, const wxRGB* pal, size_t palcount, const wxString& comment = wxEmptyString);
++    static bool WriteRect   (wxOutputStream*, int width, int height);
++    static bool WriteTerm   (wxOutputStream*);
++    static bool WriteZero   (wxOutputStream*);
++    static bool WritePalette(wxOutputStream*, const wxRGB* pal, size_t palcount);
++    static bool WriteControl(wxOutputStream*, int mask_index, int delay_ms);
++    static bool WriteComment(wxOutputStream*, const wxString&);
++    static bool WriteLoop   (wxOutputStream*);
++    static bool BufferedOutput(wxOutputStream*, wxUint8* buf, int c);
++    bool CompressOutput(wxOutputStream*, int Code);
++    bool SetupCompress(wxOutputStream*, int bpp);
++    bool CompressLine(wxOutputStream*, const wxUint8* line, int linelen);
++#endif
++public:
++    static wxString ms_comment;
+ private:
+     DECLARE_DYNAMIC_CLASS(wxGIFHandler)
+ };
+@@ -48,4 +111,3 @@
+ #endif // wxUSE_GIF
+ 
+ #endif // _WX_IMAGGIF_H_
+-
+Index: interface/wx/image.h
+===================================================================
+--- interface/wx/image.h	(revision 65661)
++++ interface/wx/image.h	(working copy)
+@@ -317,7 +317,7 @@
+     - wxBMPHandler: For loading and saving, always installed.
+     - wxPNGHandler: For loading (including alpha support) and saving.
+     - wxJPEGHandler: For loading and saving.
+-    - wxGIFHandler: Only for loading, due to legal issues.
++    - wxGIFHandler: For loading and saving (see below).
+     - wxPCXHandler: For loading and saving (see below).
+     - wxPNMHandler: For loading and saving (see below).
+     - wxTIFFHandler: For loading and saving.
+@@ -335,6 +335,8 @@
+     Loading PNMs only works for ASCII or raw RGB images.
+     When saving in PNM format, wxPNMHandler will always save as raw RGB.
+ 
++    Saving GIFs requires images of maximum 8 bpp (see wxQuantize), and the alpha channel converted to a mask (see wxImage::ConvertAlphaToMask).
++    Saving an animated GIF requires images of the same size (see wxGIFHandler::SaveAnimation)
+ 
+     @library{wxcore}
+     @category{gdi}
+Index: src/common/imaggif.cpp
+===================================================================
+--- src/common/imaggif.cpp	(revision 65661)
++++ src/common/imaggif.cpp	(working copy)
+@@ -1,9 +1,9 @@
+ /////////////////////////////////////////////////////////////////////////////
+ // Name:        src/common/imaggif.cpp
+ // Purpose:     wxGIFHandler
+-// Author:      Vaclav Slavik & Guillermo Rodriguez Garcia
++// Author:      Vaclav Slavik, Guillermo Rodriguez Garcia, Gershon Elber, Troels K
+ // RCS-ID:      $Id$
+-// Copyright:   (c) 1999 Vaclav Slavik & Guillermo Rodriguez Garcia
++// Copyright:   (c) 1999-2010 Vaclav Slavik, Guillermo Rodriguez Garcia, Gershon Elber, Troels K
+ // Licence:     wxWindows licence
+ /////////////////////////////////////////////////////////////////////////////
+ 
+@@ -19,12 +19,51 @@
+ #ifndef WX_PRECOMP
+     #include "wx/intl.h"
+     #include "wx/log.h"
++    #include "wx/palette.h"
++    #include "wx/utils.h"
+ #endif
+ 
+ #include "wx/imaggif.h"
+ #include "wx/gifdecod.h"
+-#include "wx/wfstream.h"
++#include "wx/stream.h"
++#include "wx/anidecod.h" // wxImageArray
+ 
++#define GIF89_HDR     "GIF89a"
++#define NETSCAPE_LOOP "NETSCAPE2.0"
++
++// see members.aol.com/royalef/gifabout.htm
++//     members.aol.com/royalef/gif89a.txt
++
++enum
++{
++    GIF_MARKER_EXT       = '!', // 0x21
++    GIF_MARKER_ENDOFDATA = ';', // 0x3B
++    GIF_MARKER_SEP       = ',', // 0x2C
++
++    GIF_MARKER_EXT_GRAPHICS_CONTROL = 0xF9,
++    GIF_MARKER_EXT_COMMENT          = 0xFE,
++    GIF_MARKER_EXT_APP              = 0xFF
++};
++
++#define LZ_MAX_CODE         4095    /* Biggest code possible in 12 bits. */
++#define FLUSH_OUTPUT        4096    /* Impossible code, to signal flush. */
++#define FIRST_CODE          4097    /* Impossible code, to signal first. */
++
++#define HT_SIZE			8192	   /* 12bits = 4096 or twice as big! */
++#define HT_KEY_MASK		0x1FFF	   /* 13bits keys */
++
++#define HT_GET_KEY(l)	(l >> 12)
++#define HT_GET_CODE(l)	(l & 0x0FFF)
++#define HT_PUT_KEY(l)	(l << 12)
++#define HT_PUT_CODE(l)	(l & 0x0FFF)
++
++typedef struct _GifHashTableType
++{
++    wxUint32 HTable[HT_SIZE];
++} GifHashTableType;
++
++/*static*/ wxString wxGIFHandler::ms_comment;
++
+ IMPLEMENT_DYNAMIC_CLASS(wxGIFHandler,wxImageHandler)
+ 
+ //-----------------------------------------------------------------------------
+@@ -40,7 +79,6 @@
+     wxGIFErrorCode error;
+     bool ok = true;
+ 
+-//    image->Destroy();
+     decod = new wxGIFDecoder();
+     error = decod->LoadGIF(stream);
+ 
+@@ -85,15 +123,15 @@
+     return ok;
+ }
+ 
+-bool wxGIFHandler::SaveFile( wxImage * WXUNUSED(image),
+-                             wxOutputStream& WXUNUSED(stream), bool verbose )
++bool wxGIFHandler::SaveFile( wxImage * image,
++                             wxOutputStream& stream, bool verbose )
+ {
+-    if (verbose)
+-    {
+-        wxLogDebug(wxT("GIF: the handler is read-only!!"));
+-    }
+-
+-    return false;
++    wxRGB pal[256];
++    int mask_index;
++    size_t palcount = GetPalette(*image, pal, &mask_index);
++    bool ok = palcount && DoSaveFile(*image, &stream, verbose, true, 0, false, pal, palcount, mask_index, ms_comment);
++    ok = ok && WriteTerm(&stream);
++    return ok;
+ }
+ 
+ bool wxGIFHandler::DoCanRead( wxInputStream& stream )
+@@ -116,6 +154,563 @@
+     return decod.GetFrameCount();
+ }
+ 
++/*static*/
++bool wxGIFHandler::WriteHeader(wxOutputStream* stream, int width, int height, bool loop, 
++                               const wxRGB* pal, size_t palcount, const wxString& comment)
++{
++    const int bpp = BitSize(palcount);
++    wxUint8 buf[3];
++    bool ok = true;
++
++    ok = ok && Write(stream, GIF89_HDR, sizeof(GIF89_HDR)-1);
++    ok = ok && WriteWord(stream, (wxUint16)width);
++    ok = ok && WriteWord(stream, (wxUint16)height);
++
++    buf[0] = 0x80;
++    buf[0] |=(bpp - 1) << 5;
++    buf[0] |=(bpp - 1);
++    buf[1] = 0; // background color == entry 0
++    buf[2] = 0; // aspect ratio 1:1
++    ok = ok && Write(stream, buf, sizeof(buf));
++    ok = ok && WritePalette(stream, pal, palcount);
++
++    if (loop)
++    {
++       ok = ok && WriteLoop(stream);
++    }
++    if (comment.Length())
++    {
++       ok = ok && WriteComment(stream, comment);
++    }
++    return ok;
++}
++
++/*static*/
++bool wxGIFHandler::WriteRect(wxOutputStream* stream, int width, int height)
++{
++    bool ok = true;
++    ok = ok && WriteWord(stream, 0); // left
++    ok = ok && WriteWord(stream, 0); // top
++    ok = ok && WriteWord(stream, (wxUint16)width);
++    ok = ok && WriteWord(stream, (wxUint16)height);
++    return ok;
++}
++
++/*static*/
++bool wxGIFHandler::WriteControl(wxOutputStream* stream, int mask_index, int delay_ms)
++{
++    wxUint8 buf[8];
++
++    buf[0] = GIF_MARKER_EXT;	// extension marker
++    buf[1] = GIF_MARKER_EXT_GRAPHICS_CONTROL;
++    buf[2] = 4;		// length of block
++    buf[3] = (mask_index != wxNOT_FOUND) ? 1 : 0;	// has transparency
++    buf[4] = delay_ms/10;		// delay time
++    buf[5] = 0;
++    buf[6] = (mask_index != wxNOT_FOUND) ? (wxUint8)mask_index : 0;
++    buf[7] = 0;
++    return Write(stream, buf, sizeof(buf));
++}
++
++bool wxGIFHandler::DoSaveFile(const wxImage& image, wxOutputStream* stream, bool WXUNUSED(verbose), bool first, int delay_ms, bool loop,
++                          const wxRGB* pal, size_t palcount, int mask_index, const wxString& comment)
++{
++    const int colorcount = image.CountColours();
++    bool ok = colorcount && (colorcount <= 256);
++    if (ok)
++    {    
++        int width = image.GetWidth();
++        int height = image.GetHeight();
++        int width_even = width + ((width % 2) ? 1 : 0);
++
++        if (first)
++        {
++            ok = ok && WriteHeader(stream, width, height, loop, pal, palcount, comment);
++        }
++        ok = ok && WriteControl(stream, mask_index, delay_ms);
++        ok = ok && WriteByte(stream, GIF_MARKER_SEP);
++        ok = ok && WriteRect(stream, width, height);
++
++        // local palette
++        if (first)
++        {
++            // we already saved the (global) palette
++            ok = ok && WriteZero(stream);
++        }
++        else
++        {
++            const int bpp = BitSize(palcount);
++            wxUint8 b;
++            
++            b = 0x80;
++            b |=(bpp - 1) << 5;
++            b |=(bpp - 1);
++            b &=~0x40; // clear interlaced
++            
++            ok = ok && WriteByte(stream, b);
++            ok = ok && WritePalette(stream, pal, palcount);
++        }
++
++        if (ok && InitHashTable())
++        {
++            const wxUint8* src = image.GetData();
++            wxUint8* eightBitData = new wxUint8[width];
++
++            SetupCompress(stream, 8);
++
++            m_PixelCount = height * width_even;
++            for (int y = 0; y < height; y++)
++            {
++                m_PixelCount -= width_even;
++                for (int x = 0; x < width; x++)
++                {
++                    wxRGB rgb;
++                    rgb.red   = src[0];
++                    rgb.green = src[1];
++                    rgb.blue  = src[2];
++                    int index = PaletteFind(rgb, pal, palcount);
++                    wxASSERT(index != wxNOT_FOUND);
++                    eightBitData[x] = (wxUint8)index;
++                    src+=3;
++                }
++                CompressLine(stream, eightBitData, width);
++            }
++            delete [] eightBitData;
++        }
++        else
++        {
++            wxLogError(_("Couldn't initialize GIF hash table."));
++        }
++        wxDELETE(m_HashTable);
++    }
++    return ok;
++}
++
++bool wxGIFHandler::SaveAnimation(const wxImageArray& images, wxOutputStream* stream, bool verbose, int delay_ms, const wxString& comment)
++{
++    bool ok = true;
++    size_t i;
++
++    wxSize size(0,0);
++    for (i = 0; (i < images.GetCount()) && ok; i++)
++    {
++        const wxImage& image = images.Item(i);
++        wxSize temp(image.GetWidth(), image.GetHeight());
++    #if wxUSE_PALETTE
++        ok = ok && image.HasPalette();
++    #endif
++        if (i)
++        {
++           ok = ok && (size == temp);
++        }
++        else
++        {
++           size = temp;
++        }
++    }
++
++    for (i = 0; (i < images.GetCount()) && ok; i++)
++    {
++        const wxImage& image = images.Item(i);
++
++        wxRGB pal[256];
++        int mask_index;
++        size_t palcount = GetPalette(image, pal, &mask_index);
++        ok = palcount && DoSaveFile(image, stream, verbose, i == 0, delay_ms, true, pal, palcount, mask_index, comment.Length() ? comment : ms_comment);
++    }
++    ok = ok && WriteTerm(stream);
++    return ok;
++}
++
++bool wxGIFHandler::CompressOutput(wxOutputStream* stream, int Code)
++{
++    if (Code == FLUSH_OUTPUT)
++    {
++        while (m_CrntShiftState > 0)
++        {
++            /* Get Rid of what is left in DWord, and flush it. */
++            if (!BufferedOutput(stream, m_LZBuf, m_CrntShiftDWord & 0xff))
++            {
++                return false;
++            }
++            m_CrntShiftDWord >>= 8;
++            m_CrntShiftState -= 8;
++        }
++        m_CrntShiftState = 0;                       /* For next time. */
++        if (!BufferedOutput(stream, m_LZBuf, FLUSH_OUTPUT))
++        {
++            return false;
++        }
++    }
++    else
++    {
++        m_CrntShiftDWord |= ((long) Code) << m_CrntShiftState;
++        m_CrntShiftState += m_RunningBits;
++        while (m_CrntShiftState >= 8)
++        {
++            /* Dump out full bytes: */
++            if (!BufferedOutput(stream, m_LZBuf, m_CrntShiftDWord & 0xff))
++            {
++                return false;
++            }
++            m_CrntShiftDWord >>= 8;
++            m_CrntShiftState -= 8;
++        }
++    }
++
++    /* If code can't fit into RunningBits bits, must raise its size. Note */
++    /* however that codes above LZ_MAX_CODE are used for special signaling.      */
++    if ( (m_RunningCode >= m_MaxCode1) && (Code <= LZ_MAX_CODE))
++    {
++        m_MaxCode1 = 1 << ++m_RunningBits;
++    }
++    return true;
++}
++
++bool wxGIFHandler::SetupCompress(wxOutputStream* stream, int bpp)
++{
++    bool ok = true;
++    
++    m_LZBuf[0] = 0;			  /* Nothing was output yet. */
++    m_ClearCode = (1 << bpp);
++    m_EOFCode = m_ClearCode + 1;
++    m_RunningCode = m_EOFCode + 1;
++    m_RunningBits = bpp + 1;	 /* Number of bits per code. */
++    m_MaxCode1 = 1 << m_RunningBits;	   /* Max. code + 1. */
++    m_CrntCode = FIRST_CODE;	   /* Signal that this is first one! */
++    m_CrntShiftState = 0;      /* No information in CrntShiftDWord. */
++    m_CrntShiftDWord = 0;
++
++    /* Clear hash table and send Clear to make sure the decoder do the same. */
++    ClearHashTable();
++
++    ok = ok && WriteByte(stream, (wxUint8)bpp);
++    ok = ok && CompressOutput(stream, m_ClearCode);
++    return ok;
++}
++
++bool wxGIFHandler::CompressLine(wxOutputStream* stream, const wxUint8* Line, int LineLen)
++{
++    int i = 0, CrntCode, NewCode;
++    unsigned long NewKey;
++    wxUint8 Pixel;
++    if (m_CrntCode == FIRST_CODE)                  /* Its first time! */
++        CrntCode = Line[i++];
++    else
++        CrntCode = m_CrntCode;     /* Get last code in compression. */
++
++    while (i < LineLen)
++    {
++        /* Decode LineLen items. */
++        Pixel = Line[i++];                    /* Get next pixel from stream. */
++        /* Form a new unique key to search hash table for the code combines  */
++        /* CrntCode as Prefix string with Pixel as postfix char.             */
++        NewKey = (((unsigned long) CrntCode) << 8) + Pixel;
++        if ((NewCode = ExistsHashTable(NewKey)) >= 0)
++        {
++            /* This Key is already there, or the string is old one, so       */
++            /* simple take new code as our CrntCode:                         */
++            CrntCode = NewCode;
++        }
++        else
++        {
++            /* Put it in hash table, output the prefix code, and make our    */
++            /* CrntCode equal to Pixel.                                      */
++            if (!CompressOutput(stream, CrntCode))
++            {
++                return false;
++            }
++
++            CrntCode = Pixel;
++
++            /* If however the HashTable if full, we send a clear first and   */
++            /* Clear the hash table.                                         */
++            if (m_RunningCode >= LZ_MAX_CODE)
++            {
++                /* Time to do some clearance: */
++                if (!CompressOutput(stream, m_ClearCode))
++                {
++                    return false;
++                }
++
++                m_RunningCode = m_EOFCode + 1;
++                m_RunningBits = 8 + 1;
++                m_MaxCode1 = 1 << m_RunningBits;
++                ClearHashTable();
++            }
++            else
++            {
++                /* Put this unique key with its relative Code in hash table: */
++                InsertHashTable(NewKey, m_RunningCode++);
++            }
++        }
++    }
++    /* Preserve the current state of the compression algorithm: */
++    m_CrntCode = CrntCode;
++    if (m_PixelCount == 0)
++    {
++        /* We are done - output last Code and flush output buffers: */
++        if (!CompressOutput(stream, CrntCode))
++        {
++            return false;
++        }
++        if (!CompressOutput(stream, m_EOFCode))
++        {
++            return false;
++        }
++        if (!CompressOutput(stream, FLUSH_OUTPUT))
++        {
++            return false;
++        }
++    }
++    return true;
++}
++
++/*static*/
++bool wxGIFHandler::Write(wxOutputStream* stream, const void* buf, size_t len)
++{
++    return (len == stream->Write(buf, len).LastWrite());
++}
++
++/*static*/
++bool wxGIFHandler::WriteByte(wxOutputStream* stream, wxUint8 byte)
++{
++    return Write(stream, &byte, sizeof(byte));
++}
++
++/*static*/
++bool wxGIFHandler::WriteWord(wxOutputStream* stream, wxUint16 word)
++{
++    wxUint8 buf[2];
++
++    buf[0] = word & 0xff;
++    buf[1] = (word >> 8) & 0xff;
++    return Write(stream, &word, sizeof(word));
++}
++
++/*static*/
++bool wxGIFHandler::BufferedOutput(wxOutputStream* stream, wxUint8* buf, int c)
++{
++    bool ok = true;
++    if (c == FLUSH_OUTPUT)
++    {
++        /* Flush everything out. */
++        if (buf[0])
++        {
++            ok = ok && Write(stream, buf, buf[0]+1);
++        }
++        /* Mark end of compressed data, by an empty block (see GIF doc): */
++        WriteZero(stream);
++    }
++    else
++    {
++        if (buf[0] == 255)
++        {
++            /* Dump out this buffer - it is full: */
++            ok = ok && Write(stream, buf, buf[0] + 1);
++            buf[0] = 0;
++        }
++        buf[++buf[0]] = c;
++    }
++    return ok;
++}
++
++/*static*/
++bool wxGIFHandler::WriteTerm(wxOutputStream* stream)
++{
++    return WriteByte(stream, GIF_MARKER_ENDOFDATA);
++}
++
++/*static*/
++bool wxGIFHandler::WriteZero(wxOutputStream* stream)
++{
++    return WriteByte(stream, 0);
++}
++
++/*static*/
++bool wxGIFHandler::WriteComment(wxOutputStream* stream, const wxString& comment)
++{
++    bool ok = true;
++    wxUint8 buf[3];
++    wxCharBuffer text(comment.mb_str());
++    size_t len = strlen(text.data());
++    len = wxMin(len, 255);
++
++    buf[0] = GIF_MARKER_EXT;
++    buf[1] = GIF_MARKER_EXT_COMMENT;
++    buf[2] = (wxUint8)len;
++    ok = ok && Write(stream, buf, sizeof(buf));
++    ok = ok && Write(stream, text.data(), len);
++    ok = ok && WriteZero(stream);
++    return ok;
++}
++
++/*static*/
++bool wxGIFHandler::WriteLoop(wxOutputStream* stream)
++{
++    wxUint8 buf[4];
++    const int loopcount = 0; // infinite
++    bool ok = true;
++
++    buf[0] = GIF_MARKER_EXT;
++    buf[1] = GIF_MARKER_EXT_APP;
++    buf[2] = 0x0B;
++    ok = ok && Write(stream, buf, 3);
++    ok = ok && Write(stream, NETSCAPE_LOOP, sizeof(NETSCAPE_LOOP)-1);
++
++    buf[0] = 3;
++    buf[1] = 1;
++    buf[2] = loopcount & 0xFF;
++    buf[3] = loopcount >> 8;
++    ok = ok && Write(stream, buf, 4);
++    ok = ok && WriteZero(stream);
++    return ok;
++}
++
++/*static*/
++bool wxGIFHandler::WritePalette(wxOutputStream* stream, const wxRGB* array, size_t count)
++{
++    wxUint8 buf[3];
++    bool ok = true;
++    for (size_t i = 0; (i < count) && ok; i++)
++    {
++        buf[0] = array[i].red;
++        buf[1] = array[i].green;
++        buf[2] = array[i].blue;
++        ok = Write(stream, buf, sizeof(buf));
++    }
++    return ok;
++}
++
+ #endif  // wxUSE_STREAMS
+ 
++/*static*/
++size_t wxGIFHandler::GetPalette(const wxImage& image, wxRGB* pal, int* mask_index)
++{
++    size_t palcount = 0;
++#if wxUSE_PALETTE
++    if (image.HasPalette())
++    {
++        const wxPalette& palette = image.GetPalette();
++        for (;;)
++        {
++            wxRGB* rgb = pal + palcount;
++            if (palette.GetRGB(palcount, &rgb->red, &rgb->green, &rgb->blue))
++            {
++                palcount++;
++            }
++            else
++            {
++                break;
++            }
++        }
++        if (image.HasMask())
++        {
++            wxRGB mask;
++            
++            mask.red   = image.GetMaskRed();
++            mask.green = image.GetMaskGreen();
++            mask.blue  = image.GetMaskBlue();
++            *mask_index = PaletteFind(mask, pal, palcount);
++            if ( (*mask_index == wxNOT_FOUND) && (palcount < 256))
++            {
++                *mask_index = palcount;
++                pal[palcount++] = mask;
++            }
++        }
++        else
++        {
++            *mask_index = wxNOT_FOUND;
++        }
++    }
++#endif
++    return palcount;
++}
++
++/*static*/
++int wxGIFHandler::PaletteFind(const wxRGB& clr, const wxRGB* array, size_t count)
++{
++    for (size_t i = 0; i < count; i++)
++    {
++        if (   (clr.red   == array[i].red)
++            && (clr.green == array[i].green)
++            && (clr.blue  == array[i].blue))
++        {
++            return (int)i;
++        }
++    }
++    return wxNOT_FOUND;
++}
++
++bool wxGIFHandler::InitHashTable(void)
++{
++    if (m_HashTable == NULL) m_HashTable = new GifHashTableType();
++    bool ok = (NULL != m_HashTable);
++    if (ok)
++    {
++        ClearHashTable();
++    }
++    return ok;
++}
++
++void wxGIFHandler::ClearHashTable(void)
++{
++    int index = HT_SIZE;
++    wxUint32* HTable = m_HashTable->HTable;
++
++    while (--index>=0)
++    {
++        HTable[index] = 0xfffffffful;
++    }
++}
++
++void wxGIFHandler::InsertHashTable(unsigned long Key, int Code)
++{
++    int HKey = KeyItem(Key);
++    wxUint32* HTable = m_HashTable->HTable;
++
++    while (HT_GET_KEY(HTable[HKey]) != 0xFFFFFL)
++    {
++        HKey = (HKey + 1) & HT_KEY_MASK;
++    }
++    HTable[HKey] = HT_PUT_KEY(Key) | HT_PUT_CODE(Code);
++}
++
++
++int wxGIFHandler::ExistsHashTable(unsigned long Key)
++{
++    int HKey = KeyItem(Key);
++    wxUint32* HTable = m_HashTable->HTable, HTKey;
++
++    while ((HTKey = HT_GET_KEY(HTable[HKey])) != 0xFFFFFL)
++    {
++        if (Key == HTKey)
++        {
++            return HT_GET_CODE(HTable[HKey]);
++        }
++        HKey = (HKey + 1) & HT_KEY_MASK;
++    }
++    return -1;
++}
++
++/*static*/
++int wxGIFHandler::KeyItem(unsigned long Item)
++{
++    return ((Item >> 12) ^ Item) & HT_KEY_MASK;
++}
++
++/*static*/
++int wxGIFHandler::BitSize(int n)
++{
++    int i;
++    for (i = 1; i <= 8; i++)
++    {
++        if ((1 << i) >= n)
++        {
++            break;
++        }
++    }
++    return i;
++}
++
+ #endif  // wxUSE_GIF

@@ -1,0 +1,497 @@
+? mypatch.diff
+Index: src/unix/threadpsx.cpp
+===================================================================
+RCS file: /home/wxcvs/wxWindows/src/unix/threadpsx.cpp,v
+retrieving revision 1.39
+diff -c -r1.39 threadpsx.cpp
+*** src/unix/threadpsx.cpp	20 Mar 2000 17:39:18 -0000	1.39
+--- src/unix/threadpsx.cpp	6 Feb 2002 17:54:47 -0000
+***************
+*** 245,274 ****
+      wxConditionInternal();
+      ~wxConditionInternal();
+  
+!     void Wait();
+!     bool WaitWithTimeout(const timespec* ts);
+! 
+!     void Signal();
+!     void Broadcast();
+  
+!     void WaitDone();
+!     bool ShouldWait();
+!     bool HasWaiters();
+  
+  private:
+!     bool m_wasSignaled;             // TRUE if condition was signaled while
+!                                     // nobody waited for it
+!     size_t m_nWaiters;              // TRUE if someone already waits for us
+  
+!     pthread_mutex_t m_mutexProtect; // protects access to vars above
+  
+!     pthread_mutex_t m_mutex;        // the mutex used with the condition
+!     pthread_cond_t m_condition;     // the condition itself
+  };
+  
+  wxConditionInternal::wxConditionInternal()
+  {
+!     m_wasSignaled = FALSE;
+      m_nWaiters = 0;
+  
+      if ( pthread_cond_init(&m_condition, (pthread_condattr_t *)NULL) != 0 )
+--- 245,273 ----
+      wxConditionInternal();
+      ~wxConditionInternal();
+  
+!     // wait with the given timeout or indefinitely if NULL
+!     bool Wait(const timespec* ts = NULL);
+  
+!     void Signal(bool all = FALSE);
+  
+  private:
+!     // the number of Signal() calls we "missed", i.e. which were done while
+!     // there were no threads to wait for them
+!     size_t m_nQueuedSignals;
+  
+!     // counts all pending waiters
+!     size_t m_nWaiters;
+  
+!     // the condition itself
+!     pthread_cond_t m_condition;
+! 
+!     // the mutex used with the conditon: it also protects the counters above
+!     pthread_mutex_t m_mutex;
+  };
+  
+  wxConditionInternal::wxConditionInternal()
+  {
+!     m_nQueuedSignals =
+      m_nWaiters = 0;
+  
+      if ( pthread_cond_init(&m_condition, (pthread_condattr_t *)NULL) != 0 )
+***************
+*** 277,295 ****
+          wxFAIL_MSG( _T("pthread_cond_init() failed") );
+      }
+  
+!     if ( pthread_mutex_init(&m_mutex, (pthread_mutexattr_t *)NULL) != 0 ||
+!          pthread_mutex_init(&m_mutexProtect, NULL) != 0 )
+      {
+          // neither this
+          wxFAIL_MSG( _T("wxCondition: pthread_mutex_init() failed") );
+      }
+- 
+-     // initially the mutex is locked, so no thread can Signal() or Broadcast()
+-     // until another thread starts to Wait()
+-     if ( pthread_mutex_lock(&m_mutex) != 0 )
+-     {
+-         wxFAIL_MSG( _T("wxCondition: pthread_mutex_lock() failed") );
+-     }
+  }
+  
+  wxConditionInternal::~wxConditionInternal()
+--- 276,286 ----
+          wxFAIL_MSG( _T("pthread_cond_init() failed") );
+      }
+  
+!     if ( pthread_mutex_init(&m_mutex, NULL) != 0 )
+      {
+          // neither this
+          wxFAIL_MSG( _T("wxCondition: pthread_mutex_init() failed") );
+      }
+  }
+  
+  wxConditionInternal::~wxConditionInternal()
+***************
+*** 300,437 ****
+                        "threads are probably still waiting on it?)"));
+      }
+  
+!     if ( pthread_mutex_unlock( &m_mutex ) != 0 )
+!     {
+!         wxLogDebug(_T("wxCondition: failed to unlock the mutex"));
+!     }
+! 
+!     if ( pthread_mutex_destroy( &m_mutex ) != 0 ||
+!          pthread_mutex_destroy( &m_mutexProtect ) != 0 )
+      {
+          wxLogDebug(_T("Failed to destroy mutex (it is probably locked)"));
+      }
+  }
+  
+! void wxConditionInternal::WaitDone()
+  {
+!     MutexLock lock(m_mutexProtect);
+! 
+!     m_wasSignaled = FALSE;
+!     m_nWaiters--;
+! }
+  
+! bool wxConditionInternal::ShouldWait()
+! {
+!     MutexLock lock(m_mutexProtect);
+! 
+!     if ( m_wasSignaled )
+      {
+!         // the condition was signaled before we started to wait, reset the
+!         // flag and return
+!         m_wasSignaled = FALSE;
+  
+!         return FALSE;
+      }
+  
+!     // we start to wait for it
+      m_nWaiters++;
+  
+!     return TRUE;
+! }
+  
+! bool wxConditionInternal::HasWaiters()
+! {
+!     MutexLock lock(m_mutexProtect);
+  
+!     if ( m_nWaiters )
+!     {
+!         // someone waits for us, signal the condition normally
+!         return TRUE;
+!     }
+  
+!     // nobody waits for us and may be never will - so just remember that the
+!     // condition was signaled and don't do anything else
+!     m_wasSignaled = TRUE;
+  
+!     return FALSE;
+  }
+  
+! void wxConditionInternal::Wait()
+  {
+!     if ( ShouldWait() )
+      {
+!         if ( pthread_cond_wait( &m_condition, &m_mutex ) != 0 )
+!         {
+!             // not supposed to ever happen
+!             wxFAIL_MSG( _T("pthread_cond_wait() failed") );
+!         }
+      }
+  
+!     WaitDone();
+! }
+  
+! bool wxConditionInternal::WaitWithTimeout(const timespec* ts)
+! {
+!     bool ok;
+  
+!     if ( ShouldWait() )
+      {
+!         switch ( pthread_cond_timedwait( &m_condition, &m_mutex, ts ) )
+!         {
+!             case 0:
+!                 // condition signaled
+!                 ok = TRUE;
+!                 break;
+! 
+!             default:
+!                 wxLogDebug(_T("pthread_cond_timedwait() failed"));
+! 
+!                 // fall through
+! 
+!             case ETIMEDOUT:
+!             case EINTR:
+!                 // wait interrupted or timeout elapsed
+!                 ok = FALSE;
+!         }
+      }
+      else
+      {
+!         // the condition had already been signaled before
+!         ok = TRUE;
+      }
+  
+!     WaitDone();
+! 
+!     return ok;
+! }
+! 
+! void wxConditionInternal::Signal()
+! {
+!     if ( HasWaiters() )
+      {
+!         MutexLock lock(m_mutex);
+! 
+!         if ( pthread_cond_signal( &m_condition ) != 0 )
+!         {
+!             // shouldn't ever happen
+!             wxFAIL_MSG(_T("pthread_cond_signal() failed"));
+!         }
+      }
+  }
+  
+! void wxConditionInternal::Broadcast()
+! {
+!     if ( HasWaiters() )
+!     {
+!         MutexLock lock(m_mutex);
+! 
+!         if ( pthread_cond_broadcast( &m_condition ) != 0 )
+!         {
+!             // shouldn't ever happen
+!             wxFAIL_MSG(_T("pthread_cond_broadcast() failed"));
+!         }
+!     }
+! }
+  
+  wxCondition::wxCondition()
+  {
+--- 291,395 ----
+                        "threads are probably still waiting on it?)"));
+      }
+  
+!     if ( pthread_mutex_destroy( &m_mutex ) != 0 ) 
+      {
+          wxLogDebug(_T("Failed to destroy mutex (it is probably locked)"));
+      }
+  }
+  
+! bool wxConditionInternal::Wait(const timespec* ts)
+  {
+!     MutexLock lock(m_mutex);
+  
+!     if ( m_nQueuedSignals )
+      {
+!         m_nQueuedSignals--;
+! 
+!         wxLogTrace(TRACE_THREADS,
+!                    _T("wxCondition(%08x)::Wait(): Has been signaled before"),
+!                    this);
+  
+!         return TRUE;
+      }
+  
+!     // there are no queued signals, so start really waiting
+      m_nWaiters++;
+  
+!     // calling wait function below unlocks the mutex and Signal() or
+!     // Broadcast() will be able to continue to run now if they were
+!     // blocking for it in the loop locking all mutexes)
+!     wxLogTrace(TRACE_THREADS,
+!                _T("wxCondition(%08x)::Wait(): starting to wait"), this);
+! 
+!     int err = ts ? pthread_cond_timedwait(&m_condition, &m_mutex, ts)
+!                  : pthread_cond_wait(&m_condition, &m_mutex);
+!     switch ( err )
+!     {
+!         case 0:
+!             // condition was signaled
+!             wxLogTrace(TRACE_THREADS,
+!                        _T("wxCondition(%08x)::Wait(): ok"), this);
+!             break;
+  
+!         default:
+!             wxLogDebug(_T("unexpected pthread_cond_[timed]wait() return"));
+!             // fall through
+  
+!         case ETIMEDOUT:
+!         case EINTR:
+!             // The condition has not been signaled, so we have to
+!             // decrement the counter manually
+!             --m_nWaiters;
+  
+!             // wait interrupted or timeout elapsed
+!             wxLogTrace(TRACE_THREADS,
+!                        _T("wxCondition(%08x)::Wait(): timeout/intr"), this);
+!     }
+  
+!     return err == 0;
+  }
+  
+! void wxConditionInternal::Signal(bool all)
+  {
+!     // make sure that only one Signal() or Broadcast() is in progress
+!     MutexLock lock(m_mutex);
+! 
+!     // Are there any waiters?
+!     if ( m_nWaiters == 0 )
+      {
+!         // No, there are not, so don't signal but keep in mind for the next
+!         // Wait()
+!         m_nQueuedSignals++;
+! 
+!         return;
+      }
+  
+!     // now we can finally signal it
+!     wxLogTrace(TRACE_THREADS, _T("wxCondition(%08x)::Signal(): preparing to %s"),
+!                this, all ? _T("broadcast") : _T("signal"));
+  
+!     int err = all ? pthread_cond_broadcast(&m_condition)
+!                   : pthread_cond_signal(&m_condition);
+  
+!     if ( all )
+      {
+!         m_nWaiters = 0;
+      }
+      else
+      {
+!         --m_nWaiters;
+      }
+  
+!     if ( err )
+      {
+!         // shouldn't ever happen
+!         wxFAIL_MSG(_T("pthread_cond_{broadcast|signal}() failed"));
+      }
+  }
+  
+! // ----------------------------------------------------------------------------
+! // wxCondition
+! // ----------------------------------------------------------------------------
+  
+  wxCondition::wxCondition()
+  {
+***************
+*** 445,451 ****
+  
+  void wxCondition::Wait()
+  {
+!     m_internal->Wait();
+  }
+  
+  bool wxCondition::Wait(unsigned long sec, unsigned long nsec)
+--- 403,409 ----
+  
+  void wxCondition::Wait()
+  {
+!     (void)m_internal->Wait();
+  }
+  
+  bool wxCondition::Wait(unsigned long sec, unsigned long nsec)
+***************
+*** 455,461 ****
+      tspec.tv_sec = time(0L) + sec;  // FIXME is time(0) correct here?
+      tspec.tv_nsec = nsec;
+  
+!     return m_internal->WaitWithTimeout(&tspec);
+  }
+  
+  void wxCondition::Signal()
+--- 413,419 ----
+      tspec.tv_sec = time(0L) + sec;  // FIXME is time(0) correct here?
+      tspec.tv_nsec = nsec;
+  
+!     return m_internal->Wait(&tspec);
+  }
+  
+  void wxCondition::Signal()
+***************
+*** 465,471 ****
+  
+  void wxCondition::Broadcast()
+  {
+!     m_internal->Broadcast();
+  }
+  
+  //--------------------------------------------------------------------
+--- 423,429 ----
+  
+  void wxCondition::Broadcast()
+  {
+!     m_internal->Signal(TRUE /* all */);
+  }
+  
+  //--------------------------------------------------------------------
+***************
+*** 531,536 ****
+--- 489,496 ----
+          // sometimes - tell the thread that it should do it
+      void Notify() { m_shouldBroadcast = TRUE; }
+  
++     void SetCondDelete( wxCondition *condDelete ) { m_condDelete = condDelete; }
++ 
+  private:
+      pthread_t     m_threadId;   // id of the thread
+      wxThreadState m_state;      // see wxThreadState enum
+***************
+*** 569,574 ****
+--- 529,541 ----
+  
+      // finally this one is signalled when the thread exits
+      wxCondition m_condEnd;
++ 
++     // this condition is used by detached threads
++     // to notify their exit, an external wxCondition
++     // (created by the waiter) needs to be provided
++     // since the detached thread will destroy itself
++     // upon exit
++     wxCondition *m_condDelete;
+  };
+  
+  // ----------------------------------------------------------------------------
+***************
+*** 699,704 ****
+--- 666,673 ----
+      m_shouldBeJoined = TRUE;
+      m_shouldBroadcast = TRUE;
+      m_isDetached = FALSE;
++ 
++     m_condDelete = NULL;
+  }
+  
+  wxThreadInternal::~wxThreadInternal()
+***************
+*** 731,737 ****
+  
+      // wait until the thread terminates (we're blocking in _another_ thread,
+      // of course)
+!     m_condEnd.Wait();
+  
+      wxLogTrace(TRACE_THREADS, _T("Finished waiting for thread %ld."), id);
+  
+--- 700,711 ----
+  
+      // wait until the thread terminates (we're blocking in _another_ thread,
+      // of course)
+!     if ( m_condDelete != NULL ) {
+!         m_condDelete->Wait();
+!     }
+!     else {
+!         m_condEnd.Wait();
+!     }
+  
+      wxLogTrace(TRACE_THREADS, _T("Finished waiting for thread %ld."), id);
+  
+***************
+*** 777,782 ****
+--- 751,760 ----
+                     GetId());
+  
+          m_condEnd.Broadcast();
++ 
++         if ( m_condDelete != NULL ) {
++             m_condDelete->Signal();
++         }
+      }
+  }
+  
+***************
+*** 1173,1178 ****
+--- 1151,1158 ----
+      wxCHECK_MSG( This() != this, wxTHREAD_MISC_ERROR,
+                   _T("a thread can't delete itself") );
+  
++     wxCondition condDelete;
++ 
+      m_critsect.Enter();
+      wxThreadState state = m_internal->GetState();
+  
+***************
+*** 1185,1190 ****
+--- 1165,1172 ----
+          // because usually nobody waits for them - but here we do, so ask the
+          // thread to notify us
+          m_internal->Notify();
++ 
++         m_internal->SetCondDelete( &condDelete );
+      }
+  
+      m_critsect.Leave();
+
+ 	  	 

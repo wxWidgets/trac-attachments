@@ -1,0 +1,522 @@
+Index: include/wx/app.h
+===================================================================
+--- include/wx/app.h	(révision 73824)
++++ include/wx/app.h	(copie de travail)
+@@ -24,6 +24,7 @@
+ #include "wx/init.h"        // we must declare wxEntry()
+ #include "wx/intl.h"        // for wxLayoutDirection
+ #include "wx/log.h"         // for wxDISABLE_DEBUG_LOGGING_IN_RELEASE_BUILD()
++#include "wx/list.h"        // for the list of objects to be deleted
+ 
+ class WXDLLIMPEXP_FWD_BASE wxAppConsole;
+ class WXDLLIMPEXP_FWD_BASE wxAppTraits;
+@@ -41,6 +42,9 @@
+     wxDISABLE_ASSERTS_IN_RELEASE_BUILD(); \
+     wxDISABLE_DEBUG_LOGGING_IN_RELEASE_BUILD()
+ 
++    
++WX_DECLARE_LIST(wxObject, wxObjectsList);    
++    
+ // ----------------------------------------------------------------------------
+ // typedefs
+ // ----------------------------------------------------------------------------
+@@ -58,14 +62,7 @@
+     wxPRINT_POSTSCRIPT = 2
+ };
+ 
+-// ----------------------------------------------------------------------------
+-// global variables
+-// ----------------------------------------------------------------------------
+ 
+-// use of this list is strongly deprecated, use wxApp ScheduleForDestruction()
+-// and IsScheduledForDestruction()  methods instead of this list directly, it
+-// is here for compatibility purposes only
+-extern WXDLLIMPEXP_DATA_BASE(wxList) wxPendingDelete;
+ 
+ // ----------------------------------------------------------------------------
+ // wxAppConsoleBase: wxApp for non-GUI applications
+@@ -352,6 +349,13 @@
+ 
+     // return true if the object is scheduled for destruction
+     bool IsScheduledForDestruction(wxObject *object) const;
++    
++    // remove an object from the destruction list
++    // do nothing if it was not in it
++    void UnscheduleDestruction(wxObject *object);
++    
++    // remove from the destruction list the first object that matches a condition 
++    wxObject *UnscheduleDestructionIf(bool (*sel)(wxObject *object, void *user_data), void *user_data = NULL);
+ 
+ 
+     // wxEventLoop-related methods
+@@ -444,10 +448,13 @@
+ #endif
+ 
+ protected:
+-    // delete all objects in wxPendingDelete list
++    // delete all objects in pending to be deleted
+     //
+     // called from ProcessPendingEvents()
+     void DeletePendingObjects();
++    
++    // the list of all objects pending to be deleted
++    wxObjectsList m_pendingDelete;
+ 
+     // the function which creates the traits object when GetTraits() needs it
+     // for the first time
+Index: include/wx/tglbtn.h
+===================================================================
+--- include/wx/tglbtn.h	(révision 73824)
++++ include/wx/tglbtn.h	(copie de travail)
+@@ -45,7 +45,7 @@
+             return;
+ 
+         wxWindow *tlw = wxGetTopLevelParent( this );
+-        if (tlw && wxPendingDelete.Member( tlw ))
++        if (tlw && wxTheApp->IsScheduledForDestruction( tlw ))
+            return;
+ 
+         wxUpdateUIEvent event( GetId() );
+Index: include/wx/window.h
+===================================================================
+--- include/wx/window.h	(révision 73824)
++++ include/wx/window.h	(copie de travail)
+@@ -150,9 +150,6 @@
+ 
+ extern WXDLLIMPEXP_DATA_CORE(wxWindowList) wxTopLevelWindows;
+ 
+-// declared here for compatibility only, main declaration is in wx/app.h
+-extern WXDLLIMPEXP_DATA_BASE(wxList) wxPendingDelete;
+-
+ // ----------------------------------------------------------------------------
+ // wxWindowBase is the base class for all GUI controls/widgets, this is the public
+ // interface of this class.
+Index: src/aui/auibook.cpp
+===================================================================
+--- src/aui/auibook.cpp	(révision 73824)
++++ src/aui/auibook.cpp	(copie de travail)
+@@ -1994,8 +1994,7 @@
+     {
+         // delete the child frame with pending delete, as is
+         // customary with frame windows
+-        if (!wxPendingDelete.Member(wnd))
+-            wxPendingDelete.Append(wnd);
++        wxTheApp->ScheduleForDestruction(wnd);
+     }
+     else
+ #endif
+@@ -2935,8 +2934,7 @@
+ 
+             // use pending delete because sometimes during
+             // window closing, refreshs are pending
+-            if (!wxPendingDelete.Member(tab_frame->m_tabs))
+-                wxPendingDelete.Append(tab_frame->m_tabs);
++            wxTheApp->ScheduleForDestruction(tab_frame->m_tabs);
+ 
+             tab_frame->m_tabs = NULL;
+ 
+Index: src/aui/framemanager.cpp
+===================================================================
+--- src/aui/framemanager.cpp	(révision 73824)
++++ src/aui/framemanager.cpp	(copie de travail)
+@@ -3840,7 +3840,7 @@
+ void wxAuiManager::OnRender(wxAuiManagerEvent& evt)
+ {
+     // if the frame is about to be deleted, don't bother
+-    if (!m_frame || wxPendingDelete.Member(m_frame))
++    if (!m_frame || wxTheApp->IsScheduledForDestruction(m_frame))
+         return;
+ 
+     wxDC* dc = evt.GetDC();
+Index: src/common/appbase.cpp
+===================================================================
+--- src/common/appbase.cpp	(révision 73824)
++++ src/common/appbase.cpp	(copie de travail)
+@@ -119,7 +119,9 @@
+ 
+ wxSocketManager *wxAppTraitsBase::ms_manager = NULL;
+ 
+-WXDLLIMPEXP_DATA_BASE(wxList) wxPendingDelete;
++// a list of objects 
++#include <wx/listimpl.cpp>
++WX_DEFINE_LIST(wxObjectsList);
+ 
+ // ----------------------------------------------------------------------------
+ // wxEventLoopPtr
+@@ -539,7 +541,7 @@
+ 
+ bool wxAppConsoleBase::IsScheduledForDestruction(wxObject *object) const
+ {
+-    return wxPendingDelete.Member(object);
++    return m_pendingDelete.Member(object);
+ }
+ 
+ void wxAppConsoleBase::ScheduleForDestruction(wxObject *object)
+@@ -552,13 +554,36 @@
+     }
+     //else: we either already have or will soon start an event loop
+ 
+-    if ( !wxPendingDelete.Member(object) )
+-        wxPendingDelete.Append(object);
++    if ( !m_pendingDelete.Member(object) )
++        m_pendingDelete.Append(object);
+ }
+ 
++void wxAppConsoleBase::UnscheduleDestruction(wxObject *object)
++{
++    m_pendingDelete.remove(object);
++}
++
++wxObject *wxAppConsoleBase::UnscheduleDestructionIf(bool (*sel)(wxObject *object, void *user_data), void *user_data)
++{
++    for(wxObjectsList::iterator i = m_pendingDelete.begin(); i != m_pendingDelete.end(); i++) {
++    
++        if (sel(*i, user_data)) {
++        
++            wxObject *obj = *i;
++            m_pendingDelete.erase(i);
++            return obj;
++        
++        }
++    
++    }
++
++    return NULL;
++}
++
++
+ void wxAppConsoleBase::DeletePendingObjects()
+ {
+-    wxList::compatibility_iterator node = wxPendingDelete.GetFirst();
++    wxObjectsList::compatibility_iterator node = m_pendingDelete.GetFirst();
+     while (node)
+     {
+         wxObject *obj = node->GetData();
+@@ -566,17 +591,20 @@
+         // remove it from the list first so that if we get back here somehow
+         // during the object deletion (e.g. wxYield called from its dtor) we
+         // wouldn't try to delete it the second time
+-        if ( wxPendingDelete.Member(obj) )
+-            wxPendingDelete.Erase(node);
++        if ( m_pendingDelete.Member(obj) )
++            m_pendingDelete.Erase(node);
+ 
+         delete obj;
+ 
+         // Deleting one object may have deleted other pending
+         // objects, so start from beginning of list again.
+-        node = wxPendingDelete.GetFirst();
++        node = m_pendingDelete.GetFirst();
+     }
+ }
+ 
++
++
++
+ // ----------------------------------------------------------------------------
+ // exception handling
+ // ----------------------------------------------------------------------------
+Index: src/common/appcmn.cpp
+===================================================================
+--- src/common/appcmn.cpp	(révision 73824)
++++ src/common/appcmn.cpp	(copie de travail)
+@@ -352,7 +352,7 @@
+ 
+         // Don't send idle events to the windows that are about to be destroyed
+         // anyhow, this is wasteful and unexpected.
+-        if ( !wxPendingDelete.Member(win) && win->SendIdleEvents(event) )
++        if ( !IsScheduledForDestruction(win) && win->SendIdleEvents(event) )
+             needMore = true;
+         node = node->GetNext();
+     }
+Index: src/common/datavcmn.cpp
+===================================================================
+--- src/common/datavcmn.cpp	(révision 73824)
++++ src/common/datavcmn.cpp	(copie de travail)
+@@ -704,8 +704,8 @@
+     // some pending messages for it.
+     m_editorCtrl->Hide();
+ 
+-    wxPendingDelete.Append(handler);
+-    wxPendingDelete.Append(m_editorCtrl);
++    wxTheApp->ScheduleForDestruction(handler);
++    wxTheApp->ScheduleForDestruction(m_editorCtrl);
+ 
+     // Ensure that DestroyEditControl() is not called again for this control.
+     m_editorCtrl.Release();
+Index: src/common/dlgcmn.cpp
+===================================================================
+--- src/common/dlgcmn.cpp	(révision 73824)
++++ src/common/dlgcmn.cpp	(copie de travail)
+@@ -148,8 +148,7 @@
+     if ( !parent )
+         return NULL;
+ 
+-    extern WXDLLIMPEXP_DATA_BASE(wxList) wxPendingDelete;
+-    if ( wxPendingDelete.Member(parent) || parent->IsBeingDeleted() )
++    if ( wxTheApp->IsScheduledForDestruction(parent) || parent->IsBeingDeleted() )
+     {
+         // this window is being deleted and we shouldn't create any children
+         // under it
+Index: src/common/popupcmn.cpp
+===================================================================
+--- src/common/popupcmn.cpp	(révision 73824)
++++ src/common/popupcmn.cpp	(copie de travail)
+@@ -412,10 +412,10 @@
+     // are still being processed for it, so delay its real destruction until
+     // the next idle time when we're sure that it's safe to really destroy it.
+ 
+-    wxCHECK_MSG( !wxPendingDelete.Member(this), false,
++    wxCHECK_MSG( !wxTheApp->IsScheduledForDestruction(this), false,
+                  wxS("Shouldn't destroy the popup twice.") );
+ 
+-    wxPendingDelete.Append(this);
++    wxTheApp->ScheduleForDestruction(this);
+ 
+     return true;
+ }
+Index: src/common/taskbarcmn.cpp
+===================================================================
+--- src/common/taskbarcmn.cpp	(révision 73824)
++++ src/common/taskbarcmn.cpp	(copie de travail)
+@@ -26,8 +26,6 @@
+     #include "wx/menu.h"
+ #endif
+ 
+-extern WXDLLIMPEXP_DATA_CORE(wxList) wxPendingDelete;
+-
+ // DLL options compatibility check:
+ WX_CHECK_BUILD_OPTIONS("wxAdvanced")
+ 
+@@ -58,7 +56,7 @@
+ 
+ void wxTaskBarIconBase::Destroy()
+ {
+-    wxPendingDelete.Append(this);
++    wxTheApp->ScheduleForDestruction(this);
+ }
+ 
+ #endif // wxUSE_TASKBARICON
+Index: src/common/toplvcmn.cpp
+===================================================================
+--- src/common/toplvcmn.cpp	(révision 73824)
++++ src/common/toplvcmn.cpp	(copie de travail)
+@@ -57,6 +57,13 @@
+     m_isShown = false;
+ }
+ 
++static bool parent_window_is(wxObject *object, void *parent)
++{
++    wxWindow *win = wxDynamicCast(object, wxWindow);
++    return win && win->GetParent() == static_cast<wxWindow *>(parent);
++}
++
++
+ wxTopLevelWindowBase::~wxTopLevelWindowBase()
+ {
+     // don't let wxTheApp keep any stale pointers to us
+@@ -72,27 +79,10 @@
+     // on the stack) immediately afterwards and before the child TLW was really
+     // destroyed -- not destroying it now would leave it alive with a dangling
+     // parent pointer and result in a crash later
+-    for ( wxObjectList::iterator i = wxPendingDelete.begin();
+-          i != wxPendingDelete.end();
+-          )
+-    {
+-        wxWindow * const win = wxDynamicCast(*i, wxWindow);
+-        if ( win && win->GetParent() == this )
+-        {
+-            wxPendingDelete.erase(i);
++    wxObject *object;
++    while( (object = wxTheApp->UnscheduleDestructionIf(parent_window_is, this)) != NULL )
++        delete object;
+ 
+-            delete win;
+-
+-            // deleting it invalidated the list (and not only one node because
+-            // it could have resulted in deletion of other objects to)
+-            i = wxPendingDelete.begin();
+-        }
+-        else
+-        {
+-            ++i;
+-        }
+-    }
+-
+     if ( IsLastBeforeExit() )
+     {
+         // no other (important) windows left, quit the app
+@@ -104,14 +94,13 @@
+ {
+     // delayed destruction: the frame will be deleted during the next idle
+     // loop iteration
+-    if ( !wxPendingDelete.Member(this) )
+-        wxPendingDelete.Append(this);
++    wxTheApp->ScheduleForDestruction(this);
+ 
+     // normally we want to hide the window immediately so that it doesn't get
+     // stuck on the screen while it's being destroyed, however we shouldn't
+     // hide the last visible window as then we might not get any idle events
+     // any more as no events will be sent to the hidden window and without idle
+-    // events we won't prune wxPendingDelete list and the application won't
++    // events we won't prune the "scheduled for destruction" list and the application won't
+     // terminate
+     for ( wxWindowList::const_iterator i = wxTopLevelWindows.begin(),
+                                      end = wxTopLevelWindows.end();
+@@ -158,7 +147,7 @@
+     {
+         // don't close twice the windows which are already marked for deletion
+         wxTopLevelWindow * const win = static_cast<wxTopLevelWindow *>(*i);
+-        if ( !wxPendingDelete.Member(win) && !win->Close() )
++        if ( !wxTheApp->IsScheduledForDestruction(win) && !win->Close() )
+         {
+             // one of the windows refused to close, don't exit
+             //
+Index: src/common/wincmn.cpp
+===================================================================
+--- src/common/wincmn.cpp	(révision 73824)
++++ src/common/wincmn.cpp	(copie de travail)
+@@ -455,7 +455,7 @@
+ 
+     // Just in case the window has been Closed, but we're then deleting
+     // immediately: don't leave dangling pointers.
+-    wxPendingDelete.DeleteObject(this);
++    wxTheApp->UnscheduleDestruction(this);
+ 
+     // Just in case we've loaded a top-level window via LoadNativeDialog but
+     // we weren't a dialog class
+Index: src/generic/listctrl.cpp
+===================================================================
+--- src/generic/listctrl.cpp	(révision 73824)
++++ src/generic/listctrl.cpp	(copie de travail)
+@@ -1448,7 +1448,7 @@
+     m_text->RemoveEventHandler(this);
+     m_owner->ResetTextControl( m_text );
+ 
+-    wxPendingDelete.Append( this );
++    wxTheApp->ScheduleForDestruction( this );
+ 
+     if (setfocus)
+         m_owner->SetFocus();
+Index: src/generic/treectlg.cpp
+===================================================================
+--- src/generic/treectlg.cpp	(révision 73824)
++++ src/generic/treectlg.cpp	(copie de travail)
+@@ -509,7 +509,7 @@
+ {
+     m_owner->ResetTextControl();
+ 
+-    wxPendingDelete.Append(this);
++    wxTheApp->ScheduleForDestruction(this);
+ 
+     if (setfocus)
+         m_owner->SetFocus();
+Index: src/gtk/mdi.cpp
+===================================================================
+--- src/gtk/mdi.cpp	(révision 73824)
++++ src/gtk/mdi.cpp	(copie de travail)
+@@ -224,7 +224,7 @@
+     wxWindowList::compatibility_iterator node = m_clientWindow->GetChildren().GetFirst();
+     while (node)
+     {
+-        if ( wxPendingDelete.Member(node->GetData()) )
++        if ( wxTheApp->IsScheduledForDestruction(node->GetData()) )
+             return NULL;
+ 
+         wxMDIChildFrame *child_frame = wxDynamicCast( node->GetData(), wxMDIChildFrame );
+Index: src/motif/dialog.cpp
+===================================================================
+--- src/motif/dialog.cpp	(révision 73824)
++++ src/motif/dialog.cpp	(copie de travail)
+@@ -336,8 +336,7 @@
+ // Destroy the window (delayed, if a managed window)
+ bool wxDialog::Destroy()
+ {
+-    if (!wxPendingDelete.Member(this))
+-        wxPendingDelete.Append(this);
++    wxTheApp->ScheduleForDestruction(this);
+     return true;
+ }
+ 
+Index: src/osx/carbon/listctrl_mac.cpp
+===================================================================
+--- src/osx/carbon/listctrl_mac.cpp	(révision 73824)
++++ src/osx/carbon/listctrl_mac.cpp	(copie de travail)
+@@ -358,7 +358,7 @@
+         m_text->RemoveEventHandler(this);
+         m_owner->FinishEditing(m_text);
+ 
+-        wxPendingDelete.Append( this );
++        wxTheApp->ScheduleForDestruction( this );
+     }
+ }
+ 
+Index: src/osx/toplevel_osx.cpp
+===================================================================
+--- src/osx/toplevel_osx.cpp	(révision 73824)
++++ src/osx/toplevel_osx.cpp	(copie de travail)
+@@ -108,8 +108,7 @@
+ #endif
+     // delayed destruction: the tlw will be deleted during the next idle
+     // loop iteration
+-    if ( !wxPendingDelete.Member(this) )
+-        wxPendingDelete.Append(this);
++    wxTheApp->ScheduleForDestruction(this);
+     
+     Hide();
+     return true;
+Index: src/propgrid/propgrid.cpp
+===================================================================
+--- src/propgrid/propgrid.cpp	(révision 73824)
++++ src/propgrid/propgrid.cpp	(copie de travail)
+@@ -3944,7 +3944,7 @@
+     wnd->Hide();
+ 
+     // Do not free editors immediately (for sake of processing events)
+-    wxPendingDelete.Append(wnd);
++    wxTheApp->ScheduleForDestruction(wnd);
+ }
+ 
+ void wxPropertyGrid::FreeEditors()
+@@ -3960,7 +3960,7 @@
+     {
+         wxEvtHandler* handler = m_wndEditor2->PopEventHandler(false);
+         m_wndEditor2->Hide();
+-        wxPendingDelete.Append( handler );
++        wxTheApp->ScheduleForDestruction( handler );
+         DestroyEditorWnd(m_wndEditor2);
+         m_wndEditor2 = NULL;
+     }
+@@ -3969,7 +3969,7 @@
+     {
+         wxEvtHandler* handler = m_wndEditor->PopEventHandler(false);
+         m_wndEditor->Hide();
+-        wxPendingDelete.Append( handler );
++        wxTheApp->ScheduleForDestruction( handler );
+         DestroyEditorWnd(m_wndEditor);
+         m_wndEditor = NULL;
+     }
+Index: src/stc/PlatWX.cpp
+===================================================================
+--- src/stc/PlatWX.cpp	(révision 73824)
++++ src/stc/PlatWX.cpp	(copie de travail)
+@@ -871,8 +871,7 @@
+ 
+ 
+     bool Destroy() {
+-        if ( !wxPendingDelete.Member(this) )
+-            wxPendingDelete.Append(this);
++        wxTheApp->ScheduleForDestruction(this);
+         return true;
+     }
+ 
+@@ -991,8 +990,7 @@
+         r.SetHeight(r.GetHeight()+1);
+         p->Refresh(false, &r);
+ #endif
+-        if ( !wxPendingDelete.Member(this) )
+-            wxPendingDelete.Append(this);
++        wxTheApp->ScheduleForDestruction(this);
+         return true;
+     }
+ 

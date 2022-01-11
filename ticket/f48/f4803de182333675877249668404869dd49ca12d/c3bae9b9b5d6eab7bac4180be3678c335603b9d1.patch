@@ -1,0 +1,162 @@
+diff -Naur wxWidgets-2.8.7\include\wx\msw\dib.h wxWidgets-2.8.7-patch\include\wx\msw\dib.h
+--- wxWidgets-2.8.7\include\wx\msw\dib.h	Wed Nov 21 13:42:47 2007
++++ wxWidgets-2.8.7-patch\include\wx\msw\dib.h	Mon Feb 25 16:51:05 2008
+@@ -140,13 +140,16 @@
+ #if wxUSE_IMAGE
+     // create a DIB from the given image, the DIB will be either 24 or 32 (if
+     // the image has alpha channel) bpp
+-    wxDIB(const wxImage& image) { Init(); (void)Create(image); }
++    // RGB values will be premultiplied with alpha for use with ::AlphaBlend,
++    // but sometimes, it may be usefull to have DIB without this conversion
++    wxDIB(const wxImage& image, bool preMultiplyAlpha = true) { Init(); (void)Create(image, preMultiplyAlpha); }
+ 
+     // same as the above ctor but with the return code
+-    bool Create(const wxImage& image);
++    bool Create(const wxImage& image, bool preMultiplyAlpha = true);
+ 
+     // create wxImage having the same data as this DIB
+-    wxImage ConvertToImage() const;
++    // Alpha premultiplication will be undone except if requested otherwise
++    wxImage ConvertToImage(bool undoPreMultipliedAlpha = true) const;
+ #endif // wxUSE_IMAGE
+ 
+ 
+diff -Naur wxWidgets-2.8.7\src\msw\dib.cpp wxWidgets-2.8.7-patch\src\msw\dib.cpp
+--- wxWidgets-2.8.7\src\msw\dib.cpp	Wed Nov 21 13:42:46 2007
++++ wxWidgets-2.8.7-patch\src\msw\dib.cpp	Mon Feb 25 16:51:11 2008
+@@ -670,7 +670,7 @@
+ 
+ #if wxUSE_IMAGE
+ 
+-bool wxDIB::Create(const wxImage& image)
++bool wxDIB::Create(const wxImage& image, bool preMultiplyAlpha)
+ {
+     wxCHECK_MSG( image.Ok(), false, _T("invalid wxImage in wxDIB ctor") );
+ 
+@@ -704,9 +704,20 @@
+                 // RGB order is reversed, and we need to premultiply
+                 // all channels by alpha value for use with ::AlphaBlend.
+                 const unsigned char a = *alpha++;
+-                *dst++ = (unsigned char)((src[2] * a + 127) / 255);
+-                *dst++ = (unsigned char)((src[1] * a + 127) / 255);
+-                *dst++ = (unsigned char)((src[0] * a + 127) / 255);
++                if ( preMultiplyAlpha )
++                {
++                    *dst++ = (unsigned char)((src[2] * a + 127) / 255);
++                    *dst++ = (unsigned char)((src[1] * a + 127) / 255);
++                    *dst++ = (unsigned char)((src[0] * a + 127) / 255);
++                }
++                // In some cases, it may be usefull to have DIB without
++                // premultiplied alpha (e.g. for use with ::ImageList_Add)
++                else
++                {
++                    *dst++ = src[2];
++                    *dst++ = src[1];
++                    *dst++ = src[0];
++                }
+                 *dst++ = a;
+                 src += 3;
+             }
+@@ -735,7 +746,7 @@
+     return true;
+ }
+ 
+-wxImage wxDIB::ConvertToImage() const
++wxImage wxDIB::ConvertToImage(bool undoPreMultipliedAlpha) const
+ {
+     wxCHECK_MSG( IsOk(), wxNullImage,
+                     wxT("can't convert invalid DIB to wxImage") );
+@@ -783,7 +794,7 @@
+                     // premultiplication done in Create() above
+                     const unsigned char a = *src;
+                     *alpha++ = a;
+-                    if ( a > 0 )
++                    if ( undoPreMultipliedAlpha && a > 0 )
+                     {
+                         dst[0] = (dst[0] * 255) / a;
+                         dst[1] = (dst[1] * 255) / a;
+diff -Naur wxWidgets-2.8.7\src\msw\imaglist.cpp wxWidgets-2.8.7-patch\src\msw\imaglist.cpp
+--- wxWidgets-2.8.7\src\msw\imaglist.cpp	Wed Nov 21 13:42:46 2007
++++ wxWidgets-2.8.7-patch\src\msw\imaglist.cpp	Mon Feb 25 16:51:15 2008
+@@ -39,6 +39,7 @@
+ 
+ #include "wx/imaglist.h"
+ #include "wx/msw/private.h"
++#include "wx/msw/dib.h"
+ 
+ // ----------------------------------------------------------------------------
+ // wxWin macros
+@@ -139,9 +140,13 @@
+ // 'bitmap' and 'mask'.
+ int wxImageList::Add(const wxBitmap& bitmap, const wxBitmap& mask)
+ {
++    HBITMAP hbmp = bitmap.HasAlpha() 
++        ? wxDIB(bitmap.ConvertToImage(), false).Detach()
++        : GetHbitmapOf(bitmap);
++
+     HBITMAP hbmpMask = GetMaskForImage(bitmap, mask);
+ 
+-    int index = ImageList_Add(GetHImageList(), GetHbitmapOf(bitmap), hbmpMask);
++    int index = ImageList_Add(GetHImageList(), hbmp, hbmpMask);
+     if ( index == -1 )
+     {
+         wxLogError(_("Couldn't add an image to the image list."));
+@@ -149,6 +154,9 @@
+ 
+     ::DeleteObject(hbmpMask);
+ 
++    if ( bitmap.HasAlpha() )
++        ::DeleteObject(hbmp);
++
+     return index;
+ }
+ 
+@@ -157,13 +165,20 @@
+ // 'bitmap'.
+ int wxImageList::Add(const wxBitmap& bitmap, const wxColour& maskColour)
+ {
++    HBITMAP hbmp = bitmap.HasAlpha() 
++        ? wxDIB(bitmap.ConvertToImage(), false).Detach()
++        : GetHbitmapOf(bitmap);
++
+     int index = ImageList_AddMasked(GetHImageList(),
+-                                    GetHbitmapOf(bitmap),
++                                    hbmp,
+                                     wxColourToRGB(maskColour));
+     if ( index == -1 )
+     {
+         wxLogError(_("Couldn't add an image to the image list."));
+     }
++    
++    if ( bitmap.HasAlpha() )
++        ::DeleteObject(hbmp);
+ 
+     return index;
+ }
+@@ -186,16 +201,22 @@
+ bool wxImageList::Replace(int index,
+                           const wxBitmap& bitmap, const wxBitmap& mask)
+ {
++    HBITMAP hbmp = bitmap.HasAlpha() 
++        ? wxDIB(bitmap.ConvertToImage(), false).Detach()
++        : GetHbitmapOf(bitmap);
++
+     HBITMAP hbmpMask = GetMaskForImage(bitmap, mask);
+ 
+-    bool ok = ImageList_Replace(GetHImageList(), index,
+-                                GetHbitmapOf(bitmap), hbmpMask) != 0;
++    bool ok = ImageList_Replace(GetHImageList(), index, hbmp, hbmpMask) != 0;
+     if ( !ok )
+     {
+         wxLogLastError(wxT("ImageList_Replace()"));
+     }
+ 
+     ::DeleteObject(hbmpMask);
++    
++    if ( bitmap.HasAlpha() )
++        ::DeleteObject(hbmp);
+ 
+     return ok;
+ }
+
+ 	  	 

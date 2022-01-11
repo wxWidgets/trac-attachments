@@ -1,0 +1,333 @@
+Index: include/wx/event.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/event.h,v
+retrieving revision 1.158.2.1
+diff -b -u -2 -r1.158.2.1 event.h
+--- include/wx/event.h	2002/10/30 19:55:06	1.158.2.1
++++ include/wx/event.h	2003/02/13 20:59:22
+@@ -1986,4 +1986,5 @@
+ class WXDLLEXPORT wxEvtHandler : public wxObject
+ {
++    friend class wxChainEvtHandler;
+ public:
+     wxEvtHandler();
+@@ -1995,4 +1996,5 @@
+     void SetPreviousHandler(wxEvtHandler *handler) { m_previousHandler = handler; }
+ 
++
+     void SetEvtHandlerEnabled(bool enabled) { m_enabled = enabled; }
+     bool GetEvtHandlerEnabled() const { return m_enabled; }
+@@ -2125,8 +2127,67 @@
+     virtual void *DoGetClientData() const;
+ 
++    //! hooks for wxRefCountedEvtHandler
++    virtual void IncRef() {};
++    virtual void DecRef() {};
++
+ private:
+     DECLARE_NO_COPY_CLASS(wxEvtHandler)
+     DECLARE_DYNAMIC_CLASS(wxEvtHandler)
+ };
++
++// ----------------------------------------------------------------------------
++// wxChainEvtHandler: the base class for wxWindow class
++// A handler that manages list of event handlers.
++// ----------------------------------------------------------------------------
++
++class wxChainEvtHandler : public wxEvtHandler
++{
++    public:
++        wxChainEvtHandler() {};
++        virtual ~wxChainEvtHandler();
++        /**
++            process m_handlers list if wxEvtHandler::ProcessEvent returns FALSE
++            @return TRUE if event was processed, FALSE otherwise
++        */
++        virtual bool ProcessEvent(wxEvent& p_event);
++
++        /**
++            push/pop event handler: allows to chain a custom event handler to
++            already existing ones
++        */
++        void PushEventHandler( wxEvtHandler *handler );
++        /**
++            @warning this method is dangerous for public use.
++        */
++        wxEvtHandler *PopEventHandler( bool deleteHandler = FALSE );
++        /**
++            find the given handler in the event handler list and remove (but
++            not delete) it from the event handler list, return TRUE if it was
++            found and FALSE otherwise (this also results in an assert failure so
++            this function should only be called when the handler is supposed to
++            be there)
++        */
++        bool RemoveEventHandler(wxEvtHandler *handler);
++    protected:
++        //! List of plugged event handlers
++        wxList m_handlers;
++};
++
++// ----------------------------------------------------------------------------
++// wxRefCountedEvtHandler: base class for 'plug and forget' pluggable event handlers
++// ----------------------------------------------------------------------------
++
++class wxRefCountedEvtHandler : public wxEvtHandler
++{
++    public:
++        wxRefCountedEvtHandler() { mCounter = 0;};
++        virtual ~wxRefCountedEvtHandler() {};
++    protected:
++        virtual void IncRef() { mCounter++;};
++        virtual void DecRef() { mCounter--; if (mCounter == 0) delete this; };
++    private:
++        int mCounter;
++};
++
+ 
+ typedef void (wxEvtHandler::*wxEventFunction)(wxEvent&);
+Index: include/wx/window.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/window.h,v
+retrieving revision 1.94.2.4
+diff -b -u -2 -r1.94.2.4 window.h
+--- include/wx/window.h	2002/11/22 21:37:10	1.94.2.4
++++ include/wx/window.h	2003/02/13 20:59:31
+@@ -90,5 +90,5 @@
+ // ----------------------------------------------------------------------------
+ 
+-class WXDLLEXPORT wxWindowBase : public wxEvtHandler
++class WXDLLEXPORT wxWindowBase : public wxChainEvtHandler
+ {
+ public:
+@@ -472,21 +472,10 @@
+ 
+         // get the current event handler
+-    wxEvtHandler *GetEventHandler() const { return m_eventHandler; }
++    wxEvtHandler *GetEventHandler() const;
+ 
+         // replace the event handler (allows to completely subclass the
+         // window)
+-    void SetEventHandler( wxEvtHandler *handler ) { m_eventHandler = handler; }
++    void SetEventHandler( wxEvtHandler *handler );
+ 
+-        // push/pop event handler: allows to chain a custom event handler to
+-        // alreasy existing ones
+-    void PushEventHandler( wxEvtHandler *handler );
+-    wxEvtHandler *PopEventHandler( bool deleteHandler = FALSE );
+-
+-        // find the given handler in the event handler chain and remove (but
+-        // not delete) it from the event handler chain, return TRUE if it was
+-        // found and FALSE otherwise (this also results in an assert failure so
+-        // this function should only be called when the handler is supposed to
+-        // be there)
+-    bool RemoveEventHandler(wxEvtHandler *handler);
+ 
+     // validators
+@@ -884,8 +873,4 @@
+                          m_maxWidth,
+                          m_maxHeight;
+-
+-    // event handler for this window: usually is just 'this' but may be
+-    // changed with SetEventHandler()
+-    wxEvtHandler        *m_eventHandler;
+ 
+ #if wxUSE_VALIDATORS
+Index: src/common/event.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/event.cpp,v
+retrieving revision 1.110.2.1
+diff -b -u -2 -r1.110.2.1 event.cpp
+--- src/common/event.cpp	2002/10/30 19:55:38	1.110.2.1
++++ src/common/event.cpp	2003/02/13 20:59:54
+@@ -566,5 +566,4 @@
+     m_rawCode = evt.m_rawCode;
+     m_rawFlags = evt.m_rawFlags;
+-        
+ #if wxUSE_UNICODE
+     m_uniChar = evt.m_uniChar;
+@@ -1137,2 +1136,75 @@
+ 
+ #endif // wxUSE_GUI
++
++wxChainEvtHandler::~wxChainEvtHandler()
++{
++    wxNode* node = m_handlers.GetFirst();
++    while(node != NULL)
++    {
++        wxEvtHandler* handler = (wxEvtHandler *)node -> GetData();
++        wxASSERT_MSG(handler != NULL,_T("Got node with no data"));
++        handler -> DecRef(); //this could delete handler
++        node = node -> GetNext();
++    };
++};
++
++/**
++    Try to process event by parent. If it returs false try our event handler list.
++*/
++bool
++wxChainEvtHandler::ProcessEvent(wxEvent& p_event)
++{
++    if (!wxEvtHandler::ProcessEvent(p_event))
++    {
++        for(wxNode* node = m_handlers.GetFirst() -> GetNext(); node != NULL; node = node -> GetNext())
++        {
++            wxEvtHandler* handler = (wxEvtHandler *)node -> GetData();
++            wxASSERT_MSG(handler != NULL,_T("Got node with no data"));
++            if (handler -> ProcessEvent(p_event))
++                return TRUE;
++        };
++    };
++    return FALSE;
++};
++
++void
++wxChainEvtHandler::PushEventHandler( wxEvtHandler *handler )
++{
++    m_handlers.Append(handler);
++    handler -> IncRef();
++};
++
++/**
++    This is safe with RefCountedEventHandler too.
++*/
++wxEvtHandler *
++wxChainEvtHandler::PopEventHandler( bool deleteHandler = FALSE )
++{
++    wxEvtHandler* handler = (wxEvtHandler *) (m_handlers.GetLast() -> GetData());
++    wxASSERT_MSG(handler != NULL,_T("Got node with no data"));
++    if (deleteHandler)
++    {
++        delete handler;
++        handler = (wxEvtHandler *) NULL;
++    } else {
++        handler -> DecRef();
++    };
++    m_handlers.DeleteNode(m_handlers.GetLast());
++    return handler;
++};
++
++bool
++wxChainEvtHandler::RemoveEventHandler(wxEvtHandler *handler)
++{
++    wxNode* node = m_handlers.Find(handler);
++    if (handler == NULL)
++    {
++        wxASSERT_MSG(false,_T("Handler not found"));
++        return false;
++    };
++    wxEvtHandler* h = (wxEvtHandler *) node -> GetData();
++    wxASSERT_MSG(h != NULL,_T("Got node with no data"));
++    h -> DecRef(); //this could cause self destruction of h.
++    m_handlers.DeleteNode(node);
++    return TRUE;
++}
+Index: src/common/wincmn.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/wincmn.cpp,v
+retrieving revision 1.123.2.5
+diff -b -u -2 -r1.123.2.5 wincmn.cpp
+--- src/common/wincmn.cpp	2003/02/02 15:06:36	1.123.2.5
++++ src/common/wincmn.cpp	2003/02/13 21:00:04
+@@ -121,6 +121,4 @@
+     m_isEnabled = TRUE;
+ 
+-    // the default event handler is just this window
+-    m_eventHandler = this;
+ 
+ #if wxUSE_VALIDATORS
+@@ -199,4 +197,8 @@
+                               const wxString& name)
+ {
++
++    // the default event handler is just this window
++    m_handlers.Append(this);
++
+     // m_isWindow is set to TRUE in wxWindowBase::Init() as well as many other
+     // member variables - check that it has been called (will catch the case
+@@ -731,76 +733,17 @@
+ // event handler stuff
+ // ----------------------------------------------------------------------------
+-
+-void wxWindowBase::PushEventHandler(wxEvtHandler *handler)
++wxEvtHandler *wxWindowBase::GetEventHandler() const
+ {
+-    wxEvtHandler *handlerOld = GetEventHandler();
+-
+-    handler->SetNextHandler(handlerOld);
+-
+-    if ( handlerOld )
+-        GetEventHandler()->SetPreviousHandler(handler);
+-
+-    SetEventHandler(handler);
++    return (wxEvtHandler *) m_handlers.GetFirst() -> GetData();
+ }
+ 
+-wxEvtHandler *wxWindowBase::PopEventHandler(bool deleteHandler)
++void wxWindowBase::SetEventHandler(wxEvtHandler *handler)
+ {
+-    wxEvtHandler *handlerA = GetEventHandler();
+-    if ( handlerA )
+-    {
+-        wxEvtHandler *handlerB = handlerA->GetNextHandler();
+-        handlerA->SetNextHandler((wxEvtHandler *)NULL);
+-
+-        if ( handlerB )
+-            handlerB->SetPreviousHandler((wxEvtHandler *)NULL);
+-        SetEventHandler(handlerB);
+-
+-        if ( deleteHandler )
+-        {
+-            delete handlerA;
+-            handlerA = (wxEvtHandler *)NULL;
+-        }
+-    }
+-
+-    return handlerA;
+-}
+-
+-bool wxWindowBase::RemoveEventHandler(wxEvtHandler *handler)
+-{
+-    wxCHECK_MSG( handler, FALSE, _T("RemoveEventHandler(NULL) called") );
+-
+-    wxEvtHandler *handlerPrev = NULL,
+-                 *handlerCur = GetEventHandler();
+-    while ( handlerCur )
++    for (wxEvtHandler* h = GetEventHandler(); h != NULL; h = GetEventHandler())
+     {
+-        wxEvtHandler *handlerNext = handlerCur->GetNextHandler();
+-
+-        if ( handlerCur == handler )
+-        {
+-            if ( handlerPrev )
+-            {
+-                handlerPrev->SetNextHandler(handlerNext);
+-            }
+-            else
+-            {
+-                SetEventHandler(handlerNext);
+-            }
+-
+-            if ( handlerNext )
+-            {
+-                handlerNext->SetPreviousHandler ( handlerPrev );
+-            }
+-            handler->SetNextHandler(NULL);
+-
+-            return TRUE;
+-        }
+-
+-        handlerPrev = handlerCur;
+-        handlerCur = handlerNext;
+-    }
+-
+-    wxFAIL_MSG( _T("where has the event handler gone?") );
+-
+-    return FALSE;
++        PopEventHandler(h);
++    };
++    wxASSERT(m_handlers.GetCount() == 0);
++    m_handlers.Append(handler);
+ }
+ 
+
+ 	  	 

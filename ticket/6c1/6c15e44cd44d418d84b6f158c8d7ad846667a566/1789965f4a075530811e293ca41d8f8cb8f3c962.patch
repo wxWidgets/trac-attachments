@@ -1,0 +1,703 @@
+Index: include/wx/msw/font.h
+===================================================================
+--- include/wx/msw/font.h	(revision 71881)
++++ include/wx/msw/font.h	(working copy)
+@@ -176,4 +176,6 @@
+     DECLARE_DYNAMIC_CLASS(wxFont)
+ };
+ 
++#define wxHAS_PRIVATE_FONTS 1
++
+ #endif // _WX_FONT_H_
+Index: include/wx/msw/missing.h
+===================================================================
+--- include/wx/msw/missing.h	(revision 71881)
++++ include/wx/msw/missing.h	(working copy)
+@@ -521,8 +521,25 @@
+ #endif
+ 
+ //Various defines that will be needed by mingw and possibly VC++6
+-//Used by the webview library
++//Used by the webview library. Well i686-w64-mingw and x86_64-w64-mingw32
++//in fact define this enum, and define __SHDocVw_LIBRARY_DEFINED__
++//to note that fact... all in exdisp.h
+ 
++#ifdef __MINGW32__
++
++// Does this include need to be guarded by something that checks if the
++// file is present?
++#include <exdisp.h>
++
++#ifndef __SHDocVw_LIBRARY_DEFINED__
++typedef enum CommandStateChangeConstants {
++    CSC_UPDATECOMMANDS = (int) 0xFFFFFFFF,
++    CSC_NAVIGATEFORWARD = 0x1,
++    CSC_NAVIGATEBACK = 0x2
++} CommandStateChangeConstants;
++#endif
++#endif
++
+ #ifndef DISPID_COMMANDSTATECHANGE
+ #define DISPID_COMMANDSTATECHANGE 105
+ #endif
+Index: include/wx/osx/font.h
+===================================================================
+--- include/wx/osx/font.h	(revision 71881)
++++ include/wx/osx/font.h	(working copy)
+@@ -190,4 +190,6 @@
+     DECLARE_DYNAMIC_CLASS(wxFont)
+ };
+ 
++#define wxHAS_PRIVATE_FONTS 1
++
+ #endif // _WX_FONT_H_
+Index: include/wx/gtk/font.h
+===================================================================
+--- include/wx/gtk/font.h	(revision 71881)
++++ include/wx/gtk/font.h	(working copy)
+@@ -131,4 +131,6 @@
+     DECLARE_DYNAMIC_CLASS(wxFont)
+ };
+ 
++#define wxHAS_PRIVATE_FONTS 1
++
+ #endif // _WX_GTK_FONT_H_
+Index: include/wx/font.h
+===================================================================
+--- include/wx/font.h	(revision 71881)
++++ include/wx/font.h	(working copy)
+@@ -215,6 +215,10 @@
+     // from the string representation of wxNativeFontInfo
+     static wxFont *New(const wxString& strNativeFontDesc);
+ 
++    // to allow for adding private fonts
++    static bool AddPrivateFont(const wxString& filename);
++    static bool ActivatePrivateFonts();
++
+     // comparison
+     bool operator==(const wxFont& font) const;
+     bool operator!=(const wxFont& font) const { return !(*this == font); }
+Index: src/common/fontcmn.cpp
+===================================================================
+--- src/common/fontcmn.cpp	(revision 71881)
++++ src/common/fontcmn.cpp	(working copy)
+@@ -1120,4 +1120,21 @@
+     return font->SetNativeFontInfo(str);
+ }
+ 
++#ifndef wxHAS_PRIVATE_FONTS
+ 
++// Adding private fonts is not supported on this platform, so provide the
++// functions that would be used, but make them no-ops that return a code
++// that indicates failure.
++
++bool wxFontBase::AddPrivateFont(wxString& filename)
++{
++    return false;
++}
++
++bool wxFontBase::ActivatePrivateFonts()
++{
++    return false;
++}
++
++#endif
++
+Index: src/msw/graphics.cpp
+===================================================================
+--- src/msw/graphics.cpp	(revision 71881)
++++ src/msw/graphics.cpp	(working copy)
+@@ -53,6 +53,8 @@
+ #include <commdlg.h>
+ #endif
+ 
++#include <gdiplus.h>
++
+ namespace
+ {
+ 
+@@ -887,6 +889,79 @@
+ }
+ 
+ //-----------------------------------------------------------------------------
++// Support for adding private fonts
++//-----------------------------------------------------------------------------
++
++static wxArrayString privateFontFileNames;
++static Gdiplus::PrivateFontCollection* privateFonts = NULL;
++static Gdiplus::FontFamily* pFontFamily = NULL;
++
++bool wxFontBase::AddPrivateFont(const wxString& filename)
++{
++// This adds a font from the named file...
++//    wxFont::AddPrivateFont("fontname.ttf");
++//    wxFont::AddPrivateFont("fontname1.ttf");
++//    wxFont::ActivatePrivateFonts();
++    privateFontFileNames.Add(filename);
++    return true; // indicate success
++}
++
++bool wxFontBase::ActivatePrivateFonts()
++{
++    bool success = true;
++    int n = privateFontFileNames.GetCount();
++    for ( int i=0 ; i<n ; i++ )
++    {
++        wxString path(privateFontFileNames[i]);
++        if ( AddFontResourceExW(path.wc_str(), FR_PRIVATE, 0) == 0)
++            success = false; // Record failure to add a font
++    }
++    SendMessage(HWND_BROADCAST, WM_FONTCHANGE, 0, 0);
++    return success;
++}
++
++void wxGDIPlusRenderer::Load()
++{
++    GdiplusStartupInput input;
++    GdiplusStartupOutput output;
++    if ( GdiplusStartup(&m_gditoken,&input,&output) == Gdiplus::Ok )
++    {
++        wxLogTrace("gdiplus", "successfully initialized GDI+");
++        m_loaded = 1;
++// Now if some private fonts had been registered prior to use of gdiplus
++// I will establish them in a privateFontCollection. Note that I do not
++// do any of this until gdiplus has been started.
++        privateFonts = new Gdiplus::PrivateFontCollection();
++        int n = privateFontFileNames.GetCount();
++        pFontFamily = new Gdiplus::FontFamily[n];
++        for ( int i=0 ; i<n ; i++)
++        {
++            wxString path(privateFontFileNames[i]);
++            privateFonts->AddFontFile(path.wc_str());
++        }
++    }
++    else
++    {
++        wxLogTrace("gdiplus", "failed to initialize GDI+, missing gdiplus.dll?");
++        m_loaded = 0;
++    }
++}
++
++void wxGDIPlusRenderer::Unload()
++{
++    if ( m_gditoken )
++    {
++        GdiplusShutdown(m_gditoken);
++        m_gditoken = 0;
++        delete privateFonts;
++        delete[] pFontFamily;
++        privateFonts = NULL;
++        pFontFamily = NULL;
++    }
++    m_loaded = -1; // next Load() will try again
++}
++
++//-----------------------------------------------------------------------------
+ // wxGDIPlusFont implementation
+ //-----------------------------------------------------------------------------
+ 
+@@ -897,7 +972,27 @@
+                         const wxColour& col,
+                         Unit fontUnit)
+ {
+-    m_font = new Font(name.wc_str(), size, style, fontUnit);
++// If the user has registered any private fonts I wish to use them in
++// preference to any system-wide ones.
++    m_font = NULL;
++    if ( privateFonts != NULL )
++    {
++        int count = privateFonts->GetFamilyCount();
++        int found = 0;
++        privateFonts->GetFamilies(count, pFontFamily, &found);
++// Here I hope and expect that found==count.
++        for ( int j=0 ; j<found ; j++ )
++        {
++            wchar_t familyName[LF_FACESIZE];
++            int rc = pFontFamily[j].GetFamilyName(familyName);
++            if ( rc==0 && wcscmp(name, familyName) == 0 )
++            {
++                m_font = new Font(&pFontFamily[j], size, style, fontUnit);
++                break;
++            }
++        }
++    }
++    if (m_font == NULL) m_font = new Font(name, size, style, fontUnit);
+ 
+     m_textBrush = new SolidBrush(wxColourToColor(col));
+ }
+@@ -1961,33 +2056,6 @@
+     if ( !EnsureIsLoaded() )                   \
+         return (returnOnFail)
+ 
+-
+-void wxGDIPlusRenderer::Load()
+-{
+-    GdiplusStartupInput input;
+-    GdiplusStartupOutput output;
+-    if ( GdiplusStartup(&m_gditoken,&input,&output) == Gdiplus::Ok )
+-    {
+-        wxLogTrace("gdiplus", "successfully initialized GDI+");
+-        m_loaded = 1;
+-    }
+-    else
+-    {
+-        wxLogTrace("gdiplus", "failed to initialize GDI+, missing gdiplus.dll?");
+-        m_loaded = 0;
+-    }
+-}
+-
+-void wxGDIPlusRenderer::Unload()
+-{
+-    if ( m_gditoken )
+-    {
+-        GdiplusShutdown(m_gditoken);
+-        m_gditoken = 0;
+-    }
+-    m_loaded = -1; // next Load() will try again
+-}
+-
+ wxGraphicsContext * wxGDIPlusRenderer::CreateContext( const wxWindowDC& dc)
+ {
+     ENSURE_LOADED_OR_RETURN(NULL);
+Index: src/osx/fontutil.cpp
+===================================================================
+--- src/osx/fontutil.cpp	(revision 71881)
++++ src/osx/fontutil.cpp	(working copy)
+@@ -66,6 +66,32 @@
+ }
+ 
+ // ----------------------------------------------------------------------------
++// Private Fonts
++// ----------------------------------------------------------------------------
++
++
++// On OSX one can provide private fonts by putting the font files in
++// with the resources in your application bundle. So the API for adding
++// fonts does not do anything here, but it does report success in the
++// expectation that you have indeed put what you need in the application
++// bundle.
++
++int wxFont::AddPrivateFont(wxString& filename)
++{
++    return 1;
++}
++
++int wxFont::ActivatePrivateFonts(wxString& filename)
++{
++    return 1;
++}
++
++int wxFont::RemovePrivateFonts()
++{
++    return 1;
++}
++
++// ----------------------------------------------------------------------------
+ // helper functions
+ // ----------------------------------------------------------------------------
+ 
+Index: src/gtk/font.cpp
+===================================================================
+--- src/gtk/font.cpp	(revision 71881)
++++ src/gtk/font.cpp	(working copy)
+@@ -32,6 +32,9 @@
+ 
+ #include "wx/gtk/private.h"
+ 
++#include <X11/Xlib.h>
++#include <X11/Xft/Xft.h>
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -550,3 +553,35 @@
+ 
+     return true;
+ }
++
++
++// ----------------------------------------------------------------------------
++// Support for adding private fonts
++// ----------------------------------------------------------------------------
++
++static FcConfig* config = NULL;
++
++bool wxFontBase::AddPrivateFont(const wxString& filename)
++{
++// This passes the name of a file expected to contain a font, as in
++//    wxFont::AddPrivatefont("fontname.ttf");
++//    wxFont::AddPrivatefont("fontname1.ttf");
++// and makes the fonts in those files available to the application but
++// not to other applications. These calls should be followd up by
++//    wxFont::ActivatePrivateFonts();
++// which happens not to do anything in this GTK implementation but does
++// all the work in the Windows version.
++    if ( config == NULL ) config = FcConfigGetCurrent();
++    if ( config == NULL ) config = FcConfigCreate();
++// The fontconfig calls return true on success.
++    return FcConfigAppFontAddFile(config,
++            (const FcChar8 *)(const char *)filename.fn_str()) &&
++           FcConfigSetCurrent(config);
++}
++
++bool wxFontBase::ActivatePrivateFonts()
++{
++    return true;
++}
++
++
+Index: docs/doxygen/overviews/font.h
+===================================================================
+--- docs/doxygen/overviews/font.h	(revision 71881)
++++ docs/doxygen/overviews/font.h	(working copy)
+@@ -82,5 +82,20 @@
+ are available for all the ports and should be used to make your program work
+ correctly when they are implemented later.
+ 
++@section overview_font_privateinfo Private font information
++
++Sometimes an application needs fonts that are not globally installed on the
++system. On Macintosh/OSX this can be arranged by placing the desired fonts
++within the Application Bundle in Contents/Resources/Fonts and using
++the ATSApplicationFontsPath key to point there. The full details of the
++procedure there can be found as OSX developer resources. For the GTK+ and
++Windows ports it is possible to add Truetype fonts at run-time using
++a sequence of calls to wxFont::AddPrivateFont to give the names of files
++containing font data, followed by a call to wxFont::ActivatePrivateFonts
++to complete the process of making the fonts available. These functions
++return false if they fail. They should be called just once before any
++graphics contexts have been created or other activity liable to use fonts
++has happened.
++
+ */
+ 
+Index: interface/wx/font.h
+===================================================================
+--- interface/wx/font.h	(revision 71881)
++++ interface/wx/font.h	(working copy)
+@@ -519,6 +519,22 @@
+     const wxNativeFontInfo *GetNativeFontInfo() const;
+ 
+     /**
++        Specify the name of a file containing a Truetype font to be
++        made available to the current application even though it is
++        not globally installed. Supported on Windows and GTK+. Not
++        needed on OSX because private fonts can be placed within an
++        application bundle. Should be called before any graphics
++        contexts have been created. Return value is false on failure.
++    */
++    static bool AddPrivateFont(wxString& filename);
++
++    /**
++        To be called after a succession of calls to AddPrivateFont
++        to make the new fonts available. Returns false on failure.
++    */
++    static bool ActivatePrivatefonts();
++
++    /**
+         Gets the point size.
+ 
+         @see SetPointSize()
+Index: samples/font/makefile.vc
+===================================================================
+--- samples/font/makefile.vc	(revision 71881)
++++ samples/font/makefile.vc	(working copy)
+@@ -330,7 +330,7 @@
+ 
+ ### Targets: ###
+ 
+-all: $(OBJS)\font.exe
++all: $(OBJS)\font.exe data
+ 
+ clean: 
+ 	-if exist $(OBJS)\*.obj del $(OBJS)\*.obj
+@@ -345,6 +345,10 @@
+ 	$(FONT_OBJECTS) $(FONT_RESOURCES)  $(__WXLIB_CORE_p)  $(__WXLIB_BASE_p)  $(__WXLIB_MONO_p) $(__LIB_TIFF_p) $(__LIB_JPEG_p) $(__LIB_PNG_p)  wxzlib$(WXDEBUGFLAG).lib wxregex$(WXUNICODEFLAG)$(WXDEBUGFLAG).lib wxexpat$(WXDEBUGFLAG).lib $(EXTRALIBS_FOR_BASE) $(__UNICOWS_LIB_p) $(__CAIRO_LIB_p) kernel32.lib user32.lib gdi32.lib comdlg32.lib winspool.lib winmm.lib shell32.lib comctl32.lib ole32.lib oleaut32.lib uuid.lib rpcrt4.lib advapi32.lib wsock32.lib wininet.lib
+ <<
+ 
++data: 
++	if not exist $(OBJS) mkdir $(OBJS)
++	for %f in (wxprivate.ttf) do if not exist $(OBJS)\%f copy .\%f $(OBJS)
++
+ $(OBJS)\font_sample.res: .\..\..\samples\sample.rc
+ 	rc /fo$@  /d WIN32 $(____DEBUGRUNTIME_3_p_1) /d _CRT_SECURE_NO_DEPRECATE=1 /d _CRT_NON_CONFORMING_SWPRINTFS=1 /d _SCL_SECURE_NO_WARNINGS=1 $(__NO_VC_CRTDBG_p_1)  /d __WXMSW__ $(__WXUNIV_DEFINE_p_1) $(__DEBUG_DEFINE_p_1) $(__NDEBUG_DEFINE_p_1) $(__EXCEPTIONS_DEFINE_p_1) $(__RTTI_DEFINE_p_1) $(__THREAD_DEFINE_p_1) $(__UNICODE_DEFINE_p_1) $(__MSLU_DEFINE_p_1) /i $(SETUPHDIR) /i .\..\..\include $(____CAIRO_INCLUDEDIR_FILENAMES_1_p) /i . $(__DLLFLAG_p_1) /d _WINDOWS /i .\..\..\samples /d NOPCH .\..\..\samples\sample.rc
+ 
+Index: samples/font/font.cpp
+===================================================================
+--- samples/font/font.cpp	(revision 71881)
++++ samples/font/font.cpp	(working copy)
+@@ -88,7 +88,7 @@
+ {
+ public:
+     // ctor(s)
+-    MyFrame(const wxString& title, const wxPoint& pos, const wxSize& size);
++    MyFrame(const wxString& title, const wxPoint& pos, const wxSize& size, const wxString& privfont);
+ 
+     // accessors
+     MyCanvas *GetCanvas() const { return m_canvas; }
+@@ -128,6 +128,7 @@
+     void OnSetFamily(wxCommandEvent& event);
+     void OnSetFaceName(wxCommandEvent& event);
+     void OnSetEncoding(wxCommandEvent& event);
++    void OnPrivateFont(wxCommandEvent& event);
+ 
+ protected:
+     bool DoEnumerateFamilies(bool fixedWidthOnly,
+@@ -207,6 +208,8 @@
+     Font_SetFamily,
+     Font_SetFaceName,
+     Font_SetEncoding,
++
++    Font_Private,
+     Font_Max
+ };
+ 
+@@ -258,6 +261,7 @@
+     EVT_MENU(Font_EnumFamilies, MyFrame::OnEnumerateFamilies)
+     EVT_MENU(Font_EnumFixedFamilies, MyFrame::OnEnumerateFixedFamilies)
+     EVT_MENU(Font_EnumEncodings, MyFrame::OnEnumerateEncodings)
++    EVT_MENU(Font_Private, MyFrame::OnPrivateFont)
+ END_EVENT_TABLE()
+ 
+ // Create a new application object: this macro will allow wxWidgets to create
+@@ -280,10 +284,27 @@
+ {
+     if ( !wxApp::OnInit() )
+         return false;
++    wxString privfont = argv[0].BeforeLast('/');
++// I create a file name based on the identity of the program being run
++// and hope that argv[0] will contain a full path for it. If argv[0]
++// contains ".../font" I will use ".../wxprivate.ttf" while if
++// it contain "...\\font.exe" I will use "...\wxprivate.ttf". If argv[0]
++// does not contain either "/" or "\" I will expect the font file to be in
++// the current directory.
++#define PRIVATEFONT "wxprivate"
++    if ( !privfont.IsEmpty() ) privfont.Append(wxT("/" PRIVATEFONT ".ttf"));
++    else
++    {
++        privfont = argv[0].BeforeLast('\\');
++        if ( !privfont.IsEmpty() )
++            privfont.Append(wxT("\\" PRIVATEFONT ".ttf"));
++        else privfont = wxT(PRIVATEFONT ".ttf");
++    }
+ 
+     // Create the main application window
+     MyFrame *frame = new MyFrame(wxT("Font wxWidgets demo"),
+-                                 wxPoint(50, 50), wxSize(600, 400));
++                                 wxPoint(50, 50), wxSize(600, 400),
++                                 privfont);
+ 
+     // Show it
+     frame->Show(true);
+@@ -299,9 +320,32 @@
+ // ----------------------------------------------------------------------------
+ 
+ // frame constructor
+-MyFrame::MyFrame(const wxString& title, const wxPoint& pos, const wxSize& size)
++MyFrame::MyFrame(const wxString& title, const wxPoint& pos, const wxSize& size, const wxString& privfont)
+        : wxFrame((wxFrame *)NULL, wxID_ANY, title, pos, size), m_textctrl(NULL)
+ {
++//
++// For MacOSX put the font(s) you wish to use (ie in this case
++// just wxprivate.ttf) in font.app/Contents/Resources/Fonts and
++// arrange that font.app/Contents/Info.plist contains a segment
++//
++//     <plist version="0.9">
++//       <dict>
++//         ...
++//         <key>ATSApplicationFontsPath</key>
++//         <string>Fonts</string>
++//         ...
++//       </dict>
++//     </plist>
++//
++// For Windows note that if you put a font somewhere using Cygwin you
++// may need to go "chmod +x wxprivate.ttf" before Windows will be prepared
++// to use it.
++//
++    bool priv = wxFont::AddPrivateFont(privfont);
++    if ( priv ) priv = wxFont::ActivatePrivateFonts();
++// The boolean priv now records whether we seem toi have been able to
++// add our own font.
++
+     m_fontSize = wxNORMAL_FONT->GetPointSize();
+ 
+     SetIcon(wxICON(sample));
+@@ -372,7 +416,6 @@
+                          wxT("Default font for user interface objects such as menus and dialog boxes. "));
+     menuSelect->Append(Font_SystemSettings, wxT("System fonts"), menuSettingFonts);
+ 
+-
+     menuSelect->AppendSeparator();
+     menuSelect->Append(Font_EnumFamilies, wxT("Enumerate font &families\tCtrl-F"));
+     menuSelect->Append(Font_EnumFixedFamilies,
+@@ -382,6 +425,12 @@
+     menuSelect->Append(Font_EnumFamiliesForEncoding,
+                      wxT("Find font for en&coding...\tCtrl-C"),
+                      wxT("Find font families for given encoding"));
++    if ( priv )
++    {
++        menuSelect->AppendSeparator();
++        menuSelect->Append(Font_Private,
++                           wxT("Select a font private to this application"));
++    }
+ 
+     // now append the freshly created menu to the menu bar...
+     wxMenuBar *menuBar = new wxMenuBar;
+@@ -861,6 +910,22 @@
+     }
+ }
+ 
++void MyFrame::OnPrivateFont(wxCommandEvent& WXUNUSED(event))
++{
++    wxFont font(GetCanvas()->GetTextFont());
++    if (font.SetFaceName(wxT(PRIVATEFONT)))
++    {
++        wxASSERT_MSG(font.IsOk(), wxT("The font should now be valid"));
++        DoChangeFont(font);
++    }
++    else
++    {
++        wxASSERT_MSG(!font.IsOk(), wxT("The font should now be invalid"));
++        wxMessageBox(wxT("Private font not accessible..."),
++                     wxT("Invalid face name"), wxOK|wxICON_ERROR, this);
++    }
++}
++
+ void MyFrame::OnQuit(wxCommandEvent& WXUNUSED(event))
+ {
+     // true is to force the frame to close
+Index: samples/font/makefile.bcc
+===================================================================
+--- samples/font/makefile.bcc	(revision 71881)
++++ samples/font/makefile.bcc	(working copy)
+@@ -216,7 +216,7 @@
+ 
+ ### Targets: ###
+ 
+-all: $(OBJS)\font.exe
++all: $(OBJS)\font.exe data
+ 
+ clean: 
+ 	-if exist $(OBJS)\*.obj del $(OBJS)\*.obj
+@@ -234,6 +234,10 @@
+ 	c0w32.obj $(FONT_OBJECTS),$@,, $(__WXLIB_CORE_p)  $(__WXLIB_BASE_p)  $(__WXLIB_MONO_p) $(__LIB_TIFF_p) $(__LIB_JPEG_p) $(__LIB_PNG_p)  wxzlib$(WXDEBUGFLAG).lib wxregex$(WXUNICODEFLAG)$(WXDEBUGFLAG).lib wxexpat$(WXDEBUGFLAG).lib $(EXTRALIBS_FOR_BASE) $(__UNICOWS_LIB_p) $(__CAIRO_LIB_p) ole2w32.lib oleacc.lib import32.lib cw32$(__THREADSFLAG_5)$(__RUNTIME_LIBS_8).lib,, $(OBJS)\font_sample.res
+ |
+ 
++data: 
++	if not exist $(OBJS) mkdir $(OBJS)
++	for %f in (wxprivate.ttf) do if not exist $(OBJS)\%f copy .\%f $(OBJS)
++
+ $(OBJS)\font_sample.res: .\..\..\samples\sample.rc
+ 	brcc32 -32 -r -fo$@ -i$(BCCDIR)\include    -d__WXMSW__ $(__WXUNIV_DEFINE_p_1) $(__DEBUG_DEFINE_p_1) $(__NDEBUG_DEFINE_p_1) $(__EXCEPTIONS_DEFINE_p_1) $(__RTTI_DEFINE_p_1) $(__THREAD_DEFINE_p_1) $(__UNICODE_DEFINE_p_1) $(__MSLU_DEFINE_p_1) -i$(SETUPHDIR) -i.\..\..\include $(____CAIRO_INCLUDEDIR_FILENAMES_1_p) -i. $(__DLLFLAG_p_1) -i.\..\..\samples -dNOPCH .\..\..\samples\sample.rc
+ 
+Index: samples/font/makefile.gcc
+===================================================================
+--- samples/font/makefile.gcc	(revision 71881)
++++ samples/font/makefile.gcc	(working copy)
+@@ -210,7 +210,7 @@
+ 
+ ### Targets: ###
+ 
+-all: $(OBJS)\font.exe
++all: $(OBJS)\font.exe data
+ 
+ clean: 
+ 	-if exist $(OBJS)\*.o del $(OBJS)\*.o
+@@ -220,13 +220,17 @@
+ $(OBJS)\font.exe: $(FONT_OBJECTS) $(OBJS)\font_sample_rc.o
+ 	$(CXX) -o $@ $(FONT_OBJECTS)  $(__DEBUGINFO) $(__THREADSFLAG) -L$(LIBDIRNAME) -Wl,--subsystem,windows -mwindows $(____CAIRO_LIBDIR_FILENAMES_p) $(LDFLAGS)  $(__WXLIB_CORE_p)  $(__WXLIB_BASE_p)  $(__WXLIB_MONO_p) $(__LIB_TIFF_p) $(__LIB_JPEG_p) $(__LIB_PNG_p)  -lwxzlib$(WXDEBUGFLAG) -lwxregex$(WXUNICODEFLAG)$(WXDEBUGFLAG) -lwxexpat$(WXDEBUGFLAG) $(EXTRALIBS_FOR_BASE) $(__UNICOWS_LIB_p) $(__CAIRO_LIB_p) -lkernel32 -luser32 -lgdi32 -lcomdlg32 -lwinspool -lwinmm -lshell32 -lcomctl32 -lole32 -loleaut32 -luuid -lrpcrt4 -ladvapi32 -lwsock32 -lwininet
+ 
++data: 
++	if not exist $(OBJS) mkdir $(OBJS)
++	for %%f in (wxprivate.ttf) do if not exist $(OBJS)\%%f copy .\%%f $(OBJS)
++
+ $(OBJS)\font_sample_rc.o: ./../../samples/sample.rc
+ 	windres --use-temp-file -i$< -o$@    --define __WXMSW__ $(__WXUNIV_DEFINE_p_1) $(__DEBUG_DEFINE_p_1) $(__NDEBUG_DEFINE_p_1) $(__EXCEPTIONS_DEFINE_p_1) $(__RTTI_DEFINE_p_1) $(__THREAD_DEFINE_p_1) $(__UNICODE_DEFINE_p_1) $(__MSLU_DEFINE_p_1) --include-dir $(SETUPHDIR) --include-dir ./../../include $(__CAIRO_INCLUDEDIR_p) --include-dir . $(__DLLFLAG_p_1) --include-dir ./../../samples --define NOPCH
+ 
+ $(OBJS)\font_font.o: ./font.cpp
+ 	$(CXX) -c -o $@ $(FONT_CXXFLAGS) $(CPPDEPS) $<
+ 
+-.PHONY: all clean
++.PHONY: all clean data
+ 
+ 
+ SHELL := $(COMSPEC)
+Index: samples/font/font.bkl
+===================================================================
+--- samples/font/font.bkl	(revision 71881)
++++ samples/font/font.bkl	(working copy)
+@@ -9,4 +9,11 @@
+         <wx-lib>base</wx-lib>
+     </exe>
+ 
++    <wx-data id="data">
++        <files>
++            wxprivate.ttf
++        </files>
++    </wx-data>
++
++
+ </makefile>
+Index: samples/font/makefile.wat
+===================================================================
+--- samples/font/makefile.wat	(revision 71881)
++++ samples/font/makefile.wat	(working copy)
+@@ -238,7 +238,7 @@
+ 
+ ### Targets: ###
+ 
+-all : .SYMBOLIC $(OBJS)\font.exe
++all : .SYMBOLIC $(OBJS)\font.exe data
+ 
+ clean : .SYMBOLIC 
+ 	-if exist $(OBJS)\*.obj del $(OBJS)\*.obj
+@@ -260,6 +260,10 @@
+ 	@for %i in () do @%append $(OBJS)\font.lbc option stack=%i
+ 	wlink @$(OBJS)\font.lbc
+ 
++data : .SYMBOLIC 
++	if not exist $(OBJS) mkdir $(OBJS)
++	for %f in (wxprivate.ttf) do if not exist $(OBJS)\%f copy .\%f $(OBJS)
++
+ $(OBJS)\font_sample.res :  .AUTODEPEND .\..\..\samples\sample.rc
+ 	wrc -q -ad -bt=nt -r -fo=$^@    -d__WXMSW__ $(__WXUNIV_DEFINE_p) $(__DEBUG_DEFINE_p) $(__NDEBUG_DEFINE_p) $(__EXCEPTIONS_DEFINE_p) $(__RTTI_DEFINE_p) $(__THREAD_DEFINE_p) $(__UNICODE_DEFINE_p)  -i=$(SETUPHDIR) -i=.\..\..\include $(____CAIRO_INCLUDEDIR_FILENAMES) -i=. $(__DLLFLAG_p) -i=.\..\..\samples -dNOPCH $<
+ 
+Index: samples/font/Makefile.in
+===================================================================
+--- samples/font/Makefile.in	(revision 71881)
++++ samples/font/Makefile.in	(working copy)
+@@ -131,7 +131,7 @@
+ 
+ ### Targets: ###
+ 
+-all: font$(EXEEXT) $(__font_bundle___depname)
++all: font$(EXEEXT) $(__font_bundle___depname) data
+ 
+ install: 
+ 
+@@ -176,6 +176,18 @@
+ 
+ @COND_PLATFORM_MACOSX_1@font_bundle: $(____font_BUNDLE_TGT_REF_DEP)
+ 
++data: 
++	@mkdir -p .
++	@for f in wxprivate.ttf; do \
++	if test ! -f ./$$f -a ! -d ./$$f ; \
++	then x=yep ; \
++	else x=`find $(srcdir)/$$f -newer ./$$f -print` ; \
++	fi; \
++	case "$$x" in ?*) \
++	cp -pRf $(srcdir)/$$f . ;; \
++	esac; \
++	done
++
+ font_sample_rc.o: $(srcdir)/../../samples/sample.rc
+ 	$(WINDRES) -i$< -o$@    --define __WX$(TOOLKIT)__ $(__WXUNIV_DEFINE_p_2) $(__DEBUG_DEFINE_p_2)  $(__EXCEPTIONS_DEFINE_p_2) $(__RTTI_DEFINE_p_2) $(__THREAD_DEFINE_p_2)   --include-dir $(srcdir) $(__DLLFLAG_p_2) --include-dir $(srcdir)/../../samples $(__RCDEFDIR_p_1) --include-dir $(top_srcdir)/include
+ 
+@@ -186,4 +198,4 @@
+ # Include dependency info, if present:
+ @IF_GNU_MAKE@-include ./.deps/*.d
+ 
+-.PHONY: all install uninstall clean distclean font_bundle
++.PHONY: all install uninstall clean distclean font_bundle data

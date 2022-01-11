@@ -1,0 +1,23 @@
+export CC=/opt/cross/bin/i386-mingw32msvc-gcc
+export CXX=/opt/cross/bin/i386-mingw32msvc-c++
+export LD=/opt/cross/bin/i386-mingw32msvc-ld
+export AR=/opt/cross/bin/i386-mingw32msvc-ar
+export AS=/opt/cross/bin/i386-mingw32msvc-as
+export NM=/opt/cross/bin/i386-mingw32msvc-nm
+export STRIP=/opt/cross/bin/i386-mingw32msvc-strip
+export RANLIB=/opt/cross/bin/i386-mingw32msvc-ranlib
+export DLLTOOL=/opt/cross/bin/i386-mingw32msvc-dlltool
+export OBJDUMP=/opt/cross/bin/i386-mingw32msvc-objdump
+export RESCOMP=/opt/cross/bin/i386-mingw32msvc-windres
+../configure --prefix=/home/stephan/Software/wxGTK-2.9.1/mswr/ --host=i386-mingw32msvc --build=i586-linux CFLAGS=-I/opt/cross/i386-mingw32msvc/include/ --enable-stl --disable-debug --disable-shared --enable-monolithic --with-msw --disable-svg --without-libpng --without-libjpeg --without-libtiff --without-xpm --without-libmspack --without-expat --without-odbc --without-zlib --without-regex --disable-compat28
+export CC=
+export CXX=
+export LD=
+export AR=
+export AS=
+export NM=
+export STRIP=
+export RANLIB=
+export DLLTOOL=
+export OBJDUMP=
+export RESCOMP=

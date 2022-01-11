@@ -1,0 +1,230 @@
+--- C:\dev-fix\2.3.wx\dev\sdk\wxWidgets\interface\wx\cmdline.h	2010-01-25 14:08:03.000 +0100
++++ C:\dev-fix\2.3.wx\dev\sdk\wxWidgets-ec\interface\wx\cmdline.h	2010-01-25 13:58:16.000 +0100
+@@ -25,6 +25,10 @@
+     @c wxCMD_LINE_NEEDS_SEPARATOR can be specified to require a separator (either
+     a colon, an equal sign or white space) between the option name and its
+     value. By default, no separator is required.
++
++    @c wxCMD_LINE_SWITCH_NEGATABLE can be specified if you want the program to
++    accept the negation of this flag (such as with /R-). You will want to use
++    wxCmdLineParser::FoundSwitch to test for both presence and negation of the flag.
+ */
+ enum wxCmdLineEntryFlags
+ {
+@@ -32,7 +36,8 @@
+     wxCMD_LINE_PARAM_OPTIONAL   = 0x02, ///< The parameter may be omitted.
+     wxCMD_LINE_PARAM_MULTIPLE   = 0x04, ///< The parameter may be repeated.
+     wxCMD_LINE_OPTION_HELP      = 0x08, ///< This option is a help request.
+-    wxCMD_LINE_NEEDS_SEPARATOR  = 0x10  ///< Must have a separator before the value.
++    wxCMD_LINE_NEEDS_SEPARATOR  = 0x10, ///< Must have a separator before the value.
++    wxCMD_LINE_SWITCH_NEGATABLE = 0x20  ///< This switch can be negated (e.g. /S-)
+ };
+ 
+ /**
+@@ -70,6 +75,22 @@
+ };
+ 
+ /**
++    The state of a switch as returned by wxCmdLineParser::FoundSwitch
++*/
++enum wxCmdLineSwitchState
++{
++    /// The switch was found negated
++    wxCMD_SWITCH_OFF,
++
++    /// The switch was found (and was not negated)
++    wxCMD_SWITCH_ON,
++
++    /// The switch was not found
++    wxCMD_SWITCH_NOT_FOUND
++};
++
++
++/**
+     Flags determining wxCmdLineParser::ConvertStringToArgs() behaviour.
+  */
+ enum wxCmdLineSplitType
+@@ -390,6 +411,14 @@
+     bool Found(const wxString& name) const;
+ 
+     /**
++        Returns @c wxCMD_SWITCH_ON or @c wxCMD_SWITCH_OFF if the given switch was found.
++        @c wxCMD_SWITCH_OFF is returned if the switch was negated
++        
++        Returns @c wxCMD_SWITCH_NOT_FOUND if the switch was not found.
++    */
++    wxCmdLineSwitchState FoundSwitch(const wxString& name) const;
++
++    /**
+         Returns true if an option taking a string value was found and stores
+         the value in the provided pointer (which should not be @NULL).
+     */
+
+--- C:\dev-fix\2.3.wx\dev\sdk\wxWidgets\include\wx\cmdline.h	2010-01-25 14:07:28.000 +0100
++++ C:\dev-fix\2.3.wx\dev\sdk\wxWidgets-ec\include\wx\cmdline.h	2010-01-25 11:14:27.000 +0100
+@@ -42,7 +42,8 @@
+     wxCMD_LINE_PARAM_OPTIONAL   = 0x02, // the parameter may be omitted
+     wxCMD_LINE_PARAM_MULTIPLE   = 0x04, // the parameter may be repeated
+     wxCMD_LINE_OPTION_HELP      = 0x08, // this option is a help request
+-    wxCMD_LINE_NEEDS_SEPARATOR  = 0x10  // must have sep before the value
++    wxCMD_LINE_NEEDS_SEPARATOR  = 0x10, // must have sep before the value
++	wxCMD_LINE_SWITCH_NEGATABLE = 0x20  // this switch can be negated (e.g. /S-)
+ };
+ 
+ // an option value or parameter may be a string (the most common case), a
+@@ -66,6 +67,14 @@
+     wxCMD_LINE_NONE         // to terminate the list
+ };
+ 
++// returned by FoundSwitch
++enum wxCmdLineSwitchState
++{
++    wxCMD_SWITCH_OFF,
++    wxCMD_SWITCH_ON,
++    wxCMD_SWITCH_NOT_FOUND
++};
++
+ // ----------------------------------------------------------------------------
+ // wxCmdLineEntryDesc is a description of one command line
+ // switch/option/parameter
+@@ -212,6 +221,11 @@
+     // returns true if the given switch was found
+     bool Found(const wxString& name) const;
+ 
++    // returns wxCMD_SWITCH_ON or wxCMD_SWITCH_OFF if the given switch was found
++    //  wxCMD_SWITCH_OFF is returned if the switch was negated
++    // returns wxCMD_SWITCH_NOT_FOUND if the switch was not found
++    wxCmdLineSwitchState FoundSwitch(const wxString& name) const;
++
+     // returns true if an option taking a string value was found and stores the
+     // value in the provided pointer
+     bool Found(const wxString& name, wxString *value) const;
+
+
+--- C:\dev-fix\2.3.wx\dev\sdk\wxWidgets\src\common\cmdline.cpp	2010-01-25 14:07:42.000 +0100
++++ C:\dev-fix\2.3.wx\dev\sdk\wxWidgets-ec\src\common\cmdline.cpp	2010-01-25 13:59:16.000 +0100
+@@ -105,6 +105,7 @@
+         flags = fl;
+ 
+         m_hasVal = false;
++        m_isNegated = false;
+     }
+ 
+     // can't use union easily here, so just store all possible data fields, we
+@@ -139,8 +140,9 @@
+         { Check(wxCMD_LINE_VAL_DATE); m_dateVal = val; m_hasVal = true; }
+ #endif // wxUSE_DATETIME
+ 
+-    void SetHasValue(bool hasValue = true) { m_hasVal = hasValue; }
++    void SetHasValue(bool hasValue = true, bool negated = false) { m_hasVal = hasValue; m_isNegated = negated; }
+     bool HasValue() const { return m_hasVal; }
++    bool IsNegated() const { return m_isNegated; }
+ 
+ public:
+     wxCmdLineEntryType kind;
+@@ -152,6 +154,7 @@
+ 
+ private:
+     bool m_hasVal;
++    bool m_isNegated;
+ 
+     double m_doubleVal;
+     long m_longVal;
+@@ -485,17 +488,22 @@
+ 
+ bool wxCmdLineParser::Found(const wxString& name) const
+ {
++    return FoundSwitch(name) != wxCMD_SWITCH_NOT_FOUND;
++}
++
++wxCmdLineSwitchState wxCmdLineParser::FoundSwitch(const wxString& name) const
++{
+     int i = m_data->FindOption(name);
+     if ( i == wxNOT_FOUND )
+         i = m_data->FindOptionByLongName(name);
+ 
+-    wxCHECK_MSG( i != wxNOT_FOUND, false, wxT("unknown switch") );
++    wxCHECK_MSG( i != wxNOT_FOUND, wxCMD_SWITCH_NOT_FOUND, wxT("unknown switch") );
+ 
+     wxCmdLineOption& opt = m_data->m_options[(size_t)i];
+     if ( !opt.HasValue() )
+-        return false;
++        return wxCMD_SWITCH_NOT_FOUND;
+ 
+-    return true;
++    return opt.IsNegated() ? wxCMD_SWITCH_OFF : wxCMD_SWITCH_ON;
+ }
+ 
+ bool wxCmdLineParser::Found(const wxString& name, wxString *value) const
+@@ -721,6 +729,12 @@
+                     if ( m_data->m_options[(size_t)optInd].kind
+                             == wxCMD_LINE_SWITCH )
+                     {
++                        // if the switch is negatable and it is just followed by '-'
++                        // the '-' is considered to be part of this switch
++                        if ( (m_data->m_options[(size_t)optInd].flags & wxCMD_LINE_SWITCH_NEGATABLE) != 0 &&
++                            arg[len] == '-')
++                            ++len;
++                                                
+                         // pretend that all the rest of the argument is the
+                         // next argument, in fact
+                         wxString arg2 = arg[0u];
+@@ -758,7 +772,12 @@
+             if ( opt.kind == wxCMD_LINE_SWITCH )
+             {
+                 // we must check that there is no value following the switch
+-                if ( p != arg.end() )
++                bool negated = false;
++ 
++                negated = ((opt.flags & wxCMD_LINE_SWITCH_NEGATABLE) != 0 && p != arg.end() &&
++                    *p == '-');
++
++                if ( !negated && p != arg.end() )
+                 {
+                     errorMsg << wxString::Format(_("Unexpected characters following option '%s'."), name.c_str())
+                              << wxT('\n');
+@@ -767,7 +786,7 @@
+                 else // no value, as expected
+                 {
+                     // nothing more to do
+-                    opt.SetHasValue();
++                    opt.SetHasValue(true, negated);
+ 
+                     if ( opt.flags & wxCMD_LINE_OPTION_HELP )
+                     {
+@@ -1061,7 +1080,7 @@
+     for ( n = 0; n < count; n++ )
+     {
+         wxCmdLineOption& opt = m_data->m_options[n];
+-        wxString option;
++        wxString option, negator;
+ 
+         if ( opt.kind != wxCMD_LINE_USAGE_TEXT )
+         {
+@@ -1071,13 +1090,16 @@
+                 usage << wxT('[');
+             }
+ 
++            if ((opt.flags & wxCMD_LINE_SWITCH_NEGATABLE) != 0)
++                negator = _T("[-]");
++
+             if ( !opt.shortName.empty() )
+             {
+-                usage << chSwitch << opt.shortName;
++                usage << chSwitch << opt.shortName << negator;
+             }
+             else if ( areLongOptionsEnabled && !opt.longName.empty() )
+             {
+-                usage << wxT("--") << opt.longName;
++                usage << wxT("--") << opt.longName << negator;
+             }
+             else
+             {
+@@ -1111,6 +1133,7 @@
+                 option << (!opt.longName ? wxT(':') : wxT('=')) << val;
+             }
+ 
++            usage << negator;
+             if ( !(opt.flags & wxCMD_LINE_OPTION_MANDATORY) )
+             {
+                 usage << wxT(']');

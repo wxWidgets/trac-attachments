@@ -1,0 +1,189 @@
+ src/generic/datavgen.cpp | 75 ++++++++++++++++++++++++++++++++++--------------
+ 1 file changed, 83 insertions(+), 52 deletions(-)
+
+diff --git a/src/generic/datavgen.cpp b/src/generic/datavgen.cpp
+index a18f8a5..764dc24 100644
+--- a/src/generic/datavgen.cpp
++++ b/src/generic/datavgen.cpp
+@@ -222,7 +222,7 @@ void wxDataViewColumn::SetSortOrder(bool ascending)
+         m_owner->UseColumnForSorting(idx);
+         m_sort = true;
+     }
+-
++
+    m_sortAscending = ascending;
+ 
+     // Call this directly instead of using UpdateDisplay() as we already have
+@@ -1818,17 +1818,44 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+     }
+ 
+     // prepare the DC
+-    GetOwner()->PrepareDC( dc );
++    //to avoid overflow problems in GDI, we will compute ourselves the scrolled position
++    //from MSDN :
++    //https://msdn.microsoft.com/en-us/library/windows/desktop/dd145139(v=vs.85).aspx
++    //"Device space measures 2^27 units high by 2^27 units wide."
++    //2^27 = 134 217 128, so 6 100 805 lines with height 22
++    //This is consistent with a scrolling bug found in very large virtual lists,
++    //where the items were not updated after line 6 100 000
++    //The only viable solution is to perform ourselves all calculations
++    // in unsigned 32 bits, and to keep DC origin at 0
++    //
++    //Therefore we will not use CalcUnscrolledPosition methods
++    int x0 = 0, y0 = 0;
++    unsigned int uiX0 = 0, uiY0 = 0;
++    GetOwner()->PrepareDC(dc);
++    dc.GetDeviceOrigin(&x0, &y0); //in case of scrolling, x0 and y0 will be negative
++    dc.SetDeviceOrigin(0, 0);
++
++    //convert to unsigned 32 bits
++    uiX0 = wxMax(0, -x0);
++    uiY0 = wxMax(0, -y0);
++
++    //macro to translate everything to origin
++    #define TO_ORIGIN_X(x)  (int)((unsigned int) x - uiX0)
++    #define TO_ORIGIN_Y(y)  (int)((unsigned int) y - uiY0)
++
++    //set font
+     dc.SetFont( GetFont() );
+ 
+-    wxRect update = GetUpdateRegion().GetBox();
+-    m_owner->CalcUnscrolledPosition( update.x, update.y, &update.x, &update.y );
++    //wxRect update = GetUpdateRegion().GetBox();
++    //m_owner->CalcUnscrolledPosition( update.x, update.y, &update.x, &update.y );
+ 
+     // compute which items needs to be redrawn
+-    unsigned int item_start = GetLineAt( wxMax(0,update.y) );
++    unsigned int item_start = GetLineAt(uiY0); //GetLineAt( wxMax(0,update.y) );
+     unsigned int item_count =
+-        wxMin( (int)(  GetLineAt( wxMax(0,update.y+update.height) ) - item_start + 1),
+-            (int)(GetRowCount( ) - item_start));
++        wxMin( (int)(GetLineAt(uiY0 + size.GetHeight()) - item_start + 1),
++                                     (int)(GetRowCount() - item_start));
++//        wxMin( (int)(  GetLineAt( wxMax(0,update.y+update.height) ) - item_start + 1),
++//            (int)(GetRowCount( ) - item_start));
+     unsigned int item_last = item_start + item_count;
+ 
+     // Send the event to wxDataViewCtrl itself.
+@@ -1854,7 +1881,7 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+             continue;      // skip it!
+ 
+         unsigned int w = col->GetWidth();
+-        if (x_start+w >= (unsigned int)update.x)
++        if (x_start+w >= uiX0) //(unsigned int)update.x)
+             break;
+ 
+         x_start += w;
+@@ -1868,7 +1895,7 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+         if (col->IsHidden())
+             continue;      // skip it!
+ 
+-        if (x_last > (unsigned int)update.GetRight())
++        if (x_last > (unsigned int)uiX0 + size.GetWidth()) //update.GetRight())
+             break;
+ 
+         x_last += col->GetWidth();
+@@ -1894,14 +1921,14 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+         dc.SetBrush(wxBrush(altRowColour));
+ 
+         // We only need to draw the visible part, so limit the rectangle to it.
+-        const int xRect = m_owner->CalcUnscrolledPosition(wxPoint(0, 0)).x;
++        const int xRect = 0; //m_owner->CalcUnscrolledPosition(wxPoint(0, 0)).x;
+         const int widthRect = size.x;
+         for (unsigned int item = item_start; item < item_last; item++)
+         {
+             if ( item % 2 )
+             {
+-                dc.DrawRectangle(xRect,
+-                                 GetLineStart(item),
++                dc.DrawRectangle(TO_ORIGIN_X(xRect),
++                                 TO_ORIGIN_Y(GetLineStart(item)),
+                                  widthRect,
+                                  GetLineHeight(item));
+             }
+@@ -1917,7 +1944,7 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+         for (unsigned int i = item_start; i <= item_last; i++)
+         {
+             int y = GetLineStart( i );
+-            dc.DrawLine(x_start, y, x_last, y);
++            dc.DrawLine(TO_ORIGIN_X(x_start), TO_ORIGIN_Y(y), TO_ORIGIN_X(x_last), TO_ORIGIN_Y(y));
+         }
+     }
+ 
+@@ -1941,8 +1968,8 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+ 
+             x += col->GetWidth();
+ 
+-            dc.DrawLine(x, GetLineStart( item_start ),
+-                        x, GetLineStart( item_last ) );
++            dc.DrawLine(TO_ORIGIN_X(x), TO_ORIGIN_Y(GetLineStart(item_start)),
++                        TO_ORIGIN_X(x), TO_ORIGIN_Y(GetLineStart(item_last)));
+         }
+     }
+ 
+@@ -1953,8 +1980,9 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+ 
+         if (selected || item == m_currentRow)
+         {
+-            wxRect rowRect( x_start, GetLineStart( item ),
+-                         x_last - x_start, GetLineHeight( item ) );
++            wxRect rowRect(TO_ORIGIN_X(x_start),
++                           TO_ORIGIN_Y(GetLineStart( item )),
++                            x_last - x_start, GetLineHeight( item ) );
+ 
+             bool renderColumnFocus = false;
+ 
+@@ -2058,7 +2086,7 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+ #if wxUSE_DRAG_AND_DROP
+     if (m_dropHint)
+     {
+-        wxRect rect( x_start, GetLineStart( m_dropHintLine ),
++        wxRect rect(TO_ORIGIN_X(x_start), TO_ORIGIN_Y(GetLineStart(m_dropHintLine)),
+                      x_last - x_start, GetLineHeight( m_dropHintLine ) );
+         dc.SetPen( *wxBLACK_PEN );
+         dc.SetBrush( *wxTRANSPARENT_BRUSH );
+@@ -2071,7 +2099,7 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+ 
+     // redraw all cells for all rows which must be repainted and all columns
+     wxRect cell_rect;
+-    cell_rect.x = x_start;
++    cell_rect.x = TO_ORIGIN_X(x_start);
+     for (unsigned int i = col_start; i < col_last; i++)
+     {
+         wxDataViewColumn *col = GetOwner()->GetColumnAt( i );
+@@ -2108,7 +2136,7 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+             }
+ 
+             // update cell_rect
+-            cell_rect.y = GetLineStart( item );
++            cell_rect.y = TO_ORIGIN_Y(GetLineStart( item ));
+             cell_rect.height = GetLineHeight( item );
+ 
+             cell->PrepareForItem(model, dataitem, col->GetModelColumn());
+@@ -2188,6 +2216,9 @@ void wxDataViewMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
+ 
+         cell_rect.x += cell_rect.width;
+     }
++
++    #undef TO_ORIGIN_X
++    #undef TO_ORIGIN_Y
+ }
+ 
+ 
+@@ -5079,14 +5110,14 @@ wxDataViewColumn *wxDataViewCtrl::GetSortingColumn() const
+ {
+     if ( m_sortingColumnIdxs.empty() )
+         return NULL;
+-
++
+     return GetColumn(m_sortingColumnIdxs.front());
+ }
+ 
+ wxVector<wxDataViewColumn *> wxDataViewCtrl::GetSortingColumns() const
+ {
+     wxVector<wxDataViewColumn *> out;
+-
++
+     for ( wxVector<int>::const_iterator it = m_sortingColumnIdxs.begin(),
+                                        end = m_sortingColumnIdxs.end();
+           it != end;

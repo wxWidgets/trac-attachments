@@ -1,0 +1,126 @@
+diff --git a/include/wx/fswatcher.h b/include/wx/fswatcher.h
+index cb31a78..263e3cd 100644
+--- a/include/wx/fswatcher.h
++++ b/include/wx/fswatcher.h
+@@ -53,6 +53,9 @@ enum
+                          wxFSW_EVENT_RENAME | wxFSW_EVENT_MODIFY |
+                          wxFSW_EVENT_ACCESS | wxFSW_EVENT_ATTRIB |
+                          wxFSW_EVENT_WARNING | wxFSW_EVENT_ERROR
++#ifdef wxHAS_INOTIFY
++    ,wxFSW_EVENT_UNMOUNT = 0x2000
++#endif
+ };
+ 
+ // Type of the path watched, used only internally for now.
+diff --git a/interface/wx/fswatcher.h b/interface/wx/fswatcher.h
+index b2981a0..5857d69 100644
+--- a/interface/wx/fswatcher.h
++++ b/interface/wx/fswatcher.h
+@@ -258,6 +258,18 @@ enum wxFSWFlags
+     wxFSW_EVENT_ATTRIB = 0x20,
+ 
+     /**
++        The file system containing a watched item was unmounted.
++
++        wxFSW_EVENT_UNMOUNT cannot be set; unmount events are produced automatically. This flag
++        is therefore not included in wxFSW_EVENT_ALL.
++
++        This event is currently only detected under Linux.
++
++        @since 2.9.5
++    */
++    wxFSW_EVENT_UNMOUNT = 0x2000,
++
++    /**
+         A warning condition arose.
+ 
+         This is something that probably needs to be shown to the user in an
+diff --git a/samples/fswatcher/fswatcher.cpp b/samples/fswatcher/fswatcher.cpp
+index 0c2bdf6..37f7c31 100644
+--- a/samples/fswatcher/fswatcher.cpp
++++ b/samples/fswatcher/fswatcher.cpp
+@@ -535,8 +535,12 @@ static wxString GetFSWEventChangeTypeName(int changeType)
+         return "MODIFY";
+     case wxFSW_EVENT_ACCESS:
+         return "ACCESS";
+-    case wxFSW_EVENT_ATTRIB: // Currently this is wxGTK-only
++    case wxFSW_EVENT_ATTRIB:  // Currently this is wxGTK-only
+         return "ATTRIBUTE";
++#ifdef wxHAS_INOTIFY
++    case wxFSW_EVENT_UNMOUNT: // Currently this is wxGTK-only
++        return "UNMOUNT";
++#endif
+     case wxFSW_EVENT_WARNING:
+         return "WARNING";
+     case wxFSW_EVENT_ERROR:
+diff --git a/src/common/fswatchercmn.cpp b/src/common/fswatchercmn.cpp
+index dfa8730..2990795 100644
+--- a/src/common/fswatchercmn.cpp
++++ b/src/common/fswatchercmn.cpp
+@@ -42,6 +42,10 @@ static wxString GetFSWEventChangeTypeName(int type)
+         return "ACCESS";
+     case wxFSW_EVENT_ATTRIB: // Currently this is wxGTK-only
+         return "ATTRIBUTE";
++#ifdef wxHAS_INOTIFY
++    case wxFSW_EVENT_UNMOUNT: // Currently this is wxGTK-only
++        return "UNMOUNT";
++#endif
+     case wxFSW_EVENT_WARNING:
+         return "WARNING";
+     case wxFSW_EVENT_ERROR:
+diff --git a/src/unix/fswatcher_inotify.cpp b/src/unix/fswatcher_inotify.cpp
+index bdc0b34..f743872 100644
+--- a/src/unix/fswatcher_inotify.cpp
++++ b/src/unix/fswatcher_inotify.cpp
+@@ -265,6 +265,13 @@ protected:
+             wxFileSystemWatcherEvent event(flags, errMsg);
+             SendEvent(event);
+         }
++        // Now IN_UNMOUNT. We must do so here, as it's not in the watch flags
++        if (nativeFlags & IN_UNMOUNT)
++        {
++            wxFileName path = GetEventPath(watch, inevt);
++            wxFileSystemWatcherEvent event(wxFSW_EVENT_UNMOUNT, path, path);
++            SendEvent(event);
++        }
+         // filter out ignored events and those not asked for.
+         // we never filter out warnings or exceptions
+         else if ((flags == 0) || !(flags & watch.GetFlags()))
+@@ -488,12 +495,13 @@ protected:
+         }
+ 
+         static const int flag_mapping[][2] = {
+-            { wxFSW_EVENT_ACCESS, IN_ACCESS },
+-            { wxFSW_EVENT_MODIFY, IN_MODIFY },
+-            { wxFSW_EVENT_ATTRIB, IN_ATTRIB },
+-            { wxFSW_EVENT_RENAME, IN_MOVE   },
+-            { wxFSW_EVENT_CREATE, IN_CREATE },
+-            { wxFSW_EVENT_DELETE, IN_DELETE|IN_DELETE_SELF|IN_MOVE_SELF }
++            { wxFSW_EVENT_ACCESS, IN_ACCESS   },
++            { wxFSW_EVENT_MODIFY, IN_MODIFY   },
++            { wxFSW_EVENT_ATTRIB, IN_ATTRIB   },
++            { wxFSW_EVENT_RENAME, IN_MOVE     },
++            { wxFSW_EVENT_CREATE, IN_CREATE   },
++            { wxFSW_EVENT_DELETE, IN_DELETE|IN_DELETE_SELF|IN_MOVE_SELF },
++            { wxFSW_EVENT_UNMOUNT, IN_UNMOUNT }
+             // wxFSW_EVENT_ERROR/WARNING make no sense here
+         };
+ 
+@@ -523,7 +531,7 @@ protected:
+             { IN_DELETE_SELF,   wxFSW_EVENT_DELETE },
+             { IN_MOVE_SELF,     wxFSW_EVENT_DELETE },
+ 
+-            { IN_UNMOUNT,       wxFSW_EVENT_ERROR  },
++            { IN_UNMOUNT,       wxFSW_EVENT_UNMOUNT},
+             { IN_Q_OVERFLOW,    wxFSW_EVENT_WARNING},
+ 
+             // ignored, because this is generated mainly by watcher::Remove()
+@@ -549,8 +557,6 @@ protected:
+     {
+         switch ( flag )
+         {
+-        case IN_UNMOUNT:
+-            return _("File system containing watched object was unmounted");
+         case IN_Q_OVERFLOW:
+             return _("Event queue overflowed");
+         }

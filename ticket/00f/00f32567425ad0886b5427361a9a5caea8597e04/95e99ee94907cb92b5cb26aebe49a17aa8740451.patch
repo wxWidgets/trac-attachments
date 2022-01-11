@@ -1,0 +1,283 @@
+Index: include/wx/msw/private.h
+===================================================================
+--- include/wx/msw/private.h	(revision 76473)
++++ include/wx/msw/private.h	(working copy)
+@@ -190,15 +190,24 @@
+ class AutoHANDLE
+ {
+ public:
+-    wxEXPLICIT AutoHANDLE(HANDLE handle) : m_handle(handle) { }
++    wxEXPLICIT AutoHANDLE(HANDLE handle = INVALID_HANDLE_VALUE) : m_handle(handle), m_handleInvalid(INVALID_HANDLE_VALUE) { }
+ 
+-    bool IsOk() const { return m_handle != INVALID_HANDLE_VALUE; }
++    bool IsOk() const { return m_handle != m_handleInvalid; }
+     operator HANDLE() const { return m_handle; }
+ 
+-    ~AutoHANDLE() { if ( IsOk() ) ::CloseHandle(m_handle); }
++    ~AutoHANDLE() { if ( IsOk() ) Close(); }
+ 
++    void Close()
++    {
++        wxCHECK_RET(IsOk(), wxT("Handle must be valid"));
++        if (::CloseHandle(m_handle))
++            m_handle = m_handleInvalid;
++        else
++            wxLogLastError(wxT("CloseHandle error in AutoHANDLE"));
++    }
++
+ protected:
+-    HANDLE m_handle;
++    WXHANDLE m_handle, m_handleInvalid;
+ };
+ 
+ // a template to make initializing Windows styructs less painful: it zeroes all
+Index: include/wx/msw/private/event.h
+===================================================================
+--- include/wx/msw/private/event.h	(revision 0)
++++ include/wx/msw/private/event.h	(working copy)
+@@ -0,0 +1,75 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/msw/private/event.h
++// Purpose:     Simple Windows 'event object' wrapper.
++// Author:      
++// Created:     2014-05-07
++// Copyright:   (c) 2014 wxWidgets team
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_MSW_PRIVATE_EVENT_H_
++#define _WX_MSW_PRIVATE_EVENT_H_
++
++#include "wx/msw/private.h"
++
++namespace wxWinAPI
++{
++
++class Event : public AutoHANDLE
++{
++public:
++    enum Kind
++    {
++        ManualReset, AutomaticReset
++    };
++    enum InitialState
++    {
++        Signaled, Nonsignaled
++    };
++
++    wxEXPLICIT Event() : AutoHANDLE() { m_handle = m_handleInvalid = NULL; }
++
++    bool Create(Kind kind = AutomaticReset, InitialState initialState = Nonsignaled, const wxChar* pstrName = NULL);
++    bool SetEvent();
++    bool ResetEvent();
++private:
++    wxDECLARE_NO_COPY_CLASS(Event);
++};
++
++} // namespace wxWinAPI
++
++// ----------------------------------------------------------------------------
++// Implementations requiring windows.h; these are to moved out-of-line if
++// this class is moved to a public header, or if [parts of] msw/private.h is
++// changed to not depend on windows.h being included.
++// ----------------------------------------------------------------------------
++
++inline bool wxWinAPI::Event::Create(wxWinAPI::Event::Kind kind, wxWinAPI::Event::InitialState initialState, const wxChar* pstrName)
++{
++    wxCHECK_MSG(!IsOk(), false, wxT("Cannot open twice"));
++    WXHANDLE handle = ::CreateEvent(NULL, kind == ManualReset, initialState == Signaled, pstrName);
++    if (handle == m_handleInvalid)
++        return false;
++    m_handle = handle;
++    return true;
++}
++
++inline bool wxWinAPI::Event::SetEvent()
++{
++    wxCHECK_MSG(m_handle, false, wxT("Handle must be valid"));
++    if (::SetEvent(m_handle))
++        return true;
++    wxLogLastError(wxT("SetEvent error"));
++    return false;
++}
++
++inline bool wxWinAPI::Event::ResetEvent()
++{
++    wxCHECK_MSG(m_handle, false, wxT("Handle must be valid"));
++    if (::ResetEvent(m_handle))
++        return true;
++    wxLogLastError(wxT("ResetEvent error"));
++    return false;
++}
++
++#endif // _WX_MSW_PRIVATE_EVENT_H_
+Index: src/msw/dialup.cpp
+===================================================================
+--- src/msw/dialup.cpp	(revision 76473)
++++ src/msw/dialup.cpp	(working copy)
+@@ -40,6 +40,7 @@
+ 
+ #include "wx/msw/private.h"
+ #include "wx/msw/private/hiddenwin.h"
++#include "wx/msw/private/event.h"
+ #include "wx/dynlib.h"
+ 
+ wxDEFINE_EVENT( wxEVT_DIALUP_CONNECTED, wxDialUpEvent );
+@@ -139,8 +140,6 @@
+     wxRasThreadData()
+     {
+         hWnd = 0;
+-        hEventRas =
+-        hEventQuit = 0;
+         dialUpManager = NULL;
+     }
+ 
+@@ -148,17 +147,11 @@
+     {
+         if ( hWnd )
+             DestroyWindow(hWnd);
+-
+-        if ( hEventQuit )
+-            CloseHandle(hEventQuit);
+-
+-        if ( hEventRas )
+-            CloseHandle(hEventRas);
+     }
+ 
+     HWND    hWnd;       // window to send notifications to
+-    HANDLE  hEventRas,  // automatic event which RAS signals when status changes
+-            hEventQuit; // manual event which we signal when we terminate
++    wxWinAPI::Event hEventRas,  // automatic event which RAS signals when status changes
++                    hEventQuit; // manual event which we signal when we terminate
+ 
+     class WXDLLIMPEXP_FWD_CORE wxDialUpManagerMSW *dialUpManager;  // the owner
+ };
+@@ -577,7 +570,7 @@
+ {
+     if ( m_hThread )
+     {
+-        if ( !SetEvent(m_data->hEventQuit) )
++        if ( !m_data->hEventQuit.SetEvent() )
+         {
+             wxLogLastError(wxT("SetEvent(RasThreadQuit)"));
+         }
+@@ -1068,14 +1061,11 @@
+     if ( ok )
+     {
+         // first create an event to wait on
+-        m_data->hEventRas = ::CreateEvent
++        if ( !m_data->hEventRas.Create
+                             (
+-                             NULL,      // security attribute (default)
+-                             FALSE,     // manual reset (no, it is automatic)
+-                             FALSE,     // initial state (not signaled)
+-                             NULL       // name (no)
+-                            );
+-        if ( !m_data->hEventRas )
++                             wxWinAPI::Event::AutomaticReset,
++                             wxWinAPI::Event::Nonsignaled
++                            ) )
+         {
+             wxLogLastError(wxT("CreateEvent(RasStatus)"));
+ 
+@@ -1089,14 +1079,11 @@
+         // here avoids problems with missing the event if wxDialUpManagerMSW
+         // is created and destroyed immediately, before wxRasStatusWindowProc
+         // starts waiting on the event
+-        m_data->hEventQuit = ::CreateEvent
++        if ( !m_data->hEventQuit.Create
+                              (
+-                                NULL,   // default security
+-                                TRUE,   // manual event
+-                                FALSE,  // initially non signalled
+-                                NULL    // nameless
+-                             );
+-        if ( !m_data->hEventQuit )
++                                wxWinAPI::Event::ManualReset,  // manual event
++                                wxWinAPI::Event::Nonsignaled
++                             ) )
+         {
+             wxLogLastError(wxT("CreateEvent(RasThreadQuit)"));
+ 
+@@ -1241,14 +1228,12 @@
+ 
+ static DWORD wxRasMonitorThread(wxRasThreadData *data)
+ {
+-    HANDLE handles[2];
+-    handles[0] = data->hEventRas;
+-    handles[1] = data->hEventQuit;
++    HANDLE handles[] = { data->hEventRas, data->hEventQuit };
+ 
+     bool cont = true;
+     while ( cont )
+     {
+-        DWORD dwRet = ::WaitForMultipleObjects(2, handles, FALSE, INFINITE);
++        DWORD dwRet = ::WaitForMultipleObjects(WXSIZEOF(handles), handles, FALSE, INFINITE);
+ 
+         switch ( dwRet )
+         {
+Index: src/msw/utilsexc.cpp
+===================================================================
+--- src/msw/utilsexc.cpp	(revision 76473)
++++ src/msw/utilsexc.cpp	(working copy)
+@@ -79,6 +79,7 @@
+ #endif // wxUSE_IPC
+ 
+ #include "wx/msw/private/hiddenwin.h"
++#include "wx/msw/private/event.h"
+ 
+ // FIXME-VC6: These are not defined in VC6 SDK headers.
+ #ifndef BELOW_NORMAL_PRIORITY_CLASS
+@@ -107,7 +108,7 @@
+ static const wxChar *gs_classForHiddenWindow = NULL;
+ 
+ // event used to wake up threads waiting in wxExecuteThread
+-static HANDLE gs_heventShutdown = NULL;
++static wxWinAPI::Event gs_heventShutdown;
+ 
+ // handles of all threads monitoring the execution of asynchronously running
+ // processes
+@@ -152,17 +153,16 @@
+     virtual bool OnInit() { return true; }
+     virtual void OnExit()
+     {
+-        if ( gs_heventShutdown )
++        if ( gs_heventShutdown.IsOk() )
+         {
+             // stop any threads waiting for the termination of asynchronously
+             // running processes
+-            if ( !::SetEvent(gs_heventShutdown) )
++            if ( !gs_heventShutdown.SetEvent() )
+             {
+                 wxLogDebug(wxT("Failed to set shutdown event in wxExecuteModule"));
+             }
+ 
+-            ::CloseHandle(gs_heventShutdown);
+-            gs_heventShutdown = NULL;
++            gs_heventShutdown.Close();
+ 
+             // now wait until they terminate
+             if ( !gs_asyncThreads.empty() )
+@@ -300,18 +300,17 @@
+     wxExecuteData * const data = (wxExecuteData *)arg;
+ 
+     // create the shutdown event if we're the first thread starting to wait
+-    if ( !gs_heventShutdown )
++    if ( !gs_heventShutdown.IsOk() )
+     {
+         // create a manual initially non-signalled event object
+-        gs_heventShutdown = ::CreateEvent(NULL, TRUE, FALSE, NULL);
+-        if ( !gs_heventShutdown )
++        if ( !gs_heventShutdown.Create(wxWinAPI::Event::ManualReset, wxWinAPI::Event::Nonsignaled) )
+         {
+             wxLogDebug(wxT("CreateEvent() in wxExecuteThread failed"));
+         }
+     }
+ 
+-    HANDLE handles[2] = { data->hProcess, gs_heventShutdown };
+-    switch ( ::WaitForMultipleObjects(2, handles, FALSE, INFINITE) )
++    HANDLE handles[] = { data->hProcess, gs_heventShutdown };
++    switch ( ::WaitForMultipleObjects(WXSIZEOF(handles), handles, FALSE, INFINITE) )
+     {
+         case WAIT_OBJECT_0:
+             // process terminated, get its exit code

@@ -1,0 +1,286 @@
+--- include/wx/event-svn.h	2007-11-24 16:12:56.000000000 +0100
++++ include/wx/event.h	2007-11-24 19:04:11.000000000 +0100
+@@ -162,6 +162,9 @@
+     DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_BASE, wxEVT_SOCKET, 50)
+     DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_BASE, wxEVT_TIMER , 80)
+ 
++        // Event handler destruction notification 
++    DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_BASE, wxEVT_DESTROY_EVTHANDLER , 90)
++
+         // Mouse event types
+     DECLARE_EVENT_TYPE(wxEVT_LEFT_DOWN, 100)
+     DECLARE_EVENT_TYPE(wxEVT_LEFT_UP, 101)
+@@ -473,6 +476,44 @@
+ };
+ 
+ 
++// Destructor notifications for wxEvtHandler
++// ----------------------------------------------------------------------------
++class WXDLLIMPEXP_BASE wxDestroyEvent : public wxEvent
++{
++public:
++    wxDestroyEvent(wxEvtHandler* evtHandler);
++
++    virtual wxEvent *Clone() const { return NULL; }
++};
++    
+ #if wxUSE_GUI
+ 
+ 
+@@ -2251,7 +2292,8 @@
+                              wxObjectEventFunction fn, wxObject *data, wxEvtHandler* eventSink)
+         : wxEventTableEntryBase(winid, idLast, fn, data),
+           m_eventType(evType),
+-          m_eventSink(eventSink)
++          m_eventSink(eventSink),
++          m_connectionCount(1)
+     { }
+ 
+     // not a reference here as we can't keep a reference to a temporary int
+@@ -2264,6 +2306,10 @@
+     // message
+     wxEvtHandler* m_eventSink;
+ 
++    // This is primarily used for destruction notifications. We might have  
++    // several connections with a sink, but only need one table entry for that.
++    int m_connectionCount;
++
+     DECLARE_NO_COPY_CLASS(wxDynamicEventTableEntry)
+ };
+ 
+@@ -2366,7 +2412,10 @@
+     // add an event to be processed later
+     virtual void AddPendingEvent(const wxEvent& event);
+ 
+-    void ProcessPendingEvents();
++    // Returns true if event handler processed all events and should be 
++    // removed from wxPendingEvents (list of handlers with still pending events)
++    // Returns false otherwise.
++    bool ProcessPendingEvents();
+ 
+ #if wxUSE_THREADS
+     bool ProcessThreadEvent(const wxEvent& event);
+@@ -2519,6 +2568,9 @@
+     virtual void DoSetClientData( void *data );
+     virtual void *DoGetClientData() const;
+ 
++    // Enable automaticically unhooking dynamically connected event sinks
++    void OnSinkDestroyed( wxEvent& evt );
++    
+ private:
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxEvtHandler)
+ };
+--- src/common/event-svn.cpp	2007-11-24 16:14:49.000000000 +0100
++++ src/common/event.cpp	2007-11-25 15:37:41.000000000 +0100
+@@ -153,6 +153,7 @@
+ DEFINE_EVENT_TYPE(wxEVT_IDLE)
+ DEFINE_EVENT_TYPE(wxEVT_SOCKET)
+ DEFINE_EVENT_TYPE(wxEVT_TIMER)
++DEFINE_EVENT_TYPE(wxEVT_DESTROY_EVTHANDLER)
+ 
+ #endif // !WXWIN_COMPATIBILITY_EVENT_TYPES
+ 
+@@ -822,6 +823,12 @@
+ 
+ #if wxUSE_BASE
+ 
++wxDestroyEvent::wxDestroyEvent(wxEvtHandler *evtHandler)
++                : wxEvent(0,wxEVT_DESTROY_EVTHANDLER) 
++{
++    SetEventObject(evtHandler);
++}
++
+ // ----------------------------------------------------------------------------
+ // wxEventHashTable
+ // ----------------------------------------------------------------------------
+@@ -1061,8 +1068,14 @@
+ 
+     if (m_dynamicEvents)
+     {
+-        for ( wxList::iterator it = m_dynamicEvents->begin(),
+-                               end = m_dynamicEvents->end();
++        wxList* dynamicEvents = m_dynamicEvents;
++        m_dynamicEvents = NULL; // Disable dynamic event dispatch during destruction
++        
++        // To notify any objects for which we are a sink
++        wxDestroyEvent evtDestroy(this);
++        
++        for ( wxList::iterator it = dynamicEvents->begin(),
++                               end = dynamicEvents->end();
+               it != end;
+               ++it )
+         {
+@@ -1072,12 +1085,27 @@
+             wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)*it;
+ #endif // WXWIN_COMPATIBILITY_EVENT_TYPES/!WXWIN_COMPATIBILITY_EVENT_TYPES
+ 
++            // Check if it is a a destruction notification event 
++            if (entry->m_eventType==wxEVT_DESTROY_EVTHANDLER)
++            {
++                // We have the sink (event target) role here. Notify source.
++                if( entry->m_eventSink )
++                    (entry->m_eventSink->*((wxEventFunction) (entry->m_fn)))(evtDestroy);
++            }
++            else 
++            {
++                // We have the event source role here
++                // Undo subscribing to destruction notification
++                if (entry->m_eventSink && entry->m_eventSink!=this )
++                    entry->m_eventSink->Disconnect(wxEVT_DESTROY_EVTHANDLER, (wxObjectEventFunction)&wxEvtHandler::OnSinkDestroyed, NULL, this);
++            }
++                
+             if (entry->m_callbackUserData)
+                 delete entry->m_callbackUserData;
+             delete entry;
+         }
+-        delete m_dynamicEvents;
+-    };
++        delete dynamicEvents;
++    }
+ 
+     if (m_pendingEvents)
+         m_pendingEvents->DeleteContents(true);
+@@ -1164,11 +1192,11 @@
+     wxWakeUpIdle();
+ }
+ 
+-void wxEvtHandler::ProcessPendingEvents()
++bool wxEvtHandler::ProcessPendingEvents()
+ {
+     // this method is only called by wxApp if this handler does have
+     // pending events
+-    wxCHECK_RET( m_pendingEvents,
++    wxCHECK_MSG( m_pendingEvents, true, 
+                  wxT("Please call wxApp::ProcessPendingEvents() instead") );
+ 
+     wxENTER_CRIT_SECT( Lock() );
+@@ -1184,7 +1212,7 @@
+     {
+         wxEvent *event = (wxEvent *)node->GetData();
+ 
+-        // It's importan we remove event from list before processing it.
++        // It's important we remove event from list before processing it.
+         // Else a nested event loop, for example from a modal dialog, might
+         // process the same event again.
+ 
+@@ -1196,6 +1224,14 @@
+ 
+         delete event;
+ 
++        // It could be that this event handler has been destroyed during
++        // ProcessEvent above (an event handler must be allowed to destroy
++        // itself in response to an event). If so, return without accessing 
++        // any members (Note: depends on wxAppConsoleBase::ProcessPendingEvents 
++        // not removing the node before calling us). 
++        if( !wxPendingEvents->Find(this) )
++            return false;
++            
+         wxENTER_CRIT_SECT( Lock() );
+ 
+         if ( --n == 0 )
+@@ -1203,6 +1239,11 @@
+     }
+ 
+     wxLEAVE_CRIT_SECT( Lock() );
++    
++    // Only return true if there are no unprocessed events left, since 
++    // removing us from wxPendingEvents would leave the events unprocessed
++    // indefinitely.
++    return m_pendingEvents->size()==0;
+ }
+ 
+ /*
+@@ -1337,6 +1378,27 @@
+                             wxObject *userData,
+                             wxEvtHandler* eventSink )
+ {
++    // If adding a destructor notification, see if we already have one and increase 
++    // ref count in that case.
++    if (eventType==wxEVT_DESTROY_EVTHANDLER && m_dynamicEvents)
++    {
++        wxList::compatibility_iterator node = m_dynamicEvents->GetFirst();
++        while (node)
++        {
++#if WXWIN_COMPATIBILITY_EVENT_TYPES
++            wxEventTableEntry *entry = (wxEventTableEntry*)node->GetData();
++#else // !WXWIN_COMPATIBILITY_EVENT_TYPES
++            wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)node->GetData();
++#endif // WXWIN_COMPATIBILITY_EVENT_TYPES/!WXWIN_COMPATIBILITY_EVENT_TYPES
++            if( entry->m_eventType==wxEVT_DESTROY_EVTHANDLER && entry->m_eventSink==eventSink )
++            {
++                entry->m_connectionCount++;
++                return;
++            }
++            node = node->GetNext();
++        }
++    }
++    
+ #if WXWIN_COMPATIBILITY_EVENT_TYPES
+     wxEventTableEntry *entry = new wxEventTableEntry;
+     entry->m_eventType = eventType;
+@@ -1354,6 +1416,10 @@
+ 
+     // Insert at the front of the list so most recent additions are found first
+     m_dynamicEvents->Insert( (wxObject*) entry );
++    
++    // Subscribe to wxEVT_DESTROY_EVTHANDLER events (so we can disconnect properly)
++    if( eventSink && eventSink!=this && eventType!=wxEVT_DESTROY_EVTHANDLER )
++        eventSink->Connect(wxEVT_DESTROY_EVTHANDLER, (wxObjectEventFunction)&wxEvtHandler::OnSinkDestroyed, NULL, this);
+ }
+ 
+ bool wxEvtHandler::Disconnect( int id, int lastId, wxEventType eventType,
+@@ -1380,6 +1446,17 @@
+             ((entry->m_eventSink == eventSink) || (eventSink == (wxEvtHandler*)NULL)) &&
+             ((entry->m_callbackUserData == userData) || (userData == (wxObject*)NULL)))
+         {
++            // If it is a destruction notification handler, simply decrease count
++            // and destroy it only if zero.
++            if( entry->m_eventType==wxEVT_DESTROY_EVTHANDLER )
++            {
++                if( --entry->m_connectionCount>0 )
++                    return true;
++            }
++            // Undo subscribing to destruction notification
++            else if (entry->m_eventSink && entry->m_eventSink!=this)
++                entry->m_eventSink->Disconnect(wxEVT_DESTROY_EVTHANDLER, (wxObjectEventFunction)&wxEvtHandler::OnSinkDestroyed, NULL, this);
++                
+             if (entry->m_callbackUserData)
+                 delete entry->m_callbackUserData;
+             m_dynamicEvents->Erase( node );
+@@ -1469,6 +1546,34 @@
+     return m_clientData;
+ }
+ 
++void wxEvtHandler::OnSinkDestroyed( wxEvent& evt )
++{
++    if (!m_dynamicEvents)
++        return;
++
++    // Remove all connections we have to this sink 
++    wxEvtHandler *eventSink = (wxEvtHandler*)evt.GetEventObject( );
++    wxList::compatibility_iterator node = m_dynamicEvents->GetFirst(), nodeNext;
++    while (node)
++    {
++#if WXWIN_COMPATIBILITY_EVENT_TYPES
++            wxEventTableEntry *entry = (wxEventTableEntry*)node->GetData();
++#else // !WXWIN_COMPATIBILITY_EVENT_TYPES
++            wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)node->GetData();
++#endif // WXWIN_COMPATIBILITY_EVENT_TYPES/!WXWIN_COMPATIBILITY_EVENT_TYPES
++
++        nodeNext = node->GetNext();
++        if (entry->m_eventSink == eventSink)
++        {
++            if (entry->m_callbackUserData)
++                delete entry->m_callbackUserData;
++            m_dynamicEvents->Erase( node );
++            delete entry;
++        }
++        node = nodeNext;
++    }
++}
++
+ #endif // wxUSE_BASE
+ 
+ #if wxUSE_GUI
+
+ 	  	 

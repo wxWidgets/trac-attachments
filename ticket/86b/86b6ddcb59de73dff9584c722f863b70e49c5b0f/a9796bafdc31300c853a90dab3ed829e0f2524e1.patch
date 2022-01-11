@@ -1,0 +1,345 @@
+Index: include/wx/image.h
+===================================================================
+--- include/wx/image.h	(revision 74279)
++++ include/wx/image.h	(working copy)
+@@ -71,7 +71,7 @@
+     wxIMAGE_QUALITY_NORMAL = wxIMAGE_QUALITY_NEAREST,
+ 
+     // highest (but best) quality
+-    wxIMAGE_QUALITY_HIGH
++    wxIMAGE_QUALITY_HIGH	= 4
+ };
+ 
+ // alpha channel values: fully transparent, default threshold separating
+Index: src/common/image.cpp
+===================================================================
+--- src/common/image.cpp	(revision 74279)
++++ src/common/image.cpp	(working copy)
+@@ -552,6 +552,34 @@
+     return image;
+ }
+ 
++struct BoxPrecalc
++{
++    int box_start;
++    int box_end;
++};
++
++inline int boxBetween(int aTest, int aMin, int aMax)
++{
++    return wxMax(wxMin(aTest, aMax), aMin);
++}
++
++void precalc(wxVector<BoxPrecalc> &aPrecalc, int aOldDim)
++{
++    const int tNewSize        = aPrecalc.size();
++    const double scale_factor_1 = double(aOldDim) / tNewSize;
++    const int scale_factor_2 = (int)(scale_factor_1 / 2);
++
++    for ( int dst = 0; dst < tNewSize; ++dst )
++    {
++        // Source pixel in the Y direction
++        int src_p = (int)(dst * scale_factor_1);
++
++        BoxPrecalc &tPrec = aPrecalc[dst];
++        tPrec.box_start = boxBetween(int(src_p - scale_factor_1/2.0 + 1), 0, aOldDim - 1);
++        tPrec.box_end    = boxBetween(wxMax(tPrec.box_start + 1, int(src_p + scale_factor_2)), 0, aOldDim - 1);
++    }
++}
++
+ wxImage wxImage::ResampleBox(int width, int height) const
+ {
+     // This function implements a simple pre-blur/box averaging method for
+@@ -561,12 +589,13 @@
+ 
+     wxImage ret_image(width, height, false);
+ 
+-    const double scale_factor_x = double(M_IMGDATA->m_width) / width;
+-    const double scale_factor_y = double(M_IMGDATA->m_height) / height;
++    wxVector<BoxPrecalc> tDimY(height);
++    wxVector<BoxPrecalc> tDimX(width);
++    
++    precalc(tDimY, M_IMGDATA->m_height);
++    precalc(tDimX, M_IMGDATA->m_width);
++    
+ 
+-    const int scale_factor_x_2 = (int)(scale_factor_x / 2);
+-    const int scale_factor_y_2 = (int)(scale_factor_y / 2);
+-
+     const unsigned char* src_data = M_IMGDATA->m_data;
+     const unsigned char* src_alpha = M_IMGDATA->m_alpha;
+     unsigned char* dst_data = ret_image.GetData();
+@@ -584,33 +613,21 @@
+     for ( int y = 0; y < height; y++ )         // Destination image - Y direction
+     {
+         // Source pixel in the Y direction
+-        int src_y = (int)(y * scale_factor_y);
++        const BoxPrecalc &tPreY = tDimY[y];
+ 
+         for ( int x = 0; x < width; x++ )      // Destination image - X direction
+         {
+             // Source pixel in the X direction
+-            int src_x = (int)(x * scale_factor_x);
++            const BoxPrecalc &tPreX = tDimX[x];
+ 
+             // Box of pixels to average
+             averaged_pixels = 0;
+             sum_r = sum_g = sum_b = sum_a = 0.0;
+ 
+-            for ( int j = int(src_y - scale_factor_y/2.0 + 1), k = j;
+-                  j <= int(src_y + scale_factor_y_2) || j < k + 2;
+-                  j++ )
++            for(int j = tPreY.box_start; j <= tPreY.box_end; ++j )
+             {
+-                // We don't care to average pixels that don't exist (edges)
+-                if ( j < 0 || j > M_IMGDATA->m_height - 1 )
+-                    continue;
+-
+-                for ( int i = int(src_x - scale_factor_x/2.0 + 1), e = i;
+-                      i <= src_x + scale_factor_x_2 || i < e + 2;
+-                      i++ )
++                for(int i = tPreX.box_start; i <= tPreX.box_end; ++i )
+                 {
+-                    // Don't average edge pixels
+-                    if ( i < 0 || i > M_IMGDATA->m_width - 1 )
+-                        continue;
+-
+                     // Calculate the actual index in our source pixels
+                     src_pixel_index = j * M_IMGDATA->m_width + i;
+ 
+@@ -637,6 +654,40 @@
+     return ret_image;
+ }
+ 
++
++struct BilinearPrecalc 
++{ 
++    int offset1;
++    int offset2;
++    double dd;
++    double dd1;
++};
++
++void precalculate(wxVector< BilinearPrecalc > &aWeight, int aOrigDim)
++{
++    const int tNewSize        = aWeight.size();
++    const double HFactor    = double(aOrigDim) / tNewSize;
++    const int srcpixmax    = aOrigDim - 1;
++
++    //BilinearPrecalc tPrecalc;
++
++    for ( int dsty = 0; dsty < tNewSize; dsty++ )
++    {
++        // We need to calculate the source pixel to interpolate from - Y-axis
++        double srcpix = double(dsty) * HFactor;
++        double srcpix1 = int(srcpix);
++        double srcpix2 = ( srcpix1 == srcpixmax ) ? srcpix1 : srcpix1 + 1.0;
++
++        BilinearPrecalc &tPreCalc = aWeight[dsty];
++
++        tPreCalc.dd = srcpix - (int)srcpix;
++        tPreCalc.dd1 = 1.0 - tPreCalc.dd;
++        tPreCalc.offset1 = srcpix1 < 0.0 ? 0 : srcpix1 > srcpixmax ? srcpixmax : (int)srcpix1;
++        tPreCalc.offset2 = srcpix2 < 0.0 ? 0 : srcpix2 > srcpixmax ? srcpixmax : (int)srcpix2;
++    }
++}
++
++
+ wxImage wxImage::ResampleBilinear(int width, int height) const
+ {
+     // This function implements a Bilinear algorithm for resampling.
+@@ -651,15 +702,12 @@
+         ret_image.SetAlpha();
+         dst_alpha = ret_image.GetAlpha();
+     }
+-    double HFactor = double(M_IMGDATA->m_height) / height;
+-    double WFactor = double(M_IMGDATA->m_width) / width;
+ 
+-    int srcpixymax = M_IMGDATA->m_height - 1;
+-    int srcpixxmax = M_IMGDATA->m_width - 1;
++    wxVector< BilinearPrecalc > tWeightY(height);
++    wxVector< BilinearPrecalc > tWeightX(width);
++    precalculate(tWeightY, M_IMGDATA->m_height);
++    precalculate(tWeightX, M_IMGDATA->m_width);
+ 
+-    double srcpixy, srcpixy1, srcpixy2, dy, dy1;
+-    double srcpixx, srcpixx1, srcpixx2, dx, dx1;
+-
+     // initialize alpha values to avoid g++ warnings about possibly
+     // uninitialized variables
+     double r1, g1, b1, a1 = 0;
+@@ -668,55 +716,42 @@
+     for ( int dsty = 0; dsty < height; dsty++ )
+     {
+         // We need to calculate the source pixel to interpolate from - Y-axis
+-        srcpixy = double(dsty) * HFactor;
+-        srcpixy1 = int(srcpixy);
+-        srcpixy2 = ( srcpixy1 == srcpixymax ) ? srcpixy1 : srcpixy1 + 1.0;
+-        dy = srcpixy - (int)srcpixy;
+-        dy1 = 1.0 - dy;
++        const BilinearPrecalc &tPteY = tWeightY[dsty];
+ 
+ 
+         for ( int dstx = 0; dstx < width; dstx++ )
+         {
+             // X-axis of pixel to interpolate from
+-            srcpixx = double(dstx) * WFactor;
+-            srcpixx1 = int(srcpixx);
+-            srcpixx2 = ( srcpixx1 == srcpixxmax ) ? srcpixx1 : srcpixx1 + 1.0;
+-            dx = srcpixx - (int)srcpixx;
+-            dx1 = 1.0 - dx;
++            const BilinearPrecalc &tPteX = tWeightX[dstx];
+ 
+-            int x_offset1 = srcpixx1 < 0.0 ? 0 : srcpixx1 > srcpixxmax ? srcpixxmax : (int)srcpixx1;
+-            int x_offset2 = srcpixx2 < 0.0 ? 0 : srcpixx2 > srcpixxmax ? srcpixxmax : (int)srcpixx2;
+-            int y_offset1 = srcpixy1 < 0.0 ? 0 : srcpixy1 > srcpixymax ? srcpixymax : (int)srcpixy1;
+-            int y_offset2 = srcpixy2 < 0.0 ? 0 : srcpixy2 > srcpixymax ? srcpixymax : (int)srcpixy2;
++            int src_pixel_index00 = tPteY.offset1 * M_IMGDATA->m_width + tPteX.offset1;
++            int src_pixel_index01 = tPteY.offset1 * M_IMGDATA->m_width + tPteX.offset2;
++            int src_pixel_index10 = tPteY.offset2 * M_IMGDATA->m_width + tPteX.offset1;
++            int src_pixel_index11 = tPteY.offset2 * M_IMGDATA->m_width + tPteX.offset2;
+ 
+-            int src_pixel_index00 = y_offset1 * M_IMGDATA->m_width + x_offset1;
+-            int src_pixel_index01 = y_offset1 * M_IMGDATA->m_width + x_offset2;
+-            int src_pixel_index10 = y_offset2 * M_IMGDATA->m_width + x_offset1;
+-            int src_pixel_index11 = y_offset2 * M_IMGDATA->m_width + x_offset2;
+-
+             // first line
+-            r1 = src_data[src_pixel_index00 * 3 + 0] * dx1 + src_data[src_pixel_index01 * 3 + 0] * dx;
+-            g1 = src_data[src_pixel_index00 * 3 + 1] * dx1 + src_data[src_pixel_index01 * 3 + 1] * dx;
+-            b1 = src_data[src_pixel_index00 * 3 + 2] * dx1 + src_data[src_pixel_index01 * 3 + 2] * dx;
++            r1 = src_data[src_pixel_index00 * 3 + 0] * tPteX.dd1 + src_data[src_pixel_index01 * 3 + 0] * tPteX.dd;
++            g1 = src_data[src_pixel_index00 * 3 + 1] * tPteX.dd1 + src_data[src_pixel_index01 * 3 + 1] * tPteX.dd;
++            b1 = src_data[src_pixel_index00 * 3 + 2] * tPteX.dd1 + src_data[src_pixel_index01 * 3 + 2] * tPteX.dd;
+             if ( src_alpha )
+-                a1 = src_alpha[src_pixel_index00] * dx1 + src_alpha[src_pixel_index01] * dx;
++                a1 = src_alpha[src_pixel_index00] * tPteX.dd1 + src_alpha[src_pixel_index01] * tPteX.dd;
+ 
+             // second line
+-            r2 = src_data[src_pixel_index10 * 3 + 0] * dx1 + src_data[src_pixel_index11 * 3 + 0] * dx;
+-            g2 = src_data[src_pixel_index10 * 3 + 1] * dx1 + src_data[src_pixel_index11 * 3 + 1] * dx;
+-            b2 = src_data[src_pixel_index10 * 3 + 2] * dx1 + src_data[src_pixel_index11 * 3 + 2] * dx;
++            r2 = src_data[src_pixel_index10 * 3 + 0] * tPteX.dd1 + src_data[src_pixel_index11 * 3 + 0] * tPteX.dd;
++            g2 = src_data[src_pixel_index10 * 3 + 1] * tPteX.dd1 + src_data[src_pixel_index11 * 3 + 1] * tPteX.dd;
++            b2 = src_data[src_pixel_index10 * 3 + 2] * tPteX.dd1 + src_data[src_pixel_index11 * 3 + 2] * tPteX.dd;
+             if ( src_alpha )
+-                a2 = src_alpha[src_pixel_index10] * dx1 + src_alpha[src_pixel_index11] * dx;
++                a2 = src_alpha[src_pixel_index10] * tPteX.dd1 + src_alpha[src_pixel_index11] * tPteX.dd;
+ 
+             // result lines
+ 
+-            dst_data[0] = static_cast<unsigned char>(r1 * dy1 + r2 * dy);
+-            dst_data[1] = static_cast<unsigned char>(g1 * dy1 + g2 * dy);
+-            dst_data[2] = static_cast<unsigned char>(b1 * dy1 + b2 * dy);
++            dst_data[0] = static_cast<unsigned char>(r1 * tPteY.dd1 + r2 * tPteY.dd);
++            dst_data[1] = static_cast<unsigned char>(g1 * tPteY.dd1 + g2 * tPteY.dd);
++            dst_data[2] = static_cast<unsigned char>(b1 * tPteY.dd1 + b2 * tPteY.dd);
+             dst_data += 3;
+ 
+             if ( src_alpha )
+-                *dst_alpha++ = static_cast<unsigned char>(a1 * dy1 + a2 * dy);
++                *dst_alpha++ = static_cast<unsigned char>(a1 * tPteY.dd1 + a2 * tPteY.dd);
+         }
+     }
+ 
+@@ -738,6 +773,38 @@
+             4 * spline_cube(value - 1)) / 6;
+ }
+ 
++
++
++struct BicubicPrecalc 
++{ 
++    double weight[4];
++    int offset[4];
++};
++
++inline void precalculate(wxVector< BicubicPrecalc > &aWeight, int aOrigDim)
++{
++    const int tNewSize = aWeight.size();
++    for ( int dstd = 0; dstd < tNewSize; dstd++ )
++    {
++        // We need to calculate the source pixel to interpolate from - Y-axis
++        const double srcpixd = static_cast<double>(dstd * aOrigDim) / tNewSize;
++        const double dd = srcpixd - static_cast<int>(srcpixd);
++
++        BicubicPrecalc &tPreCalc = aWeight[dstd];
++
++        for ( int k = -1; k <= 2; k++ )
++        {
++            tPreCalc.offset[k + 1] = srcpixd + k < 0.0
++                ? 0
++                : srcpixd + k >= aOrigDim
++                ? aOrigDim - 1
++                : static_cast<int>(srcpixd + k);
++
++            tPreCalc.weight[k + 1] = spline_weight(k - dd);
++        }
++    }
++}
++
+ // This is the bicubic resampling algorithm
+ wxImage wxImage::ResampleBicubic(int width, int height) const
+ {
+@@ -782,17 +849,23 @@
+         dst_alpha = ret_image.GetAlpha();
+     }
+ 
++    // Precalculate weights
++    wxVector< BicubicPrecalc > tWeightY(height);
++    wxVector< BicubicPrecalc > tWeightX(width);
++
++    precalculate(tWeightY, M_IMGDATA->m_height);
++    precalculate(tWeightX, M_IMGDATA->m_width);
++    // ~Precalculate weights
++
+     for ( int dsty = 0; dsty < height; dsty++ )
+     {
+         // We need to calculate the source pixel to interpolate from - Y-axis
+-        double srcpixy = double(dsty * M_IMGDATA->m_height) / height;
+-        double dy = srcpixy - (int)srcpixy;
++        const BicubicPrecalc &tPreY = tWeightY[dsty];
+ 
+         for ( int dstx = 0; dstx < width; dstx++ )
+         {
+             // X-axis of pixel to interpolate from
+-            double srcpixx = double(dstx * M_IMGDATA->m_width) / width;
+-            double dx = srcpixx - (int)srcpixx;
++            const BicubicPrecalc &tPreX = tWeightX[dstx];
+ 
+             // Sums for each color channel
+             double sum_r = 0, sum_g = 0, sum_b = 0, sum_a = 0;
+@@ -801,21 +874,13 @@
+             for ( int k = -1; k <= 2; k++ )
+             {
+                 // Y offset
+-                int y_offset = srcpixy + k < 0.0
+-                                ? 0
+-                                : srcpixy + k >= M_IMGDATA->m_height
+-                                       ? M_IMGDATA->m_height - 1
+-                                       : (int)(srcpixy + k);
++                const int y_offset = tPreY.offset[k + 1];
+ 
+                 // Loop across the X axis
+                 for ( int i = -1; i <= 2; i++ )
+                 {
+                     // X offset
+-                    int x_offset = srcpixx + i < 0.0
+-                                    ? 0
+-                                    : srcpixx + i >= M_IMGDATA->m_width
+-                                            ? M_IMGDATA->m_width - 1
+-                                            : (int)(srcpixx + i);
++                    const int x_offset = tPreX.offset[i + 1];
+ 
+                     // Calculate the exact position where the source data
+                     // should be pulled from based on the x_offset and y_offset
+@@ -824,8 +889,7 @@
+                     // Calculate the weight for the specified pixel according
+                     // to the bicubic b-spline kernel we're using for
+                     // interpolation
+-                    double
+-                        pixel_weight = spline_weight(i - dx)*spline_weight(k - dy);
++                    const double pixel_weight = tPreY.weight[k + 1] * tPreX.weight[i + 1];
+ 
+                     // Create a sum of all velues for each color channel
+                     // adjusted for the pixel's calculated weight

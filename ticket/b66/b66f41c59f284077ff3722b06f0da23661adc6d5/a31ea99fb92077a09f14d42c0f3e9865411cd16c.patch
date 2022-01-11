@@ -1,0 +1,180 @@
+diff --git a/include/wx/stc/stc.h b/include/wx/stc/stc.h
+index f052296fb6..d9749c302c 100644
+--- a/include/wx/stc/stc.h
++++ b/include/wx/stc/stc.h
+@@ -5439,6 +5439,7 @@ protected:
+     void OnMenu(wxCommandEvent& evt);
+     void OnListBox(wxCommandEvent& evt);
+     void OnIdle(wxIdleEvent& evt);
++    void OnMouseCaptureLost(wxMouseCaptureLostEvent& evt);
+ 
+     virtual wxSize DoGetBestSize() const wxOVERRIDE;
+ 
+@@ -5458,6 +5459,7 @@ protected:
+     wxScrollBar*        m_hScrollBar;
+ 
+     bool                m_lastKeyDownConsumed;
++    wxPoint             m_lastCapturePoint;
+ 
+     friend class ScintillaWX;
+     friend class Platform;
+diff --git a/src/stc/ScintillaWX.cpp b/src/stc/ScintillaWX.cpp
+index f9dbe55696..58ce3427fa 100644
+--- a/src/stc/ScintillaWX.cpp
++++ b/src/stc/ScintillaWX.cpp
+@@ -244,6 +244,7 @@ static wxTextFileType wxConvertEOLMode(int scintillaMode)
+ ScintillaWX::ScintillaWX(wxStyledTextCtrl* win) {
+     capturedMouse = false;
+     focusEvent = false;
++    handlingLostCapture = false;
+     wMain = win;
+     stc   = win;
+     wheelVRotation = 0;
+@@ -368,6 +369,10 @@ bool ScintillaWX::SetIdle(bool on) {
+ 
+ 
+ void ScintillaWX::SetMouseCapture(bool on) {
++    if (handlingLostCapture) {
++        //if we're handling a loss of mouse capture, do nothing;
++        return;
++    }
+     if (mouseDownCaptures) {
+         if (on && !capturedMouse)
+             stc->CaptureMouse();
+@@ -379,7 +384,9 @@ void ScintillaWX::SetMouseCapture(bool on) {
+ 
+ 
+ bool ScintillaWX::HaveMouseCapture() {
+-    return capturedMouse;
++    //if we're handling a loss of mouse capture, temporarily claim the control
++    //still has capture in order to complete the cleanup.
++    return handlingLostCapture?true:capturedMouse;
+ }
+ 
+ 
+@@ -1176,6 +1183,15 @@ void ScintillaWX::DoOnListBox() {
+ }
+ 
+ 
++void ScintillaWX::DoMouseCaptureLost(Point pt, unsigned int curTime, bool ctrl)
++{
++    handlingLostCapture=true;
++    ButtonUp(pt, curTime, ctrl);
++    handlingLostCapture=false;
++    capturedMouse = false;
++}
++
++
+ void ScintillaWX::DoOnIdle(wxIdleEvent& evt) {
+ 
+     if ( Idle() )
+diff --git a/src/stc/ScintillaWX.h b/src/stc/ScintillaWX.h
+index 675c4a5911..ecc69b3536 100644
+--- a/src/stc/ScintillaWX.h
++++ b/src/stc/ScintillaWX.h
+@@ -183,6 +183,7 @@ public:
+     void DoCommand(int ID);
+     bool DoContextMenu(Point pt);
+     void DoOnListBox();
++    void DoMouseCaptureLost(Point pt, unsigned int curTime, bool ctrl);
+ 
+ 
+     // helpers
+@@ -199,6 +200,7 @@ public:
+ private:
+     bool                capturedMouse;
+     bool                focusEvent;
++    bool                handlingLostCapture;
+     wxStyledTextCtrl*   stc;
+ 
+     WX_DECLARE_HASH_MAP(TickReason, wxSTCTimer*, wxIntegerHash, wxIntegerEqual, TimersHash);
+diff --git a/src/stc/stc.cpp b/src/stc/stc.cpp
+index aa08e678f2..b51ef64549 100644
+--- a/src/stc/stc.cpp
++++ b/src/stc/stc.cpp
+@@ -162,6 +162,7 @@ wxBEGIN_EVENT_TABLE(wxStyledTextCtrl, wxControl)
+     EVT_ERASE_BACKGROUND        (wxStyledTextCtrl::OnEraseBackground)
+     EVT_MENU_RANGE              (10, 16, wxStyledTextCtrl::OnMenu)
+     EVT_LISTBOX_DCLICK          (wxID_ANY, wxStyledTextCtrl::OnListBox)
++    EVT_MOUSE_CAPTURE_LOST      (wxStyledTextCtrl::OnMouseCaptureLost)
+ wxEND_EVENT_TABLE()
+ 
+ 
+@@ -5214,6 +5215,9 @@ void wxStyledTextCtrl::OnMouseRightDown(wxMouseEvent& evt) {
+ void wxStyledTextCtrl::OnMouseMove(wxMouseEvent& evt) {
+     wxPoint pt = evt.GetPosition();
+     m_swx->DoLeftButtonMove(Point(pt.x, pt.y));
++    if (HasCapture()) {
++        m_lastCapturePoint=pt;
++    }
+ }
+ 
+ void wxStyledTextCtrl::OnMouseLeftUp(wxMouseEvent& evt) {
+@@ -5369,6 +5373,12 @@ void wxStyledTextCtrl::OnIdle(wxIdleEvent& evt) {
+ }
+ 
+ 
++void wxStyledTextCtrl::OnMouseCaptureLost(wxMouseCaptureLostEvent& WXUNUSED(evt)) {
++    m_swx->DoMouseCaptureLost(Point(m_lastCapturePoint.x, m_lastCapturePoint.y),
++                              m_stopWatch.Time(), ::wxGetKeyState(WXK_CONTROL));
++}
++
++
+ wxSize wxStyledTextCtrl::DoGetBestSize() const
+ {
+     // What would be the best size for a wxSTC?
+diff --git a/src/stc/stc.cpp.in b/src/stc/stc.cpp.in
+index a36991f8d1..fda57aad4d 100644
+--- a/src/stc/stc.cpp.in
++++ b/src/stc/stc.cpp.in
+@@ -162,6 +162,7 @@ wxBEGIN_EVENT_TABLE(wxStyledTextCtrl, wxControl)
+     EVT_ERASE_BACKGROUND        (wxStyledTextCtrl::OnEraseBackground)
+     EVT_MENU_RANGE              (10, 16, wxStyledTextCtrl::OnMenu)
+     EVT_LISTBOX_DCLICK          (wxID_ANY, wxStyledTextCtrl::OnListBox)
++    EVT_MOUSE_CAPTURE_LOST      (wxStyledTextCtrl::OnMouseCaptureLost)
+ wxEND_EVENT_TABLE()
+ 
+ 
+@@ -729,6 +730,9 @@ void wxStyledTextCtrl::OnMouseRightDown(wxMouseEvent& evt) {
+ void wxStyledTextCtrl::OnMouseMove(wxMouseEvent& evt) {
+     wxPoint pt = evt.GetPosition();
+     m_swx->DoLeftButtonMove(Point(pt.x, pt.y));
++    if (HasCapture()) {
++        m_lastCapturePoint=pt;
++    }
+ }
+ 
+ void wxStyledTextCtrl::OnMouseLeftUp(wxMouseEvent& evt) {
+@@ -884,6 +888,12 @@ void wxStyledTextCtrl::OnIdle(wxIdleEvent& evt) {
+ }
+ 
+ 
++void wxStyledTextCtrl::OnMouseCaptureLost(wxMouseCaptureLostEvent& WXUNUSED(evt)) {
++    m_swx->DoMouseCaptureLost(Point(m_lastCapturePoint.x, m_lastCapturePoint.y),
++                              m_stopWatch.Time(), ::wxGetKeyState(WXK_CONTROL));
++}
++
++
+ wxSize wxStyledTextCtrl::DoGetBestSize() const
+ {
+     // What would be the best size for a wxSTC?
+diff --git a/src/stc/stc.h.in b/src/stc/stc.h.in
+index 0ab26979b4..095672ba2e 100644
+--- a/src/stc/stc.h.in
++++ b/src/stc/stc.h.in
+@@ -562,6 +562,7 @@ protected:
+     void OnMenu(wxCommandEvent& evt);
+     void OnListBox(wxCommandEvent& evt);
+     void OnIdle(wxIdleEvent& evt);
++    void OnMouseCaptureLost(wxMouseCaptureLostEvent& evt);
+ 
+     virtual wxSize DoGetBestSize() const wxOVERRIDE;
+ 
+@@ -581,6 +582,7 @@ protected:
+     wxScrollBar*        m_hScrollBar;
+ 
+     bool                m_lastKeyDownConsumed;
++    wxPoint             m_lastCapturePoint;
+ 
+     friend class ScintillaWX;
+     friend class Platform;

@@ -1,0 +1,343 @@
+diff -uNrB wxWidgets-trunk\src/common/imagbmp.cpp wxWidgets-work\src/common/imagbmp.cpp
+--- wxWidgets-trunk\src/common/imagbmp.cpp	2014-01-01
++++ wxWidgets-work\src/common/imagbmp.cpp	2014-03-10
+@@ -100,9 +100,12 @@
+         return false;
+     }
+ 
+-    // get the format of the BMP file to save, else use 24bpp
++    // For icons, save alpha channel if available.
++    const bool saveAlpha = !IsBmp && image->HasAlpha();
++
++    // get the format of the BMP file to save (if no alpha channel), else use 24bpp
+     unsigned format = wxBMP_24BPP;
+-    if ( image->HasOption(wxIMAGE_OPTION_BMP_FORMAT) )
++    if ( image->HasOption(wxIMAGE_OPTION_BMP_FORMAT) && !saveAlpha )
+         format = image->GetOptionInt(wxIMAGE_OPTION_BMP_FORMAT);
+ 
+     wxUint16 bpp;     // # of bits per pixel
+@@ -141,7 +144,7 @@
+     else  // you get 24bpp
+     {
+         format = wxBMP_24BPP;
+-        bpp = 24;
++        bpp = saveAlpha? 32: 24;
+         palette_size = 0;
+     }
+ 
+@@ -350,13 +353,15 @@
+     }
+ 
+     // pointer to the image data, use quantized if available
+-    wxUint8 *data = (wxUint8*) image->GetData();
++    const wxUint8 *data = (wxUint8*) image->GetData();
++    const wxUint8 *alpha = saveAlpha? reinterpret_cast<wxUint8*>(image->GetAlpha()): NULL;
+     if (q_image) if (q_image->IsOk()) data = (wxUint8*) q_image->GetData();
+ 
+     wxUint8 *buffer = new wxUint8[row_width];
+     memset(buffer, 0, row_width);
+     int y; unsigned x;
+     long int pixel;
++    const int dstPixLen = saveAlpha? 4: 3;
+ 
+     for (y = image->GetHeight() -1; y >= 0; y--)
+     {
+@@ -366,9 +371,11 @@
+             {
+                 pixel = 3*(y*width + x);
+ 
+-                buffer[3*x    ] = data[pixel+2];
+-                buffer[3*x + 1] = data[pixel+1];
+-                buffer[3*x + 2] = data[pixel];
++                buffer[dstPixLen*x    ] = data[pixel+2];
++                buffer[dstPixLen*x + 1] = data[pixel+1];
++                buffer[dstPixLen*x + 2] = data[pixel];
++                if( saveAlpha )
++                    buffer[dstPixLen*x + 3] = alpha[y*width + x];
+             }
+         }
+         else if ((format == wxBMP_8BPP) ||       // 1 byte per pixel in color
+@@ -1188,8 +1195,8 @@
+                             bool verbose)
+ 
+ {
+-    //sanity check; icon must be less than 127 pixels high and 255 wide
+-    if ( image->GetHeight () > 127 )
++    //sanity check; icon must be no larger then 256 x 256
++    if ( image->GetHeight () > 256 )
+     {
+         if ( verbose )
+         {
+@@ -1197,7 +1204,7 @@
+         }
+         return false;
+     }
+-    if ( image->GetWidth () > 255 )
++    if ( image->GetWidth () > 256 )
+     {
+         if ( verbose )
+         {
+@@ -1207,6 +1214,7 @@
+     }
+ 
+     const int images = 1; // only generate one image
++    const bool IsBmp = false; // ICO/CUR image
+ 
+     // VS: This is a hack of sort - since ICO and CUR files are almost
+     //     identical, we have all the meat in wxICOHandler and check for
+@@ -1274,35 +1282,79 @@
+                     mask.SetRGB(i, j, 0, 0, 0 );
+         }
+         // Set the formats for image and mask
+-        // (Windows never saves with more than 8 colors):
+-        image->SetOption(wxIMAGE_OPTION_BMP_FORMAT, wxBMP_8BPP);
++        // Use maximum available color space.
++        int colours = image->CountColours(257);
++        int bppFormat;
++        int bpp;
++        if( colours > 256 || (!IsBmp && image->HasAlpha()) )
++        {
++            bppFormat = wxBMP_24BPP;
++            bpp = (!IsBmp && image->HasAlpha())? 32: 24; // Icons with alpha channel are stored in ARGB format.
++       }
++        else if( colours > 16 )
++        {
++            bppFormat = wxBMP_8BPP;
++            bpp = 8;
++        }
++        else if( colours > 2 )
++        {
++            bppFormat = wxBMP_4BPP;
++            bpp = 4;
++        }
++        else
++        {
++            bppFormat = wxBMP_1BPP;
++            bpp = 1;
++        }
++        image->SetOption(wxIMAGE_OPTION_BMP_FORMAT, bppFormat);
+ 
+         // monochome bitmap:
+         mask.SetOption(wxIMAGE_OPTION_BMP_FORMAT, wxBMP_1BPP_BW);
+-        bool IsBmp = false;
+         bool IsMask = false;
+ 
+         //calculate size and offset of image and mask
+         wxCountingOutputStream cStream;
+-        bool bResult = SaveDib(image, cStream, verbose, IsBmp, IsMask);
+-        if ( !bResult )
+-        {
+-            if ( verbose )
++        bool bResult;
++        bool saveAsPNG = false;
++#if wxUSE_LIBPNG
++        // Typically, 32-bit icons larger then 128x128 are saved as PNG images.
++        if( bpp == 32 && (image->GetHeight () > 128 || image->GetWidth () > 128) )
++        {
++            wxPNGHandler handlerPNG;
++            bResult = handlerPNG.SaveFile(image, cStream, verbose);
++            if ( !bResult )
+             {
+-                wxLogError(_("ICO: Error writing the image file!"));
++                if ( verbose )
++                {
++                    wxLogError(_("ICO: Error writing the image file!"));
++                }
++                return false;
+             }
+-            return false;
++            saveAsPNG = true;
+         }
+-        IsMask = true;
+-
+-        bResult = SaveDib(&mask, cStream, verbose, IsBmp, IsMask);
+-        if ( !bResult )
++#endif
++        if( !saveAsPNG )
+         {
+-            if ( verbose )
++            bResult = SaveDib(image, cStream, verbose, IsBmp, IsMask);
++            if ( !bResult )
+             {
+-                wxLogError(_("ICO: Error writing the image file!"));
++                if ( verbose )
++                {
++                    wxLogError(_("ICO: Error writing the image file!"));
++                }
++                return false;
++            }
++            IsMask = true;
++
++            bResult = SaveDib(&mask, cStream, verbose, IsBmp, IsMask);
++            if ( !bResult )
++            {
++                if ( verbose )
++                {
++                    wxLogError(_("ICO: Error writing the image file!"));
++                }
++                return false;
+             }
+-            return false;
+         }
+         wxUint32 Size = cStream.GetSize();
+ 
+@@ -1321,12 +1373,12 @@
+ 
+         offset = offset + sizeof(ICONDIRENTRY);
+ 
+-        icondirentry.bWidth = (wxUint8)image->GetWidth();
+-        icondirentry.bHeight = (wxUint8)(2 * image->GetHeight());
++        icondirentry.bWidth = (image->GetWidth() == 256)? 0: (wxUint8)image->GetWidth();
++        icondirentry.bHeight = (image->GetHeight() == 256)? 0: (wxUint8)image->GetHeight();
+         icondirentry.bColorCount = 0;
+         icondirentry.bReserved = 0;
+         icondirentry.wPlanes = wxUINT16_SWAP_ON_BE(1);
+-        icondirentry.wBitCount = wxUINT16_SWAP_ON_BE(wxBMP_8BPP);
++        icondirentry.wBitCount = wxUINT16_SWAP_ON_BE(bpp);
+         if ( type == 2 /*CUR*/)
+         {
+             int hx = image->HasOption(wxIMAGE_OPTION_CUR_HOTSPOT_X) ?
+@@ -1364,26 +1416,42 @@
+         }
+ 
+         // actually save it:
+-        IsMask = false;
+-        bResult = SaveDib(image, stream, verbose, IsBmp, IsMask);
+-        if ( !bResult )
++        if( saveAsPNG )
+         {
+-            if ( verbose )
++            wxPNGHandler handlerPNG;
++            bResult = handlerPNG.SaveFile(image, stream, verbose);
++            if ( !bResult )
+             {
+-                wxLogError(_("ICO: Error writing the image file!"));
++                if ( verbose )
++                {
++                    wxLogError(_("ICO: Error writing the image file!"));
++                }
++                return false;
+             }
+-            return false;
+         }
+-        IsMask = true;
+-
+-        bResult = SaveDib(&mask, stream, verbose, IsBmp, IsMask);
+-        if ( !bResult )
++        else
+         {
+-            if ( verbose )
++            IsMask = false;
++            bResult = SaveDib(image, stream, verbose, IsBmp, IsMask);
++            if ( !bResult )
+             {
+-                wxLogError(_("ICO: Error writing the image file!"));
++                if ( verbose )
++                {
++                    wxLogError(_("ICO: Error writing the image file!"));
++                }
++                return false;
++            }
++            IsMask = true;
++
++            bResult = SaveDib(&mask, stream, verbose, IsBmp, IsMask);
++            if ( !bResult )
++            {
++                if ( verbose )
++                {
++                    wxLogError(_("ICO: Error writing the image file!"));
++                }
++                return false;
+             }
+-            return false;
+         }
+ 
+     } // end of for loop
+@@ -1403,10 +1471,9 @@
+ }
+ 
+ bool wxICOHandler::DoLoadFile(wxImage *image, wxInputStream& stream,
+-                            bool WXUNUSED(verbose), int index)
++                            bool verbose, int index)
+ {
+     bool bResult wxDUMMY_INITIALIZE(false);
+-    bool IsBmp = false;
+ 
+     ICONDIR IconDir;
+ 
+@@ -1419,8 +1486,8 @@
+     wxUint16 nType = wxUINT16_SWAP_ON_BE(IconDir.idType);
+ 
+     // loop round the icons and choose the best one:
+-    ICONDIRENTRY *pIconDirEntry = new ICONDIRENTRY[nIcons];
+-    ICONDIRENTRY *pCurrentEntry = pIconDirEntry;
++    wxScopedPtr<ICONDIRENTRY>pIconDirEntry(new ICONDIRENTRY[nIcons]);
++    ICONDIRENTRY *pCurrentEntry = pIconDirEntry.get();
+     int wMax = 0;
+     int colmax = 0;
+     int iSel = wxNOT_FOUND;
+@@ -1435,8 +1502,10 @@
+ 
+         alreadySeeked += stream.LastRead();
+ 
++        const wxUint16 widthReal = pCurrentEntry->bWidth ? pCurrentEntry->bWidth : 256; 
++
+         // bHeight and bColorCount are wxUint8
+-        if ( pCurrentEntry->bWidth >= wMax )
++        if ( widthReal >= wMax )
+         {
+             // see if we have more colors, ==0 indicates > 8bpp:
+             if ( pCurrentEntry->bColorCount == 0 )
+@@ -1444,7 +1513,7 @@
+             if ( pCurrentEntry->bColorCount >= colmax )
+             {
+                 iSel = i;
+-                wMax = pCurrentEntry->bWidth;
++                wMax = widthReal;
+                 colmax = pCurrentEntry->bColorCount;
+             }
+         }
+@@ -1467,7 +1536,7 @@
+     else
+     {
+         // seek to selected icon:
+-        pCurrentEntry = pIconDirEntry + iSel;
++        pCurrentEntry = pIconDirEntry.get() + iSel;
+ 
+         // NOTE: seeking a positive amount in wxFromCurrent mode allows us to
+         //       load even non-seekable streams (see wxInputStream::SeekI docs)!
+@@ -1475,7 +1544,24 @@
+         if (offset != 0 && stream.SeekI(offset, wxFromCurrent) == wxInvalidOffset)
+             return false;
+ 
+-        bResult = LoadDib(image, stream, true, IsBmp);
++#if wxUSE_LIBPNG
++        // There is a better sanity check for PNG image so it goes first.
++        {
++            wxLogNull noLog; // log no errors
++            wxPNGHandler handlerPNG;
++            bResult = handlerPNG.LoadFile(image, stream, false /* log no errors */);  
++        }
++        if( !bResult )
++        {
++            // Rewind
++            if( stream.SeekI(wxUINT32_SWAP_ON_BE(pCurrentEntry->dwImageOffset)) == wxInvalidOffset )
++                return false;
++#else
++        {
++#endif
++            bResult = LoadDib(image, stream, verbose, false /* not BMP */);
++        }
++
+         bool bIsCursorType = (this->GetType() == wxBITMAP_TYPE_CUR) || (this->GetType() == wxBITMAP_TYPE_ANI);
+         if ( bResult && bIsCursorType && nType == 2 )
+         {
+@@ -1485,8 +1571,6 @@
+         }
+     }
+ 
+-    delete [] pIconDirEntry;
+-
+     return bResult;
+ }
+ 

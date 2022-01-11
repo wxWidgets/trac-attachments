@@ -1,0 +1,277 @@
+ include/wx/filedlg.h        | 40 ++++++++++++++++++++++++++++++++++++++++
+ src/common/fldlgcmn.cpp     |  9 +++++++++
+ src/generic/filedlgg.cpp    | 17 ++++++++++++++++-
+ src/gtk/filedlg.cpp         | 35 +++++++++++++++++++++++++++++++----
+ src/msw/filedlg.cpp         | 42 +++++++++++++++++++++++++++++++++---------
+ 5 files changed, 129 insertions(+), 14 deletions(-)
+
+diff --git a/include/wx/filedlg.h b/include/wx/filedlg.h
+index b068129..febafbd 100644
+--- a/include/wx/filedlg.h
++++ b/include/wx/filedlg.h
+@@ -213,6 +213,46 @@ wxSaveFileSelector(const wxString& what,
+                    wxWindow *parent = NULL);
+ 
+ 
++// ----------------------------------------------------------------------------
++// wxFileDialogEvent - the event class for the wxFileDialog notifications
++// ----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_CORE wxFileDialogEvent : public wxNotifyEvent
++{
++public:
++    wxFileDialogEvent(wxEventType commandType = wxEVT_NULL, int winid = 0)
++        : wxNotifyEvent(commandType, winid)
++    { }
++
++    wxFileDialogEvent(const wxFileDialogEvent& event)
++        : wxNotifyEvent(event)
++    { }
++
++    virtual wxEvent *Clone() const { return new wxFileDialogEvent(*this); }
++
++private:
++    DECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxFileDialogEvent)
++};
++
++// ----------------------------------------------------------------------------
++// wxFileDialog event macros
++// ----------------------------------------------------------------------------
++
++wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_CORE, wxEVT_FILEDIALOG_OPENING, wxFileDialogEvent );
++wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_CORE, wxEVT_FILEDIALOG_CLOSED, wxFileDialogEvent );
++
++typedef void (wxEvtHandler::*wxFileDialogEventFunction)(wxFileDialogEvent&);
++
++#define wxFileDialogEventHandler(func) \
++    wxEVENT_HANDLER_CAST(wxFileDialogEventFunction, func)
++
++#define wx__DECLARE_FILEDLG_EVT(evt, id, fn) \
++    wx__DECLARE_EVT1(wxEVT_FILEDIALOG_ ## evt, id, wxFileDialogEventHandler(fn))
++
++#define EVT_FILEDIALOG_OPENING(id, fn) wx__DECLARE_FILEDLG_EVT(OPENING, id, fn)
++#define EVT_FILEDIALOG_CLOSED(id, fn) wx__DECLARE_FILEDLG_EVT(CLOSED, id, fn)
++
++
+ #if defined (__WXUNIVERSAL__)
+     #define wxHAS_GENERIC_FILEDIALOG
+     #include "wx/generic/filedlgg.h"
+diff --git a/src/common/fldlgcmn.cpp b/src/common/fldlgcmn.cpp
+index 5bbe743..2b24a5e 100644
+--- a/src/common/fldlgcmn.cpp
++++ b/src/common/fldlgcmn.cpp
+@@ -37,6 +37,12 @@ extern WXDLLEXPORT_DATA(const char) wxFileSelectorDefaultWildcardStr[] =
+ #endif
+     ;
+ 
++// FileDialog events
++wxDEFINE_EVENT( wxEVT_FILEDIALOG_OPENING, wxFileDialogEvent );
++wxDEFINE_EVENT( wxEVT_FILEDIALOG_CLOSED, wxFileDialogEvent );
++
++wxIMPLEMENT_DYNAMIC_CLASS(wxFileDialogEvent, wxNotifyEvent)
++
+ //----------------------------------------------------------------------------
+ // wxFileDialogBase
+ //----------------------------------------------------------------------------
+@@ -129,6 +135,9 @@ bool wxFileDialogBase::Create(wxWindow *parent,
+         }
+     }
+ 
++    wxWindowCreateEvent event((wxWindow *)this);
++    (void)HandleWindowEvent(event);
++
+     return true;
+ }
+ 
+diff --git a/src/generic/filedlgg.cpp b/src/generic/filedlgg.cpp
+index bacc3a2..979e4898 100644
+--- a/src/generic/filedlgg.cpp
++++ b/src/generic/filedlgg.cpp
+@@ -292,6 +292,19 @@ wxBitmapButton* wxGenericFileDialog::AddBitmapButton( wxWindowID winId,
+ 
+ int wxGenericFileDialog::ShowModal()
+ {
++    wxFileDialogEvent openEvent(wxEVT_FILEDIALOG_OPENING, m_windowId);
++    openEvent.SetEventObject(this);
++    HandleWindowEvent(openEvent);
++
++    wxFileDialogEvent closeEvent(wxEVT_FILEDIALOG_CLOSED, m_windowId);
++    closeEvent.SetEventObject(this);
++
++    if ( !openEvent.IsAllowed() )
++    {
++        HandleWindowEvent(closeEvent);
++        return GetReturnCode();
++    }
++
+     WX_HOOK_MODAL_DIALOG();
+ 
+     if (CreateExtraControl())
+@@ -304,7 +317,9 @@ int wxGenericFileDialog::ShowModal()
+ 
+     m_filectrl->SetDirectory(m_dir);
+ 
+-    return wxDialog::ShowModal();
++    int returnCode = wxDialog::ShowModal();
++    HandleWindowEvent(closeEvent);
++    return returnCode;
+ }
+ 
+ bool wxGenericFileDialog::Show( bool show )
+diff --git a/src/gtk/filedlg.cpp b/src/gtk/filedlg.cpp
+index 4a66029..3b22ba5 100644
+--- a/src/gtk/filedlg.cpp
++++ b/src/gtk/filedlg.cpp
+@@ -362,11 +362,26 @@ void wxFileDialog::OnFakeOk(wxCommandEvent& WXUNUSED(event))
+ 
+ int wxFileDialog::ShowModal()
+ {
++    wxFileDialogEvent openEvent(wxEVT_FILEDIALOG_OPENING, m_windowId);
++    openEvent.SetEventObject(this);
++    HandleWindowEvent(openEvent);
++
++    wxFileDialogEvent closeEvent(wxEVT_FILEDIALOG_CLOSED, m_windowId);
++    closeEvent.SetEventObject(this);
++
++    if ( !openEvent.IsAllowed() )
++    {
++        HandleWindowEvent(closeEvent);
++        return GetReturnCode();
++    }
++
+     WX_HOOK_MODAL_DIALOG();
+ 
+     CreateExtraControl();
+ 
+-    return wxDialog::ShowModal();
++    int returnCode = wxDialog::ShowModal();
++    HandleWindowEvent(closeEvent);
++    return returnCode;
+ }
+ 
+ void wxFileDialog::DoSetSize(int WXUNUSED(x), int WXUNUSED(y),
+@@ -383,17 +398,29 @@ void wxFileDialog::OnSize(wxSizeEvent&)
+ 
+ wxString wxFileDialog::GetPath() const
+ {
+-    return m_fc.GetPath();
++    const wxString &fcPath = m_fc.GetPath();
++    // if the dialog opening has been vetoed, m_fc.GetPath() will return an empty string
++    // so let a chance to retrieve a value defined with SetPath()
++    if ( fcPath.IsEmpty() )
++        return wxFileDialogBase::GetPath();
++    
++    return fcPath;
+ }
+ 
+ void wxFileDialog::GetFilenames(wxArrayString& files) const
+ {
+     m_fc.GetFilenames( files );
++
++    if ( files.IsEmpty() )
++        wxFileDialogBase::GetFilenames(files);
+ }
+ 
+ void wxFileDialog::GetPaths(wxArrayString& paths) const
+ {
+     m_fc.GetPaths( paths );
++
++    if ( paths.IsEmpty() )
++        wxFileDialogBase::GetPaths(paths);
+ }
+ 
+ void wxFileDialog::SetMessage(const wxString& message)
+@@ -450,12 +477,12 @@ void wxFileDialog::SetFilename(const wxString& name)
+ 
+ wxString wxFileDialog::GetFilename() const
+ {
+-    wxString currentFilename( m_fc.GetFilename() );
++    const wxString &currentFilename = m_fc.GetFilename();
+     if (currentFilename.empty())
+     {
+         // m_fc.GetFilename() will return empty until the dialog has been shown
+         // in which case use any previously provided value
+-        currentFilename = m_fileName;
++        return wxFileDialogBase::GetFilename();
+     }
+     return currentFilename;
+ }
+diff --git a/src/msw/filedlg.cpp b/src/msw/filedlg.cpp
+index 1c16505..dff53b9 100644
+--- a/src/msw/filedlg.cpp
++++ b/src/msw/filedlg.cpp
+@@ -233,6 +233,14 @@ wxFileDialog::wxFileDialog(wxWindow *parent,
+     gs_rectDialog.y = 0;
+ }
+ 
++static void AddPath(wxArrayString& paths, const wxString& dir, const wxString& filename)
++{
++    if (wxFileName(filename).IsAbsolute())
++        paths.Add(filename);
++    else
++        paths.Add(dir + filename);
++}
++
+ void wxFileDialog::GetPaths(wxArrayString& paths) const
+ {
+     paths.Empty();
+@@ -243,17 +251,18 @@ void wxFileDialog::GetPaths(wxArrayString& paths) const
+ 
+     size_t count = m_fileNames.GetCount();
+     for ( size_t n = 0; n < count; n++ )
+-    {
+-        if (wxFileName(m_fileNames[n]).IsAbsolute())
+-            paths.Add(m_fileNames[n]);
+-        else
+-            paths.Add(dir + m_fileNames[n]);
+-    }
++        AddPath(paths, dir, m_fileNames[n]);
++
++    if (!count)
++        AddPath(paths, dir, m_fileName);
+ }
+ 
+ void wxFileDialog::GetFilenames(wxArrayString& files) const
+ {
+     files = m_fileNames;
++
++    if (files.IsEmpty())
++        files.Add(m_fileName);
+ }
+ 
+ void wxFileDialog::DoGetPosition(int *x, int *y) const
+@@ -676,8 +685,20 @@ int wxFileDialog::ShowModal()
+ 
+     //== Execute FileDialog >>=================================================
+ 
+-    if ( !ShowCommFileDialog(&of, m_windowStyle) )
+-        return wxID_CANCEL;
++    wxFileDialogEvent openEvent(wxEVT_FILEDIALOG_OPENING, m_windowId);
++    openEvent.SetEventObject(this);
++    HandleWindowEvent(openEvent);
++
++    wxFileDialogEvent closeEvent(wxEVT_FILEDIALOG_CLOSED, m_windowId);
++    closeEvent.SetEventObject(this);
++
++    if ( !openEvent.IsAllowed() || !ShowCommFileDialog(&of, m_windowStyle) )
++    {
++        SetReturnCode(openEvent.IsAllowed() ? wxID_CANCEL : GetReturnCode());
++        HandleWindowEvent(closeEvent);
++
++        return GetReturnCode();
++    }
+ 
+     m_fileNames.Empty();
+ 
+@@ -744,7 +765,10 @@ int wxFileDialog::ShowModal()
+         m_dir = wxPathOnly(fileNameBuffer);
+     }
+ 
+-    return wxID_OK;
++    SetReturnCode(wxID_OK);
++    HandleWindowEvent(closeEvent);
++
++    return GetReturnCode();
+ 
+ }
+ 

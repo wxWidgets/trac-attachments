@@ -1,0 +1,97 @@
+Index: ole/dataobj.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/ole/dataobj.cpp,v
+retrieving revision 1.88
+diff -b -u -2 -r1.88 dataobj.cpp
+--- ole/dataobj.cpp	2005/09/23 12:55:23	1.88
++++ ole/dataobj.cpp	2005/09/25 09:35:52
+@@ -320,9 +320,7 @@
+             }
+ 
+-            if ( !format.IsStandard() ) {
+-                // for custom formats, put the size with the data - alloc the
+-                // space for it
+-                // MB: not completely sure this is correct,
+-                //     even if I can't figure out what's wrong
++            if ( !m_pDataObject->NeedsVerbatimData(format) ) {
++                // for custom formats which don't need to be copied "verbatim",
++                // put the size with the data - alloc the space for it
+                 size += m_pDataObject->GetBufferOffset( format );
+             }
+@@ -388,6 +386,7 @@
+ 
+                 wxDataFormat format = pformatetc->cfFormat;
+-                if ( !format.IsStandard() ) {
+-                    // for custom formats, put the size with the data
++                if ( !m_pDataObject->NeedsVerbatimData(format) ) {
++                     // for formats which do not require a verbatim copy, 
++                     // put the size with the data
+                     pBuf = m_pDataObject->SetSizeInBuffer( pBuf, GlobalSize(hGlobal), format );
+                 }
+@@ -494,7 +493,10 @@
+                     default:
+                         {
+-                            // we suppose that the size precedes the data
++                             // if this data was not copied as "verbatim", then
++                             // the size of data itself should precede it; otherwise
++                             // we'll use ::HeapSize() to retrieve it...
+                             pBuf = m_pDataObject->GetSizeFromBuffer( pBuf, &size, format );
+-                            if (! format.IsStandard() ) {
++                             if (! m_pDataObject->NeedsVerbatimData(format) ) {
++
+                                 // see GetData for corresponding increment
+                                 size -= m_pDataObject->GetBufferOffset( format  );
+@@ -684,21 +686,44 @@
+ }
+ 
+-size_t wxDataObject::GetBufferOffset( const wxDataFormat& WXUNUSED(format) )
++size_t wxDataObject::GetBufferOffset(const wxDataFormat& format )
+ {
+-    return sizeof(size_t);
++    if (NeedsVerbatimData(format))
++        return 0;           // we cannot add any additional info to this format !
++
++    return sizeof(size_t);    // we'll add a size_t containing the size of the data
+ }
+ 
+ const void* wxDataObject::GetSizeFromBuffer( const void* buffer, size_t* size,
+-                                             const wxDataFormat& WXUNUSED(format) )
++                                               const wxDataFormat& format )
+ {
+-    size_t* p = (size_t*)buffer;
+-    *size = *p;
++    DWORD realsz = HeapSize(::GetProcessHeap(), 0, buffer);
++    if (realsz == 0xFFFFFFFF) {
++        wxLogApiError(wxT("HeapSize"), 0);    // HeapSize does not set call SetLastError
++        return NULL;                          // something wrong with this buffer
++    }
++
++    *size = realsz;
+ 
+-    return p + 1;
++    // check if this data has its size prepended 
++    // (as it was by default for wx programs prior 2.6.3):
++    size_t* p = (size_t*)buffer;         // try to cast the first bytes to a size_t
++    if (*p == realsz) {
++
++        if (NeedsVerbatimData(format))
++            wxLogWarning(wxT("Warning: this format requires verbatim data but the clipboard ")
++                         wxT("has the size of the data prepended - removing it"));
++            return p + 1;      // this data has its size prepended; skip first DWORD
++    }
++
++    return p;        // nothing prependend, return the buffer as is
+ }
+ 
+ void* wxDataObject::SetSizeInBuffer( void* buffer, size_t size,
+-                                       const wxDataFormat& WXUNUSED(format) )
++                                      const wxDataFormat& format )
+ {
++    // be sure that we are prepending the size of the data buffer only to those
++    // formats who don't need to have "verbatim" clipboard data...
++    wxASSERT(!NeedsVerbatimData(format));
++
+     size_t* p = (size_t*)buffer;
+     *p = size;
+
+ 	  	 

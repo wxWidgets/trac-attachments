@@ -1,0 +1,154 @@
+Index: wxWidgets/include/wx/artprov.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/artprov.h,v
+retrieving revision 1.20
+diff -b -u -2 -r1.20 artprov.h
+--- wxWidgets/include/wx/artprov.h	2005/02/19 16:56:08	1.20
++++ wxWidgets/include/wx/artprov.h	2005/03/03 23:43:51
+@@ -138,4 +138,8 @@
+                           const wxSize& size = wxDefaultSize);
+ 
++    // Get the size of an icon from a specific wxArtClient, queries 
++    // the topmost provider if platform_dependent = false
++    static wxSize GetSize(const wxArtClient& client, bool platform_dependent = false);
++
+ protected:
+     friend class wxArtProviderModule;
+@@ -147,4 +151,10 @@
+     static void CleanUpProviders();
+ 
++    // Get the default size of an icon for a specific client
++    virtual wxSize DoGetSize(const wxArtClient& client) 
++    {
++        return GetSize(client, true);
++    }
++                             
+     // Derived classes must override this method to create requested
+     // art resource. This method is called only once per instance's
+Index: wxWidgets/src/common/artprov.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/artprov.cpp,v
+retrieving revision 1.17
+diff -b -u -2 -r1.17 artprov.cpp
+--- wxWidgets/src/common/artprov.cpp	2004/09/08 17:30:19	1.17
++++ wxWidgets/src/common/artprov.cpp	2005/03/03 23:43:52
+@@ -152,5 +152,5 @@
+ /*static*/ wxBitmap wxArtProvider::GetBitmap(const wxArtID& id,
+                                              const wxArtClient& client,
+-                                             const wxSize& size)
++                                             const wxSize& reqSize)
+ {
+     // safety-check against writing client,id,size instead of id,client,size:
+@@ -158,6 +158,8 @@
+ 
+     wxCHECK_MSG( sm_providers, wxNullBitmap, _T("no wxArtProvider exists") );
++
++    wxSize bestSize = (reqSize != wxDefaultSize) ? reqSize : GetSize(client);
+ 
+-    wxString hashId = wxArtProviderCache::ConstructHashID(id, client, size);
++    wxString hashId = wxArtProviderCache::ConstructHashID(id, client, bestSize);
+ 
+     wxBitmap bmp;
+@@ -167,13 +169,23 @@
+              node; node = node->GetNext())
+         {
+-            bmp = node->GetData()->CreateBitmap(id, client, size);
++            bmp = node->GetData()->CreateBitmap(id, client, bestSize);
+             if ( bmp.Ok() )
+             {
+ #if wxUSE_IMAGE
+-                if ( size != wxDefaultSize &&
+-                     (bmp.GetWidth() != size.x || bmp.GetHeight() != size.y) )
++                int bmp_w = bmp.GetWidth();
++                int bmp_h = bmp.GetHeight();
++                // want default size but it's smaller, paste into transparent image
++                if ((reqSize == wxDefaultSize) && 
++                    (bmp_h < bestSize.x) && (bmp_w < bestSize.y))
++                {
++                     wxPoint offset((bestSize.x - bmp_w)/2, (bestSize.y - bmp_h)/2);
++                     wxImage img = bmp.ConvertToImage();
++                     img.Resize(bestSize, offset);
++                     bmp = wxBitmap(img);
++                }
++                else if ( (bmp_w != bestSize.x) || (bmp_h != bestSize.y) )
+                 {
+                     wxImage img = bmp.ConvertToImage();
+-                    img.Rescale(size.x, size.y);
++                    img.Rescale(bestSize.x, bestSize.y);
+                     bmp = wxBitmap(img);
+                 }
+@@ -202,4 +214,40 @@
+     icon.CopyFromBitmap(bmp);
+     return icon;
++}
++
++#ifdef __WXGTK__
++    #include <gtk/gtk.h>
++    extern GtkIconSize wxArtClientToIconSize(const wxArtClient& client);
++#endif // __WXGTK__
++
++/*static*/ wxSize wxArtProvider::GetSize(const wxArtClient& client, 
++                                         bool platform_dependent)
++{
++    if (!platform_dependent)
++    {
++        wxArtProvidersList::compatibility_iterator node = sm_providers->GetFirst();
++        if (node)
++            return node->GetData()->DoGetSize(client);
++            
++        // else return platform dependent size
++    }    
++    
++#ifdef __WXGTK__
++    GtkIconSize gtk_size = wxArtClientToIconSize(client);
++    gint width, height;
++    gtk_icon_size_lookup( gtk_size, &width, &height);
++    return wxSize(width, height);
++#else 
++    if (client == wxART_TOOLBAR)
++        return wxSize(32, 32);
++    else if (client == wxART_MENU)
++        return wxSize(16, 15);
++    else if (client == wxART_CMN_DIALOG || client == wxART_MESSAGE_BOX)
++        return wxSize(32, 32);
++    else if (client == wxART_BUTTON)
++        return wxSize(16, 15);
++    else
++        return wxSize(16, 15); // this is arbitrary    
++#endif 
+ }
+ 
+Index: wxWidgets/src/gtk/artgtk.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/artgtk.cpp,v
+retrieving revision 1.6
+diff -b -u -2 -r1.6 artgtk.cpp
+--- wxWidgets/src/gtk/artgtk.cpp	2005/02/19 16:56:13	1.6
++++ wxWidgets/src/gtk/artgtk.cpp	2005/03/03 23:43:53
+@@ -126,5 +126,5 @@
+ }
+ 
+-static GtkIconSize wxArtClientToIconSize(const wxArtClient& client)
++GtkIconSize wxArtClientToIconSize(const wxArtClient& client)
+ {
+     if (client == wxART_TOOLBAR)
+Index: wxWidgets/docs/latex/wx/artprov.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/artprov.tex,v
+retrieving revision 1.12
+diff -b -u -2 -r1.12 artprov.tex
+--- wxWidgets/docs/latex/wx/artprov.tex	2005/02/11 20:08:50	1.12
++++ wxWidgets/docs/latex/wx/artprov.tex	2005/03/03 23:43:53
+@@ -177,4 +177,10 @@
+ return a wxIcon object (or wxNullIcon on failure).
+ 
++\func{static wxSize}{GetSize}{\param{const wxArtClient\& }{client}, \param{bool }{platform_default = false}}
++
++Returns the default size for the given art {\it client} by either using the topmost 
++wxArtProvider or if {\it platform_default} is \true then return a suitable default size for 
++{\it client} depending on the current platform.
++
+ \membersection{wxArtProvider::PopProvider}\label{wxartproviderctor}
+ 
+
+ 	  	 

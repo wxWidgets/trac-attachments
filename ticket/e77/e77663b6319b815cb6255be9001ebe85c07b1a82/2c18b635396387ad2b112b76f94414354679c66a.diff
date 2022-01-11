@@ -1,0 +1,147 @@
+Index: include/wx/filedlg.h
+===================================================================
+--- include/wx/filedlg.h	(revision 58253)
++++ include/wx/filedlg.h	(working copy)
+@@ -120,8 +120,6 @@
+     // create the window containing the extra controls we want to show in it
+     typedef wxWindow *(*ExtraControlCreatorFunction)(wxWindow*);
+ 
+-    // extra controls are currently supported in GTK and generic versions
+-    // only currently
+     virtual bool SupportsExtraControl() const { return false; }
+ 
+     bool SetExtraControlCreator(ExtraControlCreatorFunction WXUNUSED(c));
+@@ -155,6 +153,10 @@
+ 
+     // returns true if control is created (if it already exists returns false)
+     bool CreateExtraControl();
++    // return true if SetExtraControlCreator() was called
++    bool HasExtraControlCreator() const { return m_extraControlCreator; }
++    // get the size of the extra control by creating and deleting it
++    wxSize GetExtraControlSize();
+ 
+ private:
+     ExtraControlCreatorFunction m_extraControlCreator;
+Index: src/common/fldlgcmn.cpp
+===================================================================
+--- src/common/fldlgcmn.cpp	(revision 58253)
++++ src/common/fldlgcmn.cpp	(working copy)
+@@ -168,6 +168,18 @@
+     return true;
+ }
+ 
++wxSize wxFileDialogBase::GetExtraControlSize()
++{
++    if (!m_extraControlCreator)
++        return wxDefaultSize;
++    // put the extra control on empty dialog to find its size
++    wxDialog *dlg = new wxDialog(NULL, -1, "");
++    wxWindow *win = (*m_extraControlCreator)(dlg);
++    wxSize size = win->GetSize();
++    delete dlg;
++    return size;
++}
++
+ //----------------------------------------------------------------------------
+ // wxFileDialog convenience functions
+ //----------------------------------------------------------------------------
+Index: include/wx/msw/filedlg.h
+===================================================================
+--- include/wx/msw/filedlg.h	(revision 58253)
++++ include/wx/msw/filedlg.h	(working copy)
+@@ -32,6 +32,10 @@
+     virtual void SetPath(const wxString& path);
+     virtual void GetPaths(wxArrayString& paths) const;
+     virtual void GetFilenames(wxArrayString& files) const;
++#ifndef __WXWINCE__
++    virtual bool SupportsExtraControl() const { return true; }
++#endif // __WXWINCE__
++    void MSWOnInitDialogHook(WXHWND hwnd);
+ 
+     virtual int ShowModal();
+ 
+Index: src/msw/filedlg.cpp
+===================================================================
+--- src/msw/filedlg.cpp	(revision 58253)
++++ src/msw/filedlg.cpp	(working copy)
+@@ -86,6 +86,14 @@
+ {
+     switch ( iMsg )
+     {
++        case WM_INITDIALOG:
++            {
++                OPENFILENAME* ofn = reinterpret_cast<OPENFILENAME *>(lParam);
++                reinterpret_cast<wxFileDialog *>(ofn->lCustData)
++                    ->MSWOnInitDialogHook((WXHWND)hDlg);
++            }
++            break;
++
+         case WM_NOTIFY:
+             {
+                 OFNOTIFY *pNotifyCode = reinterpret_cast<OFNOTIFY *>(lParam);
+@@ -360,6 +368,15 @@
+     return true;
+ }
+ 
++void wxFileDialog::MSWOnInitDialogHook(WXHWND hwnd)
++{
++   SetHWND(hwnd);
++
++   CreateExtraControl();
++
++   SetHWND(NULL);
++}
++
+ int wxFileDialog::ShowModal()
+ {
+     HWND hWnd = 0;
+@@ -385,7 +402,7 @@
+         in the upper left of the frame, it does not center
+         automatically.
+     */
+-    if (m_bMovedWindow) // we need these flags.
++    if (m_bMovedWindow || HasExtraControlCreator()) // we need these flags.
+     {
+         msw_flags |= OFN_EXPLORER|OFN_ENABLEHOOK;
+ #ifndef __WXWINCE__
+@@ -421,6 +438,40 @@
+     of.lpstrFileTitle    = titleBuffer;
+     of.nMaxFileTitle     = wxMAXFILE + 1 + wxMAXEXT;
+ 
++#ifndef __WXWINCE__
++   if ( HasExtraControlCreator() )
++   {
++       msw_flags |= OFN_ENABLETEMPLATEHANDLE;
++
++       // TODO: call GlobalFree()
++       HGLOBAL hgbl = GlobalAlloc(GMEM_ZEROINIT, 256);
++       wxASSERT(hgbl);
++
++       LPDLGTEMPLATE lpdt = (LPDLGTEMPLATE)GlobalLock(hgbl);
++
++       // Define a dialog box.
++
++       lpdt->style = DS_CONTROL | /*DS_3DLOOK |*/ WS_CHILD | WS_CLIPSIBLINGS;
++       lpdt->cdit = 0;         // Number of controls
++       lpdt->x = 0;
++       lpdt->y = 0;
++
++       wxSize extra_size = GetExtraControlSize();
++       // setting cx doesn't change the width of the dialog
++       lpdt->cx = extra_size.GetWidth();
++       // Dividing by 2 gives expected height on WinXP and Wine.
++       // I don't know why (MW).
++       lpdt->cy = extra_size.GetHeight() / 2;
++
++       // after the DLGTEMPLATE there are 3 additional WORDs for dialog menu,
++       // class and title, all three set to zeros.
++
++       GlobalUnlock(hgbl);
++
++       of.hInstance = (HINSTANCE)(LPDLGTEMPLATE)hgbl;
++   }
++#endif // __WXWINCE__
++
+     // Convert forward slashes to backslashes (file selector doesn't like
+     // forward slashes) and also squeeze multiple consecutive slashes into one
+     // as it doesn't like two backslashes in a row neither

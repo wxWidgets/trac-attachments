@@ -1,0 +1,303 @@
+Index: docs/latex/wx/animatctrl.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/animatctrl.tex,v
+retrieving revision 1.5
+diff -bu2 -r1.5 docs/latex/wx/animatctrl.tex
+--- docs/latex/wx/animatctrl.tex
++++ docs/latex/wx/animatctrl.tex
+@@ -171,4 +171,8 @@
+ is called.
+
++Note that the inactive bitmap, if smaller than the control's size, will be centered in
++the control; if bigger, it will be stretched to fit it.
++
++
+ \membersection{wxAnimationCtrl::Stop}\label{wxanimationctrlstop}
+
+Index: include/wx/animate.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/animate.h,v
+retrieving revision 1.7
+diff -bu2 -r1.7 include/wx/animate.h
+--- include/wx/animate.h
++++ include/wx/animate.h
+@@ -83,11 +83,24 @@
+     virtual bool IsPlaying() const = 0;
+
+-    virtual void SetInactiveBitmap(const wxBitmap &bmp) = 0;
++    virtual void SetInactiveBitmap(const wxBitmap &bmp);
++
++    // always return the original bitmap set in this control
+     wxBitmap GetInactiveBitmap() const
+         { return m_bmpStatic; }
+
+ protected:
++    // the inactive bitmap as it was set by the user
+     wxBitmap m_bmpStatic;
+
++    // the inactive bitmap currently shown in the control
++    // (may differ in the size from m_bmpStatic)
++    wxBitmap m_bmpStaticReal;
++
++    // updates m_bmpStaticReal from m_bmpStatic if needed
++    virtual void UpdateStaticImage();
++
++    // called by SetInactiveBitmap
++    virtual void DisplayStaticImage() = 0;
++
+ private:
+     DECLARE_ABSTRACT_CLASS(wxAnimationCtrlBase)
+Index: include/wx/generic/animate.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/generic/animate.h,v
+retrieving revision 1.10
+diff -bu2 -r1.10 include/wx/generic/animate.h
+--- include/wx/generic/animate.h
++++ include/wx/generic/animate.h
+@@ -106,5 +106,5 @@
+         { return m_animation; }
+
+-    void SetInactiveBitmap(const wxBitmap &bmp);
++    virtual void SetInactiveBitmap(const wxBitmap &bmp);
+
+     // override base class method
+@@ -147,9 +147,9 @@
+     void DisposeToBackground(wxDC& dc, const wxPoint &pos, const wxSize &sz);
+
+-    void UpdateBackingStoreWithStaticImage();
+     void IncrementalUpdateBackingStore();
+     bool RebuildBackingStoreUpToFrame(size_t);
+     void DrawFrame(wxDC &dc, size_t);
+
++    virtual void DisplayStaticImage();
+     virtual wxSize DoGetBestSize() const;
+
+Index: include/wx/gtk/animate.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/gtk/animate.h,v
+retrieving revision 1.7
+diff -bu2 -r1.7 include/wx/gtk/animate.h
+--- include/wx/gtk/animate.h
++++ include/wx/gtk/animate.h
+@@ -125,12 +125,11 @@
+
+     bool SetBackgroundColour( const wxColour &colour );
+-    void SetInactiveBitmap(const wxBitmap &bmp);
+
+ protected:
+
++    virtual void DisplayStaticImage();
+     virtual wxSize DoGetBestSize() const;
+     void FitToAnimation();
+     void ClearToBackgroundColour();
+-    void DisplayStaticImage();
+
+     void ResetAnim();
+Index: src/common/animatecmn.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/animatecmn.cpp,v
+retrieving revision 1.3
+diff -bu2 -r1.3 src/common/animatecmn.cpp
+--- src/common/animatecmn.cpp
++++ src/common/animatecmn.cpp
+@@ -32,3 +32,68 @@
+
+
++// ----------------------------------------------------------------------------
++// wxAnimationCtrlBase
++// ----------------------------------------------------------------------------
++
++void wxAnimationCtrlBase::UpdateStaticImage()
++{
++    if (!m_bmpStaticReal.IsOk() || !m_bmpStatic.IsOk())
++        return;
++
++    // if given bitmap is not of the right size, recreate m_bmpStaticReal accordingly
++    const wxSize &sz = GetClientSize();
++    if (sz.GetWidth() != m_bmpStaticReal.GetWidth() ||
++        sz.GetHeight() != m_bmpStaticReal.GetHeight())
++    {
++        if (!m_bmpStaticReal.IsOk() ||
++            m_bmpStaticReal.GetWidth() != sz.GetWidth() ||
++            m_bmpStaticReal.GetHeight() != sz.GetHeight())
++        {
++            // need to (re)create m_bmpStaticReal
++            if (!m_bmpStaticReal.Create(sz.GetWidth(), sz.GetHeight(),
++                                        m_bmpStatic.GetDepth()))
++            {
++                wxLogDebug(wxT("Cannot create the static bitmap"));
++                m_bmpStatic = wxNullBitmap;
++                return;
++            }
++        }
++
++        if (m_bmpStatic.GetWidth() <= sz.GetWidth() &&
++            m_bmpStatic.GetHeight() <= sz.GetHeight())
++        {
++            // clear the background of m_bmpStaticReal
++            wxBrush brush(GetBackgroundColour());
++            wxMemoryDC dc;
++            dc.SelectObject(m_bmpStaticReal);
++            dc.SetBackground(brush);
++            dc.Clear();
++
++            // center the user-provided bitmap in m_bmpStaticReal
++            dc.DrawBitmap(m_bmpStatic,
++                        (sz.GetWidth()-m_bmpStatic.GetWidth())/2,
++                        (sz.GetHeight()-m_bmpStatic.GetHeight())/2,
++                        true /* use mask */ );
++        }
++        else
++        {
++            // the user-provided bitmap is bigger than our control, strech it
++            wxImage temp(m_bmpStatic.ConvertToImage());
++            temp.Rescale(sz.GetWidth(), sz.GetHeight(), wxIMAGE_QUALITY_HIGH);
++            m_bmpStaticReal = wxBitmap(temp);
++        }
++    }
++}
++
++void wxAnimationCtrlBase::SetInactiveBitmap(const wxBitmap &bmp)
++{
++    m_bmpStatic = bmp;
++    m_bmpStaticReal = bmp;
++
++    // if not playing, update the control now
++    // NOTE: DisplayStaticImage() will call UpdateStaticImage automatically
++    if ( !IsPlaying() )
++        DisplayStaticImage();
++}
++
+ #endif      // wxUSE_ANIMATIONCTRL
+Index: src/generic/animateg.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/generic/animateg.cpp,v
+retrieving revision 1.15
+diff -bu2 -r1.15 src/generic/animateg.cpp
+--- src/generic/animateg.cpp
++++ src/generic/animateg.cpp
+@@ -334,5 +334,5 @@
+     if (!m_animation.IsOk())
+     {
+-        UpdateBackingStoreWithStaticImage();
++        DisplayStaticImage();
+         return;
+     }
+@@ -343,11 +343,9 @@
+         FitToAnimation();
+
+-    UpdateBackingStoreWithStaticImage();
++    DisplayStaticImage();
+ }
+
+ void wxAnimationCtrl::SetInactiveBitmap(const wxBitmap &bmp)
+ {
+-    m_bmpStatic = bmp;
+-
+     // if the bitmap has an associated mask, we need to set our background to
+     // the colour of our parent otherwise when calling DrawCurrentFrame()
+@@ -358,7 +356,5 @@
+         SetBackgroundColour(GetParent()->GetBackgroundColour());
+
+-    // if not playing, update the backing store now
+-    if ( !IsPlaying() )
+-        UpdateBackingStoreWithStaticImage();
++    wxAnimationCtrlBase::SetInactiveBitmap(bmp);
+ }
+
+@@ -376,5 +372,5 @@
+     // there's an inactive bitmap set which has higher priority than bg colour)
+     if ( !IsPlaying() )
+-        UpdateBackingStoreWithStaticImage();
++        DisplayStaticImage();
+
+     return true;
+@@ -394,5 +390,5 @@
+     m_currentFrame = 0;
+
+-    UpdateBackingStoreWithStaticImage();
++    DisplayStaticImage();
+ }
+
+@@ -527,21 +523,24 @@
+ }
+
+-void wxAnimationCtrl::UpdateBackingStoreWithStaticImage()
++void wxAnimationCtrl::DisplayStaticImage()
+ {
+     wxASSERT(!IsPlaying());
+
+-    if (m_bmpStatic.IsOk())
++    // m_bmpStaticReal will be updated only if necessary...
++    UpdateStaticImage();
++
++    if (m_bmpStaticReal.IsOk())
+     {
+         // copy the inactive bitmap in the backing store
+         // eventually using the mask if the static bitmap has one
+-        if ( m_bmpStatic.GetMask() )
++        if ( m_bmpStaticReal.GetMask() )
+         {
+             wxMemoryDC temp;
+             temp.SelectObject(m_backingStore);
+             DisposeToBackground(temp);
+-            temp.DrawBitmap(m_bmpStatic, 0, 0, true /* use mask */);
++            temp.DrawBitmap(m_bmpStaticReal, 0, 0, true /* use mask */);
+         }
+         else
+-            m_backingStore = m_bmpStatic;
++            m_backingStore = m_bmpStaticReal;
+     }
+     else
+Index: src/gtk/animate.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/animate.cpp,v
+retrieving revision 1.11
+diff -bu2 -r1.11 src/gtk/animate.cpp
+--- src/gtk/animate.cpp
++++ src/gtk/animate.cpp
+@@ -326,33 +326,27 @@
+ }
+
+-void wxAnimationCtrl::SetInactiveBitmap(const wxBitmap &bmp)
+-{
+-    m_bmpStatic = bmp;
+-
+-    // update the pixbuf associated with m_widget now...
+-    if (!IsPlaying())
+-        DisplayStaticImage();
+-}
+-
+ void wxAnimationCtrl::DisplayStaticImage()
+ {
+     wxASSERT(!IsPlaying());
+
+-    if (m_bmpStatic.IsOk())
++    // m_bmpStaticReal will be updated only if necessary...
++    UpdateStaticImage();
++
++    if (m_bmpStaticReal.IsOk())
+     {
+         // show inactive bitmap
+         GdkBitmap *mask = (GdkBitmap *) NULL;
+-        if (m_bmpStatic.GetMask())
+-            mask = m_bmpStatic.GetMask()->GetBitmap();
++        if (m_bmpStaticReal.GetMask())
++            mask = m_bmpStaticReal.GetMask()->GetBitmap();
+
+-        if (m_bmpStatic.HasPixbuf())
++        if (m_bmpStaticReal.HasPixbuf())
+         {
+             gtk_image_set_from_pixbuf(GTK_IMAGE(m_widget),
+-                                        m_bmpStatic.GetPixbuf());
++                                      m_bmpStaticReal.GetPixbuf());
+         }
+         else
+         {
+             gtk_image_set_from_pixmap(GTK_IMAGE(m_widget),
+-                                        m_bmpStatic.GetPixmap(), mask);
++                                      m_bmpStaticReal.GetPixmap(), mask);
+         }
+     }
+
+ 	  	 

@@ -1,0 +1,245 @@
+Index: build/msw/makefile.vc
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/build/msw/makefile.vc,v
+retrieving revision 1.97
+diff -u -r1.97 makefile.vc
+--- build/msw/makefile.vc	2006/02/10 20:02:54	1.97
++++ build/msw/makefile.vc	2006/02/12 10:06:21
+@@ -3553,7 +3554,7 @@
+ __EXCEPTIONSFLAG = 
+ !endif
+ !if "$(USE_EXCEPTIONS)" == "1"
+-__EXCEPTIONSFLAG = /EHsc
++__EXCEPTIONSFLAG = /EHa
+ !endif
+ !if "$(BUILD)" == "debug" && "$(DEBUG_RUNTIME_LIBS)" == "0"
+ __NO_VC_CRTDBG_p = /D__NO_VC_CRTDBG__
+
+Index: include/wx/app.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/app.h,v
+retrieving revision 1.134
+diff -u -r1.134 app.h
+--- include/wx/app.h	2006/01/23 03:27:30	1.134
++++ include/wx/app.h	2006/02/12 07:52:09
+@@ -108,7 +108,7 @@
+     // under Unix, application crash under Windows) to fatal program errors,
+     // however extreme care should be taken if you don't want this function to
+     // crash.
+-    virtual void OnFatalException() { }
++    virtual bool OnFatalException(void*) { return true; }
+ 
+     // Called from wxExit() function, should terminate the application a.s.a.p.
+     virtual void Exit();
+
+Index: src/msw/main.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/main.cpp,v
+retrieving revision 1.59
+diff -u -r1.59 main.cpp
+--- src/msw/main.cpp	2005/12/19 14:34:12	1.59
++++ src/msw/main.cpp	2006/02/12 10:09:56
+@@ -101,71 +101,15 @@
+ extern EXCEPTION_POINTERS *wxGlobalSEInformation = NULL;
+ 
+ // flag telling us whether the application wants to handle exceptions at all
+-static bool gs_handleExceptions = false;
++extern bool gs_handleExceptions = false;
+ 
+-static void wxFatalExit()
+-{
+-    // use the same exit code as abort()
+-    ::ExitProcess(3);
+-}
+-
+-unsigned long wxGlobalSEHandler(EXCEPTION_POINTERS *pExcPtrs)
+-{
+-    if ( gs_handleExceptions && wxTheApp )
+-    {
+-        // store the pointer to exception info
+-        wxGlobalSEInformation = pExcPtrs;
+-
+-        // give the user a chance to do something special about this
+-        __try
+-        {
+-            wxTheApp->OnFatalException();
+-        }
+-        __except ( EXCEPTION_EXECUTE_HANDLER )
+-        {
+-            // nothing to do here, just ignore the exception inside the
+-            // exception handler
+-            ;
+-        }
+-
+-        wxGlobalSEInformation = NULL;
+-
+-        // this will execute our handler and terminate the process
+-        return EXCEPTION_EXECUTE_HANDLER;
+-    }
+-
+-    return EXCEPTION_CONTINUE_SEARCH;
+-}
+-
+-#ifdef __VISUALC__
+-
+ static void wxSETranslator(unsigned int WXUNUSED(code), EXCEPTION_POINTERS *ep)
+ {
+-    switch ( wxGlobalSEHandler(ep) )
+-    {
+-        default:
+-            wxFAIL_MSG( _T("unexpected wxGlobalSEHandler() return value") );
+-            // fall through
+-
+-        case EXCEPTION_EXECUTE_HANDLER:
+-            // if wxApp::OnFatalException() had been called we should exit the
+-            // application -- but we shouldn't kill our host when we're a DLL
+-#ifndef WXMAKINGDLL
+-            wxFatalExit();
+-#endif // not a DLL
+-            break;
+-
+-        case EXCEPTION_CONTINUE_SEARCH:
+-            // we're called for each "catch ( ... )" and if we (re)throw from
+-            // here, the catch handler body is not executed, so the effect is
+-            // as if had inhibited translation of SE to C++ ones because the
+-            // handler will never see any structured exceptions
+-            throw;
+-    }
++    // simply throw the EXCEPTION_POINTERS object so that user code can be
++    // executed or else we can call our own OnFatalException()
++    throw ep;
+ }
+ 
+-#endif // __VISUALC__
+-
+ bool wxHandleFatalExceptions(bool doit)
+ {
+     // assume this can only be called from the main thread
+@@ -203,26 +147,6 @@
+     return true;
+ }
+ 
+-int wxEntry(int& argc, wxChar **argv)
+-{
+-    DisableAutomaticSETranslator();
+-
+-    __try
+-    {
+-        return wxEntryReal(argc, argv);
+-    }
+-    __except ( wxGlobalSEHandler(GetExceptionInformation()) )
+-    {
+-        wxFatalExit();
+-
+-#if !defined(_MSC_VER) || defined(__WXDEBUG__) || (defined(_MSC_VER) && _MSC_VER <= 1200)
+-        // this code is unreachable but put it here to suppress warnings in some compilers
+-        // and disable for others to supress warnings too
+-        return -1;
+-#endif // !__VISUALC__ in release build
+-    }
+-}
+-
+ #else // !wxUSE_ON_FATAL_EXCEPTION
+ 
+ #if defined(__VISUALC__) && !defined(__WXWINCE__)
+@@ -236,14 +160,14 @@
+ 
+ #endif // __VISUALC__
+ 
++#endif // wxUSE_ON_FATAL_EXCEPTION/!wxUSE_ON_FATAL_EXCEPTION
++
++// Common entry point
+ int wxEntry(int& argc, wxChar **argv)
+ {
+     DisableAutomaticSETranslator();
+-
+     return wxEntryReal(argc, argv);
+ }
+-
+-#endif // wxUSE_ON_FATAL_EXCEPTION/!wxUSE_ON_FATAL_EXCEPTION
+ 
+ #endif // wxUSE_BASE
+ 
+Index: src/unix/utilsunx.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/unix/utilsunx.cpp,v
+retrieving revision 1.130
+diff -u -r1.130 utilsunx.cpp
+--- src/unix/utilsunx.cpp	2005/11/25 22:09:22	1.130
++++ src/unix/utilsunx.cpp	2006/02/12 06:25:29
+@@ -1020,10 +1020,11 @@
+     if ( wxTheApp )
+     {
+         // give the user a chance to do something special about this
+-        wxTheApp->OnFatalException();
++        if ( !wxTheApp->OnFatalException(NULL) )
++        {
++			abort();
++		}
+     }
+-
+-    abort();
+ }
+ 
+ bool wxHandleFatalExceptions(bool doit)
+
+Index: samples/debugrpt/debugrpt.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/debugrpt/debugrpt.cpp,v
+retrieving revision 1.12
+diff -u -r1.12 debugrpt.cpp
+--- samples/debugrpt/debugrpt.cpp	2005/08/30 17:30:43	1.12
++++ samples/debugrpt/debugrpt.cpp	2006/02/12 06:31:53
+@@ -191,7 +191,7 @@
+     virtual bool OnInit();
+ 
+     // called when a crash occurs in this application
+-    virtual void OnFatalException();
++    virtual bool OnFatalException();
+ 
+     // this is where we really generate the debug report
+     void GenerateReport(wxDebugReport::Context ctx);
+@@ -338,9 +338,10 @@
+     return true;
+ }
+ 
+-void MyApp::OnFatalException()
++bool MyApp::OnFatalException()
+ {
+     GenerateReport(wxDebugReport::Context_Exception);
++    return false;
+ }
+ 
+ void MyApp::GenerateReport(wxDebugReport::Context ctx)
+
+Index: samples/except/except.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/except/except.cpp,v
+retrieving revision 1.12
+diff -u -r1.12 except.cpp
+--- samples/except/except.cpp	2005/05/31 09:19:28	1.12
++++ samples/except/except.cpp	2006/02/12 06:26:40
+@@ -89,7 +89,7 @@
+ 
+     // and now for something different: this function is called in case of a
+     // crash (e.g. dereferencing null pointer, division by 0, ...)
+-    virtual void OnFatalException();
++    virtual bool OnFatalException();
+ 
+ #ifdef __WXDEBUG__
+     // in debug mode, you can override this function to do something different
+@@ -291,10 +291,11 @@
+     }
+ }
+ 
+-void MyApp::OnFatalException()
++bool MyApp::OnFatalException()
+ {
+     wxMessageBox(_T("Program has crashed and will terminate."),
+                  _T("wxExcept Sample"), wxOK | wxICON_ERROR);
++    return false;
+ }
+ 
+ #ifdef __WXDEBUG__
+
+ 	  	 

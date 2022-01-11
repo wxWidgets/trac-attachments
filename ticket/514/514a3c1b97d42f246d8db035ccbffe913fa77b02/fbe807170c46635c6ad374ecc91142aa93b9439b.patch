@@ -1,0 +1,161 @@
+Index: src/gtk/filedlg.cpp
+===================================================================
+--- src/gtk/filedlg.cpp	(revision 74058)
++++ src/gtk/filedlg.cpp	(working copy)
+@@ -116,6 +116,18 @@
+         gtk_filedialog_cancel_callback(w, dialog);
+ }
+ 
++static void gtk_filedialog_selchanged_callback(GtkFileChooser *chooser,
++                                               wxFileDialog *dialog)
++{
++    wxGtkString filename(gtk_file_chooser_get_preview_filename(chooser));
++    
++    if (filename)
++        dialog->SelectionChanged (wxString (filename));
++    else
++        dialog->SelectionChanged (wxEmptyString);
++}
++ 
++
+ static void gtk_filedialog_update_preview_callback(GtkFileChooser *chooser,
+                                                    gpointer user_data)
+ {
+@@ -249,6 +261,8 @@
+     g_signal_connect (m_widget, "response",
+         G_CALLBACK (gtk_filedialog_response_callback), this);
+ 
++    g_signal_connect (m_widget, "selection-changed",
++        G_CALLBACK (gtk_filedialog_selchanged_callback), this);
+ 
+     // deal with extensions/filters
+     SetWildcard(wildCard);
+@@ -463,4 +477,12 @@
+     return m_fc.GetFilterIndex();
+ }
+ 
++void wxFileDialog::SelectionChanged (const wxString &filename)
++{
++    m_currentlySelectedFilename = filename;
++    
++    if (m_extraControl)
++        m_extraControl->UpdateWindowUI (wxUPDATE_UI_RECURSE);
++}
++ 
+ #endif // wxUSE_FILEDLG
+Index: src/msw/filedlg.cpp
+===================================================================
+--- src/msw/filedlg.cpp	(revision 74058)
++++ src/msw/filedlg.cpp	(working copy)
+@@ -180,6 +180,11 @@
+                                         pNotifyCode->lpOFN->lCustData)
+                         ->MSWOnInitDone((WXHWND)hDlg);
+                  }
++                 else if ( pNotifyCode->hdr.code == CDN_SELCHANGE ) {
++                    reinterpret_cast<wxFileDialog *>(
++                                        pNotifyCode->lpOFN->lCustData)
++                        ->MSWOnSelChange((WXHWND)hDlg);
++                }
+             }
+             break;
+ 
+@@ -323,10 +328,28 @@
+         SetPosition(gs_rectDialog.GetPosition());
+     }
+ 
++    // Call selection change handler so that update handler will be
++    // called once with no selection.
++    MSWOnSelChange (hDlg);
++
+     // we shouldn't destroy this HWND
+     SetHWND(NULL);
+ }
+ 
++void wxFileDialog::MSWOnSelChange(WXHWND hDlg)
++{
++    TCHAR buf[MAX_PATH];
++    size_t len = SendMessage(::GetParent(hDlg), CDM_GETFILEPATH,
++                             (WPARAM)MAX_PATH, (LPARAM)buf); 
++    if (len > 0)
++        m_currentlySelectedFilename = wxString (buf);
++    else
++        m_currentlySelectedFilename.clear();
++
++    if (m_extraControl)
++        m_extraControl->UpdateWindowUI (wxUPDATE_UI_RECURSE);
++}
++
+ // helper used below in ShowCommFileDialog(): style is used to determine
+ // whether to show the "Save file" dialog (if it contains wxFD_SAVE bit) or
+ // "Open file" one; returns true on success or false on failure in which case
+Index: include/wx/msw/filedlg.h
+===================================================================
+--- include/wx/msw/filedlg.h	(revision 74058)
++++ include/wx/msw/filedlg.h	(working copy)
+@@ -44,6 +44,9 @@
+     // called from the hook procedure on CDN_INITDONE reception
+     virtual void MSWOnInitDone(WXHWND hDlg);
+ 
++    // called from the hook procedure on CDN_SELCHANGE.
++    virtual void MSWOnSelChange(WXHWND hDlg);
++
+ protected:
+ 
+ #if !(defined(__SMARTPHONE__) && defined(__WXWINCE__))
+Index: include/wx/filedlg.h
+===================================================================
+--- include/wx/filedlg.h	(revision 74058)
++++ include/wx/filedlg.h	(working copy)
+@@ -122,6 +122,8 @@
+     virtual wxString GetWildcard() const { return m_wildCard; }
+     virtual int GetFilterIndex() const { return m_filterIndex; }
+ 
++    virtual wxString GetCurrentlySelectedFilename() const { return m_currentlySelectedFilename; }
++
+     // this function is called with wxFileDialog as parameter and should
+     // create the window containing the extra controls we want to show in it
+     typedef wxWindow *(*ExtraControlCreatorFunction)(wxWindow*);
+@@ -155,6 +157,7 @@
+     wxString      m_fileName;
+     wxString      m_wildCard;
+     int           m_filterIndex;
++    wxString      m_currentlySelectedFilename;
+     wxWindow*     m_extraControl;
+ 
+     // returns true if control is created (if it already exists returns false)
+Index: include/wx/gtk/filedlg.h
+===================================================================
+--- include/wx/gtk/filedlg.h	(revision 74058)
++++ include/wx/gtk/filedlg.h	(working copy)
+@@ -57,8 +57,8 @@
+     virtual int ShowModal();
+ 
+     virtual bool SupportsExtraControl() const { return true; }
++    virtual void SelectionChanged (const wxString &filename);
+ 
+-
+ protected:
+     // override this from wxTLW since the native
+     // form doesn't have any m_wxwindow
+Index: interface/wx/filedlg.h
+===================================================================
+--- interface/wx/filedlg.h	(revision 74058)
++++ interface/wx/filedlg.h	(working copy)
+@@ -184,6 +184,17 @@
+     virtual ~wxFileDialog();
+ 
+     /**
++        Returns file currently selected in dialog.
++
++        This function can be called from an update UI event handler to 
++        obtain the current selection in the dialog in order, for example,
++        to enable or disable extra controls added to the dialog.
++
++        @since 2.9.5
++    */
++    virtual wxString GetCurrentlySelectedFilename() const;
++
++    /**
+         Returns the default directory.
+     */
+     virtual wxString GetDirectory() const;

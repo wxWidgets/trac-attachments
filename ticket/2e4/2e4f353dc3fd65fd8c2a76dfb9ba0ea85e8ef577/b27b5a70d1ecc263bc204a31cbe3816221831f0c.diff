@@ -1,0 +1,161 @@
+diff --git a/src/common/mimecmn.cpp b/src/common/mimecmn.cpp
+index a14433b..9f306a8 100644
+--- a/src/common/mimecmn.cpp
++++ b/src/common/mimecmn.cpp
+@@ -392,12 +392,12 @@ wxFileType::GetOpenCommand(wxString *openCmd,
+ {
+     wxCHECK_MSG( openCmd, false, wxT("invalid parameter in GetOpenCommand") );
+ 
+-    if ( m_info )
++/*    if ( m_info )
+     {
+         *openCmd = ExpandCommand(m_info->GetOpenCommand(), params);
+ 
+         return true;
+-    }
++    }*/
+ 
+     return m_impl->GetOpenCommand(openCmd, params);
+ }
+diff --git a/src/unix/mimetype.cpp b/src/unix/mimetype.cpp
+index c520b23..89985a7 100644
+--- a/src/unix/mimetype.cpp
++++ b/src/unix/mimetype.cpp
+@@ -41,6 +41,11 @@
+ // other standard headers
+ #include <ctype.h>
+ 
++#define wxUSE_GIO 1  // *** Hack ***
++#if wxUSE_GIO
++    #include <gio/gio.h>
++#endif // wxUSE_GIO
++
+ class wxMimeTextFile
+ {
+ public:
+@@ -384,6 +389,51 @@ void wxMimeTypesManagerImpl::LoadXDGGlobs(const wxString& filename)
+ bool wxFileTypeImpl::GetOpenCommand(wxString *openCmd,
+                         const wxFileType::MessageParameters& params) const
+ {
++    // Start by trying to use GIO if we can
++#if wxUSE_GIO
++    // GIO requires an existing filepath
++    wxString filepath;
++    bool needsDeletion = CreateTempFileIfNeeded(params.GetFileName(), filepath);
++
++    GAppInfo* appinfo = NULL;
++    GFile* file = g_file_new_for_path(filepath.mb_str(wxConvUTF8));
++    if (file)
++    { 
++        appinfo = g_file_query_default_handler(file, NULL, NULL);
++        g_object_unref(file);
++    }
++
++    if (needsDeletion)
++    {
++        wxRemoveFile(filepath);
++    }
++
++    if (appinfo)
++    {
++        wxString cmd = wxString(g_app_info_get_commandline(appinfo), wxConvUTF8);
++        wxString name = wxString(g_app_info_get_name(appinfo), wxConvUTF8);
++        wxString icon = wxString(g_icon_to_string(g_app_info_get_icon(appinfo)), // But see below
++                                 wxConvUTF8);
++        g_object_unref(appinfo);
++        if (!cmd.empty())
++        { 
++            cmd.Replace(wxT("%F"), wxT("%f"));
++            cmd.Replace(wxT("%U"), wxT("%f"));
++            cmd.Replace(wxT("%u"), wxT("%f"));
++            if (0 == cmd.Replace( wxT("%f"), wxT("%s") ))
++            {
++                cmd = cmd + wxT(" %s");
++            }
++            cmd.Replace(wxT("%c"), name);
++            if (true)
++                    cmd.Replace(wxT("%i"), "--icon " + icon); // But this is just a guess at the correct syntax
++             else   cmd.Replace(wxT("%i"), "");
++            *openCmd = wxFileType::ExpandCommand(cmd, params);
++            return true;
++        }
++    }
++#endif //wxUSE_GIO
++
+     if (m_manager->HasXdgMime())
+     {
+         wxString mimeType;
+@@ -1032,6 +1082,73 @@ wxFileType * wxMimeTypesManagerImpl::GetFileTypeFromExtension(const wxString& ex
+     if (ext.empty() )
+         return NULL;
+ 
++    // Start by trying to use GIO if we can
++#if wxUSE_GIO
++    // GIO requires an existing filepath
++    wxString filepath;
++    bool needsDeletion = CreateTempFileIfNeeded(ext, filepath);
++
++    GAppInfo* appinfo = NULL;
++    GFileInfo* fileInfo = NULL;
++    GFile* file = g_file_new_for_path(filepath.mb_str(wxConvUTF8));
++    if (file)
++    { 
++        appinfo = g_file_query_default_handler(file, NULL, NULL);
++        fileInfo = g_file_query_info(file, "standard::*",
++                                     G_FILE_QUERY_INFO_NONE, NULL, NULL);
++        g_object_unref(file);
++    }
++
++    if (needsDeletion)
++    {
++        wxRemoveFile(filepath);
++    }
++
++    if (fileInfo)
++    {
++        wxString openCmd, name, icon;
++        wxString type(g_file_info_get_attribute_as_string(
++                                                        fileInfo,
++                                                        "standard::content-type"
++                                                         ),
++                      wxConvUTF8);
++        g_object_unref(fileInfo);
++            
++        if (appinfo)
++        {
++            openCmd = wxString(g_app_info_get_commandline(appinfo), wxConvUTF8);
++            name = wxString(g_app_info_get_name(appinfo), wxConvUTF8);
++            icon = wxString(g_icon_to_string( g_app_info_get_icon(appinfo) ),
++                            wxConvUTF8);
++            g_object_unref(appinfo);
++        }
++            
++        if (!type.empty())
++        {
++            wxFileTypeInfo* fti = new wxFileTypeInfo(type);
++            if (!openCmd.empty())
++            { 
++                openCmd.Replace(wxT("%F"), wxT("%f"));
++                openCmd.Replace(wxT("%U"), wxT("%f"));
++                openCmd.Replace(wxT("%u"), wxT("%f"));
++                if (0 == openCmd.Replace( wxT("%f"), wxT("%s") ))
++                {
++                    openCmd = openCmd + wxT(" %s");
++                }
++                openCmd.Replace(wxT("%c"), name);
++                if (true)
++                        openCmd.Replace(wxT("%i"), "--icon " + icon); // But this is just a guess at the correct syntax
++                 else   openCmd.Replace(wxT("%i"), "");
++                openCmd = wxFileType::ExpandCommand(openCmd, wxString());
++            }
++            fti->SetOpenCommand(openCmd);
++            fti->SetIcon(icon);
++            
++            return new wxFileType(*fti);
++        }
++    }
++#endif //wxUSE_GIO
++
+     InitIfNeeded();
+ 
+     wxFileType* alternativeFileType = NULL;

@@ -1,0 +1,270 @@
+Index: src/msw/choice.cpp
+===================================================================
+--- src/msw/choice.cpp	(revisión: 72944)
++++ src/msw/choice.cpp	(copia de trabajo)
+@@ -588,18 +588,7 @@
+ wxSize wxChoice::DoGetBestSize() const
+ {
+     // The base version returns the size of the largest string
+-    wxSize best( wxChoiceBase::DoGetBestSize() );
+-
+-    // We just need to adjust it to account for the arrow width.
+-    best.x += 5*GetCharWidth();
+-
+-    // set height on our own
+-    if( HasFlag( wxCB_SIMPLE ) )
+-        best.y = SetHeightSimpleComboBox(GetCount());
+-    else
+-        best.y = EDIT_HEIGHT_FROM_CHAR_HEIGHT(GetCharHeight());
+-
+-    return best;
++    return GetSizeFromTextSize(wxChoiceBase::DoGetBestSize().x);
+ }
+ 
+ int wxChoice::SetHeightSimpleComboBox(int nItems) const
+@@ -610,6 +599,37 @@
+     return EDIT_HEIGHT_FROM_CHAR_HEIGHT( cy ) * wxMin( wxMax( nItems, 3 ), 6 ) + hItem - 1;
+ }
+ 
++wxSize wxChoice::DoGetSizeFromTextSize(int xlen, int ylen) const
++{
++    int cHeight = GetCharHeight();
++
++#if defined(WINVER) && WINVER >= 0x0500
++    // We are interested in the difference of sizes between the whole control
++    // and its child part. I.e. arrow, separators, etc.
++    WinStruct<COMBOBOXINFO> info;
++    ::GetComboBoxInfo(GetHwnd(), &info);
++
++    wxSize tsize( xlen
++                  + info.rcItem.left + info.rcButton.right - info.rcItem.right
++                  + info.rcItem.left + 3 // right and extra margins
++                  , 0);
++#else
++    wxSize tsize(xlen + 4 * cHeight, 0);
++#endif
++
++    // set height on our own
++    if( HasFlag( wxCB_SIMPLE ) )
++        tsize.y = SetHeightSimpleComboBox(GetCount());
++    else
++        tsize.y = EDIT_HEIGHT_FROM_CHAR_HEIGHT(cHeight);
++
++    // Perhaps the user wants something different from CharHeight
++    if ( ylen > 0 )
++        tsize.IncBy(0, ylen - cHeight);
++
++    return tsize;
++}
++
+ // ----------------------------------------------------------------------------
+ // Popup operations
+ // ----------------------------------------------------------------------------
+Index: src/msw/combobox.cpp
+===================================================================
+--- src/msw/combobox.cpp	(revisión: 72944)
++++ src/msw/combobox.cpp	(copia de trabajo)
+@@ -679,4 +679,20 @@
+ 
+ #endif // wxUSE_UXTHEME
+ 
++wxSize wxComboBox::DoGetSizeFromTextSize(int xlen, int ylen) const
++{
++    wxSize tsize( wxChoice::DoGetSizeFromTextSize(xlen, ylen) );
++
++    if ( !HasFlag(wxCB_READONLY) )
++    {
++        // Add the margins we have previously set
++        wxPoint marg( GetMargins() );
++        marg.x = wxMax(0, marg.x);
++        marg.y = wxMax(0, marg.y);
++        tsize.IncBy( marg );
++    }
++
++    return tsize;
++}
++
+ #endif // wxUSE_COMBOBOX
+Index: src/msw/textctrl.cpp
+===================================================================
+--- src/msw/textctrl.cpp	(revisión: 72944)
++++ src/msw/textctrl.cpp	(copia de trabajo)
+@@ -2107,17 +2107,44 @@
+ 
+ wxSize wxTextCtrl::DoGetBestSize() const
+ {
++    return DoGetSizeFromTextSize( DEFAULT_ITEM_WIDTH );
++}
++
++wxSize wxTextCtrl::DoGetSizeFromTextSize(int xlen, int ylen) const
++{
+     int cx, cy;
+     wxGetCharSize(GetHWND(), &cx, &cy, GetFont());
+ 
+-    int wText = DEFAULT_ITEM_WIDTH;
++    int wText = 1;
++#if defined(WINVER) && WINVER > 0x0500
++    if ( ! ::SystemParametersInfo(SPI_GETCARETWIDTH, 0, &wText, 0) )
++        wText = 1;
++#endif
++    wText += xlen;
+ 
+     int hText = cy;
+     if ( m_windowStyle & wxTE_MULTILINE )
+     {
+-        hText *= wxMax(wxMin(GetNumberOfLines(), 10), 2);
++        // add space for vertical scrollbar
++        if ( !(m_windowStyle & wxTE_NO_VSCROLL) )
++            wText += ::GetSystemMetrics(SM_CXVSCROLL);
++
++        if ( ylen <= 0 )
++        {
++            hText *= wxMax(wxMin(GetNumberOfLines(), 10), 2);
++            // add space for horizontal scrollbar
++            if ( m_windowStyle & wxHSCROLL )
++                hText += ::GetSystemMetrics(SM_CYHSCROLL);
++        }
+     }
+-    //else: for single line control everything is ok
++    // for single line control cy (height + external leading) is ok
++    else
++    {
++        // Add the margins we have previously set
++        wxPoint marg( GetMargins() );
++        wText += wxMax(0, marg.x);
++        hText += wxMax(0, marg.y);
++    }
+ 
+     // Text controls without border are special and have the same height as
+     // static labels (they also have the same appearance when they're disable
+@@ -2126,11 +2153,18 @@
+     // stand out).
+     if ( !HasFlag(wxBORDER_NONE) )
+     {
++        wText += 9; // borders and inner margins
++
+         // we have to add the adjustments for the control height only once, not
+         // once per line, so do it after multiplication above
+         hText += EDIT_HEIGHT_FROM_CHAR_HEIGHT(cy) - cy;
+     }
+ 
++    // Perhaps the user wants something different from CharHeight, or ylen
++    // is used as the height of a multiline text.
++    if ( ylen > 0 )
++        hText += ylen - GetCharHeight();
++
+     return wxSize(wText, hText);
+ }
+ 
+Index: src/gtk/textctrl.cpp
+===================================================================
+--- src/gtk/textctrl.cpp	(revisión: 72944)
++++ src/gtk/textctrl.cpp	(copia de trabajo)
+@@ -1832,12 +1832,24 @@
+ 
+     if ( IsSingleLine() )
+     {
+-        // default height
+-        tsize.y = GTKGetPreferredSize(m_widget).y;
+-        // Add the margins we have previously set, but only the horizontal border
+-        // as vertical one has been taken account at GTKGetPreferredSize().
+-        // Also get other GTK+ margins.
+-        tsize.IncBy( GTKGetEntryMargins(GetEntry()).x, 0);
++        if ( HasFlag(wxBORDER_NONE) )
++        {
++            tsize.y = cHeight;
++#ifdef __WXGTK3__
++            tsize.IncBy(9, 0);
++#else
++            tsize.IncBy(4, 0);
++#endif // GTK3
++        }
++        else
++        {
++            // default height
++            tsize.y = GTKGetPreferredSize(m_widget).y;
++            // Add the margins we have previously set, but only the horizontal border
++            // as vertical one has been taken account at GTKGetPreferredSize().
++            // Also get other GTK+ margins.
++            tsize.IncBy( GTKGetEntryMargins(GetEntry()).x, 0);
++        }
+     }
+ 
+     //multiline
+@@ -1851,17 +1863,21 @@
+         tsize.y = cHeight;
+         if ( ylen <= 0 )
+         {
+-            tsize.y = cHeight * wxMax(wxMin(GetNumberOfLines(), 10), 2);
++            tsize.y = 1 + cHeight * wxMax(wxMin(GetNumberOfLines(), 10), 2);
+             // add space for horizontal scrollbar
+             if ( m_scrollBar[0] && (m_windowStyle & wxHSCROLL) )
+                 tsize.IncBy(0, GTKGetPreferredSize(GTK_WIDGET(m_scrollBar[0])).y + 3);
+         }
+ 
+-        // hardcode borders, margins, etc
+-        tsize.IncBy(5, 5);
++        if ( !HasFlag(wxBORDER_NONE) )
++        {
++            // hardcode borders, margins, etc
++            tsize.IncBy(5, 4);
++        }
+     }
+ 
+-    // Perhaps the user wants something different from CharHeight
++    // Perhaps the user wants something different from CharHeight, or ylen
++    // is used as the height of a multiline text.
+     if ( ylen > 0 )
+         tsize.IncBy(0, ylen - cHeight);
+ 
+Index: include/wx/msw/combobox.h
+===================================================================
+--- include/wx/msw/combobox.h	(revisión: 72944)
++++ include/wx/msw/combobox.h	(copia de trabajo)
+@@ -132,6 +132,8 @@
+     virtual void DoSetToolTip(wxToolTip *tip);
+ #endif
+ 
++    virtual wxSize DoGetSizeFromTextSize(int xlen, int ylen = -1) const;
++
+     // this is the implementation of GetEditHWND() which can also be used when
+     // we don't have the edit control, it simply returns NULL then
+     //
+Index: include/wx/msw/textctrl.h
+===================================================================
+--- include/wx/msw/textctrl.h	(revisión: 72944)
++++ include/wx/msw/textctrl.h	(copia de trabajo)
+@@ -236,6 +236,7 @@
+     bool SendUpdateEvent();
+ 
+     virtual wxSize DoGetBestSize() const;
++    virtual wxSize DoGetSizeFromTextSize(int xlen, int ylen = -1) const;
+ 
+ #if wxUSE_RICHEDIT
+     // Apply the character-related parts of wxTextAttr to the given selection
+Index: include/wx/msw/choice.h
+===================================================================
+--- include/wx/msw/choice.h	(revisión: 72944)
++++ include/wx/msw/choice.h	(copia de trabajo)
+@@ -125,6 +125,7 @@
+     virtual void DoSetSize(int x, int y,
+                            int width, int height,
+                            int sizeFlags = wxSIZE_AUTO);
++    virtual wxSize DoGetSizeFromTextSize(int xlen, int ylen = -1) const;
+ 
+     // Show or hide the popup part of the control.
+     void MSWDoPopupOrDismiss(bool show);
+Index: interface/wx/control.h
+===================================================================
+--- interface/wx/control.h	(revisión: 72944)
++++ interface/wx/control.h	(copia de trabajo)
+@@ -172,7 +172,7 @@
+         @endcode
+ 
+         Currently this method is only implemented for wxTextCtrl, wxComboBox
+-        and wxChoice in wxGTK.
++        and wxChoice in wxMSW and wxGTK.
+ 
+         @param xlen The horizontal extent of the area to leave for text, in
+             pixels.
+

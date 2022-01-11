@@ -1,0 +1,134 @@
+diff -rU 2 wxWidgets.orig/include/wx/msw/statbox.h wxWidgets/include/wx/msw/statbox.h
+--- wxWidgets.orig/include/wx/msw/statbox.h	2005-01-19 01:43:28.000000000 +1100
++++ wxWidgets/include/wx/msw/statbox.h	2005-01-25 01:50:30.425007448 +1100
+@@ -44,6 +44,4 @@
+ 
+     virtual WXDWORD MSWGetStyle(long style, WXDWORD *exstyle) const;
+-    virtual WXHBRUSH MSWGetBgBrushForSelf(wxWindow *parent, WXHDC hDC);
+-
+ 
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxStaticBox)
+diff -rU 2 wxWidgets.orig/src/msw/notebook.cpp wxWidgets/src/msw/notebook.cpp
+--- wxWidgets.orig/src/msw/notebook.cpp	2005-01-09 03:53:25.000000000 +1100
++++ wxWidgets/src/msw/notebook.cpp	2005-01-25 01:50:30.542989512 +1100
+@@ -51,4 +51,5 @@
+ 
+ #if wxUSE_UXTHEME
++    #include <tmschema.h>
+     #include "wx/msw/uxtheme.h"
+ #endif
+@@ -861,15 +862,24 @@
+ {
+     RECT rc;
+-    GetWindowRect(GetHwnd(), &rc);
++    ::GetClientRect(GetHwnd(), &rc);
++    LONG right  = rc.right;
++    LONG bottom = rc.bottom;
++
++    // adjust position
++    TabCtrl_AdjustRect(GetHwnd(), true, &rc);
++    rc.left   = 0 - rc.left - 2;
++    rc.top    = 0 - rc.top - 2;
++    rc.right  = right;
++    rc.bottom = bottom;
+ 
+     WindowHDC hDC(GetHwnd());
+     MemoryHDC hDCMem(hDC);
+-    CompatibleBitmap hBmp(hDC, rc.right - rc.left, rc.bottom - rc.top);
++    CompatibleBitmap hBmp(hDC, rc.right, rc.bottom);
+ 
+     SelectInHDC selectBmp(hDCMem, hBmp);
+ 
+-    ::SendMessage(GetHwnd(), WM_PRINTCLIENT,
+-                  (WPARAM)(HDC)hDCMem, 
+-                  PRF_ERASEBKGND | PRF_CLIENT | PRF_NONCLIENT);
++    WXHTHEME hTheme = (WXHTHEME)wxUxThemeEngine::Get()->OpenThemeData(GetHWND(), L"Tab");
++    wxUxThemeEngine::Get()->DrawThemeBackground(hTheme, (WXHDC)hDCMem, TABP_PANE, 0, &rc, NULL);
++    wxUxThemeEngine::Get()->CloseThemeData(hTheme);
+ 
+     if ( win )
+diff -rU 2 wxWidgets.orig/src/msw/statbox.cpp wxWidgets/src/msw/statbox.cpp
+--- wxWidgets.orig/src/msw/statbox.cpp	2005-01-19 01:44:31.000000000 +1100
++++ wxWidgets/src/msw/statbox.cpp	2005-01-25 01:50:30.639974768 +1100
+@@ -152,17 +152,3 @@
+ }
+ 
+-WXHBRUSH
+-wxStaticBox::MSWGetBgBrushForSelf(wxWindow *parent, WXHDC WXUNUSED(pDC))
+-{
+-    // we can't use pattern brushes because, apparently, the window proc of our
+-    // class does something which invalidates the brush origin before drawing
+-    // with it and so any patetrn brush is used incorrectly as can be seen by
+-    // putting a static box inside a (themed) notebook
+-    //
+-    // so always use solid brush for painting the background (note that this
+-    // only applies to the background of the box label, not the insides of the
+-    // box itself)
+-    return parent->MSWGetSolidBgBrushForChild(this);
+-}
+-
+ #endif // wxUSE_STATBOX
+diff -rU 2 wxWidgets.orig/src/msw/window.cpp wxWidgets/src/msw/window.cpp
+--- wxWidgets.orig/src/msw/window.cpp	2005-01-20 02:01:29.000000000 +1100
++++ wxWidgets/src/msw/window.cpp	2005-01-25 01:53:35.976799288 +1100
+@@ -121,4 +121,9 @@
+ #endif
+ 
++#if wxUSE_UXTHEME
++    #include <tmschema.h>
++    #include "wx/msw/uxtheme.h"
++#endif
++
+ // ---------------------------------------------------------------------------
+ // global variables
+@@ -2360,4 +2365,39 @@
+ 
+ #ifndef __WXWINCE__
++        /* We need to handle WM_PRINTCLIENT to enable DrawThemeParentBackground
++           to work. It also is called by the system prior to painting a
++           wxStaticBox when themes are enabled. Doing this test here enables
++           the text part to be drawn correctly when placed on a notebook.
++        */
++        case WM_PRINTCLIENT:
++#if wxUSE_UXTHEME
++            if ( GetParent() && wxIsKindOf(GetParent(), wxNotebook) )
++            {
++                HWND hwnd = GetHwndOf(GetParent());
++                RECT rc;
++                ::GetClientRect(hwnd, &rc);
++                LONG right  = rc.right;
++                LONG bottom = rc.bottom;
++
++                // adjust position
++                TabCtrl_AdjustRect(hwnd, true, &rc);
++                rc.left   = 0 - rc.left - 2;
++                rc.top    = 0 - rc.top - 2;
++                rc.right  = right;
++                rc.bottom = bottom;
++
++                // map from notebook client to this client coords
++                ::MapWindowPoints(hwnd, GetHwnd(), (POINT *)&rc, 2);
++
++                // draw the themed background
++                WXHTHEME hTheme = (WXHTHEME)wxUxThemeEngine::Get()->OpenThemeData(GetHWND(), L"Tab");
++                wxUxThemeEngine::Get()->DrawThemeBackground(hTheme, (WXHDC)wParam, TABP_PANE, 0, &rc, NULL);
++                wxUxThemeEngine::Get()->CloseThemeData(hTheme);
++
++                processed = true;
++                break;
++            }
++#endif
++            // fall through to WM_PRINT if parent isn't a wxNotebook
+         case WM_PRINT:
+             {
+@@ -2373,4 +2413,8 @@
+                 wxPaintDCEx dc((wxWindow *)this, (WXHDC)wParam);
+                 processed = HandlePaint();
++
++                // DrawThemeParentBackground expects this to be handled
++                if ( message == WM_PRINTCLIENT )
++                    processed = true;
+             }
+             break;
+
+ 	  	 

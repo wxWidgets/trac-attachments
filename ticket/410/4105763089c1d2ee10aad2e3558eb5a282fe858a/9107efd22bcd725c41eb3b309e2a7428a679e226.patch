@@ -1,0 +1,219 @@
+diff -uNrb wxWidgets-trunk\src/propgrid/props.cpp wxWidgets-work\src/propgrid/props.cpp
+--- wxWidgets-trunk\src/propgrid/props.cpp	2014-02-20
++++ wxWidgets-work\src/propgrid/props.cpp	2014-02-20
+@@ -342,7 +342,8 @@
+ // implementations.
+ //
+ // Note that 'value' is reference on purpose, so we can write
+-// back to it when mode is wxPG_PROPERTY_VALIDATION_SATURATE.
++// back to it when mode is wxPG_PROPERTY_VALIDATION_SATURATE or wxPG_PROPERTY_VALIDATION_WRAP.
++// For argument 'value' of type 'double' there is a specialized function (below).
+ //
+ template<typename T>
+ bool NumericValidation( const wxPGProperty* property,
+@@ -427,6 +428,115 @@
+     return true;
+ }
+ 
++// Template specialization for argument 'value' of type 'double'.
++// It takes into account required precision of the numbers
++// to avoid rounding and conversion errors.
++template<>
++bool NumericValidation( const wxPGProperty* property,
++                        double& value,
++                        wxPGValidationInfo* pValidationInfo,
++                        int mode,
++                        const wxString& strFmt )
++{
++    double min = DBL_MIN;
++    double max = DBL_MAX;
++    wxVariant variant;
++    bool minOk = false;
++    bool maxOk = false;
++
++    variant = property->GetAttribute(wxPGGlobalVars->m_strMin);
++    if ( !variant.IsNull() )
++    {
++        variant.Convert(&min);
++        minOk = true;
++    }
++
++    variant = property->GetAttribute(wxPGGlobalVars->m_strMax);
++    if ( !variant.IsNull() )
++    {
++        variant.Convert(&max);
++        maxOk = true;
++    }
++
++    if ( minOk || maxOk )
++    {
++        // Get required precision.
++        int precision = -1;
++        variant = property->GetAttribute(wxPG_FLOAT_PRECISION);
++        if ( !variant.IsNull() )
++        {
++            precision = variant.GetInteger();
++        }
++
++        // Round current value to the required precision.
++        wxString strVal = wxNumberFormatter::ToString(value, precision, wxNumberFormatter::Style_None);
++        strVal.ToDouble(&value);
++
++        // Round minimal value to the required precision.
++        strVal = wxNumberFormatter::ToString(min, precision, wxNumberFormatter::Style_None);
++        strVal.ToDouble(&min);
++
++        // Round maximal value to the required precision.
++        strVal = wxNumberFormatter::ToString(max, precision, wxNumberFormatter::Style_None);
++        strVal.ToDouble(&max);
++    }
++
++    if ( minOk )
++    {
++        if ( value < min )
++        {
++            if ( mode == wxPG_PROPERTY_VALIDATION_ERROR_MESSAGE )
++            {
++                wxString msg;
++                wxString smin = wxString::Format(strFmt, min);
++                wxString smax = wxString::Format(strFmt, max);
++                if ( !maxOk )
++                    msg = wxString::Format(
++                                _("Value must be %s or higher."),
++                                smin.c_str());
++                else
++                    msg = wxString::Format(
++                                _("Value must be between %s and %s."),
++                                smin.c_str(), smax.c_str());
++                pValidationInfo->SetFailureMessage(msg);
++            }
++            else if ( mode == wxPG_PROPERTY_VALIDATION_SATURATE )
++                value = min;
++            else
++                value = max - (min - value);
++            return false;
++        }
++    }
++
++    if ( maxOk )
++    {
++        if ( value > max )
++        {
++            if ( mode == wxPG_PROPERTY_VALIDATION_ERROR_MESSAGE )
++            {
++                wxString msg;
++                wxString smin = wxString::Format(strFmt, min);
++                wxString smax = wxString::Format(strFmt, max);
++                if ( !minOk )
++                    msg = wxString::Format(
++                                _("Value must be %s or less."),
++                                smax.c_str());
++                else
++                    msg = wxString::Format(
++                                _("Value must be between %s and %s."),
++                                smin.c_str(), smax.c_str());
++                pValidationInfo->SetFailureMessage(msg);
++            }
++            else if ( mode == wxPG_PROPERTY_VALIDATION_SATURATE )
++                value = max;
++            else
++                value = min + (value - max);
++            return false;
++        }
++    }
++    return true;
++}
++
+ bool wxIntProperty::DoValidation( const wxPGProperty* property,
+                                   wxLongLong_t& value,
+                                   wxPGValidationInfo* pValidationInfo,
+@@ -822,6 +932,16 @@
+     return false;
+ }
+ 
++wxVariant wxFloatProperty::DoGetAttribute( const wxString& name ) const
++{
++    wxVariant value;
++    if ( name == wxPG_FLOAT_PRECISION )
++    {
++        value = (long)m_precision;
++    }
++    return value;
++}
++
+ wxValidator*
+ wxFloatProperty::GetClassValidator()
+ {
+diff -uNrb wxWidgets-trunk\src/propgrid/advprops.cpp wxWidgets-work\src/propgrid/advprops.cpp
+--- wxWidgets-trunk\src/propgrid/advprops.cpp	2014-01-13
++++ wxWidgets-work\src/propgrid/advprops.cpp	2014-02-19
+@@ -340,13 +340,13 @@
+ 
+         int mode = wxPG_PROPERTY_VALIDATION_SATURATE;
+ 
+-        if ( property->GetAttributeAsLong(wxT("Wrap"), 0) )
++        if ( property->GetAttributeAsLong(wxPG_ATTR_SPINCTRL_WRAP, 0) )
+             mode = wxPG_PROPERTY_VALIDATION_WRAP;
+ 
+         if ( property->GetValueType() == wxT("double") )
+         {
+             double v_d;
+-            double step = property->GetAttributeAsDouble(wxT("Step"), 1.0);
++            double step = property->GetAttributeAsDouble(wxPG_ATTR_SPINCTRL_STEP, 1.0);
+ 
+             // Try double
+             if ( s.ToDouble(&v_d) )
+@@ -362,7 +362,14 @@
+                 // Min/Max check
+                 wxFloatProperty::DoValidation(property, v_d, NULL, mode);
+ 
+-                s = wxNumberFormatter::ToString(v_d, -1, wxNumberFormatter::Style_None);
++                int precision = -1;
++                wxVariant v = property->GetAttribute(wxPG_FLOAT_PRECISION);
++                if ( !v.IsNull() )
++                {
++                    precision = v.GetInteger();
++                }
++
++                s = wxNumberFormatter::ToString(v_d, precision, wxNumberFormatter::Style_NoTrailingZeroes);
+             }
+             else
+             {
+@@ -372,7 +379,7 @@
+         else
+         {
+             wxLongLong_t v_ll;
+-            wxLongLong_t step = property->GetAttributeAsLong(wxT("Step"), 1);
++            wxLongLong_t step = property->GetAttributeAsLong(wxPG_ATTR_SPINCTRL_STEP, 1);
+ 
+             // Try (long) long
+             if ( s.ToLongLong(&v_ll, 10) )
+diff -uNrb wxWidgets-trunk\src/propgrid/property.cpp wxWidgets-work\src/propgrid/property.cpp
+--- wxWidgets-trunk\src/propgrid/property.cpp	2014-01-05
++++ wxWidgets-work\src/propgrid/property.cpp	2014-02-19
+@@ -1767,9 +1767,12 @@
+     return wxVariant();
+ }
+ 
+-
+ wxVariant wxPGProperty::GetAttribute( const wxString& name ) const
+ {
++    wxVariant value = DoGetAttribute(name);
++    if ( !value.IsNull() )
++        return value;
++
+     return m_attributes.FindValue(name);
+ }
+ 
+diff -uNrBb -x setup.h wxWidgets-trunk\include/wx/propgrid/props.h wxWidgets-work\include/wx/propgrid/props.h
+--- wxWidgets-trunk\include/wx/propgrid/props.h	2013-12-29
++++ wxWidgets-work\include/wx/propgrid/props.h	2014-02-19
+@@ -316,6 +316,8 @@
+                                 const wxString& text,
+                                 int argFlags = 0 ) const;
+     virtual bool DoSetAttribute( const wxString& name, wxVariant& value );
++    virtual wxVariant DoGetAttribute( const wxString& name ) const;
++
+     virtual bool ValidateValue( wxVariant& value,
+                                 wxPGValidationInfo& validationInfo ) const;
+ 

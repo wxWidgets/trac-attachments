@@ -1,0 +1,1883 @@
+Index: src/gtk/spinctrl.cpp
+===================================================================
+--- src/gtk/spinctrl.cpp	(revision 52419)
++++ src/gtk/spinctrl.cpp	(working copy)
+@@ -35,23 +35,35 @@
+ 
+ extern "C" {
+ static void
+-gtk_value_changed(GtkSpinButton* spinbutton, wxSpinCtrl* win)
++gtk_value_changed(GtkSpinButton* spinbutton, wxSpinCtrlGTKBase* win)
+ {
+-    win->m_pos = int(gtk_spin_button_get_value(spinbutton));
++    win->m_value = gtk_spin_button_get_value(spinbutton);
+     if (!win->m_hasVMT || g_blockEventsOnDrag)
+         return;
+ 
+-    wxCommandEvent event( wxEVT_COMMAND_SPINCTRL_UPDATED, win->GetId());
+-    event.SetEventObject( win );
+-
+     // note that we don't use wxSpinCtrl::GetValue() here because it would
+     // adjust the value to fit into the control range and this means that we
+     // would never be able to enter an "invalid" value in the control, even
+     // temporarily - and trying to enter 10 into the control which accepts the
+     // values in range 5..50 is then, ummm, quite challenging (hint: you can't
+     // enter 1!) (VZ)
+-    event.SetInt(win->m_pos);
++
++    if (wxIsKindOf(win, wxSpinCtrl))
++    {
++        wxSpinEvent event(wxEVT_COMMAND_SPINCTRL_UPDATED, win->GetId());
++        event.SetEventObject( win );
++        event.SetPosition((int)(win->m_value + 0.5)); // FIXME should be SetValue
++        event.SetString(GTK_ENTRY(spinbutton)->text);
+     win->HandleWindowEvent( event );
++    }
++    else // wxIsKindOf(win, wxSpinCtrlDouble)
++    {
++        wxSpinDoubleEvent event( wxEVT_COMMAND_SPINCTRLDOUBLE_UPDATED, win->GetId());
++        event.SetEventObject( win );
++        event.SetValue(win->m_value);
++        event.SetString(GTK_ENTRY(spinbutton)->text);
++        win->HandleWindowEvent( event );
++    }
+ }
+ }
+ 
+@@ -71,43 +83,39 @@
+     event.SetString( GTK_ENTRY(spinbutton)->text );
+ 
+     // see above
+-    event.SetInt(win->m_pos);
++    event.SetInt((int)win->m_value);
+     win->HandleWindowEvent( event );
+ }
+ }
+ 
+ //-----------------------------------------------------------------------------
+-// wxSpinCtrl
++// wxSpinCtrlGTKBase
+ //-----------------------------------------------------------------------------
+ 
+-IMPLEMENT_DYNAMIC_CLASS(wxSpinCtrl,wxControl)
++IMPLEMENT_DYNAMIC_CLASS(wxSpinCtrlGTKBase, wxSpinCtrlBase)
+ 
+-BEGIN_EVENT_TABLE(wxSpinCtrl, wxControl)
+-    EVT_CHAR(wxSpinCtrl::OnChar)
++BEGIN_EVENT_TABLE(wxSpinCtrlGTKBase, wxSpinCtrlBase)
++    EVT_CHAR(wxSpinCtrlGTKBase::OnChar)
+ END_EVENT_TABLE()
+ 
+-wxSpinCtrl::wxSpinCtrl()
+-{
+-    m_pos = 0;
+-}
+-
+-bool wxSpinCtrl::Create(wxWindow *parent, wxWindowID id,
++bool wxSpinCtrlGTKBase::Create(wxWindow *parent, wxWindowID id,
+                         const wxString& value,
+                         const wxPoint& pos,  const wxSize& size,
+                         long style,
+-                        int min, int max, int initial,
++                               double min, double max, double initial, double inc,
+                         const wxString& name)
+ {
+     if (!PreCreation( parent, pos, size ) ||
+         !CreateBase( parent, id, pos, size, style, wxDefaultValidator, name ))
+     {
+-        wxFAIL_MSG( wxT("wxSpinCtrl creation failed") );
++        wxFAIL_MSG( wxT("wxSpinCtrlGTKBase creation failed") );
+         return false;
+     }
+ 
+-    m_widget = gtk_spin_button_new_with_range(min, max, 1);
++    m_widget = gtk_spin_button_new_with_range(min, max, inc);
++
+     gtk_spin_button_set_value( GTK_SPIN_BUTTON(m_widget), initial);
+-    m_pos = (int) gtk_spin_button_get_value( GTK_SPIN_BUTTON(m_widget));
++    m_value = gtk_spin_button_get_value( GTK_SPIN_BUTTON(m_widget));
+ 
+     gtk_spin_button_set_wrap( GTK_SPIN_BUTTON(m_widget),
+                               (int)(m_windowStyle & wxSP_WRAP) );
+@@ -127,71 +135,96 @@
+     return true;
+ }
+ 
+-int wxSpinCtrl::GetMin() const
++double wxSpinCtrlGTKBase::DoGetValue() const
+ {
+     wxCHECK_MSG( (m_widget != NULL), 0, wxT("invalid spin button") );
+ 
+-    double min;
++    GtkDisableEvents();
++    gtk_spin_button_update( GTK_SPIN_BUTTON(m_widget) );
++    wx_const_cast(wxSpinCtrlGTKBase*, this)->m_value =
++        gtk_spin_button_get_value(GTK_SPIN_BUTTON(m_widget));
++    GtkEnableEvents();
++
++    return m_value;
++}
++
++double wxSpinCtrlGTKBase::DoGetMin() const
++{
++    wxCHECK_MSG( (m_widget != NULL), 0, wxT("invalid spin button") );
++
++    double min = 0;
+     gtk_spin_button_get_range( GTK_SPIN_BUTTON(m_widget), &min, NULL);
+-    return int(min);
++    return min;
+ }
+ 
+-int wxSpinCtrl::GetMax() const
++double wxSpinCtrlGTKBase::DoGetMax() const
+ {
+     wxCHECK_MSG( (m_widget != NULL), 0, wxT("invalid spin button") );
+ 
+-    double max;
++    double max = 0;
+     gtk_spin_button_get_range( GTK_SPIN_BUTTON(m_widget), NULL, &max);
+-    return int(max);
++    return max;
+ }
+ 
+-int wxSpinCtrl::GetValue() const
++double wxSpinCtrlGTKBase::DoGetIncrement() const
+ {
+     wxCHECK_MSG( (m_widget != NULL), 0, wxT("invalid spin button") );
+ 
+-    GtkDisableEvents();
+-    gtk_spin_button_update( GTK_SPIN_BUTTON(m_widget) );
+-    wx_const_cast(wxSpinCtrl*, this)->m_pos =
+-        int(gtk_spin_button_get_value(GTK_SPIN_BUTTON(m_widget)));
+-    GtkEnableEvents();
++    double inc = 0;
++    gtk_spin_button_get_increments( GTK_SPIN_BUTTON(m_widget), NULL, &inc);
++    return inc;
++}
+ 
+-    return m_pos;
++bool wxSpinCtrlGTKBase::GetSnapToTicks() const
++{
++    wxCHECK_MSG( (m_widget != NULL), 0, wxT("invalid spin button") );
++
++    return gtk_spin_button_get_snap_to_ticks( GTK_SPIN_BUTTON(m_widget) );
+ }
+ 
+-void wxSpinCtrl::SetValue( const wxString& value )
++void wxSpinCtrlGTKBase::SetValue( const wxString& value )
+ {
+     wxCHECK_RET( (m_widget != NULL), wxT("invalid spin button") );
+ 
+-    int n;
+-    if ( (wxSscanf(value, wxT("%d"), &n) == 1) )
++    double n;
++    if ( (wxSscanf(value, wxT("%lg"), &n) == 1) )
+     {
+-        // a number - set it
+-        SetValue(n);
++        // a number - set it, let DoSetValue round for int value
++        DoSetValue(n);
++        return;
+     }
+-    else
+-    {
++
+         // invalid number - set text as is (wxMSW compatible)
+         GtkDisableEvents();
+         gtk_entry_set_text( GTK_ENTRY(m_widget), wxGTK_CONV( value ) );
+         GtkEnableEvents();
+-    }
+ }
+ 
+-void wxSpinCtrl::SetValue( int value )
++void wxSpinCtrlGTKBase::DoSetValue( double value )
+ {
+     wxCHECK_RET( (m_widget != NULL), wxT("invalid spin button") );
+ 
++    if (wxIsKindOf(this, wxSpinCtrl))
++        value = int(value + 0.5);
++
+     GtkDisableEvents();
+     gtk_spin_button_set_value( GTK_SPIN_BUTTON(m_widget), value);
+-    m_pos = (int) gtk_spin_button_get_value( GTK_SPIN_BUTTON(m_widget));
++    m_value = gtk_spin_button_get_value( GTK_SPIN_BUTTON(m_widget));
+     GtkEnableEvents();
+ }
+ 
+-void wxSpinCtrl::SetSelection(long from, long to)
++void wxSpinCtrlGTKBase::SetSnapToTicks(bool snap_to_ticks)
+ {
++    wxCHECK_RET( (m_widget != NULL), wxT("invalid spin button") );
++
++    gtk_spin_button_set_snap_to_ticks( GTK_SPIN_BUTTON(m_widget), snap_to_ticks);
++}
++
++void wxSpinCtrlGTKBase::SetSelection(long from, long to)
++{
+     // translate from wxWidgets conventions to GTK+ ones: (-1, -1) means the
+     // entire range
+-    if ( from == -1 && to == -1 )
++    if ( (from == -1) && (to == -1) )
+     {
+         from = 0;
+         to = INT_MAX;
+@@ -200,18 +233,27 @@
+     gtk_editable_select_region( GTK_EDITABLE(m_widget), (gint)from, (gint)to );
+ }
+ 
+-void wxSpinCtrl::SetRange(int minVal, int maxVal)
++void wxSpinCtrlGTKBase::DoSetRange(double minVal, double maxVal)
+ {
+     wxCHECK_RET( (m_widget != NULL), wxT("invalid spin button") );
+ 
+     GtkDisableEvents();
+     gtk_spin_button_set_range( GTK_SPIN_BUTTON(m_widget), minVal, maxVal);
+-    m_pos = int(gtk_spin_button_get_value(GTK_SPIN_BUTTON(m_widget)));
++    m_value = gtk_spin_button_get_value(GTK_SPIN_BUTTON(m_widget));
+     GtkEnableEvents();
+ }
+ 
++void wxSpinCtrlGTKBase::DoSetIncrement(double inc)
++{
++    wxCHECK_RET( (m_widget != NULL), wxT("invalid spin button") );
+ 
+-void wxSpinCtrl::GtkDisableEvents() const
++    GtkDisableEvents();
++    gtk_spin_button_set_increments( GTK_SPIN_BUTTON(m_widget), inc, 10*inc);
++    m_value = gtk_spin_button_get_value(GTK_SPIN_BUTTON(m_widget));
++    GtkEnableEvents();
++}
++
++void wxSpinCtrlGTKBase::GtkDisableEvents() const
+ {
+     g_signal_handlers_block_by_func( m_widget,
+         (gpointer)gtk_value_changed, (void*) this);
+@@ -220,7 +262,7 @@
+         (gpointer)gtk_changed, (void*) this);
+ }
+ 
+-void wxSpinCtrl::GtkEnableEvents() const
++void wxSpinCtrlGTKBase::GtkEnableEvents() const
+ {
+     g_signal_handlers_unblock_by_func(m_widget,
+         (gpointer)gtk_value_changed, (void*) this);
+@@ -229,7 +271,7 @@
+         (gpointer)gtk_changed, (void*) this);
+ }
+ 
+-void wxSpinCtrl::OnChar( wxKeyEvent &event )
++void wxSpinCtrlGTKBase::OnChar( wxKeyEvent &event )
+ {
+     wxCHECK_RET( m_widget != NULL, wxT("invalid spin ctrl") );
+ 
+@@ -266,7 +308,7 @@
+     event.Skip();
+ }
+ 
+-GdkWindow *wxSpinCtrl::GTKGetWindow(wxArrayGdkWindows& windows) const
++GdkWindow *wxSpinCtrlGTKBase::GTKGetWindow(wxArrayGdkWindows& windows) const
+ {
+     GtkSpinButton* spinbutton = GTK_SPIN_BUTTON(m_widget);
+ 
+@@ -276,7 +318,7 @@
+     return NULL;
+ }
+ 
+-wxSize wxSpinCtrl::DoGetBestSize() const
++wxSize wxSpinCtrlGTKBase::DoGetBestSize() const
+ {
+     wxSize ret( wxControl::DoGetBestSize() );
+     wxSize best(95, ret.y); // FIXME: 95?
+@@ -286,12 +328,37 @@
+ 
+ // static
+ wxVisualAttributes
+-wxSpinCtrl::GetClassDefaultAttributes(wxWindowVariant WXUNUSED(variant))
++wxSpinCtrlGTKBase::GetClassDefaultAttributes(wxWindowVariant WXUNUSED(variant))
+ {
+     // TODO: overload to accept functions like gtk_spin_button_new?
+     // Until then use a similar type
+     return GetDefaultAttributesFromGTKWidget(gtk_entry_new, true);
+ }
+ 
+-#endif
+-   // wxUSE_SPINCTRL
++//-----------------------------------------------------------------------------
++// wxSpinCtrl
++//-----------------------------------------------------------------------------
++
++IMPLEMENT_DYNAMIC_CLASS(wxSpinCtrl, wxSpinCtrlGTKBase)
++
++//-----------------------------------------------------------------------------
++// wxSpinCtrlDouble
++//-----------------------------------------------------------------------------
++
++IMPLEMENT_DYNAMIC_CLASS(wxSpinCtrlDouble, wxSpinCtrlGTKBase)
++
++int wxSpinCtrlDouble::GetDigits() const
++{
++    wxCHECK_MSG( (m_widget != NULL), 0, wxT("invalid spin button") );
++
++    return (int)gtk_spin_button_get_digits( GTK_SPIN_BUTTON(m_widget) );
++}
++
++void wxSpinCtrlDouble::SetDigits(int digits)
++{
++    wxCHECK_RET( (m_widget != NULL), wxT("invalid spin button") );
++
++    gtk_spin_button_set_digits( GTK_SPIN_BUTTON(m_widget), (gint)digits);
++}
++
++#endif // wxUSE_SPINCTRL
+Index: src/common/event.cpp
+===================================================================
+--- src/common/event.cpp	(revision 52419)
++++ src/common/event.cpp	(working copy)
+@@ -183,6 +183,7 @@
+ DEFINE_EVENT_TYPE(wxEVT_COMMAND_TOOL_RCLICKED)
+ DEFINE_EVENT_TYPE(wxEVT_COMMAND_TOOL_ENTER)
+ DEFINE_EVENT_TYPE(wxEVT_COMMAND_SPINCTRL_UPDATED)
++DEFINE_EVENT_TYPE(wxEVT_COMMAND_SPINCTRLDOUBLE_UPDATED)
+ DEFINE_EVENT_TYPE(wxEVT_COMMAND_TOOL_DROPDOWN_CLICKED)
+ 
+ // Mouse event types
+Index: src/generic/spinctlg.cpp
+===================================================================
+--- src/generic/spinctlg.cpp	(revision 52419)
++++ src/generic/spinctlg.cpp	(working copy)
+@@ -24,20 +24,24 @@
+     #pragma hdrstop
+ #endif
+ 
+-// There are port-specific versions for MSW, GTK, OS/2 and Mac, so exclude the
+-// contents of this file in those cases
+-#if !(defined(__WXMSW__) || defined(__WXGTK__) || defined(__WXPM__) || \
+-    defined(__WXMAC__)) || defined(__WXUNIVERSAL__)
+-
+ #ifndef WX_PRECOMP
+     #include "wx/textctrl.h"
+ #endif //WX_PRECOMP
+ 
++#include "wx/spinctrl.h"
++
+ #if wxUSE_SPINCTRL
+ 
++IMPLEMENT_DYNAMIC_CLASS(wxSpinDoubleEvent, wxNotifyEvent)
++
++// There are port-specific versions for the wxSpinCtrl, so exclude the
++// contents of this file in those cases
++#if !defined(__WXGTK__)
++
+ #include "wx/spinbutt.h"
+-#include "wx/spinctrl.h"
+ 
++#if wxUSE_SPINBTN
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -45,6 +49,8 @@
+ // the margin between the text control and the spin
+ static const wxCoord MARGIN = 2;
+ 
++#define SPINCTRLBUT_MAX 32000 // large to avoid wrap around trouble
++
+ // ----------------------------------------------------------------------------
+ // wxSpinCtrlText: text control used by spin control
+ // ----------------------------------------------------------------------------
+@@ -52,8 +58,9 @@
+ class wxSpinCtrlText : public wxTextCtrl
+ {
+ public:
+-    wxSpinCtrlText(wxSpinCtrl *spin, const wxString& value)
+-        : wxTextCtrl(spin->GetParent(), wxID_ANY, value)
++    wxSpinCtrlText(wxSpinCtrlGenericBase *spin, const wxString& value)
++        : wxTextCtrl(spin->GetParent(), wxID_ANY, value, wxDefaultPosition,
++                     wxDefaultSize, wxTE_NOHIDESEL|wxTE_PROCESS_ENTER)
+     {
+         m_spin = spin;
+ 
+@@ -61,35 +68,45 @@
+         SetSizeHints(wxDefaultCoord,wxDefaultCoord);
+     }
+ 
+-protected:
+-    void OnTextChange(wxCommandEvent& event)
++    virtual ~wxSpinCtrlText()
+     {
+-        int val;
+-        if ( m_spin->GetTextValue(&val) )
++        // MSW sends extra kill focus event on destroy
++        if (m_spin)
++            m_spin->m_textCtrl = NULL;
++
++        m_spin = NULL;
++    }
++
++    void OnTextEnter(wxCommandEvent& event)
+         {
+-            m_spin->GetSpinButton()->SetValue(val);
++        if (m_spin)
++            m_spin->OnTextEnter(event);
+         }
+ 
+-        event.Skip();
++    void OnChar( wxKeyEvent &event )
++    {
++        if (m_spin)
++            m_spin->OnTextChar( event );
+     }
+ 
+-    bool ProcessEvent(wxEvent &event)
++    void OnKillFocus( wxFocusEvent &event )
+     {
+-        // Hand button down events to wxSpinCtrl. Doesn't work.
+-        if (event.GetEventType() == wxEVT_LEFT_DOWN && m_spin->ProcessEvent( event ))
+-            return true;
++        if (m_spin)
++            m_spin->SyncSpinToText(true);
+ 
+-        return wxTextCtrl::ProcessEvent( event );
++        event.Skip();
+     }
+ 
++    wxSpinCtrlGenericBase *m_spin;
++
+ private:
+-    wxSpinCtrl *m_spin;
+-
+     DECLARE_EVENT_TABLE()
+ };
+ 
+ BEGIN_EVENT_TABLE(wxSpinCtrlText, wxTextCtrl)
+-    EVT_TEXT(wxID_ANY, wxSpinCtrlText::OnTextChange)
++    EVT_TEXT_ENTER( wxID_ANY, wxSpinCtrlText::OnTextEnter )
++    EVT_CHAR(       wxSpinCtrlText::OnChar )
++    EVT_KILL_FOCUS( wxSpinCtrlText::OnKillFocus )
+ END_EVENT_TABLE()
+ 
+ // ----------------------------------------------------------------------------
+@@ -99,90 +116,102 @@
+ class wxSpinCtrlButton : public wxSpinButton
+ {
+ public:
+-    wxSpinCtrlButton(wxSpinCtrl *spin, int style)
+-        : wxSpinButton(spin->GetParent())
++    wxSpinCtrlButton(wxSpinCtrlGenericBase *spin, int style)
++        : wxSpinButton(spin->GetParent(), wxID_ANY, wxDefaultPosition,
++                       wxDefaultSize, style)
+     {
+         m_spin = spin;
+ 
+-        SetWindowStyle(style | wxSP_VERTICAL);
++        SetRange(-SPINCTRLBUT_MAX, SPINCTRLBUT_MAX);
+ 
+         // remove the default minsize, the spinctrl will have one instead
+         SetSizeHints(wxDefaultCoord,wxDefaultCoord);
+     }
+ 
+-protected:
+-    void OnSpinButton(wxSpinEvent& eventSpin)
++    void OnSpinButton(wxSpinEvent& event)
+     {
+-        m_spin->SetTextValue(eventSpin.GetPosition());
++        if (m_spin)
++            m_spin->OnSpinButton(event);
++    }
+ 
+-        wxCommandEvent event(wxEVT_COMMAND_SPINCTRL_UPDATED, m_spin->GetId());
+-        event.SetEventObject(m_spin);
+-        event.SetInt(eventSpin.GetPosition());
++    wxSpinCtrlGenericBase *m_spin;
+ 
+-        m_spin->GetEventHandler()->ProcessEvent(event);
+-
+-        eventSpin.Skip();
+-    }
+-
+ private:
+-    wxSpinCtrl *m_spin;
+-
+     DECLARE_EVENT_TABLE()
+ };
+ 
+ BEGIN_EVENT_TABLE(wxSpinCtrlButton, wxSpinButton)
+-    EVT_SPIN(wxID_ANY, wxSpinCtrlButton::OnSpinButton)
++    EVT_SPIN_UP(  wxID_ANY, wxSpinCtrlButton::OnSpinButton)
++    EVT_SPIN_DOWN(wxID_ANY, wxSpinCtrlButton::OnSpinButton)
+ END_EVENT_TABLE()
+ 
+-IMPLEMENT_DYNAMIC_CLASS(wxSpinCtrl, wxControl)
+-
+ // ============================================================================
+-// implementation
++// wxSpinCtrlGenericBase
+ // ============================================================================
+ 
+ // ----------------------------------------------------------------------------
+-// wxSpinCtrl creation
++// wxSpinCtrlGenericBase creation
+ // ----------------------------------------------------------------------------
+ 
+-void wxSpinCtrl::Init()
++void wxSpinCtrlGenericBase::Init()
+ {
+-    m_text = NULL;
+-    m_btn = NULL;
++    m_value         = 0;
++    m_min           = 0;
++    m_max           = 100;
++    m_increment     = 1;
++    m_digits        = 0;
++    m_snap_to_ticks = false;
++    m_format        = wxT("%g");
++
++    m_spin_value    = 0;
++
++    m_textCtrl = NULL;
++    m_spinButton  = NULL;
+ }
+ 
+-bool wxSpinCtrl::Create(wxWindow *parent,
+-                        wxWindowID id,
++bool wxSpinCtrlGenericBase::Create(wxWindow *parent, wxWindowID id,
+                         const wxString& value,
+-                        const wxPoint& pos,
+-                        const wxSize& size,
++                                   const wxPoint& pos, const wxSize& size,
+                         long style,
+-                        int min,
+-                        int max,
+-                        int initial,
++                                   double min, double max, double initial,
++                                   double increment,
+                         const wxString& name)
+ {
++#if defined(__WXMAC__)
++    m_macIsUserPane = true;
++#endif //defined(__WXMAC__)
++
+     if ( !wxControl::Create(parent, id, wxDefaultPosition, wxDefaultSize, style,
+                             wxDefaultValidator, name) )
+     {
+         return false;
+     }
+ 
++    m_value = initial;
++    m_min   = min;
++    m_max   = max;
++    m_increment = increment;
++
++    // Note that these windows do NOT have this as their parent
++    m_textCtrl   = new wxSpinCtrlText(this, value);
++    m_spinButton = new wxSpinCtrlButton(this, wxSP_ARROW_KEYS|wxSP_VERTICAL|wxSP_WRAP);
++
++    m_spin_value = m_spinButton->GetValue();
++
+     // the string value overrides the numeric one (for backwards compatibility
+     // reasons and also because it is simpler to satisfy the string value which
+     // comes much sooner in the list of arguments and leave the initial
+     // parameter unspecified)
+     if ( !value.empty() )
+     {
+-        long l;
+-        if ( value.ToLong(&l) )
+-            initial = l;
++        double d;
++        if ( value.ToDouble(&d) )
++        {
++            m_value = d;
++            m_textCtrl->SetValue(wxString::Format(m_format.c_str(), m_value));
+     }
++    }
+ 
+-    m_text = new wxSpinCtrlText(this, value);
+-    m_btn = new wxSpinCtrlButton(this, style);
+-
+-    m_btn->SetRange(min, max);
+-    m_btn->SetValue(initial);
+     SetInitialSize(size);
+     Move(pos);
+ 
+@@ -199,166 +228,321 @@
+     return true;
+ }
+ 
+-wxSpinCtrl::~wxSpinCtrl()
++wxSpinCtrlGenericBase::~wxSpinCtrlGenericBase()
+ {
+     // delete the controls now, don't leave them alive even though they would
+     // still be eventually deleted by our parent - but it will be too late, the
+     // user code expects them to be gone now
+-    delete m_text;
+-    m_text = NULL ;
+-    delete m_btn;
+-    m_btn = NULL ;
++
++    if (m_textCtrl)
++    {
++        // null this since MSW sends KILL_FOCUS on deletion, see ~wxSpinCtrlText
++        wxDynamicCast(m_textCtrl, wxSpinCtrlText)->m_spin = NULL;
++
++        wxSpinCtrlText *text = (wxSpinCtrlText*)m_textCtrl;
++        m_textCtrl = NULL;
++        delete text;
++    }
++
++    delete m_spinButton;
++    m_spinButton = NULL ;
+ }
+ 
+ // ----------------------------------------------------------------------------
+ // geometry
+ // ----------------------------------------------------------------------------
+ 
+-wxSize wxSpinCtrl::DoGetBestSize() const
++wxSize wxSpinCtrlGenericBase::DoGetBestSize() const
+ {
+-    wxSize sizeBtn = m_btn->GetBestSize(),
+-           sizeText = m_text->GetBestSize();
++    wxSize sizeBtn  = m_spinButton->GetBestSize(),
++           sizeText = m_textCtrl->GetBestSize();
+ 
+     return wxSize(sizeBtn.x + sizeText.x + MARGIN, sizeText.y);
+ }
+ 
+-void wxSpinCtrl::DoMoveWindow(int x, int y, int width, int height)
++void wxSpinCtrlGenericBase::DoMoveWindow(int x, int y, int width, int height)
+ {
+     wxControl::DoMoveWindow(x, y, width, height);
+ 
+     // position the subcontrols inside the client area
+-    wxSize sizeBtn = m_btn->GetSize();
++    wxSize sizeBtn = m_spinButton->GetSize();
+ 
+     wxCoord wText = width - sizeBtn.x;
+-    m_text->SetSize(x, y, wText, height);
+-    m_btn->SetSize(x + wText + MARGIN, y, wxDefaultCoord, height);
++    m_textCtrl->SetSize(x, y, wText, height);
++    m_spinButton->SetSize(x + wText + MARGIN, y, wxDefaultCoord, height);
+ }
+ 
+ // ----------------------------------------------------------------------------
+ // operations forwarded to the subcontrols
+ // ----------------------------------------------------------------------------
+ 
+-bool wxSpinCtrl::Enable(bool enable)
++bool wxSpinCtrlGenericBase::Enable(bool enable)
+ {
+     if ( !wxControl::Enable(enable) )
+         return false;
+ 
+-    m_btn->Enable(enable);
+-    m_text->Enable(enable);
++    m_spinButton->Enable(enable);
++    m_textCtrl->Enable(enable);
+ 
+     return true;
+ }
+ 
+-bool wxSpinCtrl::Show(bool show)
++bool wxSpinCtrlGenericBase::Show(bool show)
+ {
+     if ( !wxControl::Show(show) )
+         return false;
+ 
+     // under GTK Show() is called the first time before we are fully
+     // constructed
+-    if ( m_btn )
++    if ( m_spinButton )
+     {
+-        m_btn->Show(show);
+-        m_text->Show(show);
++        m_spinButton->Show(show);
++        m_textCtrl->Show(show);
+     }
+ 
+     return true;
+ }
+ 
+ // ----------------------------------------------------------------------------
+-// value and range access
++// Handle sub controls events
+ // ----------------------------------------------------------------------------
+ 
+-bool wxSpinCtrl::GetTextValue(int *val) const
++void wxSpinCtrlGenericBase::OnSpinButton(wxSpinEvent& event)
+ {
+-    long l;
+-    if ( !m_text->GetValue().ToLong(&l) )
+-    {
+-        // not a number at all
+-        return false;
+-    }
++    event.Skip();
+ 
+-    if ( l < GetMin() || l > GetMax() )
++    // Sync the textctrl since the user expects that the button will modify
++    // what they see in the textctrl.
++    if (m_textCtrl && m_textCtrl->IsModified())
++        SyncSpinToText(false);
++
++    int spin_value = event.GetPosition();
++    double step = (event.GetEventType() == wxEVT_SCROLL_LINEUP) ? 1 : -1;
++
++    // Use the spinbutton's acceleration, if any, but not if wrapping around
++    if (((spin_value >= 0) && (m_spin_value >= 0)) || ((spin_value <= 0) && (m_spin_value <= 0)))
++        step *= abs(spin_value - m_spin_value);
++
++    double value = m_value + step*m_increment;
++
++    // we can always reach the ends using the spinbutton
++    if (value < m_min) value = m_min;
++    if (value > m_max) value = m_max;
++
++    // Ignore the edges when it wraps since the up/down event may be opposite
++    // They are in GTK and Mac
++    if (abs(spin_value - m_spin_value) > SPINCTRLBUT_MAX)
+     {
+-        // out of range
+-        return false;
++        m_spin_value = spin_value;
++        return;
+     }
+ 
+-    *val = l;
++    m_spin_value = spin_value;
+ 
+-    return true;
++    if (InRange(value) && DoSetValue(value))
++        DoSendEvent();
+ }
+ 
+-int wxSpinCtrl::GetValue() const
++void wxSpinCtrlGenericBase::OnTextEnter(wxCommandEvent& event)
+ {
+-    return m_btn ? m_btn->GetValue() : 0;
++    SyncSpinToText(true);
++    event.Skip();
+ }
+ 
+-int wxSpinCtrl::GetMin() const
++void wxSpinCtrlGenericBase::OnTextChar(wxKeyEvent& event)
+ {
+-    return m_btn ? m_btn->GetMin() : 0;
++    switch ( event.GetKeyCode() )
++    {
++        case WXK_UP :
++        {
++            if (m_textCtrl && m_textCtrl->IsModified()) SyncSpinToText(false);
++            if (DoSetValue( m_value + m_increment ))
++                DoSendEvent();
++            break;
++        }
++        case WXK_DOWN :
++        {
++            if (m_textCtrl && m_textCtrl->IsModified()) SyncSpinToText(false);
++            if (DoSetValue( m_value - m_increment ))
++                DoSendEvent();
++            break;
++        }
++        case WXK_PAGEUP :
++        {
++            if (m_textCtrl && m_textCtrl->IsModified()) SyncSpinToText(false);
++            if (DoSetValue( m_value + m_increment * 10.0 ))
++                DoSendEvent();
++            break;
++        }
++        case WXK_PAGEDOWN :
++        {
++            if (m_textCtrl && m_textCtrl->IsModified()) SyncSpinToText(false);
++            if (DoSetValue( m_value - m_increment * 10.0 ))
++                DoSendEvent();
++            break;
++        }
++        default : event.Skip(); break;
++    }
+ }
+ 
+-int wxSpinCtrl::GetMax() const
++// ----------------------------------------------------------------------------
++// Textctrl functions
++// ----------------------------------------------------------------------------
++
++void wxSpinCtrlGenericBase::SyncSpinToText(bool send_event, bool force_valid)
+ {
+-    return m_btn ? m_btn->GetMax() : 0;
++    if (!m_textCtrl)
++        return;
++
++    double txt_value;
++    if ( m_textCtrl->GetValue().ToDouble( &txt_value ) )
++    {
++        if ( force_valid || InRange(txt_value) )
++        {
++            if (force_valid)
++            {
++                if (txt_value > m_max)
++                    txt_value = m_max;
++                else if (txt_value < m_min)
++                    txt_value = m_min;
++            }
++
++            if (m_value != txt_value)
++            {
++                DoSetValue( txt_value );
++                if (send_event)
++                    DoSendEvent();
++            }
++        }
++    }
++    else if (force_valid)
++    {
++        // textctrl is out of sync, discard and reset
++        DoSetValue(m_value);
++    }
+ }
+ 
+ // ----------------------------------------------------------------------------
+ // changing value and range
+ // ----------------------------------------------------------------------------
+ 
+-void wxSpinCtrl::SetTextValue(int val)
++void wxSpinCtrlGenericBase::SetValue(const wxString& text)
+ {
+-    wxCHECK_RET( m_text, _T("invalid call to wxSpinCtrl::SetTextValue") );
++    wxCHECK_RET( m_textCtrl, _T("invalid call to wxSpinCtrl::SetValue") );
+ 
+-    m_text->SetValue(wxString::Format(_T("%d"), val));
++    double val;
++    if ( text.ToDouble(&val) && InRange(val) )
++    {
++        DoSetValue(val);
++    }
++    else // not a number at all or out of range
++    {
++        m_textCtrl->SetValue(text);
++        m_textCtrl->SetSelection(0, -1);
++    }
++}
+ 
+-    // select all text
+-    m_text->SetSelection(0, -1);
++bool wxSpinCtrlGenericBase::DoSetValue(double val)
++{
++    wxCHECK_MSG( m_textCtrl, false, _T("invalid call to wxSpinCtrl::SetValue") );
+ 
+-    // and give focus to the control!
+-    // m_text->SetFocus();    Why???? TODO.
++    if (!InRange(val))
++        return false;
++
++    if ( m_snap_to_ticks && (m_increment != 0) )
++    {
++        double snap_value = val / m_increment;
++
++        if (wxFinite(snap_value)) // FIXME what to do about a failure?
++        {
++            if ((snap_value - floor(snap_value)) < (ceil(snap_value) - snap_value))
++                val = floor(snap_value) * m_increment;
++            else
++                val = ceil(snap_value) * m_increment;
++        }
++    }
++
++    wxString str(wxString::Format(m_format.c_str(), val));
++
++    if ((val != m_value) || (str != m_textCtrl->GetValue()))
++    {
++        m_value = val;
++        str.ToDouble( &m_value );    // wysiwyg for textctrl
++        m_textCtrl->SetValue( str );
++        m_textCtrl->DiscardEdits();
++        return true;
++    }
++
++    return false;
+ }
+ 
+-void wxSpinCtrl::SetValue(int val)
++void wxSpinCtrlGenericBase::DoSetRange(double min, double max)
+ {
+-    wxCHECK_RET( m_btn, _T("invalid call to wxSpinCtrl::SetValue") );
++    m_min = min;
++    m_max = max;
++}
+ 
+-    SetTextValue(val);
++void wxSpinCtrlGenericBase::DoSetIncrement(double inc)
++{
++    m_increment = inc;
++}
+ 
+-    m_btn->SetValue(val);
++void wxSpinCtrlGenericBase::SetSnapToTicks(bool snap_to_ticks)
++{
++    m_snap_to_ticks = snap_to_ticks;
++    DoSetValue(m_value);
+ }
+ 
+-void wxSpinCtrl::SetValue(const wxString& text)
++void wxSpinCtrlGenericBase::SetSelection(long from, long to)
+ {
+-    wxCHECK_RET( m_text, _T("invalid call to wxSpinCtrl::SetValue") );
++    wxCHECK_RET( m_textCtrl, _T("invalid call to wxSpinCtrl::SetSelection") );
+ 
+-    long val;
+-    if ( text.ToLong(&val) && ((val > INT_MIN) && (val < INT_MAX)) )
+-    {
+-        SetValue((int)val);
+-    }
+-    else // not a number at all or out of range
+-    {
+-        m_text->SetValue(text);
+-        m_text->SetSelection(0, -1);
+-    }
++    m_textCtrl->SetSelection(from, to);
+ }
+ 
+-void wxSpinCtrl::SetRange(int min, int max)
++//-----------------------------------------------------------------------------
++// wxSpinCtrl
++//-----------------------------------------------------------------------------
++
++IMPLEMENT_DYNAMIC_CLASS(wxSpinCtrl, wxSpinCtrlGenericBase)
++
++void wxSpinCtrl::DoSendEvent()
+ {
+-    wxCHECK_RET( m_btn, _T("invalid call to wxSpinCtrl::SetRange") );
++    wxSpinEvent event( wxEVT_COMMAND_SPINCTRL_UPDATED, GetId());
++    event.SetEventObject( this );
++    event.SetPosition((int)(m_value + 0.5)); // FIXME should be SetValue
++    event.SetString(m_textCtrl->GetValue());
++    GetEventHandler()->ProcessEvent( event );
++}
+ 
+-    m_btn->SetRange(min, max);
++//-----------------------------------------------------------------------------
++// wxSpinCtrlDouble
++//-----------------------------------------------------------------------------
++
++IMPLEMENT_DYNAMIC_CLASS(wxSpinCtrlDouble, wxSpinCtrlGenericBase)
++
++void wxSpinCtrlDouble::DoSendEvent()
++{
++    wxSpinDoubleEvent event( wxEVT_COMMAND_SPINCTRLDOUBLE_UPDATED, GetId());
++    event.SetEventObject( this );
++    event.SetValue(m_value);
++    event.SetString(m_textCtrl->GetValue());
++    GetEventHandler()->ProcessEvent( event );
+ }
+ 
+-void wxSpinCtrl::SetSelection(long from, long to)
++void wxSpinCtrlDouble::SetDigits( int digits )
+ {
+-    wxCHECK_RET( m_text, _T("invalid call to wxSpinCtrl::SetSelection") );
++    wxCHECK_RET((digits >= -1) && (digits <= 20), wxT("Invalid number of digits for wxSpinCtrlDouble"));
+ 
+-    m_text->SetSelection(from, to);
++    if (digits == -1)
++        m_format = wxT("%g");
++    else
++        m_format.Printf(wxT("%%0.%dlf"), digits);
++
++    DoSetValue(m_value);
+ }
+ 
++
++#endif // wxUSE_SPINBTN
++#endif // !wxPort-with-native-spinctrl
+ #endif // wxUSE_SPINCTRL
+-#endif // !wxPort-with-native-spinctrl
+Index: include/wx/event.h
+===================================================================
+--- include/wx/event.h	(revision 52419)
++++ include/wx/event.h	(working copy)
+@@ -99,6 +99,7 @@
+ extern WXDLLIMPEXP_CORE const wxEventType wxEVT_COMMAND_TOOL_DROPDOWN_CLICKED;
+ extern WXDLLIMPEXP_CORE const wxEventType wxEVT_COMMAND_TOOL_ENTER;
+ extern WXDLLIMPEXP_CORE const wxEventType wxEVT_COMMAND_SPINCTRL_UPDATED;
++extern WXDLLIMPEXP_CORE const wxEventType wxEVT_COMMAND_SPINCTRLDOUBLE_UPDATED;
+ 
+     // Sockets and timers send events, too
+ extern WXDLLIMPEXP_BASE const wxEventType wxEVT_SOCKET;
+Index: include/wx/spinctrl.h
+===================================================================
+--- include/wx/spinctrl.h	(revision 52419)
++++ include/wx/spinctrl.h	(working copy)
+@@ -19,64 +19,98 @@
+ #include "wx/spinbutt.h"        // should make wxSpinEvent visible to the app
+ 
+ // ----------------------------------------------------------------------------
+-// a spin ctrl is a text control with a spin button which is usually used to
+-// prompt the user for a numeric input
++// A spin ctrl is a text control with a spin button which is usually used to
++// prompt the user for a numeric input.
++// There are two kinds for number types T=integer or T=double.
+ // ----------------------------------------------------------------------------
+ 
+-/* there is no generic base class for this control because it's imlpemented
+-   very differently under MSW and other platforms
+-
+ class WXDLLEXPORT wxSpinCtrlBase : public wxControl
+ {
+ public:
+-    wxSpinCtrlBase() { Init(); }
++    wxSpinCtrlBase() {}
+ 
+-    // accessors
+-    virtual int GetValue() const = 0;
+-    virtual int GetMin() const { return m_min; }
+-    virtual int GetMax() const { return m_max; }
++    // accessor functions that derived classes are expected to have
++    // T GetValue() const
++    // T GetMin() const
++    // T GetMax() const
++    // T GetIncrement() const
++    virtual bool GetSnapToTicks() const = 0;
++    // int  GetDigits() const                       - wxSpinCtrlDouble only
+ 
+-    // operations
++    // operation functions that derived classes are expected to have
+     virtual void SetValue(const wxString& value) = 0;
+-    virtual void SetValue(int val) = 0;
+-    virtual void SetRange(int minVal, int maxVal) = 0;
++    // void SetValue(T val)
++    // void SetRange(T minVal, T maxVal)
++    // void SetIncrement(T inc)
++    virtual void SetSnapToTicks(bool snap_to_ticks) = 0;
++    // void SetDigits( int digits )                 - wxSpinCtrlDouble only
+ 
+-    // as the wxTextCtrl method
++    // Select text in the textctrl
+     virtual void SetSelection(long from, long to) = 0;
+ 
++private:
++    DECLARE_NO_COPY_CLASS(wxSpinCtrlBase)
++};
++
++// ----------------------------------------------------------------------------
++// wxSpinDoubleEvent - a wxSpinEvent for double valued controls
++// ----------------------------------------------------------------------------
++
++class WXDLLEXPORT wxSpinDoubleEvent : public wxNotifyEvent
++{
++public:
++    wxSpinDoubleEvent(wxEventType commandType = wxEVT_NULL, int winid = 0,
++                      double value = 0)
++        : wxNotifyEvent(commandType, winid), m_value(value)
++    {
++    }
++
++    wxSpinDoubleEvent(const wxSpinDoubleEvent& event)
++        : wxNotifyEvent(event), m_value(event.GetValue())
++    {
++    }
++
++    double GetValue() const       { return m_value; }
++    void   SetValue(double value) { m_value = value; }
++
++    virtual wxEvent *Clone() const { return new wxSpinDoubleEvent(*this); }
++
+ protected:
+-    // initialize m_min/max with the default values
+-    void Init() { m_min = 0; m_max = 100; }
++    double m_value;
+ 
+-    int   m_min;
+-    int   m_max;
++private:
++    DECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxSpinDoubleEvent)
+ };
+-*/
+ 
+ // ----------------------------------------------------------------------------
++// wxSpinDoubleEvent event type, see also wxSpinEvent in wx/spinbutt.h
++// ----------------------------------------------------------------------------
++
++typedef void (wxEvtHandler::*wxSpinDoubleEventFunction)(wxSpinDoubleEvent&);
++
++#define wxSpinDoubleEventHandler(func) \
++    (wxObjectEventFunction)(wxEventFunction)wxStaticCastEvent(wxSpinDoubleEventFunction, &func)
++
++// macros for handling spinctrl events
++
++#define EVT_SPINCTRL(id, fn) \
++    wx__DECLARE_EVT1(wxEVT_COMMAND_SPINCTRL_UPDATED, id, wxSpinEventHandler(fn))
++
++#define EVT_SPINCTRLDOUBLE(id, fn) \
++    wx__DECLARE_EVT1(wxEVT_COMMAND_SPINCTRLDOUBLE_UPDATED, id, wxSpinDoubleEventHandler(fn))
++
++// ----------------------------------------------------------------------------
+ // include the platform-dependent class implementation
+ // ----------------------------------------------------------------------------
+ 
+-#if defined(__WXUNIVERSAL__)
+-    #include "wx/generic/spinctlg.h"
+-#elif defined(__WXMSW__)
+-    #include "wx/msw/spinctrl.h"
+-#elif defined(__WXPM__)
+-    #include "wx/os2/spinctrl.h"
+-#elif defined(__WXGTK20__)
++#if defined(__WXGTK20__)
+     #include "wx/gtk/spinctrl.h"
+ #elif defined(__WXGTK__)
+     #include "wx/gtk1/spinctrl.h"
+-#elif defined(__WXMOTIF__)
++#else
+     #include "wx/generic/spinctlg.h"
+-#elif defined(__WXMAC__)
+-    #include "wx/mac/spinctrl.h"
+-#elif defined(__WXCOCOA__)
+-    #include "wx/generic/spinctlg.h"
+ #endif // platform
+ 
+-#define EVT_SPINCTRL(id, fn) \
+-    wx__DECLARE_EVT1(wxEVT_COMMAND_SPINCTRL_UPDATED, id, wxSpinEventHandler(fn))
+ 
+ #endif // wxUSE_SPINCTRL
+ 
+Index: include/wx/gtk/spinctrl.h
+===================================================================
+--- include/wx/gtk/spinctrl.h	(revision 52419)
++++ include/wx/gtk/spinctrl.h	(working copy)
+@@ -12,52 +12,67 @@
+ #define _WX_GTK_SPINCTRL_H_
+ 
+ //-----------------------------------------------------------------------------
+-// wxSpinCtrl
++// wxSpinCtrlGTKBase - Base class for GTK versions of the wxSpinCtrl[Double]
++//
++// This class manages a double valued GTK spinctrl through the DoGet/SetXXX
++// functions that are made public as Get/SetXXX functions for int or double
++// for the wxSpinCtrl and wxSpinCtrlDouble classes respectively to avoid
++// function ambiguity.
+ //-----------------------------------------------------------------------------
+ 
+-class WXDLLIMPEXP_CORE wxSpinCtrl : public wxControl
++class WXDLLIMPEXP_CORE wxSpinCtrlGTKBase : public wxSpinCtrlBase
+ {
+ public:
+-    wxSpinCtrl();
+-    wxSpinCtrl(wxWindow *parent,
+-               wxWindowID id = -1,
+-               const wxString& value = wxEmptyString,
+-               const wxPoint& pos = wxDefaultPosition,
+-               const wxSize& size = wxDefaultSize,
+-               long style = wxSP_ARROW_KEYS,
+-               int min = 0, int max = 100, int initial = 0,
+-               const wxString& name = _T("wxSpinCtrl"))
+-    {
+-        Create(parent, id, value, pos, size, style, min, max, initial, name);
+-    }
++    wxSpinCtrlGTKBase() : m_value(0) {}
+ 
+     bool Create(wxWindow *parent,
+-                wxWindowID id = -1,
++                wxWindowID id = wxID_ANY,
+                 const wxString& value = wxEmptyString,
+                 const wxPoint& pos = wxDefaultPosition,
+                 const wxSize& size = wxDefaultSize,
+                 long style = wxSP_ARROW_KEYS,
+-                int min = 0, int max = 100, int initial = 0,
+-                const wxString& name = _T("wxSpinCtrl"));
++                double min = 0, double max = 100, double initial = 0, double inc = 1,
++                const wxString& name = _T("wxSpinCtrlGTKBase"));
+ 
+-    void SetValue(const wxString& text);
++    // wxSpinCtrl(Double) methods call DoXXX functions of the same name
++
++    // accessors
++    // T GetValue() const
++    // T GetMin() const
++    // T GetMax() const
++    // T GetIncrement() const
++    bool GetSnapToTicks() const;
++
++    // operations
++    virtual void SetValue(const wxString& value);
++    // void SetValue(T val)
++    // void SetRange(T minVal, T maxVal)
++    // void SetIncrement(T inc)
++    void SetSnapToTicks( bool snap_to_ticks );
++
++    // Select text in the textctrl
+     void SetSelection(long from, long to);
+ 
+-    virtual int GetValue() const;
+-    virtual void SetValue( int value );
+-    virtual void SetRange( int minVal, int maxVal );
+-    virtual int GetMin() const;
+-    virtual int GetMax() const;
+-
+     static wxVisualAttributes
+     GetClassDefaultAttributes(wxWindowVariant variant = wxWINDOW_VARIANT_NORMAL);
+-    
++
+     // implementation
+     void OnChar( wxKeyEvent &event );
+-    
+-    int m_pos;
+ 
++    double m_value; // public for GTK callback function
++
+ protected:
++
++    double DoGetValue() const;
++    double DoGetMin() const;
++    double DoGetMax() const;
++    double DoGetIncrement() const;
++
++    void DoSetValue(double val);
++    void DoSetValue(const wxString& strValue);
++    void DoSetRange(double min_val, double max_val);
++    void DoSetIncrement(double inc);
++
+     void GtkDisableEvents() const;
+     void GtkEnableEvents() const;
+ 
+@@ -69,8 +84,116 @@
+     virtual bool UseGTKStyleBase() const { return true; }
+ 
+ private:
+-    DECLARE_DYNAMIC_CLASS(wxSpinCtrl)
++    DECLARE_DYNAMIC_CLASS(wxSpinCtrlGTKBase)
+     DECLARE_EVENT_TABLE()
+ };
+ 
++//-----------------------------------------------------------------------------
++// wxSpinCtrl - An integer valued spin control
++//-----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_CORE wxSpinCtrl : public wxSpinCtrlGTKBase
++{
++public:
++    wxSpinCtrl() {}
++    wxSpinCtrl(wxWindow *parent,
++               wxWindowID id = wxID_ANY,
++               const wxString& value = wxEmptyString,
++               const wxPoint& pos = wxDefaultPosition,
++               const wxSize& size = wxDefaultSize,
++               long style = wxSP_ARROW_KEYS,
++               int min = 0, int max = 100, int initial = 0,
++               const wxString& name = _T("wxSpinCtrl"))
++    {
++        Create(parent, id, value, pos, size, style, min, max, initial, name);
++    }
++
++    bool Create(wxWindow *parent,
++                wxWindowID id = wxID_ANY,
++                const wxString& value = wxEmptyString,
++                const wxPoint& pos = wxDefaultPosition,
++                const wxSize& size = wxDefaultSize,
++                long style = wxSP_ARROW_KEYS,
++                int min = 0, int max = 100, int initial = 0,
++                const wxString& name = _T("wxSpinCtrl"))
++    {
++        return wxSpinCtrlGTKBase::Create(parent, id, value, pos, size, style, min, max, initial, 1, name);
++    }
++
++    // accessors
++    int GetValue() const     { return int(DoGetValue() + 0.5); }
++    int GetMin() const       { return int(DoGetMin() + 0.5); }
++    int GetMax() const       { return int(DoGetMax() + 0.5); }
++    int GetIncrement() const { return int(DoGetIncrement() + 0.5); }
++    //bool GetSnapToTicks() const;
++
++    // operations
++    void SetValue(const wxString& value)    { wxSpinCtrlGTKBase::SetValue(value); } // visibility problem w/ gcc
++    void SetValue( int value )              { DoSetValue(value); }
++    void SetRange( int minVal, int maxVal ) { DoSetRange(minVal, maxVal); }
++    void SetIncrement( double inc )         { DoSetIncrement(inc); }
++    //void SetSnapToTicks( bool snap_to_ticks );
++
++    // Select text in the textctrl
++    //void SetSelection(long from, long to);
++
++private:
++    DECLARE_DYNAMIC_CLASS(wxSpinCtrl)
++};
++
++//-----------------------------------------------------------------------------
++// wxSpinCtrlDouble - a double valued spin control
++//-----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_CORE wxSpinCtrlDouble : public wxSpinCtrlGTKBase
++{
++public:
++    wxSpinCtrlDouble() {}
++    wxSpinCtrlDouble(wxWindow *parent,
++                     wxWindowID id = wxID_ANY,
++                     const wxString& value = wxEmptyString,
++                     const wxPoint& pos = wxDefaultPosition,
++                     const wxSize& size = wxDefaultSize,
++                     long style = wxSP_ARROW_KEYS,
++                     double min = 0, double max = 100, double initial = 0, double inc = 1,
++                     const wxString& name = _T("wxSpinCtrlDouble"))
++    {
++        Create(parent, id, value, pos, size, style, min, max, initial, inc, name);
++    }
++
++    bool Create(wxWindow *parent,
++                wxWindowID id = wxID_ANY,
++                const wxString& value = wxEmptyString,
++                const wxPoint& pos = wxDefaultPosition,
++                const wxSize& size = wxDefaultSize,
++                long style = wxSP_ARROW_KEYS,
++                double min = 0, double max = 100, double initial = 0, double inc = 1,
++                const wxString& name = _T("wxSpinCtrlDouble"))
++    {
++        return wxSpinCtrlGTKBase::Create(parent, id, value, pos, size, style, min, max, initial, inc, name);
++    }
++
++    // accessors
++    double GetValue() const     { return DoGetValue(); }
++    double GetMin() const       { return DoGetMin(); }
++    double GetMax() const       { return DoGetMax(); }
++    double GetIncrement() const { return DoGetIncrement(); }
++    //bool GetSnapToTicks() const;
++    int    GetDigits() const;
++
++    // operations
++    void SetValue(const wxString& value)          { wxSpinCtrlGTKBase::SetValue(value); } // visibility problem w/ gcc
++    void SetValue( double value )                 { DoSetValue(value); }
++    void SetRange( double minVal, double maxVal ) { DoSetRange(minVal, maxVal); }
++    void SetIncrement( double inc )               { DoSetIncrement(inc); }
++    //void SetSnapToTicks( bool snap_to_ticks );
++    void SetDigits( int digits );
++
++    // Select text in the textctrl
++    //void SetSelection(long from, long to);
++
++private:
++    DECLARE_DYNAMIC_CLASS(wxSpinCtrlDouble)
++};
++
+ #endif // _WX_GTK_SPINCTRL_H_
+Index: include/wx/generic/spinctlg.h
+===================================================================
+--- include/wx/generic/spinctlg.h	(revision 52419)
++++ include/wx/generic/spinctlg.h	(working copy)
+@@ -12,6 +12,9 @@
+ #ifndef _WX_GENERIC_SPINCTRL_H_
+ #define _WX_GENERIC_SPINCTRL_H_
+ 
++#ifndef _WX_GENERIC_SPINCTRL_H_
++#define _WX_GENERIC_SPINCTRL_H_
++
+ // ----------------------------------------------------------------------------
+ // wxSpinCtrl is a combination of wxSpinButton and wxTextCtrl, so if
+ // wxSpinButton is available, this is what we do - but if it isn't, we still
+@@ -25,50 +28,56 @@
+ class WXDLLIMPEXP_FWD_CORE wxSpinButton;
+ class WXDLLIMPEXP_FWD_CORE wxTextCtrl;
+ 
++class wxSpinCtrlText; // wxTextCtrl used for the wxSpinCtrlGenericBase
++
++// The !wxUSE_SPINBTN version's GetValue() function conflicts with the
++// wxTextCtrl's GetValue() and so you have to input a dummy int value.
++#define wxSPINCTRL_GETVALUE_FIX
++
+ // ----------------------------------------------------------------------------
+-// wxSpinCtrl is a combination of wxTextCtrl and wxSpinButton
++// wxSpinCtrlGeneric is a combination of wxTextCtrl and wxSpinButton
++//
++// This class manages a double valued generic spinctrl through the DoGet/SetXXX
++// functions that are made public as Get/SetXXX functions for int or double
++// for the wxSpinCtrl and wxSpinCtrlDouble classes respectively to avoid
++// function ambiguity.
+ // ----------------------------------------------------------------------------
+ 
+-class WXDLLEXPORT wxSpinCtrl : public wxControl
++class WXDLLEXPORT wxSpinCtrlGenericBase : public wxSpinCtrlBase
+ {
+ public:
+-    wxSpinCtrl() { Init(); }
++    wxSpinCtrlGenericBase() { Init(); }
+ 
+-    wxSpinCtrl(wxWindow *parent,
+-               wxWindowID id = wxID_ANY,
+-               const wxString& value = wxEmptyString,
+-               const wxPoint& pos = wxDefaultPosition,
+-               const wxSize& size = wxDefaultSize,
+-               long style = wxSP_ARROW_KEYS,
+-               int min = 0, int max = 100, int initial = 0,
+-               const wxString& name = _T("wxSpinCtrl"))
+-    {
+-        Init();
+-        Create(parent, id, value, pos, size, style, min, max, initial, name);
+-    }
+-
+     bool Create(wxWindow *parent,
+                 wxWindowID id = wxID_ANY,
+                 const wxString& value = wxEmptyString,
+                 const wxPoint& pos = wxDefaultPosition,
+                 const wxSize& size = wxDefaultSize,
+                 long style = wxSP_ARROW_KEYS,
+-                int min = 0, int max = 100, int initial = 0,
++                double min = 0, double max = 100, double initial = 0, double inc = 1,
+                 const wxString& name = _T("wxSpinCtrl"));
+ 
+-    virtual ~wxSpinCtrl();
++    virtual ~wxSpinCtrlGenericBase();
+ 
++    // accessors
++    // T GetValue() const
++    // T GetMin() const
++    // T GetMax() const
++    // T GetIncrement() const
++    virtual bool GetSnapToTicks() const { return m_snap_to_ticks; }
++    // int  GetDigits() const                       - wxSpinCtrlDouble only
++
+     // operations
+-    void SetValue(int val);
+-    void SetValue(const wxString& text);
+-    void SetRange(int min, int max);
++    virtual void SetValue(const wxString& text);
++    // void SetValue(T val)
++    // void SetRange(T minVal, T maxVal)
++    // void SetIncrement(T inc)
++    virtual void SetSnapToTicks(bool snap_to_ticks);
++    // void SetDigits( int digits )                 - wxSpinCtrlDouble only
++
++    // Select text in the textctrl
+     void SetSelection(long from, long to);
+ 
+-    // accessors
+-    int GetValue() const;
+-    int GetMin() const;
+-    int GetMax() const;
+-
+     // implementation from now on
+ 
+     // forward these functions to all subcontrols
+@@ -76,47 +85,143 @@
+     virtual bool Show(bool show = true);
+ 
+     // get the subcontrols
+-    wxTextCtrl *GetText() const { return m_text; }
+-    wxSpinButton *GetSpinButton() const { return m_btn; }
++    wxTextCtrl   *GetText() const       { return m_textCtrl; }
++    wxSpinButton *GetSpinButton() const { return m_spinButton; }
+ 
+-    // set the value of the text (only)
+-    void SetTextValue(int val);
++    // Ensure that the textctrl shows correct value
++    void SyncSpinToText(bool send_event, bool force_valid = true);
+ 
+-    // put the numeric value of the string in the text ctrl into val and return
+-    // true or return false if the text ctrl doesn't contain a number or if the
+-    // number is out of range
+-    bool GetTextValue(int *val) const;
++    // forwarded events from children windows
++    void OnSpinButton(wxSpinEvent& event);
++    void OnTextEnter(wxCommandEvent& event);
++    void OnTextChar(wxKeyEvent& event);
+ 
++    friend class wxSpinCtrlText;
++
+ protected:
+     // override the base class virtuals involved into geometry calculations
+     virtual wxSize DoGetBestSize() const;
+     virtual void DoMoveWindow(int x, int y, int width, int height);
+ 
+-    // common part of all ctors
+-    void Init();
++    // generic double valued functions
++    double DoGetValue() const { return m_value; }
++    bool DoSetValue(double val);
++    void DoSetRange(double min_val, double max_val);
++    void DoSetIncrement(double inc);
+ 
+-private:
++    // Send the correct event type
++    virtual void DoSendEvent() = 0;
++
++    bool InRange(double n) const { return (n >= m_min) && (n <= m_max); }
++
++    double m_value;
++    double m_min;
++    double m_max;
++    double m_increment;
++    bool   m_snap_to_ticks;
++    wxString m_format;
++
++    int m_spin_value;
++
+     // the subcontrols
+-    wxTextCtrl *m_text;
+-    wxSpinButton *m_btn;
++    wxTextCtrl   *m_textCtrl;
++    wxSpinButton *m_spinButton;
+ 
+ private:
+-    DECLARE_DYNAMIC_CLASS(wxSpinCtrl)
++    // common part of all ctors
++    void Init();
+ };
+ 
+ #else // !wxUSE_SPINBTN
+ 
++#define wxSPINCTRL_GETVALUE_FIX int = 1
++
+ // ----------------------------------------------------------------------------
+ // wxSpinCtrl is just a text control
+ // ----------------------------------------------------------------------------
+ 
+ #include "wx/textctrl.h"
+ 
+-class WXDLLEXPORT wxSpinCtrl : public wxTextCtrl
++class WXDLLEXPORT wxSpinCtrlGenericBase : public wxTextCtrl
+ {
+ public:
+-    wxSpinCtrl() { Init(); }
++    wxSpinCtrlGenericBase() : m_value(0), m_min(0), m_max(100),
++                              m_increment(1), m_snap_to_ticks(false),
++                              m_format(wxT("%g")) { }
+ 
++    bool Create(wxWindow *parent,
++                wxWindowID id = wxID_ANY,
++                const wxString& value = wxEmptyString,
++                const wxPoint& pos = wxDefaultPosition,
++                const wxSize& size = wxDefaultSize,
++                long style = wxSP_ARROW_KEYS,
++                double min = 0, double max = 100, double initial = 0, double inc = 1,
++                const wxString& name = _T("wxSpinCtrl"))
++    {
++        m_min = min;
++        m_max = max;
++        m_value = initial;
++        m_increment = inc;
++
++        bool ok = wxTextCtrl::Create(parent, id, value, pos, size, style,
++                                     wxDefaultValidator, name);
++        DoSetValue(initial);
++
++        return ok;
++    }
++
++    // accessors
++    // T GetValue() const
++    // T GetMin() const
++    // T GetMax() const
++    // T GetIncrement() const
++    virtual bool GetSnapToTicks() const { return m_snap_to_ticks; }
++    // int  GetDigits() const                       - wxSpinCtrlDouble only
++
++    // operations
++    virtual void SetValue(const wxString& text) { wxTextCtrl::SetValue(text); }
++    // void SetValue(T val)
++    // void SetRange(T minVal, T maxVal)
++    // void SetIncrement(T inc)
++    virtual void SetSnapToTicks(bool snap_to_ticks) { m_snap_to_ticks = snap_to_ticks; }
++    // void SetDigits( int digits )                 - wxSpinCtrlDouble only
++
++    // Select text in the textctrl
++    //void SetSelection(long from, long to);
++
++protected:
++    // generic double valued
++    double DoGetValue() const
++    {
++        double n;
++        if ( (wxSscanf(wxTextCtrl::GetValue(), wxT("%lf"), &n) != 1) )
++            n = INT_MIN;
++
++        return n;
++    }
++
++    bool DoSetValue(double val) { wxTextCtrl::SetValue(wxString::Format(m_format.c_str(), val)); return true; }
++    void DoSetRange(double min_val, double max_val) { m_min = min_val; m_max = max_val; }
++    void DoSetIncrement(double inc) { m_increment = inc; } // Note: unused
++
++    double m_value;
++    double m_min;
++    double m_max;
++    double m_increment;
++    bool   m_snap_to_ticks;
++    wxString m_format;
++};
++
++#endif // wxUSE_SPINBTN/!wxUSE_SPINBTN
++
++//-----------------------------------------------------------------------------
++// wxSpinCtrl
++//-----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_CORE wxSpinCtrl : public wxSpinCtrlGenericBase
++{
++public:
++    wxSpinCtrl() {}
+     wxSpinCtrl(wxWindow *parent,
+                wxWindowID id = wxID_ANY,
+                const wxString& value = wxEmptyString,
+@@ -138,45 +243,92 @@
+                 int min = 0, int max = 100, int initial = 0,
+                 const wxString& name = _T("wxSpinCtrl"))
+     {
+-        SetRange(min, max);
++        return wxSpinCtrlGenericBase::Create(parent, id, value, pos, size, style, min, max, initial, 1, name);
++    }
+ 
+-        bool ok = wxTextCtrl::Create(parent, id, value, pos, size, style,
+-                                     wxDefaultValidator, name);
+-        SetValue(initial);
++    // accessors
++    int GetValue(wxSPINCTRL_GETVALUE_FIX) const { return int(DoGetValue() + 0.5); }
++    int GetMin() const       { return int(m_min + 0.5); }
++    int GetMax() const       { return int(m_max + 0.5); }
++    int GetIncrement() const { return int(m_increment + 0.5); }
++    //bool GetSnapToTicks() const
+ 
+-        return ok;
++    // operations
++    void SetValue(const wxString& value)    { wxSpinCtrlGenericBase::SetValue(value); } // visibility problem w/ gcc
++    void SetValue( int value )              { DoSetValue(value); }
++    void SetRange( int minVal, int maxVal ) { DoSetRange(minVal, maxVal); }
++    void SetIncrement( double inc )         { DoSetIncrement(inc); }
++    //void SetSnapToTicks( bool snap_to_ticks );
++
++    // Select text in the textctrl
++    //void SetSelection(long from, long to);
++
++protected:
++    virtual void DoSendEvent();
++
++private:
++    DECLARE_DYNAMIC_CLASS(wxSpinCtrl)
++};
++
++//-----------------------------------------------------------------------------
++// wxSpinCtrlDouble
++//-----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_CORE wxSpinCtrlDouble : public wxSpinCtrlGenericBase
++{
++public:
++    wxSpinCtrlDouble() : m_digits(-1) {}
++    wxSpinCtrlDouble(wxWindow *parent,
++                     wxWindowID id = wxID_ANY,
++                     const wxString& value = wxEmptyString,
++                     const wxPoint& pos = wxDefaultPosition,
++                     const wxSize& size = wxDefaultSize,
++                     long style = wxSP_ARROW_KEYS,
++                     double min = 0, double max = 100, double initial = 0, double inc = 1,
++                     const wxString& name = _T("wxSpinCtrlDouble"))
++    {
++        m_digits = -1;
++        Create(parent, id, value, pos, size, style, min, max, initial, inc, name);
+     }
+ 
+-    // accessors
+-    int GetValue(int WXUNUSED(dummy) = 1) const
++    bool Create(wxWindow *parent,
++                wxWindowID id = wxID_ANY,
++                const wxString& value = wxEmptyString,
++                const wxPoint& pos = wxDefaultPosition,
++                const wxSize& size = wxDefaultSize,
++                long style = wxSP_ARROW_KEYS,
++                double min = 0, double max = 100, double initial = 0, double inc = 1,
++                const wxString& name = _T("wxSpinCtrlDouble"))
+     {
+-        int n;
+-        if ( (wxSscanf(wxTextCtrl::GetValue(), wxT("%d"), &n) != 1) )
+-            n = INT_MIN;
+-
+-        return n;
++        return wxSpinCtrlGenericBase::Create(parent, id, value, pos, size, style, min, max, initial, inc, name);
+     }
+ 
+-    int GetMin() const { return m_min; }
+-    int GetMax() const { return m_max; }
++    // accessors
++    double GetValue(wxSPINCTRL_GETVALUE_FIX) const { return DoGetValue(); }
++    double GetMin() const         { return m_min; }
++    double GetMax() const         { return m_max; }
++    double GetIncrement() const   { return m_increment; }
++    int    GetDigits() const      { return m_digits; }
++    //bool GetSnapToTicks() const
+ 
+     // operations
+-    void SetValue(const wxString& value) { wxTextCtrl::SetValue(value); }
+-    void SetValue(int val) { wxString s; s << val; wxTextCtrl::SetValue(s); }
+-    void SetRange(int min, int max) { m_min = min; m_max = max; }
++    void SetValue(const wxString& value)          { wxSpinCtrlGenericBase::SetValue(value); } // visibility problem w/ gcc
++    void SetValue( double value )                 { DoSetValue(value); }
++    void SetRange( double minVal, double maxVal ) { DoSetRange(minVal, maxVal); }
++    void SetIncrement( double inc )               { DoSetIncrement(inc); }
++    void SetDigits( int digits );
++    //void SetSnapToTicks( bool snap_to_ticks );
+ 
++    // Select text in the textctrl
++    //void SetSelection(long from, long to);
++
+ protected:
+-    // initialize m_min/max with the default values
+-    void Init() { SetRange(0, 100); }
++    virtual void DoSendEvent();
+ 
+-    int   m_min;
+-    int   m_max;
++    int m_digits;
+ 
+ private:
+-    DECLARE_DYNAMIC_CLASS(wxSpinCtrl)
++    DECLARE_DYNAMIC_CLASS(wxSpinCtrlDouble)
+ };
+ 
+-#endif // wxUSE_SPINBTN/!wxUSE_SPINBTN
+-
+ #endif // _WX_GENERIC_SPINCTRL_H_
+-
+Index: include/wx/spinbutt.h
+===================================================================
+--- include/wx/spinbutt.h	(revision 52419)
++++ include/wx/spinbutt.h	(working copy)
+@@ -102,12 +102,19 @@
+     {
+     }
+ 
++    wxSpinEvent(const wxSpinEvent& event) : wxNotifyEvent(event) {}
++
+     // get the current value of the control
++    int GetValue() const { return m_commandInt; }
++    void SetValue(int value) { m_commandInt = value; }
++
+     int GetPosition() const { return m_commandInt; }
+     void SetPosition(int pos) { m_commandInt = pos; }
+ 
++    virtual wxEvent *Clone() const { return new wxSpinEvent(*this); }
++
+ private:
+-    DECLARE_DYNAMIC_CLASS_NO_COPY(wxSpinEvent)
++    DECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxSpinEvent)
+ };
+ 
+ typedef void (wxEvtHandler::*wxSpinEventFunction)(wxSpinEvent&);
+Index: samples/widgets/spinbtn.cpp
+===================================================================
+--- samples/widgets/spinbtn.cpp	(revision 52419)
++++ samples/widgets/spinbtn.cpp	(working copy)
+@@ -63,7 +63,8 @@
+     SpinBtnPage_MinText,
+     SpinBtnPage_MaxText,
+     SpinBtnPage_SpinBtn,
+-    SpinBtnPage_SpinCtrl
++    SpinBtnPage_SpinCtrl,
++    SpinBtnPage_SpinCtrlDouble
+ };
+ 
+ // ----------------------------------------------------------------------------
+@@ -78,6 +79,7 @@
+ 
+     virtual wxControl *GetWidget() const { return m_spinbtn; }
+     virtual wxControl *GetWidget2() const { return m_spinctrl; }
++    virtual wxControl *GetWidget3() const { return m_spinctrldbl; }
+     virtual void RecreateWidget() { CreateSpin(); }
+ 
+     // lazy creation of the content
+@@ -96,6 +98,7 @@
+     void OnSpinBtnUp(wxSpinEvent& event);
+     void OnSpinBtnDown(wxSpinEvent& event);
+     void OnSpinCtrl(wxSpinEvent& event);
++    void OnSpinCtrlDouble(wxSpinDoubleEvent& event);
+     void OnSpinText(wxCommandEvent& event);
+ 
+     void OnUpdateUIValueButton(wxUpdateUIEvent& event);
+@@ -128,6 +131,7 @@
+     // the spinbtn and the spinctrl and the sizer containing them
+     wxSpinButton *m_spinbtn;
+     wxSpinCtrl *m_spinctrl;
++    wxSpinCtrlDouble *m_spinctrldbl;
+ 
+     wxSizer *m_sizerSpin;
+ 
+@@ -161,7 +165,9 @@
+     EVT_SPIN_UP(SpinBtnPage_SpinBtn, SpinBtnWidgetsPage::OnSpinBtnUp)
+     EVT_SPIN_DOWN(SpinBtnPage_SpinBtn, SpinBtnWidgetsPage::OnSpinBtnDown)
+     EVT_SPINCTRL(SpinBtnPage_SpinCtrl, SpinBtnWidgetsPage::OnSpinCtrl)
++    EVT_SPINCTRLDOUBLE(SpinBtnPage_SpinCtrlDouble, SpinBtnWidgetsPage::OnSpinCtrlDouble)
+     EVT_TEXT(SpinBtnPage_SpinCtrl, SpinBtnWidgetsPage::OnSpinText)
++    EVT_TEXT(SpinBtnPage_SpinCtrlDouble, SpinBtnWidgetsPage::OnSpinText)
+ 
+     EVT_CHECKBOX(wxID_ANY, SpinBtnWidgetsPage::OnCheckOrRadioBox)
+     EVT_RADIOBOX(wxID_ANY, SpinBtnWidgetsPage::OnCheckOrRadioBox)
+@@ -189,6 +195,7 @@
+     m_chkWrap = NULL;
+     m_spinbtn = NULL;
+     m_spinctrl = NULL;
++    m_spinctrldbl = NULL;
+     m_textValue = NULL;
+     m_textMin = NULL;
+     m_textMax = NULL;
+@@ -304,14 +311,17 @@
+ 
+         m_sizerSpin->Detach( m_spinbtn );
+         m_sizerSpin->Detach( m_spinctrl );
++        m_sizerSpin->Detach( m_spinctrldbl );
+ 
+-        // there are 3 spacers left
++        // there are 4 spacers left
+         m_sizerSpin->Remove( 0 );
+         m_sizerSpin->Remove( 0 );
+         m_sizerSpin->Remove( 0 );
++        m_sizerSpin->Remove( 0 );
+ 
+         delete m_spinbtn;
+         delete m_spinctrl;
++        delete m_spinctrldbl;
+     }
+ 
+     m_spinbtn = new wxSpinButton(this, SpinBtnPage_SpinBtn,
+@@ -327,11 +337,19 @@
+                                 flags,
+                                 m_min, m_max, val);
+ 
++    m_spinctrldbl = new wxSpinCtrlDouble(this, SpinBtnPage_SpinCtrlDouble,
++                                         wxString::Format(_T("%d"), val),
++                                         wxDefaultPosition, wxDefaultSize,
++                                         flags,
++                                         m_min, m_max, val, 0.1);
++
+     m_sizerSpin->Add(0, 0, 1);
+     m_sizerSpin->Add(m_spinbtn, 0, wxALIGN_CENTRE | wxALL, 5);
+     m_sizerSpin->Add(0, 0, 1);
+     m_sizerSpin->Add(m_spinctrl, 0, wxALIGN_CENTRE | wxALL, 5);
+     m_sizerSpin->Add(0, 0, 1);
++    m_sizerSpin->Add(m_spinctrldbl, 0, wxALIGN_CENTRE | wxALL, 5);
++    m_sizerSpin->Add(0, 0, 1);
+ 
+     m_sizerSpin->Layout();
+ }
+@@ -365,6 +383,7 @@
+ 
+     m_spinbtn->SetRange(minNew, maxNew);
+     m_spinctrl->SetRange(minNew, maxNew);
++    m_spinctrldbl->SetRange(minNew, maxNew);
+ }
+ 
+ void SpinBtnWidgetsPage::OnButtonSetValue(wxCommandEvent& WXUNUSED(event))
+@@ -379,6 +398,7 @@
+ 
+     m_spinbtn->SetValue(val);
+     m_spinctrl->SetValue(val);
++    m_spinctrldbl->SetValue(val);
+ }
+ 
+ void SpinBtnWidgetsPage::OnUpdateUIValueButton(wxUpdateUIEvent& event)
+@@ -442,6 +462,13 @@
+     wxLogMessage(_T("Spin control value changed, now %d"), value);
+ }
+ 
++void SpinBtnWidgetsPage::OnSpinCtrlDouble(wxSpinDoubleEvent& event)
++{
++    double value = event.GetValue();
++
++    wxLogMessage(_T("Spin control value changed, now %g"), value);
++}
++
+ void SpinBtnWidgetsPage::OnSpinText(wxCommandEvent& event)
+ {
+     wxLogMessage(_T("Text changed in spin control, now \"%s\""),
+
+ 	  	 

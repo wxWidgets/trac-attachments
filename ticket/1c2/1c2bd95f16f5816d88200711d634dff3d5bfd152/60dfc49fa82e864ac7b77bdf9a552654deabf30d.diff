@@ -1,0 +1,206 @@
+Fix FromWChar implementation.
+Original implementation has some issues:
+ * it may overflow dst buffer by 1 null character
+ * when convert multibyte characters, it may not fill nul charaters because
+	src+lenChunk should be src+wxWcslen(src)
+
+This patch also fix comment of FromWChar in strconv.h.
+
+diff --git a/wxWidgets/include/wx/strconv.h b/wxWidgets/include/wx/strconv.h
+--- a/wxWidgets/include/wx/strconv.h
++++ b/wxWidgets/include/wx/strconv.h
+@@ -56,21 +56,20 @@
+     // character strings.
+     //
+     // On success, the return value is the length (i.e. the number of
+     // characters, not bytes) of the converted string including any trailing
+     // L'\0' or (possibly multiple) '\0'(s). If the conversion fails or if
+     // there is not enough space for everything, including the trailing NUL
+     // character(s), in the output buffer, wxCONV_FAILED is returned.
+     //
+-    // In the special case when dstLen is 0 (outputBuf may be NULL then) the
+-    // return value is the length of the needed buffer but nothing happens
+-    // otherwise. If srcLen is wxNO_LEN, the entire string, up to and
+-    // including the trailing NUL(s), is converted, otherwise exactly srcLen
+-    // bytes are.
++    // In the special case when dst is NULL the return value is the length
++    // of the needed buffer but nothing happens otherwise. If srcLen is
++    // wxNO_LEN, the entire string, up to and including the trailing NUL(s),
++    // is converted, otherwise exactly srcLen bytes are.
+     //
+     // Typical usage:
+     //
+     //          size_t dstLen = conv.ToWChar(NULL, 0, src);
+     //          if ( dstLen != wxCONV_FAILED )
+     //              ... handle error ...
+     //          wchar_t *wbuf = new wchar_t[dstLen];
+     //          conv.ToWChar(wbuf, dstLen, src);
+diff --git a/wxWidgets/src/common/strconv.cpp b/wxWidgets/src/common/strconv.cpp
+--- a/wxWidgets/src/common/strconv.cpp
++++ b/wxWidgets/src/common/strconv.cpp
+@@ -323,34 +323,42 @@
+ 
+     const size_t lenNul = GetMBNulLen();
+     for ( const wchar_t * const srcEnd = src + srcLen;
+           src < srcEnd;
+           src += wxWcslen(src) + 1 /* skip L'\0' too */ )
+     {
+         // try to convert the current chunk
+         size_t lenChunk = WC2MB(NULL, src, 0);
++        const bool isChunkNulTerminated = isNulTerminated || src + wxWcslen(src) < srcEnd;
+ 
+         if ( lenChunk == wxCONV_FAILED )
+             return wxCONV_FAILED;
+ 
+         dstWritten += lenChunk;
+-        if ( src+lenChunk < srcEnd || isNulTerminated )
++        if ( isChunkNulTerminated )
+             dstWritten += lenNul;
+ 
+         if ( dst )
+         {
+             if ( dstWritten > dstLen )
+                 return wxCONV_FAILED;
+ 
+-            if ( WC2MB(dst, src, lenChunk + lenNul) == wxCONV_FAILED )
+-                return wxCONV_FAILED;
++            if ( isChunkNulTerminated ) {
++                if ( WC2MB(dst, src, lenChunk + lenNul) == wxCONV_FAILED )
++                    return wxCONV_FAILED;
++            } else {
++                wxWritableCharBuffer tmp = wxCharBuffer(lenChunk + lenNul);
++                if ( WC2MB(tmp, src, lenChunk + lenNul) == wxCONV_FAILED )
++                    return wxCONV_FAILED;
++                memcpy(dst, tmp, lenChunk);
++            }
+ 
+             dst += lenChunk;
+-            if ( src+lenChunk < srcEnd || isNulTerminated )
++            if ( isChunkNulTerminated )
+                 dst += lenNul;
+         }
+     }
+ 
+     return dstWritten;
+ }
+ 
+ size_t wxMBConv::MB2WC(wchar_t *outBuff, const char *inBuff, size_t outLen) const
+diff --git a/wxWidgets/tests/mbconv/mbconvtest.cpp b/wxWidgets/tests/mbconv/mbconvtest.cpp
+--- a/wxWidgets/tests/mbconv/mbconvtest.cpp
++++ b/wxWidgets/tests/mbconv/mbconvtest.cpp
+@@ -76,16 +76,17 @@
+         CPPUNIT_TEST( UTF16BETests );
+         CPPUNIT_TEST( CP932Tests );
+         CPPUNIT_TEST( CP1252Tests ); // depends on UTF8 Decoder functioning correctly
+         CPPUNIT_TEST( LibcTests );
+         CPPUNIT_TEST( IconvTests );
+         CPPUNIT_TEST( Latin1Tests );
+         CPPUNIT_TEST( FontmapTests );
+         CPPUNIT_TEST( BufSize );
++        CPPUNIT_TEST( FromWCharTests );
+ #ifdef HAVE_WCHAR_H
+         CPPUNIT_TEST( UTF8_41 );
+         CPPUNIT_TEST( UTF8_7f );
+         CPPUNIT_TEST( UTF8_80 );
+         CPPUNIT_TEST( UTF8_c2_7f );
+         CPPUNIT_TEST( UTF8_c2_80 );
+         CPPUNIT_TEST( UTF8_ce_91 );
+         CPPUNIT_TEST( UTF8_df_bf );
+@@ -110,16 +111,17 @@
+     void UTF16BETests();
+     void UTF32LETests();
+     void UTF32BETests();
+     void CP932Tests();
+     void CP1252Tests();
+     void LibcTests();
+     void FontmapTests();
+     void BufSize();
++    void FromWCharTests();
+     void IconvTests();
+     void Latin1Tests();
+ 
+     // verifies that the specified multibyte sequence decodes to the specified wchar_t sequence
+     void TestDecoder(
+         const wchar_t* wideBuffer,  // the same character sequence as multiBuffer, encoded as wchar_t
+         size_t         wideChars,   // the number of wide characters at wideBuffer
+         const char*    multiBuffer, // a multibyte encoded character sequence that can be decoded by "converter"
+@@ -858,16 +860,79 @@
+         wxCONV_FAILED, convUTF16.WC2MB(buf.data(), utf16text, lenMB + 1) );
+     CPPUNIT_ASSERT(
+         convUTF16.WC2MB(buf.data(), utf16text, lenMB + 2) != wxCONV_FAILED );
+     CPPUNIT_ASSERT(
+         convUTF16.WC2MB(buf.data(), utf16text, lenMB + 3) != wxCONV_FAILED );
+     CPPUNIT_ASSERT_EQUAL( '?', buf[lenMB + 2] );
+ }
+ 
++void MBConvTestCase::FromWCharTests()
++{
++    wxCSConv conv950(_T("CP950"));
++    char mbuf[10];
++    wchar_t wbuf[] = { 0x4e00, 0, 0x4e00, 0 }; // 0x4e00 is 2 bytes in cp950
++
++    // test simple ascii text
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( wxCONV_FAILED, conv950.FromWChar(mbuf, 0, L"a", 1));
++    CPPUNIT_ASSERT_EQUAL( '!', mbuf[0]);
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( 1, conv950.FromWChar(mbuf, 1, L"a", 1));
++    CPPUNIT_ASSERT_EQUAL( 'a', mbuf[0]);
++    CPPUNIT_ASSERT_EQUAL( '!', mbuf[1]);
++    
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( wxCONV_FAILED, conv950.FromWChar(mbuf, 1, L"a", 2));
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( 2, conv950.FromWChar(mbuf, 2, L"a", 2));
++    CPPUNIT_ASSERT_EQUAL( 'a', mbuf[0]);
++    CPPUNIT_ASSERT_EQUAL( '\0', mbuf[1]);
++    CPPUNIT_ASSERT_EQUAL( '!', mbuf[2]);
++    
++    // test non-ascii text, 1 wchar -> 2 char
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( wxCONV_FAILED, conv950.FromWChar(mbuf, 0, wbuf, 1));
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( wxCONV_FAILED, conv950.FromWChar(mbuf, 1, wbuf, 1));
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( 2, conv950.FromWChar(mbuf, 2, wbuf, 1));
++    CPPUNIT_ASSERT_EQUAL( '!', mbuf[2]);
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( wxCONV_FAILED, conv950.FromWChar(mbuf, 2, wbuf, 2));
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( 3, conv950.FromWChar(mbuf, 3, wbuf, 2));
++    CPPUNIT_ASSERT_EQUAL( '\0', mbuf[2]);
++    CPPUNIT_ASSERT_EQUAL( '!', mbuf[3]);
++
++    // test text with embeded NUL-character and srcLen specified
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( wxCONV_FAILED, conv950.FromWChar(mbuf, 3, wbuf, 3));
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( wxCONV_FAILED, conv950.FromWChar(mbuf, 4, wbuf, 3));
++    CPPUNIT_ASSERT_EQUAL( 5, conv950.FromWChar(mbuf, 5, wbuf, 3));
++    CPPUNIT_ASSERT_EQUAL( '\0', mbuf[2]);
++    CPPUNIT_ASSERT_EQUAL( '!', mbuf[5]);
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( wxCONV_FAILED, conv950.FromWChar(mbuf, 5, wbuf, 4));
++
++    memset(mbuf, '!', sizeof(mbuf));
++    CPPUNIT_ASSERT_EQUAL( 6, conv950.FromWChar(mbuf, 6, wbuf, 4));
++    CPPUNIT_ASSERT_EQUAL( '\0', mbuf[2]);
++    CPPUNIT_ASSERT_EQUAL( '\0', mbuf[5]);
++    CPPUNIT_ASSERT_EQUAL( '!', mbuf[6]);
++}
+ 
+ WXDLLIMPEXP_BASE wxMBConv* new_wxMBConv_iconv( const char* name );
+ 
+ void MBConvTestCase::IconvTests()
+ {
+ #ifdef HAVE_ICONV
+     wxMBConv* converter = new_wxMBConv_iconv("CP932");
+     if ( !converter )

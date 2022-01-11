@@ -1,0 +1,1100 @@
+Index: include/wx/msw/private/fswatcher.h
+===================================================================
+--- include/wx/msw/private/fswatcher.h	(revision 66853)
++++ include/wx/msw/private/fswatcher.h	(working copy)
+@@ -15,6 +15,7 @@
+ #include "wx/vector.h"
+ #include "wx/msw/private.h"
+ 
++
+ // ============================================================================
+ // wxFSWatcherEntry implementation & helper declarations
+ // ============================================================================
+@@ -36,43 +37,80 @@
+         m_handle = OpenDir(m_path);
+         m_overlapped = (OVERLAPPED*)calloc(1, sizeof(OVERLAPPED));
+         wxZeroMemory(m_buffer);
++        m_deletePending = false;
+     }
+ 
+     virtual ~wxFSWatchEntryMSW()
+     {
+         wxLogTrace(wxTRACE_FSWATCHER, "Deleting entry '%s'", m_path);
+-
+-        if (m_handle != INVALID_HANDLE_VALUE)
++        if (HasValidHandle())
+         {
+-            if (!CloseHandle(m_handle))
++            if (!CloseHandle())
+             {
+                 wxLogSysError(_("Unable to close the handle for '%s'"),
+                                 m_path);
+             }
++        }        
++        if (!CanDelete()) {
++            wxLogTrace(wxTRACE_FSWATCHER, "Destroying watch still in use ('%s')", m_path);
+         }
+-        delete m_overlapped;
++        delete m_overlapped;    
+     }
+ 
+-    bool IsOk() const
++    HANDLE GetHandle()
+     {
+-        return m_handle != INVALID_HANDLE_VALUE;
++        return m_handle;
+     }
+ 
+-    HANDLE GetHandle() const
++    bool CloseHandle()
+     {
+-        return m_handle;
++        wxCriticalSection cs;
++        wxCriticalSectionLocker csl(cs);
++
++        if (!HasValidHandle())
++            return false;
++        if (::CloseHandle(m_handle)) {
++            m_handle = INVALID_HANDLE_VALUE;
++            return true;
++        }
++        return false;
+     }
+ 
++    bool HasValidHandle() const
++    {
++       return m_handle != INVALID_HANDLE_VALUE;
++    }
++
++    bool HasIoCompleted() const
++    {
++        return HasOverlappedIoCompleted(m_overlapped);
++    }
++
++    bool CanDelete() const
++    {
++        return (!HasValidHandle() && HasIoCompleted());
++    }
++
++    void SetDeletePending()
++    {
++        m_deletePending = true;
++    }
++
++    bool HasDeletePending() const
++    {
++        return m_deletePending;
++    }
++
+     void* GetBuffer()
+     {
+         return m_buffer;
+     }
+ 
+-    OVERLAPPED* GetOverlapped() const
++    OVERLAPPED* GetOverlapped() 
+     {
+         return m_overlapped;
+-    }
+-
++    }    
++    
+ private:
+     // opens dir with all flags, attributes etc. necessary to be later
+     // asynchronous watched with ReadDirectoryChangesW
+@@ -100,6 +138,7 @@
+     HANDLE m_handle;             // handle to opened directory
+     char m_buffer[BUFFER_SIZE];  // buffer for fs events
+     OVERLAPPED* m_overlapped;
++    bool m_deletePending;
+ 
+     wxDECLARE_NO_COPY_CLASS(wxFSWatchEntryMSW);
+ };
+@@ -116,25 +155,27 @@
+         m_iocp(INVALID_HANDLE_VALUE)
+     {
+         Init();
++        
++        // the list is to call delete on its items when erasing them
++        m_removedWatches.DeleteContents(true); 
+     }
+ 
+     ~wxIOCPService()
+-    {
++    {        
+         if (m_iocp != INVALID_HANDLE_VALUE)
+         {
+             if (!CloseHandle(m_iocp))
+             {
+                 wxLogSysError(_("Unable to close I/O completion port handle"));
+             }
+-        }
+-        m_watches.clear();
++        }     
+     }
+ 
+     // associates a wxFSWatchEntryMSW with completion port
+     bool Add(wxSharedPtr<wxFSWatchEntryMSW> watch)
+     {
+         wxCHECK_MSG( m_iocp != INVALID_HANDLE_VALUE, false, "IOCP not init" );
+-        wxCHECK_MSG( watch->IsOk(), false, "Invalid watch" );
++        wxCHECK_MSG( watch->HasValidHandle(), false, "Invalid watch" );
+ 
+         // associate with IOCP
+         HANDLE ret = CreateIoCompletionPort(watch->GetHandle(), m_iocp,
+@@ -150,12 +191,64 @@
+             wxFAIL_MSG(_("Unexpectedly new I/O completion port was created"));
+             return false;
+         }
+-
++        
+         // add to watch map
+         wxFSWatchEntries::value_type val(watch->GetPath(), watch);
+         return m_watches.insert(val).second;
+     }
+ 
++    bool Remove(wxSharedPtr<wxFSWatchEntryMSW> watch)
++    {                        
++        wxCHECK_MSG(m_iocp != INVALID_HANDLE_VALUE, false, "IOCP not init");
++        wxCHECK_MSG(watch->HasValidHandle(), false, "Invalid watch" );
++        
++        wxFSWatchEntries::iterator it = m_watches.find(watch->GetPath());
++        wxCHECK_MSG(it != m_watches.end(), false,
++                wxString::Format("Path '%s' is not watched", watch->GetPath()));        
++
++        // we can't just delete the watch here. It can be still used by the system
++        // or its addressed can be referenced to in wxIOCPThread::ReadEvents() (we send its address as a completion key)
++        // we have to employ delayed delete, we delete the watch for real once wxIOCPThread::ReadEvents() tell us
++        // it's safe to do so by calling Delete()
++
++        wxSharedPtr<wxFSWatchEntryMSW> *pWatch = new wxSharedPtr<wxFSWatchEntryMSW>(watch);
++        if (!pWatch) { // failed to allocate object needed for delayed delete            
++            wxLogTrace(wxTRACE_FSWATCHER, "Failed to allocate entry for a removed watch ('%s')", watch->GetPath());
++            return false;
++        }
++        
++        if (!watch->CloseHandle()) { 
++            wxLogTrace(wxTRACE_FSWATCHER, "Failed to close the watch's handle('%s')", pWatch->get()->GetPath());
++            delete pWatch;            
++            return false;
++        }        
++        watch->SetDeletePending();
++        m_watches.erase(it);
++        m_removedWatches.push_back(pWatch);
++        
++        return true;
++    }
++
++    bool Delete(wxFSWatchEntryMSW* watch)
++    {
++        wxSharedPtr<wxFSWatchEntryMSW>* pWatch;
++        wxFSWatchRemovedEntries::iterator it = m_removedWatches.begin();        
++
++        while (it != m_removedWatches.end()) {           
++           pWatch = *it;
++           if (pWatch->get() == watch) {
++               wxCHECK_MSG(watch->HasDeletePending(), false, "Attempted to purge a watch that hasn't been removed"); 
++               wxCHECK_MSG(watch->CanDelete(), false, "Attempted to purge a watch that can't be deleted");                               
++               m_removedWatches.erase(it++); 
++               return true;               
++           } else {
++                ++it;           
++           }
++        }
++        return false;
++    }
++    
++
+     // post completion packet
+     bool PostEmptyStatus()
+     {
+@@ -166,7 +259,6 @@
+         {
+             wxLogSysError(_("Unable to post completion status"));
+         }
+-
+         return ret != 0;
+     }
+ 
+@@ -183,14 +275,18 @@
+                      "Null out parameter 'overlapped'");
+ 
+         int ret = GetQueuedCompletionStatus(m_iocp, count, (ULONG_PTR *)watch,
+-                                            overlapped, INFINITE);
+-        if (!ret)
+-        {
+-            wxLogSysError(_("Unable to dequeue completion packet"));
++                                            overlapped, INFINITE);        
++        if (!ret) {
++            wxLogSysError(_("Unable to dequeue completion packet"));                        
+         }
+         return ret != 0;
+     }
+ 
++    wxCriticalSection& GetCriticalSection()
++    {
++        return m_criticalSection;
++    }
++        
+ protected:
+     bool Init()
+     {
+@@ -201,9 +297,11 @@
+         }
+         return m_iocp != NULL;
+     }
+-
++    
+     HANDLE m_iocp;
+     wxFSWatchEntries m_watches;
++    wxFSWatchRemovedEntries m_removedWatches;    
++    wxCriticalSection m_criticalSection;
+ };
+ 
+ 
+Index: include/wx/private/fswatcher.h
+===================================================================
+--- include/wx/private/fswatcher.h	(revision 66853)
++++ include/wx/private/fswatcher.h	(working copy)
+@@ -27,6 +27,7 @@
+     class wxFSWatchEntryMSW;
+     #define wxFSWatchEntry wxFSWatchEntryMSW
+     WX_DECLARE_STRING_HASH_MAP(wxSharedPtr<wxFSWatchEntry>,wxFSWatchEntries);
++    WX_DECLARE_LIST(wxSharedPtr<wxFSWatchEntry>,wxFSWatchRemovedEntries);
+     #include "wx/msw/private/fswatcher.h"
+ #else
+     #define wxFSWatchEntry wxFSWatchEntryPolling
+Index: samples/fswatcher/fswatcher.cpp
+===================================================================
+--- samples/fswatcher/fswatcher.cpp	(revision 66853)
++++ samples/fswatcher/fswatcher.cpp	(working copy)
+@@ -37,6 +37,11 @@
+     bool CreateWatcherIfNecessary();
+ 
+ private:
++    wxListView* m_filesList;        
++    wxTextCtrl* m_evtConsole;
++
++    wxFileSystemWatcher* m_watcher;   // file system watcher  
++    
+     // file system watcher creation
+     void CreateWatcher();
+ 
+@@ -48,18 +53,16 @@
+ 
+     void OnAdd(wxCommandEvent& event);
+     void OnRemove(wxCommandEvent& event);
++    void OnRemoveAll(wxCommandEvent& event);
+ 
++    void OnUpdateUIAdd(wxUpdateUIEvent& event);
++    void OnUpdateUIRemove(wxUpdateUIEvent& event);
++    void OnUpdateUIRemoveAll(wxUpdateUIEvent& event);    
++
+     void OnFileSystemEvent(wxFileSystemWatcherEvent& event);
+-    void LogEvent(const wxFileSystemWatcherEvent& event);
+-
+-    wxTextCtrl *m_evtConsole;         // events console
+-    wxListView *m_filesList;          // list of watched paths
+-    wxFileSystemWatcher* m_watcher;   // file system watcher
+-
+-    const static wxString LOG_FORMAT; // how to format events
++    void LogEvent(const wxFileSystemWatcherEvent& event);    
+ };
+ 
+-const wxString MyFrame::LOG_FORMAT = " %-12s %-36s    %-36s";
+ 
+ // Define a new application type, each program should derive a class from wxApp
+ class MyApp : public wxApp
+@@ -68,7 +71,7 @@
+     // 'Main program' equivalent: the program execution "starts" here
+     virtual bool OnInit()
+     {
+-        if ( !wxApp::OnInit() )
++        if (!wxApp::OnInit())
+             return false;
+ 
+         wxLog::AddTraceMask("EventSource");
+@@ -77,16 +80,15 @@
+         // create the main application window
+         m_frame = new MyFrame("File System Watcher wxWidgets App");
+ 
+-        // If we returned false here, the application would exit immediately.
+         return true;
+     }
+ 
+     // create the file system watcher here, because it needs an active loop
+     virtual void OnEventLoopEnter(wxEventLoopBase* WXUNUSED(loop))
+     {
+-        if ( m_frame->CreateWatcherIfNecessary() )
++        if (m_frame->CreateWatcherIfNecessary())
+         {
+-            if ( !m_dirToWatch.empty() )
++            if (!m_dirToWatch.empty())
+                 m_frame->AddDirectory(m_dirToWatch);
+         }
+     }
+@@ -101,10 +103,10 @@
+ 
+     virtual bool OnCmdLineParsed(wxCmdLineParser& parser)
+     {
+-        if ( !wxApp::OnCmdLineParsed(parser) )
++        if (!wxApp::OnCmdLineParsed(parser))
+             return false;
+ 
+-        if ( parser.GetParamCount() )
++        if (parser.GetParamCount())
+             m_dirToWatch = parser.GetParam();
+ 
+         return true;
+@@ -141,10 +143,12 @@
+     {
+         MENU_ID_QUIT = wxID_EXIT,
+         MENU_ID_CLEAR = wxID_CLEAR,
+-        MENU_ID_WATCH = 101,
++        
++        MENU_ID_WATCH =  wxID_HIGHEST + 1,        
+ 
+-        BTN_ID_ADD = 200,
+-        BTN_ID_REMOVE = 201,
++        BTN_ID_ADD,
++        BTN_ID_REMOVE,
++        BTN_ID_REMOVE_ALL,
+     };
+ 
+     // ================================================================
+@@ -157,10 +161,10 @@
+     menuFile->Append(MENU_ID_QUIT, "E&xit\tAlt-X", "Quit this program");
+ 
+     // "Watch" menu
+-    wxMenu *menuMon = new wxMenu;
+-    wxMenuItem* it = menuMon->AppendCheckItem(MENU_ID_WATCH, "&Watch\tCtrl-W");
++    wxMenu *menuWatch = new wxMenu;
++    wxMenuItem* it = menuWatch->AppendCheckItem(MENU_ID_WATCH, "&Watch\tCtrl-W");
+     // started by default, because file system watcher is started by default
+-    it->Check(true);
++    it->Check(true);        
+ 
+     // the "About" item should be in the help menu
+     wxMenu *menuHelp = new wxMenu;
+@@ -169,93 +173,89 @@
+     // now append the freshly created menu to the menu bar...
+     wxMenuBar *menuBar = new wxMenuBar();
+     menuBar->Append(menuFile, "&File");
+-    menuBar->Append(menuMon, "&Watch");
++    menuBar->Append(menuWatch, "&Watch");
+     menuBar->Append(menuHelp, "&Help");
+ 
+     // ... and attach this menu bar to the frame
+     SetMenuBar(menuBar);
+ 
+-    // ================================================================
+-    // upper panel
+-
+-    // panel
+-    wxPanel *panel = new wxPanel(this);
+-    wxSizer *panelSizer = new wxGridSizer(2);
+-    wxBoxSizer *leftSizer = new wxBoxSizer(wxVERTICAL);
+-
+-    // label
+-    wxStaticText* label = new wxStaticText(panel, wxID_ANY, "Watched paths");
+-    leftSizer->Add(label, wxSizerFlags().Center().Border(wxALL));
+-
+-    // list of files
++    SetSizeHints(wxSize(-1,-1), wxDefaultSize);
++	
++	wxBoxSizer* frameSizer;
++	frameSizer = new wxBoxSizer(wxVERTICAL);
++	
++	wxPanel* panel = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxSize(-1,-1), wxTAB_TRAVERSAL);
++	wxBoxSizer* panelSizer;
++	panelSizer = new wxBoxSizer(wxVERTICAL);
++		
++    wxStaticBoxSizer* pathsSizer;	
++    pathsSizer= new wxStaticBoxSizer(wxHORIZONTAL, panel, "Watched paths");
+     m_filesList = new wxListView(panel, wxID_ANY, wxPoint(-1,-1),
+-                                 wxSize(300,200), wxLC_LIST | wxLC_SINGLE_SEL);
+-    leftSizer->Add(m_filesList, wxSizerFlags(1).Expand());
+-
+-    // buttons
+-    wxButton* buttonAdd = new wxButton(panel, BTN_ID_ADD, "&Add");
+-    wxButton* buttonRemove = new wxButton(panel, BTN_ID_REMOVE, "&Remove");
+-    wxSizer *btnSizer = new wxGridSizer(2);
+-    btnSizer->Add(buttonAdd, wxSizerFlags().Center().Border(wxALL));
+-    btnSizer->Add(buttonRemove, wxSizerFlags().Center().Border(wxALL));
+-
+-    // and put it all together
+-    leftSizer->Add(btnSizer, wxSizerFlags(0).Expand());
+-    panelSizer->Add(leftSizer, wxSizerFlags(1).Expand());
+-    panel->SetSizerAndFit(panelSizer);
+-
+-    // ================================================================
+-    // lower panel
+-
+-    wxTextCtrl *headerText = new wxTextCtrl(this, wxID_ANY, "",
+-                                            wxDefaultPosition, wxDefaultSize,
+-                                            wxTE_READONLY);
+-    wxString h = wxString::Format(LOG_FORMAT, "event", "path", "new path");
+-    headerText->SetValue(h);
+-
+-    // event console
+-    m_evtConsole = new wxTextCtrl(this, wxID_ANY, "",
+-                               wxDefaultPosition, wxSize(200,200),
+-                               wxTE_MULTILINE|wxTE_READONLY|wxHSCROLL);
+-
+-    // set monospace font to have output in nice columns
+-    wxFont font(9, wxFONTFAMILY_TELETYPE,
+-                wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL);
+-    headerText->SetFont(font);
++                                 wxSize(300,100), wxLC_LIST | wxLC_SINGLE_SEL);
++    pathsSizer->Add(m_filesList, 1, wxEXPAND, 2);
++	
++	wxBoxSizer* buttonSizer;
++	buttonSizer = new wxBoxSizer(wxVERTICAL);
++	
++	wxButton* buttonAdd;
++    buttonAdd = new wxButton(panel, BTN_ID_ADD, wxT("&Add..."), wxDefaultPosition, wxDefaultSize, 0);
++	buttonSizer->Add(buttonAdd, 0, wxALL, 5);
++	
++	wxButton* buttonRemove;
++    buttonRemove = new wxButton(panel, BTN_ID_REMOVE, wxT("&Remove"), wxDefaultPosition, wxDefaultSize, 0);
++	buttonSizer->Add(buttonRemove, 0, wxALL, 5);
++	
++	wxButton* buttonRemoveAll;
++    buttonRemoveAll = new wxButton(panel, BTN_ID_REMOVE_ALL, wxT("Remove A&ll"), wxDefaultPosition, wxDefaultSize, 0);
++	buttonSizer->Add(buttonRemoveAll, 0, wxALL, 5);
++	
++	pathsSizer->Add(buttonSizer, 0, wxALIGN_BOTTOM, 5);
++	
++	panelSizer->Add(pathsSizer, 1, wxEXPAND|wxFIXED_MINSIZE, 5);
++		
++    wxStaticBoxSizer* eventsSizer;
++    eventsSizer= new wxStaticBoxSizer(wxVERTICAL, panel, "Generated file change events");
++	
++	
++	m_evtConsole = new wxTextCtrl(panel, wxID_ANY, wxEmptyString, 
++        wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE|wxTE_READONLY|wxHSCROLL);
++	wxFont font(9, wxFONTFAMILY_TELETYPE, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL);   
+     m_evtConsole->SetFont(font);
++    eventsSizer->Add(m_evtConsole, 2, wxALL|wxEXPAND, 5);
++	
++	panelSizer->Add(eventsSizer, 2, wxEXPAND, 5);
++	
++	panel->SetSizerAndFit(panelSizer);
++	panel->Layout();
++	panelSizer->Fit(panel);
++	frameSizer->Add(panel, 1, wxEXPAND|wxFIXED_MINSIZE, 5);
++		
++    SetSizerAndFit(frameSizer);
++    Layout();
+ 
+-    // ================================================================
+-    // laying out whole frame
+ 
+-    wxBoxSizer *sizer = new wxBoxSizer(wxVERTICAL);
+-    sizer->Add(panel, wxSizerFlags(1).Expand());
+-    sizer->Add(headerText, wxSizerFlags().Expand());
+-    sizer->Add(m_evtConsole, wxSizerFlags(1).Expand());
+-    SetSizerAndFit(sizer);
+-
+     // set size and position on screen
+-    SetSize(800, 600);
++    SetSize(700, 300);
+     CentreOnScreen();
+ 
+     // ================================================================
+     // event handlers & show
+ 
+     // menu
+-    Connect(MENU_ID_CLEAR, wxEVT_COMMAND_MENU_SELECTED,
+-            wxCommandEventHandler(MyFrame::OnClear));
+-    Connect(MENU_ID_QUIT, wxEVT_COMMAND_MENU_SELECTED,
+-            wxCommandEventHandler(MyFrame::OnQuit));
+-    Connect(MENU_ID_WATCH, wxEVT_COMMAND_MENU_SELECTED,
+-            wxCommandEventHandler(MyFrame::OnWatch));
+-    Connect(wxID_ABOUT, wxEVT_COMMAND_MENU_SELECTED,
+-            wxCommandEventHandler(MyFrame::OnAbout));
++    Bind(wxEVT_COMMAND_MENU_SELECTED, &MyFrame::OnClear, this, MENU_ID_CLEAR);
++    Bind(wxEVT_COMMAND_MENU_SELECTED, &MyFrame::OnQuit, this, MENU_ID_QUIT);
++    Bind(wxEVT_COMMAND_MENU_SELECTED, &MyFrame::OnWatch, this, MENU_ID_WATCH);
++    Bind(wxEVT_COMMAND_MENU_SELECTED, &MyFrame::OnAbout, this, wxID_ABOUT);
+ 
+     // buttons
+-    Connect(BTN_ID_ADD, wxEVT_COMMAND_BUTTON_CLICKED,
+-            wxCommandEventHandler(MyFrame::OnAdd));
+-    Connect(BTN_ID_REMOVE, wxEVT_COMMAND_BUTTON_CLICKED,
+-            wxCommandEventHandler(MyFrame::OnRemove));
++    buttonAdd->Bind(wxEVT_COMMAND_BUTTON_CLICKED, &MyFrame::OnAdd, this);    
++    buttonRemove->Bind(wxEVT_COMMAND_BUTTON_CLICKED, &MyFrame::OnRemove, this);
++    buttonRemoveAll->Bind(wxEVT_COMMAND_BUTTON_CLICKED, &MyFrame::OnRemoveAll, this);
+ 
++    buttonAdd->Bind(wxEVT_UPDATE_UI, &MyFrame::OnUpdateUIAdd, this);    
++    buttonRemove->Bind(wxEVT_UPDATE_UI, &MyFrame::OnUpdateUIRemove, this);    
++    buttonRemoveAll->Bind(wxEVT_UPDATE_UI, &MyFrame::OnUpdateUIRemoveAll, this);    
++        
+     // and show itself (the frames, unlike simple controls, are not shown when
+     // created initially)
+     Show(true);
+@@ -271,18 +271,17 @@
+     if (m_watcher)
+         return false;
+ 
+-    CreateWatcher();
+-    Connect(wxEVT_FSWATCHER,
+-            wxFileSystemWatcherEventHandler(MyFrame::OnFileSystemEvent));
+-
++    CreateWatcher();    
+     return true;
+ }
+ 
+ void MyFrame::CreateWatcher()
+ {
+-    wxCHECK_RET(!m_watcher, "Watcher already initialized");
++    if (m_watcher)
++        return;
+     m_watcher = new wxFileSystemWatcher();
+-    m_watcher->SetOwner(this);
++
++    m_watcher->Bind(wxEVT_FSWATCHER, &MyFrame::OnFileSystemEvent, this);    
+ }
+ 
+ // ============================================================================
+@@ -304,15 +303,14 @@
+     wxLogDebug("%s start=%d", __WXFUNCTION__, event.IsChecked());
+ 
+     if (event.IsChecked())
+-    {
+-        wxCHECK_RET(!m_watcher, "Watcher already initialized");
+-        CreateWatcher();
++    {        
++        CreateWatcherIfNecessary();
+     }
+     else
+-    {
+-        wxCHECK_RET(m_watcher, "Watcher not initialized");
++    {        
+         m_filesList->DeleteAllItems();
+-        wxDELETE(m_watcher);
++        if (m_watcher)
++            wxDELETE(m_watcher);
+     }
+ }
+ 
+@@ -323,7 +321,7 @@
+     // TODO account for adding the files as well
+     const wxString& dir = wxDirSelector("Choose a folder to watch", "",
+                                     wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+-    if ( dir.empty() )
++    if (dir.empty())
+         return;
+ 
+     AddDirectory(dir);
+@@ -331,6 +329,8 @@
+ 
+ void MyFrame::AddDirectory(const wxString& dir)
+ {
++    wxCHECK_RET(m_watcher, "Watcher not initialized");
++
+     wxLogDebug("Adding directory: '%s'", dir);
+ 
+     if (!m_watcher->Add(wxFileName::DirName(dir), wxFSW_EVENT_ALL))
+@@ -339,13 +339,15 @@
+     }
+     else
+     {
+-        m_filesList->InsertItem(m_filesList->GetItemCount(), dir);
++        m_filesList->InsertItem(m_filesList->GetItemCount(), dir);        
++        m_filesList->Select(m_filesList->GetItemCount()-1, true);
+     }
+ }
+ 
+ void MyFrame::OnRemove(wxCommandEvent& WXUNUSED(event))
+ {
+     wxCHECK_RET(m_watcher, "Watcher not initialized");
++    
+     long idx = m_filesList->GetFirstSelected();
+     if (idx == -1)
+         return;
+@@ -353,16 +355,54 @@
+     wxString path = m_filesList->GetItemText(idx);
+ 
+     // TODO we know it is a dir, but it doesn't have to be
+-    if (!m_watcher->Remove(wxFileName::DirName(path)))
+-    {
++    if (!m_watcher->Remove(wxFileName::DirName(path)))  {
+         wxLogError("Error removing '%s' from watched paths", path);
++    } else {
++        m_filesList->DeleteItem(idx);
++        if (m_filesList->GetItemCount() > 0) {
++            if (idx > m_filesList->GetItemCount() - 1) {
++                idx--;
++            }
++            m_filesList->Select(idx, true);
++        }        
+     }
+-    else
++}
++
++void MyFrame::OnRemoveAll(wxCommandEvent& WXUNUSED(event))
++{
++    wxCHECK_RET(m_watcher, "Watcher not initialized");
++
++    int watchedCount = m_watcher->GetWatchedPathsCount();
++    m_filesList->ClearAll();
++    if (!m_watcher->RemoveAll())
+     {
+-        m_filesList->DeleteItem(idx);
++        wxArrayString paths;
++
++        m_watcher->GetWatchedPaths(&paths);       
++        for (size_t i = 0; i < paths.size(); i++) {
++            m_filesList->InsertItem(m_filesList->GetItemCount(), paths[i]);        
++        }
++        wxLogError("Some of watched paths couldn't be removed, removed only %d out of %d originally watched", 
++            watchedCount - paths.size(), watchedCount);
+     }
+ }
+ 
++void MyFrame::OnUpdateUIAdd(wxUpdateUIEvent& event)
++{
++    event.Enable(m_watcher != NULL);
++}
++
++void MyFrame::OnUpdateUIRemove(wxUpdateUIEvent& event)
++{    
++    event.Enable(m_watcher != NULL && m_filesList->GetFirstSelected() != -1);
++}
++
++void MyFrame::OnUpdateUIRemoveAll(wxUpdateUIEvent& event)
++{    
++    event.Enable(m_watcher != NULL && m_watcher->GetWatchedPathsCount() > 0);
++}
++
++
+ void MyFrame::OnFileSystemEvent(wxFileSystemWatcherEvent& event)
+ {
+     // TODO remove when code is rock-solid
+@@ -370,31 +410,34 @@
+     LogEvent(event);
+ }
+ 
+-
+-static wxString GetFSWEventChangeTypeName(int changeType)
+-{
+-    switch (changeType)
+-    {
+-    case wxFSW_EVENT_CREATE:
+-        return "CREATE";
+-    case wxFSW_EVENT_DELETE:
+-        return "DELETE";
+-    case wxFSW_EVENT_RENAME:
+-        return "RENAME";
+-    case wxFSW_EVENT_MODIFY:
+-        return "MODIFY";
+-    case wxFSW_EVENT_ACCESS:
+-        return "ACCESS";
+-    }
+-
+-    return "INVALID_TYPE";
+-}
+-
+ void MyFrame::LogEvent(const wxFileSystemWatcherEvent& event)
+-{
+-    wxString entry = wxString::Format(LOG_FORMAT + "\n",
+-                            GetFSWEventChangeTypeName(event.GetChangeType()),
+-                            event.GetPath().GetFullPath(),
+-                            event.GetNewPath().GetFullPath());
++{    
++    wxString entry;
++    
++    switch (event.GetChangeType()) {
++        case wxFSW_EVENT_CREATE:
++            entry.Printf("%-8s '%s'\n", "CREATE", event.GetPath().GetFullPath()); 
++            break;
++        case wxFSW_EVENT_DELETE:
++            entry.Printf("%-8s '%s'\n","DELETE", event.GetPath().GetFullPath()); 
++            break;
++        case wxFSW_EVENT_RENAME:
++            entry.Printf("%-8s '%s' --> '%s'\n", "RENAME", event.GetPath().GetFullPath(), event.GetNewPath().GetFullPath()); 
++            break;
++        case wxFSW_EVENT_MODIFY:
++            entry.Printf("%-8s '%s'\n", "MODIFY", event.GetPath().GetFullPath()); 
++            break;
++        case wxFSW_EVENT_ACCESS:
++            entry.Printf("%-8s '%s'\n", "ACCESS", event.GetPath().GetFullPath()); 
++            break;            
++        case wxFSW_EVENT_WARNING:
++            entry.Printf("%-8s %s '%s'\n", "WARNING", event.GetErrorDescription(), event.GetPath().GetFullPath()); 
++            break;            
++        case wxFSW_EVENT_ERROR:
++            entry.Printf("%-8s %s '%s'\n", "ERROR", event.GetErrorDescription(), event.GetPath().GetFullPath()); 
++            break;            
++        default:
++            wxFAIL_MSG("Unknown file change event type");
++    }        
+     m_evtConsole->AppendText(entry);
+ }
+Index: src/common/fswatchercmn.cpp
+===================================================================
+--- src/common/fswatchercmn.cpp	(revision 66853)
++++ src/common/fswatchercmn.cpp	(working copy)
+@@ -40,6 +40,10 @@
+         return "MODIFY";
+     case wxFSW_EVENT_ACCESS:
+         return "ACCESS";
++    case wxFSW_EVENT_WARNING:
++        return "WARNING";
++    case wxFSW_EVENT_ERROR:
++        return "ERROR";
+     }
+ 
+     // should never be reached!
+@@ -110,13 +114,16 @@
+     wxFSWatchInfoMap::iterator it = m_watches.find(canonical);
+     wxCHECK_MSG(it != m_watches.end(), false,
+                 wxString::Format("Path '%s' is not watched", canonical));
+-
+-    // remove from watch-list
++      
+     wxFSWatchInfo watch = it->second;
+-    m_watches.erase(it);
+-
+     // remove in a platform specific way
+-    return m_service->Remove(watch);
++    if (m_service->Remove(watch)) {
++        // remove from watch-list  
++        m_watches.erase(it);
++        return true;
++    }
++    
++    return false;
+ }
+ 
+ bool wxFileSystemWatcherBase::AddTree(const wxFileName& path, int events,
+@@ -204,11 +211,23 @@
+     return true;
+ }
+ 
++// returns true when all the watches have been successfully removed
++// returns false when even a single watch couldn't be removed
+ bool wxFileSystemWatcherBase::RemoveAll()
+ {
+-    m_service->RemoveAll();
+-    m_watches.clear();
+-    return true;
++    if (!m_watches.empty()) {                
++        wxFSWatchInfoMap::iterator it = m_watches.begin();        
++
++        while (it != m_watches.end()) {
++            wxFSWatchInfo watch = it->second;            
++            if (m_service->Remove(watch)) {
++                m_watches.erase(it++);
++            } else {
++                ++it;
++            }
++        }                
++    }    
++    return m_watches.empty();
+ }
+ 
+ int wxFileSystemWatcherBase::GetWatchedPathsCount() const
+Index: src/msw/fswatcher.cpp
+===================================================================
+--- src/msw/fswatcher.cpp	(revision 66853)
++++ src/msw/fswatcher.cpp	(working copy)
+@@ -24,6 +24,11 @@
+ #include "wx/msw/private.h"
+ #include "wx/private/fswatcher.h"
+ 
++// keeps removed watches for delayed deleting 
++#include <wx/listimpl.cpp>
++WX_DEFINE_LIST(wxFSWatchRemovedEntries);
++
++
+ // ============================================================================
+ // wxFSWatcherImplMSW implementation
+ // ============================================================================
+@@ -37,7 +42,7 @@
+ 
+     bool SetUpWatch(wxFSWatchEntryMSW& watch);
+ 
+-    void SendEvent(wxFileSystemWatcherEvent& evt);
++    void SendEvent(wxFileSystemWatcherEvent& evt);    
+ 
+ protected:
+     bool Init();
+@@ -45,7 +50,9 @@
+     // adds watch to be monitored for file system changes
+     virtual bool DoAdd(wxSharedPtr<wxFSWatchEntryMSW> watch);
+ 
+-    virtual bool DoRemove(wxSharedPtr<wxFSWatchEntryMSW> watch);
++    virtual bool Remove(const wxFSWatchInfo& winfo);
++    virtual bool DoRemove(wxSharedPtr<wxFSWatchEntryMSW> watch);    
++    virtual bool RemoveAll();
+ 
+ private:
+     bool DoSetUpWatch(wxFSWatchEntryMSW& watch);
+@@ -64,15 +71,14 @@
+ 
+ wxFSWatcherImplMSW::~wxFSWatcherImplMSW()
+ {
+-    // order the worker thread to finish & wait
++    // order the worker thread to finish & wait    
+     m_workerThread.Finish();
+     if (m_workerThread.Wait() != 0)
+     {
+         wxLogError(_("Ungraceful worker thread termination"));
+     }
+-
+     // remove all watches
+-    (void) RemoveAll();
++    RemoveAll();
+ }
+ 
+ bool wxFSWatcherImplMSW::Init()
+@@ -107,16 +113,55 @@
+     return m_iocp.Add(watch);
+ }
+ 
++// differs from the ancestor implementation
++// in that the watch is removed from m_watches only 
++// if the delegated call succeeds
++bool wxFSWatcherImplMSW::Remove(const wxFSWatchInfo& winfo)
++ {
++    wxCriticalSectionLocker lock(m_iocp.GetCriticalSection());
++     
++    wxFSWatchEntries::iterator it = m_watches.find(winfo.GetPath());
++    wxCHECK_MSG( it != m_watches.end(), false, "Path '%s' is not watched");
++
++    wxSharedPtr<wxFSWatchEntry> watch = it->second;
++    if (DoRemove(watch)) {        
++        m_watches.erase(it);        
++        return true;
++    }
++    return false;
++}
++
+ bool
+-wxFSWatcherImplMSW::DoRemove(wxSharedPtr<wxFSWatchEntryMSW> WXUNUSED(watch))
++wxFSWatcherImplMSW::DoRemove(wxSharedPtr<wxFSWatchEntryMSW> watch)
++{        
++    return m_iocp.Remove(watch);    
++}
++
++// returns true when all the watches have been successfully removed
++// returns false when even a single watch couldn't be removed
++bool wxFSWatcherImplMSW::RemoveAll()
+ {
+-    return true;
++    wxCriticalSectionLocker lock(m_iocp.GetCriticalSection());    
++    
++    if (!m_watches.empty()) {                
++        wxFSWatchEntries::iterator it = m_watches.begin();        
++
++        while (it != m_watches.end()) {            
++            if (DoRemove(it->second)) {                
++                m_watches.erase(it++); 
++            } else {
++                ++it;
++            }
++        }                
++    }    
++    return m_watches.empty();
+ }
+ 
+ // TODO ensuring that we have not already set watch for this handle/dir?
+ bool wxFSWatcherImplMSW::SetUpWatch(wxFSWatchEntryMSW& watch)
+ {
+-    wxCHECK_MSG( watch.IsOk(), false, "Invalid watch" );
++    wxCHECK_MSG(watch.HasValidHandle(), false, "Invalid watch" );
++    wxCHECK_MSG(!watch.HasDeletePending(), false, "Removed watch" );
+     if (m_watches.find(watch.GetPath()) == m_watches.end())
+     {
+         wxLogTrace(wxTRACE_FSWATCHER, "Path '%s' is not watched",
+@@ -128,6 +173,7 @@
+     return DoSetUpWatch(watch);
+ }
+ 
++
+ void wxFSWatcherImplMSW::SendEvent(wxFileSystemWatcherEvent& evt)
+ {
+     // called from worker thread, so posting event in thread-safe way
+@@ -135,17 +181,18 @@
+ }
+ 
+ bool wxFSWatcherImplMSW::DoSetUpWatch(wxFSWatchEntryMSW& watch)
+-{
++{    
+     int flags = Watcher2NativeFlags(watch.GetFlags());
+-    int ret = ReadDirectoryChangesW(watch.GetHandle(), watch.GetBuffer(),
+-                                    wxFSWatchEntryMSW::BUFFER_SIZE, TRUE,
+-                                    flags, NULL,
+-                                    watch.GetOverlapped(), NULL);
++    int ret = ReadDirectoryChangesW(watch.GetHandle(), 
++                watch.GetBuffer(), wxFSWatchEntryMSW::BUFFER_SIZE, 
++                FALSE, flags, 
++                NULL, watch.GetOverlapped(), NULL);
+     if (!ret)
+     {
+         wxLogSysError(_("Unable to set up watch for '%s'"),
+-                        watch.GetPath());
+-    }
++                        watch.GetPath());        
++        wxLogTrace(wxTRACE_FSWATCHER, "[iocp] Unable to set up watch for '%s'", watch.GetPath());
++    }           
+ 
+     return ret != 0;
+ }
+@@ -189,7 +236,6 @@
+ 
+     // read events in a loop until we get false, which means we should exit
+     while ( ReadEvents() );
+-
+     wxLogTrace(wxTRACE_FSWATCHER, "[iocp] Ended IOCP thread");
+     return (ExitCode)0;
+ }
+@@ -202,42 +248,83 @@
+     unsigned long count = 0;
+     wxFSWatchEntryMSW* watch = NULL;
+     OVERLAPPED* overlapped = NULL;
+-    if (!m_iocp->GetStatus(&count, &watch, &overlapped))
+-        return true; // error was logged already, we don't want to exit
++    
++    bool result = m_iocp->GetStatus(&count, &watch, &overlapped);
++                        
++    wxCriticalSectionLocker locker(m_iocp->GetCriticalSection());    
+ 
++    if (!result) { // assuming we know the watch, shouldn't we attempt to reissue the watch again instead of returning? :S
++        // OK we notified the user in m_iocp->GetStatus(), now we have to tell the programmer            
++        // that something went wrong, can happen if e.g. user attempts to delete a watched directory        
++        wxFileSystemWatcherEvent evt(wxFSW_EVENT_ERROR, "GetQueuedCompletionStatus failed");
++        if (overlapped && watch) { // we have a valid watch
++            if (watch->HasDeletePending()) {  // watch has been removed                        
++                m_iocp->Delete(watch); // now it's safe to really delete 
++                return true; // don't bother reporting problems with removed watch
++            }
++            if ((watch->GetFlags() & wxFSW_EVENT_ERROR) == 0) // the programmer is not interested in receiving error events
++                return true; 
++            evt.SetPath(watch->GetPath());
++        }
++        // lets send the error event even if we don't know what watch failed         
++        // it might be general problem with completion port
++        SendEvent(evt);
++
++        return true; // don't exit the worker thread
++    }        
++
+     // this is our exit condition, so we return false
+     if (!count && !watch && !overlapped)
+         return false;
+-
+-    // in case of spurious wakeup
+-    if (!count || !watch)
++    
++    wxCHECK_MSG(watch, true, "ReadEvents called with NULL watch");
++    
++    if (watch->HasDeletePending()) {  // watch has been removed                
++        m_iocp->Delete(watch); // now it's safe to really delete it
+         return true;
++    }                
++    
++    if (count == 0) { // watch has a valid handle, it means it was a buffer overflow
++        wxLogTrace(wxTRACE_FSWATCHER, "[iocp] Buffer overflow, full directory rescan needed for path='%s'", watch->GetPath());
++        // notify the programmer                        
++        if (watch->GetFlags() & wxFSW_EVENT_WARNING) {
++            wxFileSystemWatcherEvent evt(wxFSW_EVENT_WARNING, "Full directory rescan needed");
+ 
+-    wxLogTrace( wxTRACE_FSWATCHER, "[iocp] Read entry: path='%s'",
+-                watch->GetPath());
++            evt.SetPath(watch->GetPath());
++            SendEvent(evt);                
++        }        
++    } else { // process notifies                        
++        wxLogTrace( wxTRACE_FSWATCHER, "[iocp] Read entry: path='%s', count=%d", watch->GetPath(), count);
+ 
+-    // extract events from buffer info our vector container
+-    wxVector<wxEventProcessingData> events;
+-    const char* memory = static_cast<const char*>(watch->GetBuffer());
+-    int offset = 0;
+-    do
+-    {
+-        const FILE_NOTIFY_INFORMATION* e =
+-              static_cast<const FILE_NOTIFY_INFORMATION*>((const void*)memory);
++        // extract events from buffer info our vector container
++        wxVector<wxEventProcessingData> events;
++        const char* memory = static_cast<const char*>(watch->GetBuffer());
++        int offset = 0;
++        do
++        {
++            const FILE_NOTIFY_INFORMATION* e =
++                  static_cast<const FILE_NOTIFY_INFORMATION*>((const void*)memory);
+ 
+-        events.push_back(wxEventProcessingData(e, watch));
++            events.push_back(wxEventProcessingData(e, watch));
+ 
+-        offset = e->NextEntryOffset;
+-        memory += offset;
+-    }
+-    while (offset);
++            offset = e->NextEntryOffset;
++            memory += offset;
++        }
++        while (offset);
+ 
+-    // process events
+-    ProcessNativeEvents(events);
++        // process events
++        ProcessNativeEvents(events);
++    }    
++    
+ 
+-    // reissue the watch. ignore possible errors, we will return true anyway
+-    (void) m_service->SetUpWatch(*watch);
+-
++    // reissue the watch, if reissuing failed send the error event to the programmer    
++    if (!m_service->SetUpWatch(*watch)) {                
++        if (watch->GetFlags() & wxFSW_EVENT_ERROR) {            
++            wxFileSystemWatcherEvent evt(wxFSW_EVENT_ERROR, "ReadDirectoryChangesW failed");
++            evt.SetPath(watch->GetPath());
++            SendEvent(evt);
++        }
++    }
+     return true;
+ }
+ 
+@@ -253,9 +340,10 @@
+                     FileNotifyInformationToString(e));
+ 
+         int nativeFlags = e.Action;
+-        int flags = Native2WatcherFlags(nativeFlags);
+-        if (flags & wxFSW_EVENT_WARNING || flags & wxFSW_EVENT_ERROR)
+-        {
++        int flags = Native2WatcherFlags(nativeFlags);        
++        
++        if (flags & wxFSW_EVENT_WARNING || flags & wxFSW_EVENT_ERROR) 
++        { // PB: as far as I can tell, this is never going to be executed
+             // TODO think about this...do we ever have any errors to report?
+             wxString errMsg = "Error occurred";
+             wxFileSystemWatcherEvent event(flags, errMsg);
+@@ -278,6 +366,10 @@
+             if ( it != events.end() )
+             {
+                 newpath = GetEventPath(*(it->watch), *(it->nativeEvent));
++            } else 
++            {
++                // should we send a warning here too?
++                wxLogTrace( wxTRACE_FSWATCHER, "[iocp] Couldn't find new name for %s", oldpath.GetFullPath());
+             }
+             wxFileSystemWatcherEvent event(flags, oldpath, newpath);
+             SendEvent(event);
+@@ -307,10 +399,9 @@
+         { FILE_ACTION_REMOVED,          wxFSW_EVENT_DELETE },
+ 
+         // TODO take attributes into account to see what happened
+-        { FILE_ACTION_MODIFIED,         wxFSW_EVENT_MODIFY },
++        { FILE_ACTION_MODIFIED,         wxFSW_EVENT_MODIFY },        
+ 
+         { FILE_ACTION_RENAMED_OLD_NAME, wxFSW_EVENT_RENAME },
+-
+         // ignored as it should always be matched with ***_OLD_NAME
+         { FILE_ACTION_RENAMED_NEW_NAME, 0 },
+     };

@@ -1,0 +1,178 @@
+Index: wxWindows/include/wx/generic/dirctrlg.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/generic/dirctrlg.h,v
+retrieving revision 1.19
+diff -b -u -2 -r1.19 dirctrlg.h
+--- wxWindows/include/wx/generic/dirctrlg.h	2003/08/09 12:37:29	1.19
++++ wxWindows/include/wx/generic/dirctrlg.h	2003/12/02 20:32:49
+@@ -244,4 +244,5 @@
+ // wxFileIconsTable - use wxTheFileIconsTable which is created as necessary
+ //-------------------------------------------------------------------------
++class WXDLLEXPORT wxFileIconsHashMap;
+ 
+ class WXDLLEXPORT wxFileIconsTable
+@@ -249,5 +250,5 @@
+ public:
+     wxFileIconsTable();
+-    ~wxFileIconsTable();
++    virtual ~wxFileIconsTable();
+ 
+     enum iconId_Type
+@@ -271,5 +272,5 @@
+ 
+     wxImageList *m_smallImageList;
+-    wxHashTable *m_HashTable;
++    wxFileIconsHashMap *m_hashMap;
+ };
+ 
+Index: wxWindows/src/generic/dirctrlg.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/generic/dirctrlg.cpp,v
+retrieving revision 1.76
+diff -b -u -2 -r1.76 dirctrlg.cpp
+--- wxWindows/src/generic/dirctrlg.cpp	2003/10/16 10:27:55	1.76
++++ wxWindows/src/generic/dirctrlg.cpp	2003/12/02 20:32:49
+@@ -49,4 +49,5 @@
+ #include "wx/choice.h"
+ #include "wx/filedlg.h"  // for wxFileDialogBase::ParseWildcard
++#include "wx/hashmap.h"
+ 
+ #if wxUSE_STATLINE
+@@ -1388,4 +1389,5 @@
+ // wxFileIconsTable & friends
+ // ----------------------------------------------------------------------------
++WX_DECLARE_STRING_HASH_MAP(int, wxFileIconsHashMap);
+ 
+ // global instance of a wxFileIconsTable
+@@ -1393,5 +1395,4 @@
+ 
+ // A module to allow icons table cleanup
+-
+ class wxFileIconsTableModule: public wxModule
+ {
+@@ -1399,5 +1400,9 @@
+ public:
+     wxFileIconsTableModule() {}
+-    bool OnInit() { wxTheFileIconsTable = new wxFileIconsTable; return TRUE; }
++    bool OnInit() 
++    { 
++        wxTheFileIconsTable = new wxFileIconsTable; 
++        return TRUE; 
++    }
+     void OnExit()
+     {
+@@ -1412,15 +1417,7 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxFileIconsTableModule, wxModule)
+ 
+-class wxFileIconEntry : public wxObject
+-{
+-public:
+-    wxFileIconEntry(int i) { id = i; }
+-
+-    int id;
+-};
+-
+ wxFileIconsTable::wxFileIconsTable()
+ {
+-    m_HashTable = NULL;
++    m_hashMap = NULL;
+     m_smallImageList = NULL;
+ }
+@@ -1428,10 +1425,9 @@
+ wxFileIconsTable::~wxFileIconsTable()
+ {
+-    if (m_HashTable)
+-    {
+-        WX_CLEAR_HASH_TABLE(*m_HashTable);
+-        delete m_HashTable;
+-    }
+-    if (m_smallImageList) delete m_smallImageList;
++    if (m_hashMap)
++        delete m_hashMap;
++        
++    if (m_smallImageList) 
++        delete m_smallImageList;
+ }
+ 
+@@ -1439,6 +1435,6 @@
+ void wxFileIconsTable::Create()
+ {
+-    wxCHECK_RET(!m_smallImageList && !m_HashTable, wxT("creating icons twice"));
+-    m_HashTable = new wxHashTable(wxKEY_STRING);
++    wxCHECK_RET(!m_smallImageList && !m_hashMap, wxT("creating icons twice"));
++    m_hashMap = new wxFileIconsHashMap;
+     m_smallImageList = new wxImageList(16, 16);
+ 
+@@ -1463,7 +1459,5 @@
+     {
+         m_smallImageList->Add(wxArtProvider::GetBitmap(wxART_EXECUTABLE_FILE, wxART_CMN_DIALOG));
+-        delete m_HashTable->Get(_T("exe"));
+-        m_HashTable->Delete(_T("exe"));
+-        m_HashTable->Put(_T("exe"), new wxFileIconEntry(executable));
++        (*m_hashMap)[_T("exe")] = executable;
+     }
+     /* else put into list by GetIconID
+@@ -1585,11 +1579,12 @@
+     if (!extension.IsEmpty())
+     {
+-        wxFileIconEntry *entry = (wxFileIconEntry*) m_HashTable->Get(extension);
+-        if (entry) return (entry -> id);
++        wxFileIconsHashMap::iterator it = m_hashMap->find(extension);
++        if (it != m_hashMap->end())
++            return it->second;
+     }
+ 
+     wxFileType *ft = (mime.IsEmpty()) ?
+-                   wxTheMimeTypesManager -> GetFileTypeFromExtension(extension) :
+-                   wxTheMimeTypesManager -> GetFileTypeFromMimeType(mime);
++                   wxTheMimeTypesManager->GetFileTypeFromExtension(extension) :
++                   wxTheMimeTypesManager->GetFileTypeFromMimeType(mime);
+ 
+     wxIconLocation iconLoc;
+@@ -1601,27 +1596,34 @@
+ 
+     delete ft;
++
++    wxBitmap bmp;
+ 
+-    if ( !ic.Ok() )
++    // the icon for MSVS 7 fails on conversion to a bitmap, check for this
++    if ( ic.Ok() )
++        bmp.CopyFromIcon(ic);
++
++    if ( !bmp.Ok() )
+     {
+         int newid = file;
+-        m_HashTable->Put(extension, new wxFileIconEntry(newid));
++        (*m_hashMap)[extension] = newid;
+         return newid;
+     }
+ 
+-    wxBitmap tmpBmp;
+-    tmpBmp.CopyFromIcon(ic);
+-    wxImage img = tmpBmp.ConvertToImage();
+-
+     int id = m_smallImageList->GetImageCount();
+-    if (img.GetWidth() == 16 && img.GetHeight() == 16)
+-        m_smallImageList->Add(wxBitmap(img));
++    
++    if ((bmp.GetWidth() == 16) && (bmp.GetHeight() == 16))
++    {
++        m_smallImageList->Add(bmp);
++    }
+     else
+     {
+-        if (img.GetWidth() != 32 || img.GetHeight() != 32)
++        wxImage img = bmp.ConvertToImage();
++    
++        if ((img.GetWidth() != 32) || (img.GetHeight() != 32))
+             m_smallImageList->Add(CreateAntialiasedBitmap(CutEmptyBorders(img).Rescale(32, 32)));
+         else
+             m_smallImageList->Add(CreateAntialiasedBitmap(img));
+     }
+-    m_HashTable->Put(extension, new wxFileIconEntry(id));
++    (*m_hashMap)[extension] = id;
+     return id;
+ 
+
+ 	  	 

@@ -1,0 +1,183 @@
+Index: src/common/wxchar.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/wxchar.cpp,v
+retrieving revision 1.130
+diff -u -r1.130 wxchar.cpp
+--- src/common/wxchar.cpp	2006/11/08 13:34:13	1.130
++++ src/common/wxchar.cpp	2006/11/10 17:56:19
+@@ -317,7 +317,7 @@
+     // Process this conversion specifier and puts the result in the given
+     // buffer. Returns the number of characters written in 'buf' or -1 if
+     // there's not enough space.
+-    int Process(wxChar *buf, size_t lenMax, wxPrintfArg *p);
++    int Process(wxChar *buf, size_t lenCur, size_t lenMax, wxPrintfArg *p);
+ 
+     // Loads the argument of this conversion specifier from given va_list.
+     bool LoadArg(wxPrintfArg *p, va_list &argptr);
+@@ -728,13 +728,13 @@
+     return true;    // loading was successful
+ }
+ 
+-int wxPrintfConvSpec::Process(wxChar *buf, size_t lenMax, wxPrintfArg *p)
++int wxPrintfConvSpec::Process(wxChar *buf, size_t lenCur, size_t lenMax, wxPrintfArg *p)
+ {
+     // buffer to avoid dynamic memory allocation each time for small strings;
+     // note that this buffer is used only to hold results of number formatting,
+     // %s directly writes user's string in buf, without using szScratch
+     char szScratch[wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN];
+-    size_t lenScratch = 0, lenCur = 0;
++    size_t lenScratch = 0;
+ 
+ #define APPEND_CH(ch) \
+                 { \
+@@ -938,13 +938,13 @@
+             wxASSERT(lenScratch < wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN);
+ #if !wxUSE_UNICODE
+             {
+-                if (lenMax < lenScratch)
++                if (lenMax - lenCur < lenScratch)
+                 {
+                     // fill output buffer and then return -1
+-                    wxStrncpy(buf, szScratch, lenMax);
++                    wxStrncpy(buf + lenCur, szScratch, lenMax - lenCur);
+                     return -1;
+                 }
+-                wxStrncpy(buf, szScratch, lenScratch);
++                wxStrncpy(buf + lenCur, szScratch, lenScratch);
+                 lenCur += lenScratch;
+             }
+ #else
+@@ -953,8 +953,8 @@
+                 // conversion, but we can optimise by making use of the fact
+                 // that we are formatting numbers, this should mean only 7-bit
+                 // ascii characters are involved.
+-                wxChar *bufptr = buf;
+-                const wxChar *bufend = buf + lenMax;
++                wxChar *bufptr = buf + lenCur;
++                const wxChar *bufend = buf + lenCur + lenMax;
+                 const char *scratchptr = szScratch;
+ 
+                 // Simply copy each char to a wxChar, stopping on the first
+@@ -995,7 +995,7 @@
+ 
+ // differences from standard strncpy:
+ // 1) copies everything from 'source' except for '%%' sequence which is copied as '%'
+-// 2) returns the number of written characters in 'dest' as it could differ from given 'n'
++// 2) returns the number of characters written in 'dest' as it could differ from given 'n'
+ // 3) much less optimized, unfortunately...
+ static int wxCopyStrWithPercents(wxChar *dest, const wxChar *source, size_t n)
+ {
+@@ -1128,25 +1128,39 @@
+         // copy in the output buffer the portion of the format string between
+         // last specifier and the current one
+         size_t tocopy = ( arg[i].m_pArgPos - toparse );
+-        if (lenCur+tocopy >= lenMax)
++        while (lenCur+tocopy > lenMax)
+         {
+             // not enough space in the output buffer !
+             // copy until the end of remaining space and then stop
+-            wxCopyStrWithPercents(buf+lenCur, toparse, lenMax - lenCur - 1);
+-            buf[lenMax-1] = wxT('\0');
+-            return -1;
++            // NOTE: be careful that lenMax may be == lenCur here!
++            int written = wxCopyStrWithPercents(buf+lenCur, toparse, lenMax - lenCur);
++                
++            // we need to check again as 'written' may be != lenMax - lenCur
++            if (lenCur+written >= lenMax)
++            {
++                buf[lenMax-1] = wxT('\0');  // always NUL-terminate
++                return -1;
++            }
++
++            toparse += lenMax - lenCur;
++            lenCur += written;
++
++            // recalc tocopy and check again
++            tocopy = ( arg[i].m_pArgPos - toparse );
+         }
+ 
+         lenCur += wxCopyStrWithPercents(buf+lenCur, toparse, tocopy);
+ 
+         // process this specifier directly in the output buffer
+-        int n = arg[i].Process(buf+lenCur, lenMax - lenCur, &argdata[arg[i].m_pos]);
++        int n = arg[i].Process(buf, lenCur, lenMax, &argdata[arg[i].m_pos]);
+         if (n == -1)
+         {
+             buf[lenMax-1] = wxT('\0');  // be sure to always NUL-terminate the string
+             return -1;      // not enough space in the output buffer !
+         }
+-        lenCur += n;
++
++        // update number of chars written up to now
++        lenCur = n;
+ 
+         // the +1 is because wxPrintfConvSpec::m_pArgEnd points to the last character
+         // of the format specifier, but we are not interested to it...
+@@ -1157,9 +1171,28 @@
+     // NOTE: toparse is pointing to the character just after the last processed
+     //       conversion specifier
+     // NOTE2: the +1 is because we want to copy also the '\0'
+-    size_t tocopy = wxStrlen(format) + 1  - ( toparse - format ) ;
+-    if (lenCur+tocopy >= lenMax)
+-        return -1;      // not enough space in the output buffer !
++    size_t formatlen = wxStrlen(format);
++    size_t tocopy = formatlen + 1  - ( toparse - format ) ;
++    while (lenCur+tocopy > lenMax)
++    {
++        // not enough space in the output buffer !
++        // copy until the end of remaining space and then stop
++        // NOTE: be careful that lenMax may be == lenCur here!
++        int written = wxCopyStrWithPercents(buf+lenCur, toparse, lenMax - lenCur);
++        
++        // we need to check again as 'written' may be != lenMax - lenCur
++        if (lenCur+written >= lenMax)
++        {
++            buf[lenMax-1] = wxT('\0');  // always NUL-terminate
++            return -1;
++        }
++
++        toparse += lenMax - lenCur;
++        lenCur += written;
++
++        // recalc tocopy and check again
++        tocopy = formatlen + 1  - ( toparse - format ) ;
++    }
+ 
+     // the -1 is because of the '\0'
+     lenCur += wxCopyStrWithPercents(buf+lenCur, toparse, tocopy) - 1;
+Index: tests/strings/vsnprintf.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/tests/strings/vsnprintf.cpp,v
+retrieving revision 1.10
+diff -u -r1.10 vsnprintf.cpp
+--- tests/strings/vsnprintf.cpp	2006/11/09 01:25:23	1.10
++++ tests/strings/vsnprintf.cpp	2006/11/10 18:19:44
+@@ -405,9 +405,7 @@
+         CPPUNIT_ASSERT_MESSAGE(overflowMsg, buf[i] == '*');
+ }
+ 
+-// Originally intended to test the final copy from the scratch, hence the
+-// name, but turns up problems elsewhere too.
+-//
++// Originally intended to test the final copy from the scratch, hence the name
+ void VsnprintfTestCase::Scratch()
+ {
+     // expectedLen, expectedString, max, format, ...
+@@ -428,4 +426,15 @@
+     DoScratch(6, wxT("12%45%"), 8,  wxT("12%%45%%"));
+     DoScratch(7, wxT("12%45%7"), 8,  wxT("12%%45%%7"));
+     DoScratch(-1, wxT("12%45%7"), 8,  wxT("12%%45%%78"));
++
++    // FIXME: the following tests fail because wxCopyStrWithPercents is
++    //        called at some point with a single "%" which it copies
++    //        when it should not...
++
++    // this one shows the bug in the last while() loop of wxVsnprintf_
++    //DoScratch(5, wxT("%%%%%"), 6,  wxT("%%%%%%%%%%"));
++
++    // this test has been carefully constructed to show the bug in the
++    // innermost while() loop of wxVsnprintf_
++    //DoScratch(6, wxT("%%%%12"), 7,  wxT("%%%%%%%%%d"), 12);
+ }
+
+ 	  	 

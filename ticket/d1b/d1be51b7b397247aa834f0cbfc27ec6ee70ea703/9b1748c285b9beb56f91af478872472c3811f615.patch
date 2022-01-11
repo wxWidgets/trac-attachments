@@ -1,0 +1,117 @@
+diff -uNr wxWidgets-orig/include/wx/osx/cocoa/dataview.h wxWidgets-mine/include/wx/osx/cocoa/dataview.h
+--- wxWidgets-orig/include/wx/osx/cocoa/dataview.h	2021-02-05 12:38:42.000000000 +0100
++++ wxWidgets-mine/include/wx/osx/cocoa/dataview.h	2021-02-05 22:35:59.000000000 +0100
+@@ -86,7 +86,7 @@
+ class wxDataViewColumnNativeData
+ {
+ public:
+-    wxDataViewColumnNativeData() : m_NativeColumnPtr(NULL)
++    wxDataViewColumnNativeData() : m_NativeColumnPtr(NULL), m_isLast(false), m_prevWidth(0)
+     {
+     }
+ 
+@@ -104,10 +104,33 @@
+     {
+         m_NativeColumnPtr = newNativeColumnPtr;
+     }
++        
++    bool GetIsLast() const
++    {
++        return m_isLast;
++    }
++    
++    void SetIsLast(bool isLast)
++    {
++        m_isLast = isLast;
++    }
++        
++    int GetPrevWidth() const
++    {
++        return m_prevWidth;
++    }
++    
++    void SetPrevWidth(int prevWidth)
++    {
++        m_prevWidth = prevWidth;
++    }
+ 
+ private:
+     // not owned by us
+     NSTableColumn* m_NativeColumnPtr;
++        
++    bool m_isLast;
++    int m_prevWidth;
+ };
+ 
+ // ============================================================================
+diff -uNr wxWidgets-orig/src/osx/cocoa/dataview.mm wxWidgets-mine/src/osx/cocoa/dataview.mm
+--- wxWidgets-orig/src/osx/cocoa/dataview.mm	2021-02-05 12:38:42.000000000 +0100
++++ wxWidgets-mine/src/osx/cocoa/dataview.mm	2021-02-05 22:38:13.000000000 +0100
+@@ -2206,7 +2206,8 @@
+ void wxCocoaDataViewControl::FitColumnWidthToContent(unsigned int pos)
+ {
+     const int count = GetCount();
+-    NSTableColumn *column = GetColumn(pos)->GetNativeData()->GetNativeColumnPtr();
++    wxDataViewColumnNativeData *nativeData = GetColumn(pos)->GetNativeData();
++    NSTableColumn *column = nativeData->GetNativeColumnPtr();
+     UInt32 const noOfColumns = [[m_OutlineView tableColumns] count];
+ 
+     class MaxWidthCalculator
+@@ -2338,11 +2339,31 @@
+     if ( m_expanderWidth == 0 )
+         m_expanderWidth = calculator.GetExpanderWidth();
+ 
+-    if ( pos == noOfColumns - 1 )
++    bool isLast = (pos == noOfColumns - 1);
++        
++    if ( isLast ) {
++        
++        // note that FitColumnWidthToContent() is called whenever a column is added, so we might
++        // also just temporarily become the last column; since we cannot know at this time whether
++        // we will just temporarily be the last column, we store our current column width in order
++        // to restore it later in case we suddenly are no longer the last column because new columns
++        // have been added --> we need to restore our previous width in that case because it must
++        // not get lost
++        nativeData->SetPrevWidth(GetColumn(pos)->GetWidth());
++            
+         [m_OutlineView sizeLastColumnToFit];
+-    else
+-        [column setWidth:calculator.GetMaxWidth() + m_expanderWidth];
+-
++            
++    } else if ( GetColumn(pos)->GetWidthVariable() == wxCOL_WIDTH_AUTOSIZE ) {
++            
++        [column setWidth:calculator.GetMaxWidth() + m_ExpanderWidth];
++            
++    } else if ( nativeData->GetIsLast() ) {
++            
++        [column setWidth:nativeData->GetPrevWidth()];
++    }
++        
++    nativeData->SetIsLast(isLast);
++       
+     if ( !(GetDataViewCtrl()->GetWindowStyle() & wxDV_VARIABLE_LINE_HEIGHT) )
+     {
+         int curHeight = ceil([m_OutlineView rowHeight]);
+diff -uNr wxWidgets-orig/src/osx/dataview_osx.cpp wxWidgets-mine/src/osx/dataview_osx.cpp
+--- wxWidgets-orig/src/osx/dataview_osx.cpp	2021-02-05 12:38:42.000000000 +0100
++++ wxWidgets-mine/src/osx/dataview_osx.cpp	2021-02-05 22:37:08.000000000 +0100
+@@ -441,6 +441,9 @@
+      // otherwise ask the control to 'update' the data in the newly appended column:
+       if (GetColumnCount() == 1)
+         SetExpanderColumn(columnPtr);
++            
++      AdjustAutosizedColumns();
++            
+      // done:
+       return true;
+     }
+@@ -482,6 +485,8 @@
+   {
+     m_ColumnPtrs.Remove(columnPtr);
+     delete columnPtr;
++    
++    AdjustAutosizedColumns();
+     return true;
+   }
+   else

@@ -1,0 +1,292 @@
+diff --git a/build/bakefiles/files.bkl b/build/bakefiles/files.bkl
+index b2a79d8..19643cd 100644
+--- a/build/bakefiles/files.bkl
++++ b/build/bakefiles/files.bkl
+@@ -198,6 +198,7 @@ IMPORTANT: please read docs/tech/tn0016.txt before modifying this file!
+     wx/osx/core/cfref.h
+     wx/osx/core/cfstring.h
+     wx/osx/core/hid.h
++    wx/osx/core/evtloop.h
+     wx/osx/core/objcid.h
+     wx/osx/core/private.h
+     wx/osx/core/stdpaths.h
+diff --git a/include/wx/evtloop.h b/include/wx/evtloop.h
+index 3923c66..ee6759d 100644
+--- a/include/wx/evtloop.h
++++ b/include/wx/evtloop.h
+@@ -236,8 +236,17 @@ private:
+ #if defined(__DARWIN__)
+     // CoreFoundation-based event loop is currently in wxBase so include it in
+     // any case too (although maybe it actually shouldn't be there at all)
+-    #include "wx/osx/evtloop.h"
+-#elif wxUSE_GUI
++    #include "wx/osx/core/evtloop.h"
++#endif
++
++// include the header defining wxConsoleEventLoop
++#if defined(__UNIX__) && !defined(__WXMSW__)
++    #include "wx/unix/evtloop.h"
++#elif defined(__WINDOWS__)
++    #include "wx/msw/evtloopconsole.h"
++#endif
++
++#if wxUSE_GUI
+ 
+ // include the appropriate header defining wxGUIEventLoop
+ 
+@@ -245,6 +254,8 @@ private:
+     #include "wx/msw/evtloop.h"
+ #elif defined(__WXCOCOA__)
+     #include "wx/cocoa/evtloop.h"
++#elif defined(__WXOSX__)
++    #include "wx/osx/evtloop.h"
+ #elif defined(__WXDFB__)
+     #include "wx/dfb/evtloop.h"
+ #elif defined(__WXGTK20__)
+@@ -306,13 +317,6 @@ protected:
+ 
+ #endif // wxUSE_GUI
+ 
+-// include the header defining wxConsoleEventLoop for Unix systems
+-#if defined(__UNIX__) && !defined(__WXMSW__)
+-#include "wx/unix/evtloop.h"
+-#elif defined(__WINDOWS__)
+-#include "wx/msw/evtloopconsole.h"
+-#endif
+-
+ #if wxUSE_GUI
+     // we use a class rather than a typedef because wxEventLoop is
+     // forward-declared in many places
+diff --git a/include/wx/osx/core/evtloop.h b/include/wx/osx/core/evtloop.h
+new file mode 100644
+index 0000000..7bccb9a
+--- /dev/null
++++ b/include/wx/osx/core/evtloop.h
+@@ -0,0 +1,111 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/osx/core/evtloop.h
++// Purpose:     CoreFoundation-based event loop
++// Author:      Vadim Zeitlin
++// Modified by:
++// Created:     2006-01-12
++// RCS-ID:      $Id$
++// Copyright:   (c) 2006 Vadim Zeitlin <vadim@wxwindows.org>
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_OSX_CORE_EVTLOOP_H_
++#define _WX_OSX_CORE_EVTLOOP_H_
++
++DECLARE_WXOSX_OPAQUE_CFREF( CFRunLoop );
++DECLARE_WXOSX_OPAQUE_CFREF( CFRunLoopObserver );
++
++class WXDLLIMPEXP_BASE wxCFEventLoopPauseIdleEvents;
++
++class WXDLLIMPEXP_BASE wxCFEventLoop : public wxEventLoopBase
++{
++    friend class wxCFEventLoopPauseIdleEvents;
++public:
++    wxCFEventLoop();
++    virtual ~wxCFEventLoop();
++
++    // enters a loop calling OnNextIteration(), Pending() and Dispatch() and
++    // terminating when Exit() is called
++    virtual int Run();
++
++    // sets the "should exit" flag and wakes up the loop so that it terminates
++    // soon
++    virtual void Exit(int rc = 0);
++
++    // return true if any events are available
++    virtual bool Pending() const;
++
++    // dispatch a single event, return false if we should exit from the loop
++    virtual bool Dispatch();
++
++    // same as Dispatch() but doesn't wait for longer than the specified (in
++    // ms) timeout, return true if an event was processed, false if we should
++    // exit the loop or -1 if timeout expired
++    virtual int DispatchTimeout(unsigned long timeout);
++
++    // implement this to wake up the loop: usually done by posting a dummy event
++    // to it (can be called from non main thread)
++    virtual void WakeUp();
++
++    virtual bool YieldFor(long eventsToProcess);
++
++#if wxUSE_EVENTLOOP_SOURCE
++    virtual wxEventLoopSource *
++      AddSourceForFD(int fd, wxEventLoopSourceHandler *handler, int flags);
++#endif // wxUSE_EVENTLOOP_SOURCE
++
++protected:
++    void CommonModeObserverCallBack(CFRunLoopObserverRef observer, int activity);
++    void DefaultModeObserverCallBack(CFRunLoopObserverRef observer, int activity);
++
++    // set to false to avoid idling at unexpected moments - eg when having native message boxes
++    void SetProcessIdleEvents(bool process) { m_processIdleEvents = process; }
++
++    static void OSXCommonModeObserverCallBack(CFRunLoopObserverRef observer, int activity, void *info);
++    static void OSXDefaultModeObserverCallBack(CFRunLoopObserverRef observer, int activity, void *info);
++
++    // get the currently executing CFRunLoop
++    virtual CFRunLoopRef CFGetCurrentRunLoop() const;
++
++    virtual int DoDispatchTimeout(unsigned long timeout);
++
++    virtual void DoRun();
++
++    virtual void DoStop();
++
++    // should we exit the loop?
++    bool m_shouldExit;
++
++    // the loop exit code
++    int m_exitcode;
++
++    // cfrunloop
++    CFRunLoopRef m_runLoop;
++
++    // common modes runloop observer
++    CFRunLoopObserverRef m_commonModeRunLoopObserver;
++
++    // default mode runloop observer
++    CFRunLoopObserverRef m_defaultModeRunLoopObserver;
++    
++    // set to false to avoid idling at unexpected moments - eg when having native message boxes
++    bool m_processIdleEvents;
++
++private:
++    // process all already pending events and dispatch a new one (blocking
++    // until it appears in the event queue if necessary)
++    //
++    // returns the return value of DoDispatchTimeout()
++    int DoProcessEvents();
++
++    wxDECLARE_NO_COPY_CLASS(wxCFEventLoop);
++};
++
++class WXDLLIMPEXP_BASE wxCFEventLoopPauseIdleEvents : public wxObject
++{
++public:
++    wxCFEventLoopPauseIdleEvents();
++    virtual ~wxCFEventLoopPauseIdleEvents();
++};
++
++#endif // _WX_OSX_EVTLOOP_H_
+diff --git a/include/wx/osx/evtloop.h b/include/wx/osx/evtloop.h
+index efbb220..a26f033 100644
+--- a/include/wx/osx/evtloop.h
++++ b/include/wx/osx/evtloop.h
+@@ -14,104 +14,6 @@
+ #ifndef _WX_OSX_EVTLOOP_H_
+ #define _WX_OSX_EVTLOOP_H_
+ 
+-DECLARE_WXOSX_OPAQUE_CFREF( CFRunLoop );
+-DECLARE_WXOSX_OPAQUE_CFREF( CFRunLoopObserver );
+-
+-class WXDLLIMPEXP_BASE wxCFEventLoopPauseIdleEvents;
+-
+-class WXDLLIMPEXP_BASE wxCFEventLoop : public wxEventLoopBase
+-{
+-    friend class wxCFEventLoopPauseIdleEvents;
+-public:
+-    wxCFEventLoop();
+-    virtual ~wxCFEventLoop();
+-
+-    // enters a loop calling OnNextIteration(), Pending() and Dispatch() and
+-    // terminating when Exit() is called
+-    virtual int Run();
+-
+-    // sets the "should exit" flag and wakes up the loop so that it terminates
+-    // soon
+-    virtual void Exit(int rc = 0);
+-
+-    // return true if any events are available
+-    virtual bool Pending() const;
+-
+-    // dispatch a single event, return false if we should exit from the loop
+-    virtual bool Dispatch();
+-
+-    // same as Dispatch() but doesn't wait for longer than the specified (in
+-    // ms) timeout, return true if an event was processed, false if we should
+-    // exit the loop or -1 if timeout expired
+-    virtual int DispatchTimeout(unsigned long timeout);
+-
+-    // implement this to wake up the loop: usually done by posting a dummy event
+-    // to it (can be called from non main thread)
+-    virtual void WakeUp();
+-
+-    virtual bool YieldFor(long eventsToProcess);
+-
+-#if wxUSE_EVENTLOOP_SOURCE
+-    virtual wxEventLoopSource *
+-      AddSourceForFD(int fd, wxEventLoopSourceHandler *handler, int flags);
+-#endif // wxUSE_EVENTLOOP_SOURCE
+-
+-protected:
+-    void CommonModeObserverCallBack(CFRunLoopObserverRef observer, int activity);
+-    void DefaultModeObserverCallBack(CFRunLoopObserverRef observer, int activity);
+-
+-    // set to false to avoid idling at unexpected moments - eg when having native message boxes
+-    void SetProcessIdleEvents(bool process) { m_processIdleEvents = process; }
+-
+-    static void OSXCommonModeObserverCallBack(CFRunLoopObserverRef observer, int activity, void *info);
+-    static void OSXDefaultModeObserverCallBack(CFRunLoopObserverRef observer, int activity, void *info);
+-
+-    // get the currently executing CFRunLoop
+-    virtual CFRunLoopRef CFGetCurrentRunLoop() const;
+-
+-    virtual int DoDispatchTimeout(unsigned long timeout);
+-
+-    virtual void DoRun();
+-
+-    virtual void DoStop();
+-
+-    // should we exit the loop?
+-    bool m_shouldExit;
+-
+-    // the loop exit code
+-    int m_exitcode;
+-
+-    // cfrunloop
+-    CFRunLoopRef m_runLoop;
+-
+-    // common modes runloop observer
+-    CFRunLoopObserverRef m_commonModeRunLoopObserver;
+-
+-    // default mode runloop observer
+-    CFRunLoopObserverRef m_defaultModeRunLoopObserver;
+-    
+-    // set to false to avoid idling at unexpected moments - eg when having native message boxes
+-    bool m_processIdleEvents;
+-
+-private:
+-    // process all already pending events and dispatch a new one (blocking
+-    // until it appears in the event queue if necessary)
+-    //
+-    // returns the return value of DoDispatchTimeout()
+-    int DoProcessEvents();
+-
+-    wxDECLARE_NO_COPY_CLASS(wxCFEventLoop);
+-};
+-
+-class WXDLLIMPEXP_BASE wxCFEventLoopPauseIdleEvents : public wxObject
+-{
+-public:
+-    wxCFEventLoopPauseIdleEvents();
+-    virtual ~wxCFEventLoopPauseIdleEvents();
+-};
+-
+-#if wxUSE_GUI
+-
+ #ifdef __WXOSX_COCOA__
+     #include "wx/osx/cocoa/evtloop.h"
+ #else
+@@ -137,6 +39,4 @@ protected:
+     WXWindow m_modalNativeWindow;
+ };
+ 
+-#endif // wxUSE_GUI
+-
+ #endif // _WX_OSX_EVTLOOP_H_

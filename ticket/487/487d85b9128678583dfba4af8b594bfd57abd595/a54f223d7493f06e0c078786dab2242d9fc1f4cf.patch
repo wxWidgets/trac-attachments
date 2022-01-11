@@ -1,0 +1,162 @@
+Index: include/wx/mac/carbon/printmac.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/mac/carbon/printmac.h,v
+retrieving revision 1.4
+diff -b -u -2 -r1.4 printmac.h
+--- include/wx/mac/carbon/printmac.h	2004/05/23 20:51:03	1.4
++++ include/wx/mac/carbon/printmac.h	2006/07/10 23:30:17
+@@ -57,4 +57,5 @@
+     virtual ~wxMacPrintPreview();
+ 
++    virtual bool DrawBlankPage(wxPreviewCanvas *canvas, wxDC& dc);
+   virtual bool Print(bool interactive);
+     virtual void DetermineScaling();
+Index: src/mac/carbon/printmac.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/printmac.cpp,v
+retrieving revision 1.31.2.2
+diff -b -u -2 -r1.31.2.2 printmac.cpp
+--- src/mac/carbon/printmac.cpp	2006/07/08 07:11:07	1.31.2.2
++++ src/mac/carbon/printmac.cpp	2006/07/10 23:30:24
+@@ -207,12 +207,20 @@
+     // PMDuplexMode not yet accessible via API
+     // PMQualityMode not yet accessible via API
+-    // todo paperSize
++
+ 	PMRect rPaper;
+-    err = PMGetUnadjustedPaperRect( m_macPageFormat, &rPaper);
++    err = PMGetAdjustedPaperRect( m_macPageFormat, &rPaper);
++    if ( err == noErr )
++    {
++        PMResolution res;
++        err = PMGetResolution( m_macPageFormat, &res);
+     if ( err == noErr )
+     {
++            float hpx2mm = 25.4 / res.hRes;
++            float vpx2mm = 25.4 / res.vRes;
++            
+         data.SetPaperSize( wxSize (
+-            (int)(( rPaper.right - rPaper.left ) * pt2mm + 0.5 ) ,
+-             (int)(( rPaper.bottom - rPaper.top ) * pt2mm + 0.5 ) ) );
++                (int)(( rPaper.right - rPaper.left ) * hpx2mm + 0.5 ) ,
++                (int)(( rPaper.bottom - rPaper.top ) * vpx2mm + 0.5 ) ) );
++        }
+     }
+     return true ;
+@@ -229,18 +237,29 @@
+ {
+ 	PMRect rPaper;
+-    OSStatus err = PMGetUnadjustedPaperRect(m_macPageFormat, &rPaper);
++    OSStatus err = PMGetAdjustedPaperRect(m_macPageFormat, &rPaper);
+     if ( err == noErr )
+     {
+         PMRect rPage ;
+-        err = PMGetUnadjustedPageRect(m_macPageFormat , &rPage ) ;
++        err = PMGetAdjustedPageRect(m_macPageFormat , &rPage ) ;
++        if ( err == noErr )
++        {
++        PMResolution res;
++        err = PMGetResolution( m_macPageFormat, &res);
+         if ( err == noErr )
+         {
++            float hpx2mm = 25.4 / res.hRes;
++            float vpx2mm = 25.4 / res.vRes;
++            
++            data->SetPaperSize( wxSize (
++                (int)(( rPaper.right - rPaper.left ) * hpx2mm + 0.5 ) ,
++                (int)(( rPaper.bottom - rPaper.top ) * vpx2mm + 0.5 ) ) );
++            
+             data->SetMinMarginTopLeft( wxPoint (
+-	            (int)(((double) rPage.left - rPaper.left ) * pt2mm) ,
+-	            (int)(((double) rPage.top - rPaper.top ) * pt2mm) ) ) ;
++                (int)(((double) rPage.left - rPaper.left ) * hpx2mm) ,
++                (int)(((double) rPage.top - rPaper.top ) * vpx2mm) ) ) ;
+ 	        
+ 	        data->SetMinMarginBottomRight( wxPoint (
+-                (wxCoord)(((double) rPaper.right - rPage.right ) * pt2mm),
+-                (wxCoord)(((double) rPaper.bottom - rPage.bottom ) * pt2mm)) ) ;
++                (wxCoord)(((double) rPaper.right - rPage.right ) * hpx2mm),
++                (wxCoord)(((double) rPaper.bottom - rPage.bottom ) * vpx2mm)) ) ;
+ 
+             if ( data->GetMarginTopLeft().x < data->GetMinMarginTopLeft().x )
+@@ -253,10 +272,11 @@
+ 
+             if ( data->GetMarginTopLeft().y < data->GetMinMarginTopLeft().y )
+-                data->SetMarginTopLeft( wxPoint( data->GetMarginTopLeft().x , data->GetMinMarginTopLeft().y ) );
++                data->SetMarginTopLeft( wxPoint( data->GetMarginTopLeft().x , 
++                    data->GetMinMarginTopLeft().y ) );
+ 
+             if ( data->GetMarginBottomRight().y < data->GetMinMarginBottomRight().y )
+                 data->SetMarginBottomRight( wxPoint( data->GetMarginBottomRight().x ,
+                     data->GetMinMarginBottomRight().y) );
+-
++          }
+ 	    }
+ 	}
+@@ -526,4 +546,64 @@
+ {
+ }
++
++
++bool wxMacPrintPreview::DrawBlankPage(wxPreviewCanvas *canvas, wxDC& dc)
++  {
++    int canvasWidth, canvasHeight;
++    canvas->GetSize(&canvasWidth, &canvasHeight);
++
++    // actualWidth & actualHeight are the width and height of the printable
++    // area, scaled appropriately for the zoom factor.
++    float zoomScale = (float)((float)m_currentZoom/(float)100);
++    float actualWidth = zoomScale*m_pageWidth*m_previewScale;
++    float actualHeight = zoomScale*m_pageHeight*m_previewScale;
++
++   // Now get paper rect and page rect, to calculate how far to extend the page
++   // by the nonprintable area, and compute the nonprintable area that goes on
++   // each side of the printable area.
++   int npaLeft(0), npaTop(0), npaRight(0), npaBottom(0);
++    wxMacCarbonPrintData *native = 
++        (wxMacCarbonPrintData*)m_printDialogData.GetPrintData().GetNativeData();
++    PMRect rPage;
++    OSErr err = PMGetAdjustedPageRect(native->m_macPageFormat, &rPage);
++    if ( err == noErr )
++    {
++        PMRect rPaper;
++        err = PMGetAdjustedPaperRect(native->m_macPageFormat, &rPaper);
++        if ( err == noErr )
++        {
++            // Compute additional margins to show non-printing area.
++            npaLeft = int(0.5 + float(rPage.left - rPaper.left) * actualWidth / 
++                (rPage.right - rPage.left));
++            npaTop = int(0.5 + float(rPage.top - rPaper.top) * actualHeight / 
++                (rPage.bottom - rPage.top));
++            npaRight = int(0.5 + float(rPaper.right - rPage.right) * actualWidth / 
++                (rPage.right - rPage.left));
++            npaBottom = int(0.5 + float(rPaper.bottom - rPage.bottom) * actualHeight / 
++                (rPage.bottom - rPage.top));
++        }
++    }
++
++    // Continue with base drawing method, but inject our npa borders where needed. 
++    float x = (float)((canvasWidth - actualWidth)/2.0);
++    if (x < m_leftMargin)
++        x = (float)m_leftMargin;
++    float y = (float)m_topMargin;
++
++    // Draw shadow, allowing for 1-pixel border AROUND the actual page
++    int shadowOffset = 4;
++    dc.SetPen(*wxBLACK_PEN);
++    dc.SetBrush(*wxBLACK_BRUSH);
++    dc.DrawRectangle((int)(x + shadowOffset) - npaLeft, (int)(y + actualHeight+1) - npaTop, (int)(actualWidth) + npaLeft + npaRight, shadowOffset + npaTop + npaBottom);
++    dc.DrawRectangle((int)(x + actualWidth) - npaLeft, (int)(y + shadowOffset) - npaTop, shadowOffset + npaLeft + npaRight, (int)(actualHeight) + npaTop + npaBottom);
++
++    // Draw blank page allowing for 1-pixel border AROUND the actual page
++    dc.SetPen(*wxBLACK_PEN);
++    dc.SetBrush(*wxWHITE_BRUSH);
++    dc.DrawRectangle((int)(x-2) - npaLeft, (int)(y-1) - npaTop, (int)(actualWidth+3) + npaLeft + npaRight, (int)(actualHeight+2) + npaTop + npaBottom);
++
++    return true;
++  }
++
+ 
+ bool wxMacPrintPreview::Print(bool interactive)
+
+ 	  	 

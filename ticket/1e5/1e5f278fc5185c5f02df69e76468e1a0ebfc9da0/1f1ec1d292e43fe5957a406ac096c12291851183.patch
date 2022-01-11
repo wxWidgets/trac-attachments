@@ -1,0 +1,204 @@
+From a9dd6c7b3cb2687e21dc6f06d630d750df60f010 Mon Sep 17 00:00:00 2001
+From: Oliver Buchtala <oliver.buchtala@googlemail.com>
+Date: Sat, 5 May 2012 21:17:26 +0200
+Subject: [PATCH 3/6] Add JSC extension mechanism to OSX port of
+ wxWebViewWebKit.
+
+---
+ build/bakefiles/files.bkl         |    7 ++++++-
+ configure.in                      |    2 +-
+ include/wx/osx/webview_webkit.h   |   12 +++++++++++
+ include/wx/webkit_jsc_extension.h |    2 ++
+ src/osx/webkit_jsc_extension.mm   |   12 +++++++++++
+ src/osx/webview_webkit.mm         |   40 +++++++++++++++++++++++++++++++++++++
+ 6 files changed, 73 insertions(+), 2 deletions(-)
+ create mode 100644 src/osx/webkit_jsc_extension.mm
+
+diff --git a/build/bakefiles/files.bkl b/build/bakefiles/files.bkl
+index 7fb0746..96b30c1 100644
+--- a/build/bakefiles/files.bkl
++++ b/build/bakefiles/files.bkl
+@@ -3299,7 +3299,11 @@ IMPORTANT: please read docs/tech/tn0016.txt before modifying this file!
+         src/common/webkit_jsc_extension.cpp
+         src/gtk/webkit_jsc_extension.cpp
+     </if>
+-    <if cond="PLATFORM_MACOSX=='1'">src/osx/webview_webkit.mm</if>
++    <if cond="PLATFORM_MACOSX=='1'">
++        src/osx/webview_webkit.mm
++        src/common/webkit_jsc_extension.cpp
++        src/osx/webkit_jsc_extension.mm
++    </if>
+ </set>
+ <set var="WEBVIEW_SRC" hints="files">
+     $(WEBVIEW_SRC_PLATFORM)
+@@ -3320,6 +3324,7 @@ IMPORTANT: please read docs/tech/tn0016.txt before modifying this file!
+     <if cond="PLATFORM_MACOSX=='1'">
+         wx/osx/webviewhistoryitem_webkit.h
+         wx/osx/webview_webkit.h
++        wx/webkit_jsc_extension.h
+     </if>
+ </set>
+ <set var="WEBVIEW_HDR" hints="files">
+diff --git a/configure.in b/configure.in
+index afea6d2..b7ee2e1 100644
+--- a/configure.in
++++ b/configure.in
+@@ -7726,7 +7726,7 @@ if test "$wxUSE_MAC" = 1 ; then
+         if test "$wxUSE_OSX_IPHONE" = 1; then
+             EXTRA_FRAMEWORKS="-framework IOKit -framework UIKit -framework CFNetwork -framework AudioToolbox -framework CoreFoundation -framework CoreGraphics -framework OpenGLES -framework Foundation -framework QuartzCore"
+         else
+-            EXTRA_FRAMEWORKS="-framework IOKit -framework Carbon -framework Cocoa -framework AudioToolbox -framework System -framework OpenGL"
++            EXTRA_FRAMEWORKS="-framework IOKit -framework Carbon -framework Cocoa -framework AudioToolbox -framework System -framework OpenGL -framework JavascriptCore"
+ 
+             dnl The case of QuickTime framework is special: we only need it in
+             dnl 32 bit builds and not in 64 bit and, moreover, linking with it
+diff --git a/include/wx/osx/webview_webkit.h b/include/wx/osx/webview_webkit.h
+index aa937a9..aee0bac 100644
+--- a/include/wx/osx/webview_webkit.h
++++ b/include/wx/osx/webview_webkit.h
+@@ -21,6 +21,8 @@
+ #include "wx/control.h"
+ #include "wx/webview.h"
+ 
++#include "wx/webkit_jsc_extension.h"
++
+ // ----------------------------------------------------------------------------
+ // Web Kit Control
+ // ----------------------------------------------------------------------------
+@@ -48,6 +50,8 @@ public:
+                 const wxString& name = wxWebViewNameStr);
+     virtual ~wxWebViewWebKit();
+ 
++    static bool EnableWebInspector();
++
+     virtual bool CanGoBack() const;
+     virtual bool CanGoForward() const;
+     virtual void GoBack();
+@@ -113,6 +117,11 @@ public:
+     //Virtual Filesystem Support
+     virtual void RegisterHandler(wxSharedPtr<wxWebViewHandler> handler);
+ 
++    //JSC extensions
++    virtual void RegisterJSCExtension(wxSharedPtr<wxWebkitJSCExtension> extension);
++    virtual void UpdateJSEngine();
++    virtual const wxVector<wxSharedPtr<wxWebkitJSCExtension> >& GetJSCExtensions() { return m_jscExtensions; }
++
+     // ---- methods not from the parent (common) interface
+     bool  CanGetPageSource() const;
+ 
+@@ -156,6 +165,9 @@ private:
+     void* m_webKitCtrlEventHandler;
+     //It should be WebView*, but WebView is an Objective-C class
+     //TODO: look into using DECLARE_WXCOCOA_OBJC_CLASS rather than this.
++
++    wxVector<wxSharedPtr<wxWebkitJSCExtension> > m_jscExtensions;
++
+ };
+ 
+ #endif // wxUSE_WEBVIEW && wxUSE_WEBVIEW_WEBKIT
+diff --git a/include/wx/webkit_jsc_extension.h b/include/wx/webkit_jsc_extension.h
+index d2437a7..ee56869 100644
+--- a/include/wx/webkit_jsc_extension.h
++++ b/include/wx/webkit_jsc_extension.h
+@@ -16,6 +16,8 @@ typedef bool (*JSCExtensionLoader) (JSGlobalContextRef context);
+ 
+ #if defined(__WXGTK__)
+ typedef WebKitWebView* WebViewRef;
++#elif defined(__WXOSX__)
++typedef struct objc_object* WebViewRef;
+ #else
+ #error "This feature is currently available only for wxGTK and wxOSX"
+ #endif
+diff --git a/src/osx/webkit_jsc_extension.mm b/src/osx/webkit_jsc_extension.mm
+new file mode 100644
+index 0000000..74d1d92
+--- /dev/null
++++ b/src/osx/webkit_jsc_extension.mm
+@@ -0,0 +1,12 @@
++#include <wx/webkit_jsc_extension.h>
++#include <WebKit/WebView.h>
++#include <WebKit/WebFrame.h>
++
++bool wxWebkitJSCExtension::ApplyExtension(WebViewRef web_view_ref)
++{
++    WebView* web_view = static_cast<WebView*>(web_view_ref);
++    WebFrame* frame = [web_view mainFrame];
++    JSGlobalContextRef globalContext = [frame globalContext];
++
++    return m_loaderFunction(globalContext);
++}
+diff --git a/src/osx/webview_webkit.mm b/src/osx/webview_webkit.mm
+index 78d92d6..d01d7a4 100644
+--- a/src/osx/webview_webkit.mm
++++ b/src/osx/webview_webkit.mm
+@@ -35,6 +35,9 @@
+ 
+ #include <Foundation/NSURLError.h>
+ 
++#include <Foundation/NSUserDefaults.h>
++#include <Foundation/NSDictionary.h>
++
+ #define DEBUG_WEBKIT_SIZING 0
+ 
+ // ----------------------------------------------------------------------------
+@@ -411,6 +414,19 @@ wxWebViewWebKit::~wxWebViewWebKit()
+ // public methods
+ // ----------------------------------------------------------------------------
+ 
++// static
++bool wxWebViewWebKit::EnableWebInspector()
++{
++    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
++    NSDictionary *appDefaults = [NSDictionary
++                                 dictionaryWithObject:@"YES" forKey:@"WebKitDeveloperExtras"];
++
++    // TODO: does this overwrite or extend defaults?
++    [defaults registerDefaults:appDefaults];
++
++    return true;
++}
++
+ bool wxWebViewWebKit::CanGoBack() const
+ {
+     if ( !m_webView )
+@@ -987,6 +1003,25 @@ void wxWebViewWebKit::RegisterHandler(wxSharedPtr<wxWebViewHandler> handler)
+     g_stringHandlerMap[handler->GetName()] = handler;
+ }
+ 
++void wxWebViewWebKit::RegisterJSCExtension(wxSharedPtr<wxWebkitJSCExtension> extension)
++{
++    m_jscExtensions.push_back(extension);
++    // update to have the extension instantly
++    UpdateJSEngine();
++}
++
++void wxWebViewWebKit::UpdateJSEngine()
++{
++    for(wxVector<wxSharedPtr<wxWebkitJSCExtension> >::const_iterator it = m_jscExtensions.begin();
++        it != m_jscExtensions.end(); ++it) {
++
++        // security: the extension decides whether to apply for a given URL
++        if((*it)->AcceptURL(GetCurrentURL())) {
++            (*it)->ApplyExtension((WebView*) m_webView);
++        }
++    }
++}
++
+ //------------------------------------------------------------
+ // Listener interfaces
+ //------------------------------------------------------------
+@@ -1033,6 +1068,11 @@ void wxWebViewWebKit::RegisterHandler(wxSharedPtr<wxWebViewHandler> handler)
+     webKitWindow->m_busy = false;
+ 
+     if (webKitWindow && frame == [sender mainFrame]){
++       // extend the js context
++        // TODO: is that the correct place, or is it too late?
++        webKitWindow->UpdateJSEngine();
++
++
+         NSString *url = [[[[frame dataSource] request] URL] absoluteString];
+ 
+         wxString target = wxStringWithNSString([frame name]);
+-- 
+1.7.9.5
+

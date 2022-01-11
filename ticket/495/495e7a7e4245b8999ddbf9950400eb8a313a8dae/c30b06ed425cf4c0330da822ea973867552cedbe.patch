@@ -1,0 +1,191 @@
+From 56b26e6cbecd52cbcc4c105a1dedb3ef86eb39ab Mon Sep 17 00:00:00 2001
+From: Martin Koegler <martin.koegler@chello.at>
+Date: Thu, 23 Jul 2015 00:14:30 +0200
+Subject: [PATCH 2/3] MSW touch support
+
+---
+ include/wx/msw/gccpriv.h |  4 +++
+ include/wx/msw/window.h  |  5 ++++
+ include/wx/msw/wrapwin.h | 10 ++++++-
+ src/msw/window.cpp       | 78 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 96 insertions(+), 1 deletion(-)
+
+diff --git a/include/wx/msw/gccpriv.h b/include/wx/msw/gccpriv.h
+index c2b4b73..0b94d68 100644
+--- a/include/wx/msw/gccpriv.h
++++ b/include/wx/msw/gccpriv.h
+@@ -33,6 +33,9 @@
+         #endif
+     #endif
+ 
++    #ifndef _WIN32_WINNT
++        #define _WIN32_WINNT 0x0601
++    #endif
+     #include <_mingw.h>
+ 
+     /*
+@@ -78,6 +81,7 @@
+     #define HAVE_W32API_H
+ #endif
+ 
++
+ /* check for MinGW/Cygwin w32api version ( releases >= 0.5, only ) */
+ #if defined( HAVE_W32API_H )
+ #include <w32api.h>
+diff --git a/include/wx/msw/window.h b/include/wx/msw/window.h
+index 68ed583..140cdbe 100644
+--- a/include/wx/msw/window.h
++++ b/include/wx/msw/window.h
+@@ -368,6 +368,8 @@ public:
+ 
+     bool HandlePower(WXWPARAM wParam, WXLPARAM lParam, bool *vetoed);
+ 
++    bool HandleTouch(WXWPARAM wParam, WXLPARAM lParam);
++
+ 
+     // The main body of common window proc for all wxWindow objects. It tries
+     // to handle the given message and returns true if it was handled (the
+@@ -536,6 +538,9 @@ public:
+     // behaviour
+     virtual void OnInternalIdle();
+ 
++    bool EnableTouchEvents();
++    void DisableTouchEvents();
++
+ protected:
+     // this allows you to implement standard control borders without
+     // repeating the code in different classes that are not derived from
+diff --git a/include/wx/msw/wrapwin.h b/include/wx/msw/wrapwin.h
+index 2661798..25161d2 100644
+--- a/include/wx/msw/wrapwin.h
++++ b/include/wx/msw/wrapwin.h
+@@ -44,7 +44,7 @@
+ // doesn't want to use APIs only available on later OS versions and had defined
+ // them to (presumably lower) values
+ #ifndef _WIN32_WINNT
+-    #define _WIN32_WINNT 0x0600
++    #define _WIN32_WINNT 0x0601
+ #endif
+ 
+ #ifndef _WIN32_IE
+@@ -86,6 +86,14 @@
+ #endif // !defined(_MSC_VER) || _MSC_VER < 1300
+ 
+ // ----------------------------------------------------------------------------
++// Older mingw versions ship incorrect WM_TOUCH* messages
++// ----------------------------------------------------------------------------
++
++#ifndef WM_TOUCH
++#define WM_TOUCH               0x0240
++#endif
++
++// ----------------------------------------------------------------------------
+ // Fix the functions wrongly implemented in unicows.dll
+ // ----------------------------------------------------------------------------
+ 
+diff --git a/src/msw/window.cpp b/src/msw/window.cpp
+index a141051..4473784 100644
+--- a/src/msw/window.cpp
++++ b/src/msw/window.cpp
+@@ -922,6 +922,40 @@ void wxWindowMSW::MSWUpdateUIState(int action, int state)
+     }
+ }
+ 
++bool wxWindowMSW::EnableTouchEvents()
++{
++    typedef BOOL (WINAPI *RegisterTouchWindow_t)(HWND,ULONG);
++    static bool s_initDone = false;
++    static RegisterTouchWindow_t s_pfnRegisterTouchWindow = NULL;
++    if (s_initDone)
++    {
++        wxDynamicLibrary dllUser32(wxT("user32.dll"), wxDL_VERBATIM | wxDL_QUIET);
++        wxDL_INIT_FUNC(s_pfn, RegisterTouchWindow, dllUser32);
++
++        s_initDone = true;
++    }
++    if (!s_pfnRegisterTouchWindow)
++        return false;
++    return s_pfnRegisterTouchWindow(GetHWND(), 0);
++}
++
++void wxWindowMSW::DisableTouchEvents()
++{
++    typedef BOOL (WINAPI *UnregisterTouchWindow_t)(HWND);
++    static bool s_initDone = false;
++    static UnregisterTouchWindow_t s_pfnUnregisterTouchWindow = NULL;
++    if (s_initDone)
++    {
++        wxDynamicLibrary dllUser32(wxT("user32.dll"), wxDL_VERBATIM | wxDL_QUIET);
++        wxDL_INIT_FUNC(s_pfn, UnregisterTouchWindow, dllUser32);
++
++        s_initDone = true;
++    }
++    if (!s_pfnUnregisterTouchWindow)
++        return;
++    s_pfnUnregisterTouchWindow(GetHWND());
++}
++
+ // ---------------------------------------------------------------------------
+ // scrolling stuff
+ // ---------------------------------------------------------------------------
+@@ -2874,6 +2908,12 @@ wxWindowMSW::MSWHandleMessage(WXLRESULT *result,
+             processed = HandleShow(wParam != 0, (int)lParam);
+             break;
+ 
++        case WM_TOUCH:
++            HandleTouch(wParam, lParam);
++            // Let DefWindowProc handle the touch events too
++            processed = false;
++            break;
++
+         case WM_MOUSEMOVE:
+             processed = HandleMouseMove(GET_X_LPARAM(lParam),
+                                         GET_Y_LPARAM(lParam),
+@@ -5723,6 +5763,44 @@ void wxWindowMSW::GenerateMouseLeave()
+     (void)HandleWindowEvent(event);
+ }
+ 
++bool wxWindowMSW::HandleTouch(WXWPARAM wParam, WXLPARAM lParam)
++{
++    typedef BOOL (WINAPI *GetTouchInputInfo_t)(HANDLE, UINT, PTOUCHINPUT, int);
++    static bool s_initDone = false;
++    static GetTouchInputInfo_t s_pfnGetTouchInputInfo = NULL;
++    if (s_initDone)
++    {
++        wxDynamicLibrary dllUser32(wxT("user32.dll"), wxDL_VERBATIM | wxDL_QUIET);
++        wxDL_INIT_FUNC(s_pfn, GetTouchInputInfo, dllUser32);
++
++        s_initDone = true;
++    }
++    if (!s_pfnGetTouchInputInfo)
++        return false;
++    const unsigned count = LOWORD(wParam);
++    TOUCHINPUT info[count];
++    if (s_pfnGetTouchInputInfo((HTOUCHINPUT)lParam, count, info, sizeof(TOUCHINPUT)))
++    {
++        for(unsigned i = 0; i < count; i++)
++        {
++            wxPoint pos = ScreenToClient(wxPoint(info[i].x / 100, info[i].y / 100));
++            wxEventType type;
++            if (info[i].dwFlags & TOUCHEVENTF_DOWN)
++                type = wxEVT_TOUCH_DOWN;
++            else if (info[i].dwFlags & TOUCHEVENTF_MOVE)
++                type = wxEVT_TOUCH_MOVE;
++            else if (info[i].dwFlags & TOUCHEVENTF_UP)
++                type = wxEVT_TOUCH_UP;
++            else
++                continue;
++            wxTouchEvent e(type, pos, (void*)(intptr_t)info[i].dwID, info[i].dwFlags & TOUCHEVENTF_PRIMARY);
++            HandleWindowEvent(e);
++        }
++        return true;
++    }
++    return false;
++}
++
+ // ---------------------------------------------------------------------------
+ // keyboard handling
+ // ---------------------------------------------------------------------------
+-- 
+2.1.4
+

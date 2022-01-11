@@ -1,0 +1,192 @@
+Index: include/wx/image.h
+===================================================================
+--- include/wx/image.h	(revision 61550)
++++ include/wx/image.h	(working copy)
+@@ -46,8 +46,11 @@
+ // Constants for wxImage::Scale() for determining the level of quality
+ enum
+ {
+-    wxIMAGE_QUALITY_NORMAL = 0,
+-    wxIMAGE_QUALITY_HIGH = 1
++    wxIMAGE_QUALITY_NEAREST = 0,
++    wxIMAGE_QUALITY_NORMAL = wxIMAGE_QUALITY_NEAREST,
++    wxIMAGE_QUALITY_BILINEAR = 1,
++    wxIMAGE_QUALITY_BICUBIC = 2,
++    wxIMAGE_QUALITY_HIGH = wxIMAGE_QUALITY_BICUBIC
+ };
+ 
+ // alpha channel values: fully transparent, default threshold separating
+@@ -240,6 +243,7 @@
+ 
+     // box averager and bicubic filters for up/down sampling
+     wxImage ResampleBox(int width, int height) const;
++    wxImage ResampleBilinear(int width, int height) const;
+     wxImage ResampleBicubic(int width, int height) const;
+ 
+     // blur the image according to the specified pixel radius
+Index: src/common/image.cpp
+===================================================================
+--- src/common/image.cpp	(revision 61550)
++++ src/common/image.cpp	(working copy)
+@@ -432,10 +432,11 @@
+         return *this;
+ 
+     // Scale the image (...or more appropriately, resample the image) using
+-    // either the high-quality or normal method as specified
+-    if ( quality == wxIMAGE_QUALITY_HIGH )
++    // either the nearest neighbourhood, bilinear or bicubic method as specified
++    switch(quality)
+     {
+-        // We need to check whether we are downsampling or upsampling the image
++    case wxIMAGE_QUALITY_BICUBIC:
++         // We need to check whether we are downsampling or upsampling the image
+         if ( width < old_width && height < old_height )
+         {
+             // Downsample the image using the box averaging method for best results
+@@ -447,9 +448,24 @@
+             // a bicubic b-spline scaling method
+             image = ResampleBicubic(width, height);
+         }
+-    }
+-    else    // Default scaling method == simple pixel replication
+-    {
++        break;
++    case wxIMAGE_QUALITY_BILINEAR:
++         // We need to check whether we are downsampling or upsampling the image
++        if ( width < old_width && height < old_height )
++        {
++            // Downsample the image using the box averaging method for best results
++            image = ResampleBox(width, height);
++        }
++
++        else
++        {
++            // For upsampling or other random/wierd image dimensions we'll use
++            // a bicubic b-spline scaling method
++            image = ResampleBilinear(width, height);
++        }
++        break;
++    case wxIMAGE_QUALITY_NEAREST:
++    default:
+         if ( old_width % width == 0 && old_width >= width &&
+             old_height % height == 0 && old_height >= height )
+         {
+@@ -503,6 +519,7 @@
+ 
+             y += y_delta;
+         }
++        break;
+     }
+ 
+     // If the original image has a mask, apply the mask to the new image
+@@ -608,7 +625,89 @@
+ 
+     return ret_image;
+ }
++wxImage wxImage::ResampleBilinear(int width, int height) const
++{
++    // This function implements a Bilinear algorithm for resampling.
++    wxImage ret_image(width, height, false);
++    unsigned char* src_data = M_IMGDATA->m_data;
++    unsigned char* src_alpha = M_IMGDATA->m_alpha;
++    unsigned char* dst_data = ret_image.GetData();
++    unsigned char* dst_alpha = NULL;
+ 
++    if ( src_alpha )
++    {
++        ret_image.SetAlpha();
++        dst_alpha = ret_image.GetAlpha();
++    }
++    double HFactor = double(M_IMGDATA->m_height) / height;
++    double WFactor = double(M_IMGDATA->m_width) / width;
++
++    int srcpixymax = M_IMGDATA->m_height - 1;
++    int srcpixxmax = M_IMGDATA->m_width - 1;
++
++    double srcpixy, srcpixy1, srcpixy2, dy, dy1;
++    double srcpixx, srcpixx1, srcpixx2, dx, dx1;
++    double r1, g1, b1, a1;
++    double r2, g2, b2, a2;
++
++    for ( int dsty = 0; dsty < height; dsty++ )
++    {
++        // We need to calculate the source pixel to interpolate from - Y-axis
++        srcpixy = double(dsty) * HFactor;
++        srcpixy1 = int(srcpixy);
++        srcpixy2 = ( srcpixy1 == srcpixymax ) ? srcpixy1 : srcpixy1 + 1.0;
++        dy = srcpixy - (int)srcpixy;
++        dy1 = 1.0 - dy;
++
++
++        for ( int dstx = 0; dstx < width; dstx++ )
++        {
++            // X-axis of pixel to interpolate from
++            srcpixx = double(dstx) * WFactor;
++            srcpixx1 = int(srcpixx);
++            srcpixx2 = ( srcpixx1 == srcpixxmax ) ? srcpixx1 : srcpixx1 + 1.0;
++            dx = srcpixx - (int)srcpixx;
++            dx1 = 1.0 - dx;
++
++            int x_offset1 = srcpixx1 < 0.0 ? 0 : srcpixx1 > srcpixxmax ? srcpixxmax : (int)srcpixx1;
++            int x_offset2 = srcpixx2 < 0.0 ? 0 : srcpixx2 > srcpixxmax ? srcpixxmax : (int)srcpixx2;
++            int y_offset1 = srcpixy1 < 0.0 ? 0 : srcpixy1 > srcpixymax ? srcpixymax : (int)srcpixy1;
++            int y_offset2 = srcpixy2 < 0.0 ? 0 : srcpixy2 > srcpixymax ? srcpixymax : (int)srcpixy2;
++
++            int src_pixel_index00 = y_offset1 * M_IMGDATA->m_width + x_offset1;
++            int src_pixel_index01 = y_offset1 * M_IMGDATA->m_width + x_offset2;
++            int src_pixel_index10 = y_offset2 * M_IMGDATA->m_width + x_offset1;
++            int src_pixel_index11 = y_offset2 * M_IMGDATA->m_width + x_offset2;
++
++            //first line
++            r1 = src_data[src_pixel_index00 * 3 + 0] * dx1 + src_data[src_pixel_index01 * 3 + 0] * dx;
++            g1 = src_data[src_pixel_index00 * 3 + 1] * dx1 + src_data[src_pixel_index01 * 3 + 1] * dx;
++            b1 = src_data[src_pixel_index00 * 3 + 2] * dx1 + src_data[src_pixel_index01 * 3 + 2] * dx;
++            if ( src_alpha )
++                a1 = src_alpha[src_pixel_index00] * dx1 + src_alpha[src_pixel_index01] * dx;
++
++            //second line
++            r2 = src_data[src_pixel_index10 * 3 + 0] * dx1 + src_data[src_pixel_index11 * 3 + 0] * dx;
++            g2 = src_data[src_pixel_index10 * 3 + 1] * dx1 + src_data[src_pixel_index11 * 3 + 1] * dx;
++            b2 = src_data[src_pixel_index10 * 3 + 2] * dx1 + src_data[src_pixel_index11 * 3 + 2] * dx;
++            if ( src_alpha )
++                a2 = src_alpha[src_pixel_index10] * dx1 + src_alpha[src_pixel_index11] * dx;
++
++            //result lines
++
++            dst_data[0] = r1 * dy1 + r2 * dy;
++            dst_data[1] = g1 * dy1 + g2 * dy;
++            dst_data[2] = b1 * dy1 + b2 * dy;
++            dst_data += 3;
++
++            if ( src_alpha )
++                *dst_alpha++ = a1 * dy1 + a2 * dy;
++        }
++    }
++
++    return ret_image;
++}
++
+ // The following two local functions are for the B-spline weighting of the
+ // bicubic sampling algorithm
+ static inline double spline_cube(double value)
+@@ -668,16 +767,18 @@
+         dst_alpha = ret_image.GetAlpha();
+     }
+ 
++    double HFactor = double(M_IMGDATA->m_height) / height;
++    double WFactor = double(M_IMGDATA->m_width) / width;
+     for ( int dsty = 0; dsty < height; dsty++ )
+     {
+         // We need to calculate the source pixel to interpolate from - Y-axis
+-        double srcpixy = double(dsty * M_IMGDATA->m_height) / height;
++        double srcpixy = double(dsty) * HFactor;
+         double dy = srcpixy - (int)srcpixy;
+ 
+         for ( int dstx = 0; dstx < width; dstx++ )
+         {
+             // X-axis of pixel to interpolate from
+-            double srcpixx = double(dstx * M_IMGDATA->m_width) / width;
++            double srcpixx = double(dstx) * WFactor;
+             double dx = srcpixx - (int)srcpixx;
+ 
+             // Sums for each color channel

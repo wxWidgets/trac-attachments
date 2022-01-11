@@ -1,0 +1,262 @@
+Index: include/wx/checkbox.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/checkbox.h,v
+retrieving revision 1.11
+diff -u -r1.11 checkbox.h
+--- include/wx/checkbox.h	2003/07/22 00:23:42	1.11
++++ include/wx/checkbox.h	2003/07/22 22:30:51
+@@ -18,8 +18,38 @@
+ 
+ #include "wx/control.h"
+ 
+-WXDLLEXPORT_DATA(extern const wxChar*) wxCheckBoxNameStr;
+ 
++/*
++ * wxCheckBox style flags
++ * Using wxCH_* because wxCB_* is used by wxComboBox.
++ * Determine whether to use a 3-state or 2-state
++ * checkbox. 3-state enables to differentiate
++ * between 'unchecked', 'checked' and 'undetermined'.
++ */
++#define wxCH_2STATE           0x0000
++#define wxCH_3STATE           0x1000
++
++/*
++ * If this style is set the user can set the checkbox to the
++ * undetermined state. If not set the undetermined set can only
++ * be set programmatically.
++ * This style can only be used with 3 state checkboxes.
++ */
++#define wxCH_ALLOW_3RD_STATE_FOR_USER 0x2000
++
++/*
++ * The possible states of a 3-state checkbox.
++ */
++enum wxCheckBoxState
++{
++    wxCHK_UNCHECKED,
++    wxCHK_CHECKED,
++    wxCHK_UNDETERMINED
++};
++
++
++WXDLLEXPORT_DATA(extern const wxChar *) wxCheckBoxNameStr;
++
+ // ----------------------------------------------------------------------------
+ // wxCheckBox: a control which shows a label and a box which may be checked
+ // ----------------------------------------------------------------------------
+@@ -32,8 +62,62 @@
+     // set/get the checked status of the listbox
+     virtual void SetValue(bool value) = 0;
+     virtual bool GetValue() const = 0;
++
++    bool IsChecked() const
++    {
++        wxASSERT_MSG( !Is3State(), wxT("Calling IsChecked() doesn't make sense for")
++            wxT(" a three state checkbox, Use Get3StateValue() instead") );
++
++        return GetValue();
++    }
++
++    void Set3StateValue(wxCheckBoxState state)
++    {
++        if ( state == wxCHK_UNDETERMINED && !Is3State() )
++        {
++            wxFAIL_MSG(wxT("Setting a 2-state checkbox to undetermined state"));
++            state = wxCHK_UNCHECKED;
++        }
++
++        DoSet3StateValue(state);
++    }
++
++    wxCheckBoxState Get3StateValue() const
++    {
++        wxCheckBoxState state = DoGet3StateValue();
++
++        if ( state == wxCHK_UNDETERMINED && !Is3State() )
++        {
++            // Undetermined state with a 2-state checkbox??
++            wxFAIL_MSG( wxT("DoGet3StateValue() says the 2-state checkbox is ")
++                wxT("in an undetermined/third state") );
++
++            state = wxCHK_UNCHECKED;
++        }
++
++        return state;
++    }
++
++    bool Is3State() const
++    {
++        return (m_style & wxCH_3STATE) != 0;
++    }
++
++    bool Is3rdStateAllowedForUser() const
++    {
++        return (m_style & wxCH_ALLOW_3RD_STATE_FOR_USER) != 0;
++    }
++
++protected:
++    int m_style;
++
++    virtual void DoSet3StateValue(wxCheckBoxState WXUNUSED(state)) { wxFAIL; }
+ 
+-    bool IsChecked() const { return GetValue(); }
++    virtual wxCheckBoxState DoGet3StateValue() const
++    {
++        wxFAIL;
++        return wxCHK_UNCHECKED;
++    }
+ 
+ private:
+     DECLARE_NO_COPY_CLASS(wxCheckBoxBase)
+Index: include/wx/msw/checkbox.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/msw/checkbox.h,v
+retrieving revision 1.13
+diff -u -r1.13 checkbox.h
+--- include/wx/msw/checkbox.h	2003/07/22 00:23:53	1.13
++++ include/wx/msw/checkbox.h	2003/07/22 22:30:52
+@@ -53,6 +53,10 @@
+ protected:
+     virtual wxSize DoGetBestSize() const;
+ 
++    virtual void DoSet3StateValue(wxCheckBoxState value);
++
++    virtual wxCheckBoxState DoGet3StateValue() const;
++
+ private:
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxCheckBox)
+ };
+Index: src/msw/checkbox.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/checkbox.cpp,v
+retrieving revision 1.37
+diff -u -r1.37 checkbox.cpp
+--- src/msw/checkbox.cpp	2003/03/17 11:21:52	1.37
++++ src/msw/checkbox.cpp	2003/07/22 22:30:56
+@@ -39,10 +39,18 @@
+ 
+ #include "wx/msw/private.h"
+ 
++#ifndef BST_UNCHECKED
++    #define BST_UNCHECKED 0x0000
++#endif
++
+ #ifndef BST_CHECKED
+     #define BST_CHECKED 0x0001
+ #endif
+ 
++#ifndef BST_INDETERMINATE
++    #define BST_INDETERMINATE 0x0002
++#endif
++
+ // ============================================================================
+ // implementation
+ // ============================================================================
+@@ -56,9 +64,20 @@
+ bool wxCheckBox::MSWCommand(WXUINT WXUNUSED(param), WXWORD WXUNUSED(id))
+ {
+     wxCommandEvent event(wxEVT_COMMAND_CHECKBOX_CLICKED, m_windowId);
+-    event.SetInt(GetValue());
++    wxCheckBoxState state = Get3StateValue();
++
++    // If the style flag to allow the user setting the undetermined state
++    // is not set, then skip the undetermined state and set it to unchecked.
++    if ( state == wxCHK_UNDETERMINED && !Is3rdStateAllowedForUser() )
++    {
++        state = wxCHK_UNCHECKED;
++        Set3StateValue(state);
++    }
++
++    event.SetInt(state);
+     event.SetEventObject(this);
+     ProcessCommand(event);
++
+     return TRUE;
+ }
+ 
+@@ -72,10 +91,27 @@
+ {
+     if ( !CreateControl(parent, id, pos, size, style, validator, name) )
+         return FALSE;
++
++    m_style = style;
++
++    long msStyle = WS_TABSTOP;
++
++    if ( style & wxCH_3STATE )
++    {
++        msStyle |= BS_AUTO3STATE;
++    }
++    else
++    {
++        wxASSERT_MSG( !Is3rdStateAllowedForUser(),
++            wxT("Using wxCH_ALLOW_3RD_STATE_FOR_USER")
++            wxT(" style flag for a 2-state checkbox is useless") );
++        msStyle |= BS_AUTOCHECKBOX;
++    }
+ 
+-    long msStyle = BS_AUTOCHECKBOX | WS_TABSTOP;
+     if ( style & wxALIGN_RIGHT )
++    {
+         msStyle |= BS_LEFTTEXT;
++    }
+ 
+     return MSWCreateControl(wxT("BUTTON"), msStyle, pos, size, label, 0);
+ }
+@@ -119,18 +155,50 @@
+ 
+ void wxCheckBox::SetValue(bool val)
+ {
+-    SendMessage(GetHwnd(), BM_SETCHECK, val, 0);
++    if (val)
++    {
++        Set3StateValue(wxCHK_CHECKED);
++    }
++    else
++    {
++        Set3StateValue(wxCHK_UNCHECKED);
++    }
+ }
+ 
+ bool wxCheckBox::GetValue() const
+ {
+-    return (SendMessage(GetHwnd(), BM_GETCHECK, 0, 0) & BST_CHECKED) != 0;
++    return (Get3StateValue() != 0);
+ }
+ 
+ void wxCheckBox::Command(wxCommandEvent& event)
+ {
+-    SetValue(event.GetInt() != 0);
++    int state = event.GetInt();
++    wxCHECK_RET( (state == wxCHK_UNCHECKED) || (state == wxCHK_CHECKED)
++        || (state == wxCHK_UNDETERMINED),
++        wxT("event.GetInt() returned an invalid checkbox state") );
++
++    Set3StateValue((wxCheckBoxState) state);
+     ProcessCommand(event);
++}
++
++wxCOMPILE_TIME_ASSERT(wxCHK_UNCHECKED == BST_UNCHECKED
++    && wxCHK_CHECKED == BST_CHECKED
++    && wxCHK_UNDETERMINED == BST_INDETERMINATE, EnumValuesIncorrect);
++
++void wxCheckBox::DoSet3StateValue(wxCheckBoxState state)
++{
++    ::SendMessage(GetHwnd(), BM_SETCHECK, (WPARAM) state, 0);
++}
++
++wxCheckBoxState wxCheckBox::DoGet3StateValue() const
++{
++#ifdef __WIN32__
++    return (wxCheckBoxState) ::SendMessage(GetHwnd(), BM_GETCHECK, 0, 0);
++#else
++    return (wxCheckBoxState) ((::SendMessage(GetHwnd(), BM_GETCHECK, 0, 0)
++        & 0x001) == 0x001);
++#endif
++
+ }
+ 
+ #endif // wxUSE_CHECKBOX
+
+ 	  	 

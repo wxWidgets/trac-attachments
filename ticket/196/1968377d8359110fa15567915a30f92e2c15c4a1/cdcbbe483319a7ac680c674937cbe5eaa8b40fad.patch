@@ -1,0 +1,87 @@
+--- src\common\event-bu.cpp	2008-08-11 14:41:16.000000000 +0200
++++ src\common\event.cpp	2008-08-11 14:47:36.000000000 +0200
+@@ -1033,6 +1033,8 @@
+ 
+ wxEvtHandler::wxEvtHandler()
+ {
++    m_beingDeleted = false;
++    
+     m_nextHandler = (wxEvtHandler *) NULL;
+     m_previousHandler = (wxEvtHandler *) NULL;
+     m_enabled = true;
+@@ -1046,6 +1048,8 @@
+ 
+ wxEvtHandler::~wxEvtHandler()
+ {
++    m_beingDeleted = true;
++    
+     // Takes itself out of the list of handlers
+     if (m_previousHandler)
+         m_previousHandler->m_nextHandler = m_nextHandler;
+@@ -1063,7 +1067,6 @@
+             wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)*it;
+ 
+             // Remove ourselves from sink destructor notifications
+-            // (this has usually been been done, in wxTrackable destructor)
+             wxEvtHandler *eventSink = entry->m_eventSink;
+             if ( eventSink )
+             {
+@@ -1084,8 +1087,19 @@
+     };
+ 
+     if (m_pendingEvents)
++    {
++        // At this time, we could still be used from other threads. 
++        // Continue to use sync objects.
++#if wxUSE_THREADS
++        wxENTER_CRIT_SECT( m_pendingEventsLock );
++#endif
+         m_pendingEvents->DeleteContents(true);
+     delete m_pendingEvents;
++        m_pendingEvents = NULL;
++#if wxUSE_THREADS
++        wxLEAVE_CRIT_SECT( m_pendingEventsLock );
++#endif
++    }
+ 
+     // Remove us from wxPendingEvents if necessary.
+     if ( wxPendingEvents )
+@@ -1133,6 +1147,9 @@
+ {
+     wxCHECK_RET( event, "NULL event can't be posted" );
+ 
++    // Catch the situation where destructor is already invoked (in another thread)
++    if( m_beingDeleted ) return;
++
+     // 1) Add this event to our list of pending events
+     wxENTER_CRIT_SECT( m_pendingEventsLock );
+ 
+@@ -1168,6 +1185,17 @@
+     // pending events
+     wxASSERT_MSG( m_pendingEvents && !m_pendingEvents->IsEmpty(),
+                   "should have pending events if called" );
++    // ...but it happens occasionally and we don't want a crash due to that.
++    // The problem is not ignored, since we've given an assert notification above.
++    if( !m_pendingEvents  ){
++        wxLEAVE_CRIT_SECT( m_pendingEventsLock );
++        return;
++    }
++    if( m_pendingEvents->IsEmpty() ){
++        wxPendingEvents->DeleteObject(this);
++        wxLEAVE_CRIT_SECT( m_pendingEventsLock );
++        return;
++    }
+ 
+     wxList::compatibility_iterator node = m_pendingEvents->GetFirst();
+     wxEventPtr event(wx_static_cast(wxEvent *, node->GetData()));
+--- include\wx\event-bu.h	2008-06-23 16:24:44.000000000 +0200
++++ include\wx\event.h	2008-08-07 19:57:06.000000000 +0200
+@@ -2446,6 +2446,8 @@
+ 
+     // Is event handler enabled?
+     bool                m_enabled;
++    // Avoid adding events from another thread during dtor
++    bool                m_beingDeleted;
+ 
+ 
+     // The user data: either an object which will be deleted by the container

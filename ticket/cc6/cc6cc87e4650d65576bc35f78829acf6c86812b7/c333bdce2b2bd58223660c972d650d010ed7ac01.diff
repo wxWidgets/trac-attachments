@@ -1,0 +1,107 @@
+Index: window.cpp
+===================================================================
+--- window.cpp	(revision 66977)
++++ window.cpp	(working copy)
+@@ -228,6 +228,15 @@
+ 
+ #endif // wxHAS_MSW_BACKGROUND_ERASE_HOOK
+ 
++// Flag blocking dialog box close with Esc key.
++// In some situations (i.e. IME composition in progress, menu active, combobox expanded)
++// Esc should perform a different function than closing a dialog box.
++//
++// This is currently global as we allow using UI from the main thread only
++// anyhow but could be replaced with a thread-specific value in the future if
++// needed.
++bool gs_isBlockingDialogCloseWithEscKey = false;
++
+ } // anonymous namespace
+ 
+ // ---------------------------------------------------------------------------
+@@ -2979,6 +2988,13 @@
+                 WXHWND hwnd;
+                 UnpackCommand(wParam, lParam, &id, &hwnd, &cmd);
+ 
++				// If we are in a wxDialog and a combobox is expanded, Esc key should collapse it instead of
++				// being consumed by wxEVT_CHAR_HOOK which might close the dialog box
++				if (cmd == CBN_DROPDOWN)
++					gs_isBlockingDialogCloseWithEscKey = true;
++				else if (cmd == CBN_CLOSEUP)
++					gs_isBlockingDialogCloseWithEscKey = false;
++
+                 processed = HandleCommand(id, cmd, hwnd);
+             }
+             break;
+@@ -3171,6 +3187,18 @@
+             }
+             break;
+ 
++		// If inside a wxDialog a menu is active or IME composition is in progress, Esc key should not
++		// be consumed by wxEVT_CHAR_HOOK which might close the active dialog.
++        case WM_IME_STARTCOMPOSITION:
++		case WM_ENTERMENULOOP:
++            gs_isBlockingDialogCloseWithEscKey = true;
++            break;
++
++        case WM_IME_ENDCOMPOSITION:
++		case WM_EXITMENULOOP:
++            gs_isBlockingDialogCloseWithEscKey = false;
++            break;
++
+ #if wxUSE_HOTKEY
+         case WM_HOTKEY:
+             processed = HandleHotKey((WORD)wParam, lParam);
+@@ -6495,31 +6523,38 @@
+     DWORD hiWord = HIWORD(lParam);
+     if ( nCode != HC_NOREMOVE && ((hiWord & KF_UP) == 0) )
+     {
++        // Don't intercept the Esc key which may be needed inside a wxDialog 
++		// (i.e. by IME if it's currently in use, or to close a menu or an expanded combobox).
++        // This is rather drastic but better than the alternative of
++        // stealing keys that have special meaning in a dialog box (Esc) from it.
+         wchar_t uc;
+         int id = wxMSWKeyboard::VKToWX(wParam, lParam, &uc);
+-        if ( id != WXK_NONE
++        if ( !gs_isBlockingDialogCloseWithEscKey || id != WXK_ESCAPE )
++        {
++            if ( id != WXK_NONE
+ #if wxUSE_UNICODE
+-                || static_cast<int>(uc) != WXK_NONE
++                    || static_cast<int>(uc) != WXK_NONE
+ #endif // wxUSE_UNICODE
+-                )
+-        {
+-            const wxWindow * const win = wxGetActiveWindow();
++                    )
++            {
++                const wxWindow * const win = wxGetActiveWindow();
+ 
+-            wxKeyEvent event(wxEVT_CHAR_HOOK);
+-            MSWInitAnyKeyEvent(event, wParam, lParam, win);
++                wxKeyEvent event(wxEVT_CHAR_HOOK);
++                MSWInitAnyKeyEvent(event, wParam, lParam, win);
+ 
+-            event.m_keyCode = id;
++                event.m_keyCode = id;
+ #if wxUSE_UNICODE
+-            event.m_uniChar = uc;
++                event.m_uniChar = uc;
+ #endif // wxUSE_UNICODE
+ 
+-            wxEvtHandler * const handler = win ? win->GetEventHandler()
+-                                               : wxTheApp;
++                wxEvtHandler * const handler = win ? win->GetEventHandler()
++                                                   : wxTheApp;
+ 
+-            if ( handler && handler->ProcessEvent(event) )
+-            {
+-                // processed
+-                return 1;
++                if ( handler && handler->ProcessEvent(event) )
++                {
++                    // processed
++                    return 1;
++                }
+             }
+         }
+     }

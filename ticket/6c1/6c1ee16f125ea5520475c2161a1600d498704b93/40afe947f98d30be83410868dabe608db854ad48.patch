@@ -1,0 +1,461 @@
+Index: include/wx/gtk/textentry.h
+===================================================================
+--- include/wx/gtk/textentry.h	(revisión: 72461)
++++ include/wx/gtk/textentry.h	(copia de trabajo)
+@@ -51,10 +51,13 @@
+     // implementation only from now on
+     void SendMaxLenEvent();
+ 
++    bool SendIMCharEvent(const char *text);
++
+ protected:
+-    // This method must be called from the derived class Create() to connect
+-    // the handlers for the clipboard (cut/copy/paste) events.
++    // These methods must be called from the derived class Create() to connect
++    // the handlers for the clipboard (cut/copy/paste) and insert-text events.
+     void GTKConnectClipboardSignals(GtkWidget* entry);
++    void GTKConnectInsertTextSignal();
+ 
+     virtual void DoSetValue(const wxString& value, int flags);
+     virtual wxString DoGetValue() const;
+Index: include/wx/gtk/window.h
+===================================================================
+--- include/wx/gtk/window.h	(revisión: 72461)
++++ include/wx/gtk/window.h	(copia de trabajo)
+@@ -273,7 +273,12 @@
+     void GTKDisableFocusOutEvent();
+     void GTKEnableFocusOutEvent();
+ 
++    // keyboard input
+     wxGtkIMData         *m_imData;
++    wxKeyEvent          m_lastKeyEvent;
++    bool                m_IM_Finished;
++    void GTKSetIMFinished() { m_IM_Finished = true; }
++    bool GTKSendIMCharEvent(const char *text);
+ 
+     // indices for the arrays below
+     enum ScrollDir { ScrollDir_Horz, ScrollDir_Vert, ScrollDir_Max };
+Index: configure.in
+===================================================================
+--- configure.in	(revisión: 72461)
++++ configure.in	(copia de trabajo)
+@@ -2964,28 +2964,28 @@
+             CFLAGS="$wx_cv_cflags_gtk $CFLAGS"
+             LIBS="$LIBS $wx_cv_libs_gtk"
+ 
+-            dnl test if we have at least GTK+ 2.18:
+-            AC_MSG_CHECKING([if GTK+ is version >= 2.18])
++            dnl test if we have at least GTK+ 2.22:
++            AC_MSG_CHECKING([if GTK+ is version >= 2.22])
+             AC_TRY_COMPILE([
+                             #include <gtk/gtk.h>
+                            ],
+                            [
+-                            #if !GTK_CHECK_VERSION(2,18,0)
+-                            Not GTK+ 2.18
++                            #if !GTK_CHECK_VERSION(2,22,0)
++                            Not GTK+ 2.22
+                             #endif
+                            ],
+                            [
+                             AC_DEFINE(__WXGTK218__)
+                             AC_DEFINE(__WXGTK210__)
+                             AC_MSG_RESULT([yes])
+-                            ac_wxgtk218=1
++                            ac_wxgtk222=1
+                            ],
+                            [
+                             AC_MSG_RESULT([no])
+-                            ac_wxgtk218=0
++                            ac_wxgtk222=0
+                            ])
+ 
+-            if test "$ac_wxgtk218" = 0; then
++            if test "$ac_wxgtk222" = 0; then
+                 dnl test if we have at least GTK+ 2.10:
+                 AC_MSG_CHECKING([if GTK+ is version >= 2.10])
+                 AC_TRY_COMPILE([
+Index: src/gtk/textctrl.cpp
+===================================================================
+--- src/gtk/textctrl.cpp	(revisión: 72461)
++++ src/gtk/textctrl.cpp	(copia de trabajo)
+@@ -460,8 +460,27 @@
+ //  "insert-text" for GtkTextBuffer
+ //-----------------------------------------------------------------------------
+ 
++// Multiline wxTextCtrl. Send a wxEVT_CHAR event
+ extern "C" {
+ static void
++ml_insert_text_callback(GtkTextBuffer *buffer,
++                        GtkTextIter * WXUNUSED(end),
++                        gchar *text,
++                        gint WXUNUSED(len),
++                        wxTextCtrl *win)
++{
++    // If we are called from IM context, send wxEVT_CHAR
++    if ( win->GTKSendIMCharEvent(text) )
++    {
++        // avoid inserting this char
++        g_signal_stop_emission_by_name (buffer, "insert_text");
++    }
++}
++}
++
++// Check for URLs after each text change
++extern "C" {
++static void
+ au_insert_text_callback(GtkTextBuffer * WXUNUSED(buffer),
+                         GtkTextIter *end,
+                         gchar *text,
+@@ -745,6 +764,10 @@
+ 
+     if (multi_line)
+     {
++        // Make possible to send and veto wxEVT_CHAR
++        g_signal_connect (m_buffer, "insert_text",
++                          G_CALLBACK (ml_insert_text_callback), this);
++
+         // Handle URLs on multi-line controls with wxTE_AUTO_URL style
+         if (style & wxTE_AUTO_URL)
+         {
+@@ -784,6 +807,8 @@
+         // do the right thing with Enter presses depending on whether we have
+         // wxTE_PROCESS_ENTER or not
+         GTKSetActivatesDefault();
++        // Make possible to send and veto wxEVT_CHAR
++        GTKConnectInsertTextSignal();
+     }
+ 
+ 
+@@ -1505,6 +1530,10 @@
+ {
+     wxCHECK_RET( m_text != NULL, wxT("invalid text ctrl") );
+ 
++    // Paste() while IM is working (i.e. s+c+u+key and then paste) makes
++    // IM dismiss its input. We must be aware of it.
++    GTKSetIMFinished();
++
+     if ( IsMultiLine() )
+         g_signal_emit_by_name (m_text, "paste-clipboard");
+     else
+Index: src/gtk/textentry.cpp
+===================================================================
+--- src/gtk/textentry.cpp	(revisión: 72461)
++++ src/gtk/textentry.cpp	(copia de trabajo)
+@@ -43,35 +43,54 @@
+ extern "C"
+ void
+ wx_gtk_insert_text_callback(GtkEditable *editable,
+-                            const gchar * WXUNUSED(new_text),
+-                            gint WXUNUSED(new_text_length),
++                            const gchar * new_text,
++                            gint new_text_length,
+                             gint * WXUNUSED(position),
+                             wxTextEntry *text)
+ {
+-    // we should only be called if we have a max len limit at all
+     GtkEntry *entry = GTK_ENTRY (editable);
+ 
+-    const int text_length = gtk_entry_get_text_length(entry);
+ #if GTK_CHECK_VERSION(3,0,0) || defined(GSEAL_ENABLE)
+     const int text_max_length = gtk_entry_buffer_get_max_length(gtk_entry_get_buffer(entry));
+ #else
+     const int text_max_length = entry->text_max_length;
+ #endif
+-    wxCHECK_RET(text_max_length, "shouldn't be called");
+ 
+     // check that we don't overflow the max length limit
+-    //
+-    // FIXME: this doesn't work when we paste a string which is going to be
+-    //        truncated
+-    if (text_length == text_max_length)
++    if ( text_max_length > 0 )
+     {
+-        // we don't need to run the base class version at all
+-        g_signal_stop_emission_by_name (editable, "insert_text");
++        const int text_length = gtk_entry_get_text_length(entry);
++        //new_text_length is useless in bytes. Change it
++        new_text_length = g_utf8_strlen(new_text, -1);
++        if ( text_length + new_text_length > text_max_length )
++        {
++            // we don't need to run the base class version at all
++            g_signal_stop_emission_by_name (editable, "insert_text");
+ 
+-        text->SendMaxLenEvent();
++            text->SendMaxLenEvent();
++        }
+     }
++
++    // Send wxEVT_CHAR
++    if ( text->SendIMCharEvent(new_text) )
++    {
++        // avoid inserting this char
++        g_signal_stop_emission_by_name (editable, "insert_text");
++    }
+ }
+ 
++bool wxTextEntry::SendIMCharEvent(const char *text)
++{
++    return GetEditableWindow()->GTKSendIMCharEvent(text);
++}
++
++void wxTextEntry::GTKConnectInsertTextSignal()
++{
++    g_signal_connect(GetEditable(), "insert-text",
++                     G_CALLBACK (wx_gtk_insert_text_callback),
++                     this);
++}
++
+ //-----------------------------------------------------------------------------
+ //  clipboard events: "copy-clipboard", "cut-clipboard", "paste-clipboard"
+ //-----------------------------------------------------------------------------
+@@ -380,35 +399,6 @@
+         return;
+ 
+     gtk_entry_set_max_length(entry, len);
+-
+-    // there is a bug in GTK+ 1.2.x: "changed" signal is emitted even if we had
+-    // tried to enter more text than allowed by max text length and the text
+-    // wasn't really changed
+-    //
+-    // to detect this and generate TEXT_MAXLEN event instead of TEXT_CHANGED
+-    // one in this case we also catch "insert_text" signal
+-    //
+-    // when max len is set to 0 we disconnect our handler as it means that we
+-    // shouldn't check anything any more
+-    if ( len )
+-    {
+-        g_signal_connect
+-        (
+-            entry,
+-            "insert_text",
+-            G_CALLBACK(wx_gtk_insert_text_callback),
+-            this
+-        );
+-    }
+-    else // no max length
+-    {
+-        g_signal_handlers_disconnect_by_func
+-        (
+-            entry,
+-            (gpointer)wx_gtk_insert_text_callback,
+-            this
+-        );
+-    }
+ }
+ 
+ void wxTextEntry::SendMaxLenEvent()
+Index: src/gtk/window.cpp
+===================================================================
+--- src/gtk/window.cpp	(revisión: 72461)
++++ src/gtk/window.cpp	(copia de trabajo)
+@@ -935,7 +935,7 @@
+ 
+ extern "C" {
+ static gboolean
+-gtk_window_key_press_callback( GtkWidget *WXUNUSED(widget),
++gtk_window_key_press_callback( GtkWidget *widget,
+                                GdkEventKey *gdk_event,
+                                wxWindow *win )
+ {
+@@ -949,6 +949,7 @@
+     wxKeyEvent event( wxEVT_KEY_DOWN );
+     bool ret = false;
+     bool return_after_IM = false;
++    win->m_IM_Finished = true;
+ 
+     if( wxTranslateGTKKeyEventToWx(event, win, gdk_event) )
+     {
+@@ -998,21 +999,49 @@
+         return_after_IM = true;
+     }
+ 
+-    if (!ret && win->m_imData)
++    if ( !ret )
+     {
+-        win->m_imData->lastKeyEvent = gdk_event;
++        bool returnIM = false;
++        // Store our wxKeyEvent. We will use it at GTKSendIMCharEvent().
++        wxKeyEvent eventChar(wxEVT_CHAR, event);
++        win->m_lastKeyEvent = eventChar;
+ 
+-        // We should let GTK+ IM filter key event first. According to GTK+ 2.0 API
+-        // docs, if IM filter returns true, no further processing should be done.
+-        // we should send the key_down event anyway.
+-        bool intercepted_by_IM =
+-            gtk_im_context_filter_keypress(win->m_imData->context, gdk_event) != 0;
+-        win->m_imData->lastKeyEvent = NULL;
+-        if (intercepted_by_IM)
++        // Call the proper IM filter_keypress() function.
++        // During IM process a wxEVT_CHAR may be sent.
++        win->m_IM_Finished = false;
++        if( GTK_IS_ENTRY (widget) )
+         {
++            // wxTextCtrl single line, wxComboBox and the rest that use GtkEntry
++            returnIM = gtk_entry_im_context_filter_keypress(
++                                    GTK_ENTRY (widget), gdk_event) != 0;
++        }
++        else if ( GTK_IS_TEXT_VIEW (widget) )
++        {
++            //wxTextCtrl multiline use GtkTextView
++            returnIM =
++               gtk_text_view_im_context_filter_keypress(
++                                    GTK_TEXT_VIEW (widget), gdk_event) != 0;
++        }
++        else if ( win->m_imData )
++        {
++            //Use the IM_context that we have set for this not native win
++            returnIM =
++              gtk_im_context_filter_keypress(win->m_imData->context, gdk_event) != 0;
++            win->m_imData->lastKeyEvent = NULL;
++        }
++        else
++        {
++            // We have not connected an IM for this window
++            win->m_IM_Finished = true;
++        }
++
++        if ( returnIM )
++        {
+             wxLogTrace(TRACE_KEYS, wxT("Key event intercepted by IM"));
++            // Let IM to do its work
+             return TRUE;
+         }
++        // IM dissmised this key. But wx may still send a wxEVT_CHAR for it
+     }
+ 
+     if (return_after_IM)
+@@ -1041,18 +1070,18 @@
+ 
+         if ( key_code )
+         {
+-            wxKeyEvent eventChar(wxEVT_CHAR, event);
+-
++            //This wxEVT_CHAR happens only for not "normal" chars
++            // (i.e. not 'a' 'T', '-', etc)
+             wxLogTrace(TRACE_KEYS, wxT("Char event: %ld"), key_code);
+ 
+-            eventChar.m_keyCode = key_code;
++            win->m_lastKeyEvent.m_keyCode = key_code;
+ #if wxUSE_UNICODE
+-            eventChar.m_uniChar = gdk_keyval_to_unicode(key_code);
++            win->m_lastKeyEvent.m_uniChar = gdk_keyval_to_unicode(key_code);
+ #endif // wxUSE_UNICODE
+ 
+-            AdjustCharEventKeyCodes(eventChar);
++            AdjustCharEventKeyCodes(win->m_lastKeyEvent);
+ 
+-            ret = win->HandleWindowEvent(eventChar);
++            ret = win->HandleWindowEvent(win->m_lastKeyEvent);
+         }
+     }
+ 
+@@ -1060,6 +1089,10 @@
+ }
+ }
+ 
++// The IM we have set for a window call this callback when it's job is done.
++// Notice that this function will send a wxEVT_CHAR event, but calling
++// Skip() on it does has no effect in GTK+ processing.
++// It doesn't matter because this window has no editor to show the char.
+ extern "C" {
+ static void
+ gtk_wxwindow_commit_cb (GtkIMContext * WXUNUSED(context),
+@@ -1102,7 +1135,63 @@
+ }
+ }
+ 
++// When the IM internal process has finished its job and has a character ready,
++// GTK+ emits the "insert-text" signal. We set callbacks for that signal, and
++// call this function from them.
++// But other cases, such as pasting or inserting text from other command, use
++// also the "insert-text" callback.
++// We want to send the wxEVT_CHAR only when IM is the origin of the call.
++bool wxWindowGTK::GTKSendIMCharEvent(const char *text)
++{
++    // We only want key events, not other ways of inserting text (paste, etc)
++    if ( m_IM_Finished )
++        return false;
+ 
++    //Reset
++    m_IM_Finished = true;
++
++    //Nothing to process, don't send anything
++    if ( !( text && *text ) )
++        return false;
++
++    // If we have a character, let's get its codes and set them in our
++    // stored last KeyEvent.
++
++    // Unicode point
++    gunichar uchar = g_utf8_get_char(text);
++#if wxUSE_UNICODE
++    m_lastKeyEvent.m_uniChar = uchar;
++    wxLogTrace(TRACE_KEYS, wxT("IM sent character '%c'"),
++               m_lastKeyEvent.m_uniChar);
++#endif
++
++    // Check if this text can be represented (as a single character) in the
++    // current locale.
++    size_t locLen = wxConvLocal.ToWChar(NULL, 0, text);
++    if ( locLen != wxCONV_FAILED )
++    {
++        wchar_t *locChar = new wchar_t[locLen];
++        wxConvLocal.ToWChar(locChar, locLen, text);
++        // If this char does not fit in a single char, either wxConvLocal is
++        // also utf8 and its code is > 0x7F (what ASCII-ext should we use?),
++        // or wxConvLocal is not uft8 but its code is > 0xFF.
++        // In both cases, we have no keycode.
++        long val = (long)(locChar[0]);
++        m_lastKeyEvent.m_keyCode = ( (sizeof(locChar) > 0 && locChar[1] != 0)
++                                    || val > 255 ) ? WXK_NONE : val;
++        delete locChar;
++    }
++    else
++    {
++        // Key can't be represented in the current locale, leave m_keyCode
++        // as WXK_NONE. GetUnicodeKey() shall be used to access the character.
++        m_lastKeyEvent.m_keyCode = WXK_NONE;
++    }
++
++    //Send the event
++    return HandleWindowEvent(m_lastKeyEvent);
++}
++
+ //-----------------------------------------------------------------------------
+ // "key_release_event" from any window
+ //-----------------------------------------------------------------------------
+@@ -2194,6 +2283,7 @@
+     m_cursor = *wxSTANDARD_CURSOR;
+ 
+     m_imData = NULL;
++    m_IM_Finished = true;
+     m_dirtyTabOrder = false;
+ }
+ 
+Index: src/gtk/combobox.cpp
+===================================================================
+--- src/gtk/combobox.cpp	(revisión: 72461)
++++ src/gtk/combobox.cpp	(copia de trabajo)
+@@ -169,6 +169,9 @@
+         g_signal_connect_after (entry, "changed",
+                                 G_CALLBACK (gtkcombobox_text_changed_callback), this);
+ 
++        // Make possible to send and veto wxEVT_CHAR
++        GTKConnectInsertTextSignal();
++
+         GTKConnectClipboardSignals(GTK_WIDGET(entry));
+     }
+ 
+@@ -335,6 +338,10 @@
+ 
+ void wxComboBox::OnPaste(wxCommandEvent& WXUNUSED(event))
+ {
++    // Paste() while IM is working (i.e. s+c+u+key and then paste) makes
++    // IM dismiss its input. We must be aware of it.
++    GTKSetIMFinished();
++
+     Paste();
+ }
+ 
+

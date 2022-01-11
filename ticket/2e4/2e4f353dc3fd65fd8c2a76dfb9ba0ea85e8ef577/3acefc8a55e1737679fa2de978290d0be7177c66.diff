@@ -1,0 +1,405 @@
+diff --git a/include/wx/unix/mimetype.h b/include/wx/unix/mimetype.h
+index df76534..835f330 100644
+--- a/include/wx/unix/mimetype.h
++++ b/include/wx/unix/mimetype.h
+@@ -33,6 +33,8 @@ public:
+ 
+     // and delete the data here
+     void ClearData();
++    
++    bool HasXdgMime() const;
+ 
+     // implement containing class functions
+     wxFileType *GetFileTypeFromExtension(const wxString& ext);
+@@ -127,11 +129,7 @@ public:
+         { *desc = m_manager->m_aDescriptions[m_index[0]]; return true; }
+ 
+     bool GetOpenCommand(wxString *openCmd,
+-                        const wxFileType::MessageParameters& params) const
+-    {
+-        *openCmd = GetExpandedCommand(wxT("open"), params);
+-        return (! openCmd -> IsEmpty() );
+-    }
++                        const wxFileType::MessageParameters& params) const;
+ 
+     bool GetPrintCommand(wxString *printCmd,
+                          const wxFileType::MessageParameters& params) const
+
+diff --git a/src/unix/mimetype.cpp b/src/unix/mimetype.cpp
+index 44c53a9..c520b23 100644
+--- a/src/unix/mimetype.cpp
++++ b/src/unix/mimetype.cpp
+@@ -121,62 +121,102 @@ private:
+     wxString m_fname;
+ };
+ 
+-// ----------------------------------------------------------------------------
+-// constants
+-// ----------------------------------------------------------------------------
+-
+-// MIME code tracing mask
+-#define TRACE_MIME wxT("mime")
++wxString GetXdgDataHomeDir()
++{
++    wxString xdgDataHome = wxGetenv("XDG_DATA_HOME");
++    if (xdgDataHome.empty())
++    {
++        xdgDataHome = wxGetHomeDir() + "/.local/share";
++    }
+ 
++    return xdgDataHome;
++}
+ 
+-// Read a XDG *.desktop file of type 'Application'
+-void wxMimeTypesManagerImpl::LoadXDGApp(const wxString& filename)
++wxString GetXdgDataDirs(int mailcapStyles)
+ {
+-    wxLogTrace(TRACE_MIME, wxT("loading XDG file %s"), filename.c_str());
++    wxString xdgDataDirs = wxGetenv("XDG_DATA_DIRS");
++    if ( xdgDataDirs.empty() )
++    {
++        xdgDataDirs = "/usr/local/share:/usr/share";
++        if (mailcapStyles & wxMAILCAP_GNOME)
++        {
++            xdgDataDirs += ":/usr/share/gnome:/opt/gnome/share";
++        }
++        if (mailcapStyles & wxMAILCAP_KDE)
++        {
++            xdgDataDirs += ":/usr/share/kde3:/opt/kde3/share";
++            xdgDataDirs += ":/usr/share/kde4:/opt/kde4/share";
++            xdgDataDirs += ":/usr/share/kde5:/opt/kde5/share";
++        }
++    }
+ 
+-    wxMimeTextFile file(filename);
+-    if ( !file.Open() )
+-        return;
++    return xdgDataDirs;
++}
++
++// Used by wxMimeTypesManagerImpl::LoadXDGApp and wxFileTypeImpl::GetOpenCommand
++bool ParseXDGApp(const wxString& fn, wxString& mimetypes, wxString& openCommand)
++{
++    wxMimeTextFile file(fn);
++    if (!file.Open())
++    {
++        return false;
++    }
+ 
+     // Here, only type 'Application' should be considered.
+-    int nIndex = file.pIndexOf( "Type=" );
++    int nIndex = file.pIndexOf("Type=");
+     if (nIndex != wxNOT_FOUND && file.GetCmd(nIndex) != "application")
+-        return;
++    {
++        return false;
++    }
+ 
+     // The hidden entry specifies a file to be ignored.
+-    nIndex = file.pIndexOf( "Hidden=" );
++    nIndex = file.pIndexOf("Hidden=");
+     if (nIndex != wxNOT_FOUND && file.GetCmd(nIndex) == "true")
+-        return;
++    {
++        return false;
++    }
+ 
+     // Semicolon separated list of mime types handled by the application.
+     nIndex = file.pIndexOf( wxT("MimeType=") );
+     if (nIndex == wxNOT_FOUND)
+-        return;
+-    wxString mimetypes = file.GetCmd (nIndex);
++    {
++        return false;
++    }
++    mimetypes = file.GetCmd(nIndex);
+ 
+     // Name of the application
+     wxString nameapp;
+     nIndex = wxNOT_FOUND;
+ #if wxUSE_INTL // try "Name[locale name]" first
+-    wxLocale *locale = wxGetLocale();
+-    if ( locale )
++    wxLocale* locale = wxGetLocale();
++    if (locale)
++    {
+         nIndex = file.pIndexOf(wxT("Name[")+locale->GetName()+wxT("]="));
++    }
+ #endif // wxUSE_INTL
+-    if(nIndex == wxNOT_FOUND)
+-        nIndex = file.pIndexOf( wxT("Name=") );
+-    if(nIndex != wxNOT_FOUND)
++    if (nIndex == wxNOT_FOUND)
++    {
++        nIndex = file.pIndexOf(wxT("Name="));
++    }
++    if (nIndex != wxNOT_FOUND)
++    {
+         nameapp = file.GetCmd(nIndex);
++    }
+ 
+     // Icon of the application.
+     wxString nameicon, namemini;
+     nIndex = wxNOT_FOUND;
+ #if wxUSE_INTL // try "Icon[locale name]" first
+-    if ( locale )
++    if (locale)
++    {
+         nIndex = file.pIndexOf(wxT("Icon[")+locale->GetName()+wxT("]="));
++    }
+ #endif // wxUSE_INTL
+-    if(nIndex == wxNOT_FOUND)
+-        nIndex = file.pIndexOf( wxT("Icon=") );
+-    if(nIndex != wxNOT_FOUND) {
++    if (nIndex == wxNOT_FOUND)
++    {
++        nIndex = file.pIndexOf(wxT("Icon="));
++    }
++    if (nIndex != wxNOT_FOUND) {
+         nameicon = wxString(wxT("--icon ")) + file.GetCmd(nIndex);
+         namemini = wxString(wxT("--miniicon ")) + file.GetCmd(nIndex);
+     }
+@@ -185,25 +225,96 @@ void wxMimeTypesManagerImpl::LoadXDGApp(const wxString& filename)
+     // TODO: deal with %d, %D, %n, %N, %k and %v (but last one is deprecated)
+     nIndex = file.pIndexOf( wxT("Exec=") );
+     if (nIndex == wxNOT_FOUND)
+-        return;
++    {
++        return false;
++    }
+     wxString sCmd = file.GetCmd(nIndex);
+     // we expect %f; others including  %F and %U and %u are possible
+     sCmd.Replace(wxT("%F"), wxT("%f"));
+     sCmd.Replace(wxT("%U"), wxT("%f"));
+     sCmd.Replace(wxT("%u"), wxT("%f"));
+-    if (0 == sCmd.Replace ( wxT("%f"), wxT("%s") ))
++    if (0 == sCmd.Replace( wxT("%f"), wxT("%s") ))
++    {
+         sCmd = sCmd + wxT(" %s");
++    }
+     sCmd.Replace(wxT("%c"), nameapp);
+     sCmd.Replace(wxT("%i"), nameicon);
+     sCmd.Replace(wxT("%m"), namemini);
++    
++    openCommand = sCmd;
++    return true;
++}
++
++bool CreateTempFileIfNeeded(const wxString& str, wxString& filepath)
++{
++    // We'll often be passed just an ext, not an existing filepath
++    bool needsDeletion(false);
++    wxFileName fp(str);
++    if (fp.IsRelative())
++    {
++        char filename[L_tmpnam+1]; 
++        char* tn = tmpnam(filename);
++        filepath = wxString::From8BitData(tn);
++        wxString ext = fp.HasExt() ? fp.GetExt() : fp.GetName();
++        filepath << '.' << ext;
++        wxFile file;
++        file.Create(filepath);
++        needsDeletion = true;
++    }
++    else
++    {
++        filepath = str;
++    }
++    return needsDeletion;
++}
++    
++bool XdgQueryFiletype(const wxString& str, wxString& mime)
++{
++    // xdg-mime requires an existing filepath
++    wxString filepath;
++    bool needsDeletion = CreateTempFileIfNeeded(str, filepath);
++    
++    wxArrayString output;
++    wxString command("xdg-mime query filetype ");
++    long result = wxExecute(command + filepath, output);
++    if (needsDeletion)
++    {
++        wxRemoveFile(filepath);
++    }
++
++    if (result == 0 && output.GetCount())
++    {
++        mime = output.Item(0);
++        return true;
++    }
++    return false;
++}
++
++// ----------------------------------------------------------------------------
++// constants
++// ----------------------------------------------------------------------------
++
++// MIME code tracing mask
++#define TRACE_MIME wxT("mime")
++
++
++// Read a XDG *.desktop file of type 'Application'
++void wxMimeTypesManagerImpl::LoadXDGApp(const wxString& filename)
++{
++    wxLogTrace(TRACE_MIME, wxT("loading XDG file %s"), filename.c_str());
+ 
+-    wxStringTokenizer tokenizer(mimetypes, wxT(";"));
+-    while(tokenizer.HasMoreTokens()) {
+-        wxString mimetype = tokenizer.GetNextToken().Lower();
+-        nIndex = m_aTypes.Index(mimetype);
+-        if(nIndex != wxNOT_FOUND) { // is this a known MIME type?
+-            wxMimeTypeCommands* entry = m_aEntries[nIndex];
+-            entry->AddOrReplaceVerb(wxT("open"), sCmd);
++    wxString mimetypes, openCommand;
++    if (ParseXDGApp(filename, mimetypes, openCommand))
++    {
++        wxStringTokenizer tokenizer(mimetypes, wxT(";"));
++        while(tokenizer.HasMoreTokens()) {
++            wxString mimetype = tokenizer.GetNextToken().Lower();
++            int nIndex = m_aTypes.Index(mimetype);
++            if (nIndex != wxNOT_FOUND)  // is this a known MIME type?
++            {
++                wxMimeTypeCommands* entry = m_aEntries[nIndex];
++                entry->AddOrReplaceVerb(wxT("open"), openCommand);
++            }
+         }
+     }
+ }
+@@ -270,6 +381,94 @@ void wxMimeTypesManagerImpl::LoadXDGGlobs(const wxString& filename)
+ // wxFileTypeImpl (Unix)
+ // ----------------------------------------------------------------------------
+ 
++bool wxFileTypeImpl::GetOpenCommand(wxString *openCmd,
++                        const wxFileType::MessageParameters& params) const
++{
++    if (m_manager->HasXdgMime())
++    {
++        wxString mimeType;
++        if (XdgQueryFiletype(params.GetFileName(), mimeType))
++        {
++            wxArrayString output;
++            wxString command("xdg-mime query default ");
++            long result = wxExecute(command + mimeType, output);
++            if (result == 0 && output.GetCount())
++            {
++                int mailcapStyles = wxMAILCAP_ALL;
++                if (wxAppTraits* const traits = wxApp::GetTraitsIfExists())
++                {
++                    wxString wm = traits->GetDesktopEnvironment();
++
++                    if (wm == "KDE")
++                    {
++                        mailcapStyles = wxMAILCAP_KDE;
++                    }
++                    else if (wm == "GNOME")
++                    {
++                        mailcapStyles = wxMAILCAP_GNOME;
++                    }
++                }
++                wxString locations(GetXdgDataHomeDir());
++                locations << ':' << GetXdgDataDirs(mailcapStyles);
++                wxArrayString dirs =
++                            wxStringTokenize(locations, ":", wxTOKEN_STRTOK);
++
++                wxString desktop(output.Item(0));
++                for (size_t n=0; n < dirs.GetCount(); ++n)
++                {
++                    wxString path = dirs.Item(n) + "/applications/";
++                    if (wxFileName::FileExists(path + desktop))
++                    {
++                        wxString mimetypes, cmd;
++                        if (ParseXDGApp(path + desktop, mimetypes, cmd))
++                        {
++                            *openCmd = wxFileType::ExpandCommand(cmd, params);
++                            return (!openCmd->empty());
++                        }
++                    }
++                    // Otherwise try subdirs; needed on kde
++                    wxDir dir(path);
++                    if (dir.IsOpened())
++                    {
++                        wxString filename;
++                        bool cont = dir.GetFirst(&filename, "", wxDIR_DIRS);
++                        while (cont)
++                        {
++                            wxFileName fn(path + filename, desktop);
++                            if (fn.Exists())
++                            {
++                                wxString mimetypes, cmd;
++                                if (ParseXDGApp(fn.GetFullPath(), mimetypes, cmd))
++                                {
++                                    *openCmd = wxFileType::ExpandCommand(cmd,
++                                                                         params
++                                                                        );
++                                    return (!openCmd->empty());
++                                }
++                            }
++                            cont = dir.GetNext(&filename);
++                        }
++                    }
++                }
++
++                // Failing that, the foo.desktop binary is often '/usr/bin/foo'
++                wxString guess("/usr/bin/");
++                guess << '/' << output.Item(0).BeforeFirst('.');
++                if (wxFileName::FileExists(guess))
++                {
++                    *openCmd = guess + ' ' + params.GetFileName();
++                    return true;
++                }
++            }
++        }
++    }
++
++    // Otherwise try to do it with wxMimeTypesManager
++    *openCmd = GetExpandedCommand(wxT("open"), params);
++
++    return (! openCmd -> IsEmpty() );
++}
++
+ wxString wxFileTypeImpl::GetExpandedCommand(const wxString & verb, const wxFileType::MessageParameters& params) const
+ {
+     wxString sTmp;
+@@ -537,18 +736,8 @@ void wxMimeTypesManagerImpl::Initialize(int mailcapStyles,
+     // than one mime type at a time, but it should be a reasonable
+     // heuristic.
+     {
+-        wxString xdgDataHome = wxGetenv("XDG_DATA_HOME");
+-        if ( xdgDataHome.empty() )
+-            xdgDataHome = wxGetHomeDir() + "/.local/share";
+-        wxString xdgDataDirs = wxGetenv("XDG_DATA_DIRS");
+-        if ( xdgDataDirs.empty() )
+-        {
+-            xdgDataDirs = "/usr/local/share:/usr/share";
+-            if (mailcapStyles & wxMAILCAP_GNOME)
+-                xdgDataDirs += ":/usr/share/gnome:/opt/gnome/share";
+-            if (mailcapStyles & wxMAILCAP_KDE)
+-                xdgDataDirs += ":/usr/share/kde3:/opt/kde3/share";
+-        }
++        wxString xdgDataHome = GetXdgDataHomeDir();
++        wxString xdgDataDirs = GetXdgDataDirs(mailcapStyles);
+         if ( !sExtraDir.empty() )
+         {
+            xdgDataDirs += ':';
+@@ -645,6 +834,21 @@ wxMimeTypesManagerImpl::~wxMimeTypesManagerImpl()
+     ClearData();
+ }
+ 
++bool wxMimeTypesManagerImpl::HasXdgMime() const
++{
++    static int hasXDG = -1;
++    if (hasXDG == -1)
++    {
++        wxString path, xdg_mime;
++        bool result = (wxGetEnv("PATH", &path) &&
++             wxFindFileInPath(&xdg_mime, path, "xdg-mime"));
++        
++        hasXDG = result? 1:0;
++    }
++
++    return (hasXDG == 1);
++}
++
+ wxFileType * wxMimeTypesManagerImpl::Associate(const wxFileTypeInfo& ftInfo)
+ {
+     InitIfNeeded();

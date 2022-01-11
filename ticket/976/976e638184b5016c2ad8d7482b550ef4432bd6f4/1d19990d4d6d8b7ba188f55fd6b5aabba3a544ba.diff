@@ -1,0 +1,267 @@
+Index: src/mac/carbon/utils.cpp
+===================================================================
+--- src/mac/carbon/utils.cpp	(revision 51672)
++++ src/mac/carbon/utils.cpp	(working copy)
+@@ -1631,6 +1631,11 @@
+     return SetDataBrowserListViewDisclosureColumn( m_controlRef, property, expandableRows);
+ }
+ 
++OSStatus wxMacDataBrowserControl::GetItemPartBounds( DataBrowserItemID item, DataBrowserPropertyID property, DataBrowserPropertyPart part, Rect * bounds )
++{
++	return GetDataBrowserItemPartBounds( m_controlRef, item, property, part, bounds);
++}
++
+ // ============================================================================
+ // Higher-level Databrowser
+ // ============================================================================
+Index: src/mac/carbon/listctrl_mac.cpp
+===================================================================
+--- src/mac/carbon/listctrl_mac.cpp	(revision 51672)
++++ src/mac/carbon/listctrl_mac.cpp	(working copy)
+@@ -102,7 +102,7 @@
+ wxCONSTRUCTOR_5( wxListCtrl , wxWindow* , Parent , wxWindowID , Id , wxPoint , Position , wxSize , Size , long , WindowStyle )
+ 
+ /*
+- TODO : Expose more information of a list's layout etc. via appropriate objects (à la NotebookPageInfo)
++ TODO : Expose more information of a list's layout etc. via appropriate objects (â€¡ la NotebookPageInfo)
+ */
+ #else
+ IMPLEMENT_DYNAMIC_CLASS(wxListCtrl, wxControl)
+@@ -601,7 +601,7 @@
+     int hitResult;
+     long current = HitTest(event.GetPosition(), hitResult);
+     if ((current == m_current) &&
+-        (hitResult == wxLIST_HITTEST_ONITEM) &&
++        (hitResult & wxLIST_HITTEST_ONITEMLABEL) &&
+         HasFlag(wxLC_EDIT_LABELS) )
+     {
+         m_renameTimer->Start( 100, true );
+@@ -1944,6 +1944,8 @@
+     return -1;
+ }
+ 
++static void calculateCGDrawingBounds(CGRect inItemRect, CGRect *outIconRect, CGRect *outTextRect, bool hasIcon = false);
++
+ // Determines which item (if any) is at the specified point,
+ // giving details in 'flags' (see wxLIST_HITTEST_... flags above)
+ long
+@@ -1974,27 +1976,86 @@
+         int row = y / rowHeight;
+         DataBrowserItemID id;
+         m_dbImpl->GetItemID( (DataBrowserTableViewRowIndex) row, &id );
+-
+-        // TODO: Use GetDataBrowserItemPartBounds to return if we are in icon or label
+-        if ( !(GetWindowStyleFlag() & wxLC_VIRTUAL ) )
+-        {
+-            wxMacListCtrlItem* lcItem;
+-            lcItem = (wxMacListCtrlItem*) id;
+-            if (lcItem)
+-            {
+-                flags = wxLIST_HITTEST_ONITEM;
+-                return row;
+-            }
+-        }
+-        else
+-        {
+-            if (row < GetItemCount() )
+-            {
+-                flags = wxLIST_HITTEST_ONITEM;
+-                return row;
+-            }
+-        }
+-
++		CGPoint click_point = CGPointMake( point.x, point.y );
++		
++		if (row < GetItemCount() )
++		{
++			for( short column = 0; column < GetColumnCount(); column++ )
++			{
++				Rect enclosingRect;
++				CGRect enclosingCGRect, iconCGRect, textCGRect;
++				int imgIndex = -1;
++				wxMacListCtrlItem* lcItem;
++
++				WXUNUSED_UNLESS_DEBUG( OSStatus status = ) m_dbImpl->GetItemPartBounds( id, kMinColumnId + column, kDataBrowserPropertyEnclosingPart, &enclosingRect );
++				wxASSERT( status == noErr );
++				
++				enclosingCGRect = CGRectMake(enclosingRect.left,
++											 enclosingRect.top,
++											 enclosingRect.right - enclosingRect.left,
++											 enclosingRect.bottom - enclosingRect.top);
++				
++				if (column >= 0)
++				{
++					if ( !(GetWindowStyleFlag() & wxLC_VIRTUAL ) )
++					{
++						lcItem = (wxMacListCtrlItem*) id;
++						if (lcItem->HasColumnInfo(column))
++						{
++							wxListItem* item = lcItem->GetColumnInfo(column);
++							
++							if (item->GetMask() & wxLIST_MASK_IMAGE)
++							{
++								imgIndex = item->GetImage();
++							}
++						}
++						
++					}
++					else
++					{
++						long itemNum = (long)id-1;
++						if (itemNum >= 0 && itemNum < GetItemCount())
++						{
++							imgIndex = OnGetItemColumnImage( itemNum, column );
++						}
++					}
++				}
++			
++				calculateCGDrawingBounds(enclosingCGRect, &iconCGRect, &textCGRect, (imgIndex != -1) );
++				
++				if ( CGRectContainsPoint( iconCGRect, click_point ) )
++				{
++					flags = wxLIST_HITTEST_ONITEMICON;
++					return row;
++				}
++				else if ( CGRectContainsPoint( textCGRect, click_point ) )
++				{
++					flags = wxLIST_HITTEST_ONITEMLABEL;
++					return row;
++				}
++			}
++
++			if ( !(GetWindowStyleFlag() & wxLC_VIRTUAL ) )
++			{
++				wxMacListCtrlItem* lcItem;
++				lcItem = (wxMacListCtrlItem*) id;
++				if (lcItem)
++				{
++					flags = wxLIST_HITTEST_ONITEM;
++					return row;
++				}
++			}
++			else
++			{
++				flags = wxLIST_HITTEST_ONITEM;
++				return row;
++			}
++		}
++		else
++		{
++			if ( wxControl::HitTest( point ) )
++				flags = wxLIST_HITTEST_NOWHERE;
++		}
+     }
+     return -1;
+ }
+@@ -2579,7 +2640,7 @@
+   kContentHeight = kIconHeight + kTextBoxHeight + kIconTextSpacingV
+ };
+ 
+-static void calculateCGDrawingBounds(CGRect inItemRect, CGRect *outIconRect, CGRect *outTextRect, bool hasIcon = false)
++static void calculateCGDrawingBounds(CGRect inItemRect, CGRect *outIconRect, CGRect *outTextRect, bool hasIcon)
+ {
+   float textBottom;
+   float iconH, iconW = 0;
+@@ -2683,6 +2744,8 @@
+     ThemeDrawingState savedState = NULL;
+ #endif
+     CGContextRef context = (CGContextRef)list->MacGetDrawingContext();
++	wxMacCGContextStateSaver top_saver_cg( context );
++
+     RGBColor labelColor;
+     labelColor.red = 0;
+     labelColor.green = 0;
+@@ -2726,14 +2789,13 @@
+             GetThemeBrushAsColor(kThemeBrushSecondaryHighlightColor, 32, true, &backgroundColor);
+             GetThemeTextColor(kThemeTextColorBlack, gdDepth, colorDevice, &labelColor);
+         }
+-        CGContextSaveGState(context);
++		wxMacCGContextStateSaver cg( context );
+ 
+-        CGContextSetRGBFillColor(context, (float)backgroundColor.red / (float)USHRT_MAX,
+-                      (float)backgroundColor.green / (float)USHRT_MAX,
+-                      (float)backgroundColor.blue / (float)USHRT_MAX, 1.0);
++        CGContextSetRGBFillColor(context,
++								 (float)backgroundColor.red / (float)USHRT_MAX,
++								 (float)backgroundColor.green / (float)USHRT_MAX,
++								 (float)backgroundColor.blue / (float)USHRT_MAX, 1.0);
+         CGContextFillRect(context, enclosingCGRect);
+-
+-        CGContextRestoreGState(context);
+     }
+     else
+     {
+@@ -2746,14 +2808,13 @@
+         if (bgColor.Ok())
+         {
+             backgroundColor = MAC_WXCOLORREF( bgColor.GetPixel() );
+-            CGContextSaveGState(context);
++			wxMacCGContextStateSaver cg( context );
+ 
+-            CGContextSetRGBFillColor(context, (float)backgroundColor.red / (float)USHRT_MAX,
+-                          (float)backgroundColor.green / (float)USHRT_MAX,
+-                          (float)backgroundColor.blue / (float)USHRT_MAX, 1.0);
++            CGContextSetRGBFillColor(context,
++									 (float)backgroundColor.red / (float)USHRT_MAX,
++									 (float)backgroundColor.green / (float)USHRT_MAX,
++									 (float)backgroundColor.blue / (float)USHRT_MAX, 1.0);
+             CGContextFillRect(context, enclosingCGRect);
+-
+-            CGContextRestoreGState(context);
+         }
+     }
+ 
+@@ -2766,14 +2827,13 @@
+             wxBitmap bmp = imageList->GetBitmap(imgIndex);
+             IconRef icon = bmp.GetBitmapData()->GetIconRef();
+ 
+-            CGContextSaveGState(context);
++			wxMacCGContextStateSaver cg( context );
++
+             CGContextTranslateCTM(context, 0,iconCGRect.origin.y + CGRectGetMaxY(iconCGRect));
+             CGContextScaleCTM(context,1.0f,-1.0f);
+             PlotIconRefInContext(context, &iconCGRect, kAlignNone,
+               active ? kTransformNone : kTransformDisabled, NULL,
+               kPlotIconRefNormalFlags, icon);
+-
+-            CGContextRestoreGState(context);
+         }
+     }
+ 
+@@ -2824,14 +2884,14 @@
+     info.truncationPosition = kHIThemeTextTruncationEnd;
+     info.truncationMaxLines = 1;
+ 
+-    CGContextSaveGState(context);
+-    CGContextSetRGBFillColor (context, (float)labelColor.red / (float)USHRT_MAX,
+-                      (float)labelColor.green / (float)USHRT_MAX,
+-                      (float)labelColor.blue / (float)USHRT_MAX, 1.0);
+-
+-    HIThemeDrawTextBox(cfString, &textCGRect, &info, context, kHIThemeOrientationNormal);
++	{
++		wxMacCGContextStateSaver cg( context );
++		CGContextSetRGBFillColor (context, (float)labelColor.red / (float)USHRT_MAX,
++						  (float)labelColor.green / (float)USHRT_MAX,
++						  (float)labelColor.blue / (float)USHRT_MAX, 1.0);
+ 
+-    CGContextRestoreGState(context);
++		HIThemeDrawTextBox(cfString, &textCGRect, &info, context, kHIThemeOrientationNormal);
++	}
+ 
+ #ifndef __LP64__
+     if (savedState != NULL)
+Index: include/wx/mac/carbon/private.h
+===================================================================
+--- include/wx/mac/carbon/private.h	(revision 51672)
++++ include/wx/mac/carbon/private.h	(working copy)
+@@ -802,6 +802,8 @@
+     OSStatus SetHeaderDesc( DataBrowserPropertyID property, DataBrowserListViewHeaderDesc *desc );
+ 
+     OSStatus SetDisclosureColumn( DataBrowserPropertyID property , Boolean expandableRows );
++	
++	OSStatus GetItemPartBounds( DataBrowserItemID item, DataBrowserPropertyID property, DataBrowserPropertyPart part, Rect * bounds );
+ protected :
+ 
+     static pascal void DataBrowserItemNotificationProc(
+
+ 	  	 

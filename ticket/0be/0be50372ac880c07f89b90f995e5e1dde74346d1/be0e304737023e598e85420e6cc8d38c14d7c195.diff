@@ -1,0 +1,552 @@
+--- include/wx/dir.h	2005-04-05 15:22:58.000000000 +0400
++++ include/wx/dir.h	2005-04-05 15:44:42.000000000 +0400
+@@ -17,6 +17,7 @@
+ #endif
+ 
+ #ifndef WX_PRECOMP
++    #include "wx/object.h"
+     #include "wx/string.h"
+ #endif
+ 
+@@ -84,8 +85,9 @@
+ // ----------------------------------------------------------------------------
+ 
+ class WXDLLIMPEXP_BASE wxDirData;
++class WXDLLIMPEXP_BASE wxDirTraverserSimple;
+ 
+-class WXDLLIMPEXP_BASE wxDir
++class WXDLLIMPEXP_BASE wxDir : public wxObject
+ {
+ public:
+     // test for existence of a directory with the given name
+@@ -101,39 +103,39 @@
+     wxDir(const wxString& dir);
+ 
+     // dtor cleans up the associated ressources
+-    ~wxDir();
++    virtual ~wxDir();
+ 
+     // open the directory for enumerating
+-    bool Open(const wxString& dir);
++    virtual bool Open(const wxString& dir);
+ 
+     // returns true if the directory was successfully opened
+-    bool IsOpened() const;
++    virtual bool IsOpened() const;
+ 
+     // get the full name of the directory (without '/' at the end)
+-    wxString GetName() const;
++    virtual wxString GetName() const;
+ 
+     // file enumeration routines
+     // -------------------------
+ 
+     // start enumerating all files matching filespec (or all files if it is
+     // empty) and flags, return true on success
+-    bool GetFirst(wxString *filename,
++    virtual bool GetFirst(wxString *filename,
+                   const wxString& filespec = wxEmptyString,
+                   int flags = wxDIR_DEFAULT) const;
+ 
+     // get next file in the enumeration started with GetFirst()
+-    bool GetNext(wxString *filename) const;
++    virtual bool GetNext(wxString *filename) const;
+ 
+     // return true if this directory has any files in it
+-    bool HasFiles(const wxString& spec = wxEmptyString);
++    virtual bool HasFiles(const wxString& spec = wxEmptyString);
+ 
+     // return true if this directory has any subdirectories
+-    bool HasSubDirs(const wxString& spec = wxEmptyString);
++    virtual bool HasSubDirs(const wxString& spec = wxEmptyString);
+ 
+     // enumerate all files in this directory and its subdirectories
+     //
+     // return the number of files found
+-    size_t Traverse(wxDirTraverser& sink,
++    size_t Traverse(wxDirTraverserSimple& sink,
+                     const wxString& filespec = wxEmptyString,
+                     int flags = wxDIR_DEFAULT) const;
+ 
+@@ -152,5 +154,37 @@
+     DECLARE_NO_COPY_CLASS(wxDir)
+ };
+ 
++class wxDirTraverserSimple : public wxDirTraverser
++{
++public:
++    wxDirTraverserSimple(wxArrayString& files) : m_files(files) { }
++
++    virtual wxDirTraverseResult OnFile(const wxString& filename)
++    {
++        m_files.push_back(filename);
++        return wxDIR_CONTINUE;
++    }
++
++    virtual wxDirTraverseResult OnDir(const wxString& WXUNUSED(dirname))
++    {
++        return wxDIR_CONTINUE;
++    }
++
++    virtual wxDir *MakeDir()
++    {
++	return new wxDir();
++    }
++
++    virtual wxChar GetPathSeparator()
++    {
++	return wxFILE_SEP_PATH;
++    }
++
++private:
++    wxArrayString& m_files;
++
++    DECLARE_NO_COPY_CLASS(wxDirTraverserSimple)
++};
++
+ #endif // _WX_DIR_H_
+ 
+--- include/wx/filesys.h	2005-04-05 14:07:04.000000000 +0400
++++ include/wx/filesys.h	2005-04-05 15:54:46.000000000 +0400
+@@ -29,8 +29,10 @@
+ #include "wx/stream.h"
+ #include "wx/datetime.h"
+ #include "wx/filename.h"
++#include "wx/dir.h"
+ 
+ class WXDLLIMPEXP_BASE wxFSFile;
++class WXDLLIMPEXP_BASE wxFSDir;
+ class WXDLLIMPEXP_BASE wxFileSystemHandler;
+ class WXDLLIMPEXP_BASE wxFileSystem;
+ 
+@@ -92,7 +94,64 @@
+ };
+ 
+ 
++class WXDLLIMPEXP_BASE wxFSDirData;
+ 
++class WXDLLIMPEXP_BASE wxFSDir : public wxDir
++{
++public:
++    // ctors
++    // -----
++
++    // default, use Open()
++    wxFSDir() { m_data = NULL; }
++
++    // opens the directory for enumeration, use IsOpened() to test success
++    wxFSDir(const wxString& dir);
++
++    // dtor cleans up the associated ressources
++    virtual ~wxFSDir();
++
++    // open the directory for enumerating
++    virtual bool Open(const wxString& dir);
++
++    // returns true if the directory was successfully opened
++    virtual bool IsOpened() const;
++
++    // get the full name of the directory (without '/' at the end)
++    virtual wxString GetName() const;
++
++    // file enumeration routines
++    // -------------------------
++
++    // start enumerating all files matching filespec (or all files if it is
++    // empty) and flags, return true on success
++    virtual bool GetFirst(wxString *filename,
++                  const wxString& filespec = wxEmptyString,
++                  int flags = wxDIR_DEFAULT) const;
++
++    // get next file in the enumeration started with GetFirst()
++    virtual bool GetNext(wxString *filename) const;
++
++    // return true if this directory has any files in it
++    virtual bool HasFiles(const wxString& spec = wxEmptyString);
++
++    // return true if this directory has any subdirectories
++    virtual bool HasSubDirs(const wxString& spec = wxEmptyString);
++
++    // simplest version of Traverse(): get the names of all files under this
++    // directory into filenames array, return the number of files
++    static size_t GetAllFiles(const wxString& dirname,
++                              wxArrayString *files,
++                              const wxString& filespec = wxEmptyString,
++                              int flags = wxDIR_DEFAULT);
++
++private:
++    friend class wxFSDirData;
++
++    wxFSDirData *m_data;
++
++    DECLARE_NO_COPY_CLASS(wxFSDir)
++};
+ 
+ 
+ //--------------------------------------------------------------------------------
+--- src/common/dircmn.cpp	2005-04-05 15:22:58.000000000 +0400
++++ src/common/dircmn.cpp	2005-04-19 18:57:20.000000000 +0400
+@@ -81,7 +81,7 @@
+ // wxDir::Traverse()
+ // ----------------------------------------------------------------------------
+ 
+-size_t wxDir::Traverse(wxDirTraverser& sink,
++size_t wxDir::Traverse(wxDirTraverserSimple& sink,
+                        const wxString& filespec,
+                        int flags) const
+ {
+@@ -93,7 +93,7 @@
+ 
+     // the name of this dir with path delimiter at the end
+     wxString prefix = GetName();
+-    prefix += wxFILE_SEP_PATH;
++    prefix += sink.GetPathSeparator();
+ 
+     // first, recurse into subdirs
+     if ( flags & wxDIR_DIRS )
+@@ -117,7 +117,7 @@
+ 
+                 case wxDIR_CONTINUE:
+                     {
+-                        wxDir subdir;
++                        wxDir *subdir = sink.MakeDir();
+ 
+                         // don't give the error messages for the directories
+                         // which we can't open: there can be all sorts of good
+@@ -128,7 +128,7 @@
+                         do
+                         {
+                             wxLogNull noLog;
+-                            ok = subdir.Open(fulldirname);
++                            ok = subdir->Open(fulldirname);
+                             if ( !ok )
+                             {
+                                 // ask the user code what to do
+@@ -159,8 +159,9 @@
+ 
+                         if ( ok )
+                         {
+-                            nFiles += subdir.Traverse(sink, filespec, flags);
++                            nFiles += subdir->Traverse(sink, filespec, flags);
+                         }
++			delete subdir;
+                     }
+                     break;
+ 
+@@ -200,28 +201,6 @@
+ // wxDir::GetAllFiles()
+ // ----------------------------------------------------------------------------
+ 
+-class wxDirTraverserSimple : public wxDirTraverser
+-{
+-public:
+-    wxDirTraverserSimple(wxArrayString& files) : m_files(files) { }
+-
+-    virtual wxDirTraverseResult OnFile(const wxString& filename)
+-    {
+-        m_files.push_back(filename);
+-        return wxDIR_CONTINUE;
+-    }
+-
+-    virtual wxDirTraverseResult OnDir(const wxString& WXUNUSED(dirname))
+-    {
+-        return wxDIR_CONTINUE;
+-    }
+-
+-private:
+-    wxArrayString& m_files;
+-
+-    DECLARE_NO_COPY_CLASS(wxDirTraverserSimple)
+-};
+-
+ /* static */
+ size_t wxDir::GetAllFiles(const wxString& dirname,
+                           wxArrayString *files,
+--- src/common/filesys.cpp	2005-04-04 12:15:12.000000000 +0400
++++ src/common/filesys.cpp	2005-04-05 15:54:46.000000000 +0400
+@@ -26,6 +26,7 @@
+ #include "wx/mimetype.h"
+ #include "wx/filename.h"
+ #include "wx/log.h"
++#include "wx/intl.h"
+ 
+ 
+ //--------------------------------------------------------------------------------
+@@ -571,8 +572,273 @@
+ 
+ IMPLEMENT_DYNAMIC_CLASS(wxFileSystemModule, wxModule)
+ 
+-#endif
+-  // wxUSE_FILESYSTEM
+ 
++// ----------------------------------------------------------------------------
++// wxFSDir
++// ----------------------------------------------------------------------------
++
++// ----------------------------------------------------------------------------
++// macros
++// ----------------------------------------------------------------------------
++
++#define M_FSDIR       ((wxFSDirData *)m_data)
++
++// ----------------------------------------------------------------------------
++// private classes
++// ----------------------------------------------------------------------------
++
++class wxFSDirData
++{
++public:
++    wxFSDirData(const wxString& dirname);
++    ~wxFSDirData();
++
++    bool IsOk() const { return m_dir != NULL; }
++
++    void SetFileSpec(const wxString& filespec) { m_filespec = filespec; }
++    void SetFlags(int flags) { m_flags = flags; }
++
++    void Rewind() { find_next = false; }
++    bool Read(wxString *filename);
++
++    const wxString& GetName() const { return m_dirname; }
++
++private:
++    bool ReadNext(wxString *filename);
++
++    wxFileSystem *m_dir;
++
++    wxString m_dirname;
++    wxString m_filespec;
++
++    wxArrayString m_read_names;
++    unsigned int      m_read_idx;
++
++    int      m_flags;
++    bool     find_next;
++};
++
++// ============================================================================
++// implementation
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// wxFSDirData
++// ----------------------------------------------------------------------------
++
++wxFSDirData::wxFSDirData(const wxString& dirname)
++         : m_dirname(dirname)
++{
++    m_dir = NULL;
++    find_next = false;
++
++    // throw away the trailing slashes
++    size_t n = m_dirname.length();
++    wxCHECK_RET( n, _T("empty dir name in wxDir") );
++
++    while ( n > 0 && m_dirname[--n] == '/' );
++
++    m_dirname.Truncate(n + 1);
++
++    // do open the dir
++    m_dir = new wxFileSystem();
++    m_dir->ChangePathTo(dirname, true);
++}
++
++wxFSDirData::~wxFSDirData()
++{
++    delete m_dir;
++}
++
++bool wxFSDirData::ReadNext(wxString *filename)
++{
++    bool matches = FALSE;
++    wxString d_name;
++
++    while ( !matches )
++    {
++        wxString name = find_next ? m_dir->FindNext() :
++		m_dir->FindFirst(_T("*"),
++		((m_flags & wxDIR_FILES) ? wxFILE : 0) |
++		((m_flags & wxDIR_DIRS) ? wxDIR : 0));
++
++        find_next = true;
++
++        if ( name.IsEmpty() )
++            return FALSE;
++
++        wxFileName nm(wxFileSystemHandler::GetRightLocation(name));
++        d_name = nm.GetFullName();
++        // finally, check the name
++        if ( !m_filespec.empty() )
++        {
++            // test against the pattern
++            matches = wxMatchWild(m_filespec, d_name,
++                                  !(m_flags & wxDIR_HIDDEN));
++        }
++        else
++        {
++            matches = true;
++        }
++    }
++
++    *filename = d_name;
++
++    return TRUE;
++}
++
++bool wxFSDirData::Read(wxString *filename)
++{
++    if (!find_next) {
++	bool have_more = true;
++	m_read_idx = 0;
++	m_read_names.Clear();
++	while (have_more) {
++	    wxString name;
++	    have_more = ReadNext(&name);
++	    if (have_more)
++		m_read_names.Add(name);
++	}
++    }
++    if (m_read_idx < m_read_names.size()) {
++	*filename = m_read_names[m_read_idx++];
++	return true;
++    }
++    return false;
++}
++
++// ----------------------------------------------------------------------------
++// wxFSDir construction/destruction
++// ----------------------------------------------------------------------------
++
++wxFSDir::wxFSDir(const wxString& dirname)
++{
++    m_data = NULL;
++    Open(dirname);
++}
++
++bool wxFSDir::Open(const wxString& dirname)
++{
++    delete M_FSDIR;
++    m_data = new wxFSDirData(dirname);
++
++    if ( !M_FSDIR->IsOk() )
++    {
++        wxLogSysError(_("Can not enumerate files in directory '%s'"),
++                      dirname.c_str());
+ 
++        delete M_FSDIR;
++        m_data = NULL;
+ 
++        return FALSE;
++    }
++
++    return TRUE;
++}
++
++bool wxFSDir::IsOpened() const
++{
++    return (m_data != NULL);
++}
++
++wxString wxFSDir::GetName() const
++{
++    wxString name;
++    if ( m_data )
++    {
++        name = M_FSDIR->GetName();
++        if ( !name.empty() && (name.Last() == _T('/')) )
++        {
++            // chop off the last (back)slash
++            name.Truncate(name.length() - 1);
++        }
++    }
++
++    return name;
++}
++
++wxFSDir::~wxFSDir()
++{
++    delete M_FSDIR;
++}
++
++// ----------------------------------------------------------------------------
++// wxFSDir enumerating
++// ----------------------------------------------------------------------------
++
++bool wxFSDir::GetFirst(wxString *filename,
++                     const wxString& filespec,
++                     int flags) const
++{
++    wxCHECK_MSG( IsOpened(), FALSE, _T("must wxDir::Open() first") );
++
++    M_FSDIR->Rewind();
++
++    M_FSDIR->SetFileSpec(filespec);
++    M_FSDIR->SetFlags(flags);
++
++    return GetNext(filename);
++}
++
++bool wxFSDir::GetNext(wxString *filename) const
++{
++    wxCHECK_MSG( IsOpened(), FALSE, _T("must wxFSDir::Open() first") );
++
++    wxCHECK_MSG( filename, FALSE, _T("bad pointer in wxFSDir::GetNext()") );
++
++    return M_FSDIR->Read(filename);
++}
++
++bool wxFSDir::HasFiles(const wxString& spec)
++{
++    wxString s;
++    return GetFirst(&s, spec, wxDIR_FILES | wxDIR_HIDDEN);
++}
++
++bool wxFSDir::HasSubDirs(const wxString& spec)
++{
++    wxString s;
++    return GetFirst(&s, spec, wxDIR_DIRS | wxDIR_HIDDEN);
++}
++
++class wxFSDirTraverserSimple : public wxDirTraverserSimple
++{
++public:
++    wxFSDirTraverserSimple(wxArrayString& files) : wxDirTraverserSimple(files) { }
++
++    virtual wxDir *MakeDir()
++    {
++	return new wxFSDir();
++    }
++
++    virtual wxChar GetPathSeparator()
++    {
++	return wxFILE_SEP_PATH_UNIX;
++    }
++
++    DECLARE_NO_COPY_CLASS(wxFSDirTraverserSimple)
++};
++
++/* static */
++size_t wxFSDir::GetAllFiles(const wxString& dirname,
++                          wxArrayString *files,
++                          const wxString& filespec,
++                          int flags)
++{
++    wxCHECK_MSG( files, (size_t)-1, _T("NULL pointer in wxDir::GetAllFiles") );
++
++    size_t nFiles = 0;
++
++    wxFSDir dir(dirname);
++    if ( dir.IsOpened() )
++    {
++        wxFSDirTraverserSimple traverser(*files);
++
++        nFiles += dir.Traverse(traverser, filespec, flags);
++    }
++
++    return nFiles;
++}
++
++#endif
++  // wxUSE_FILESYSTEM
+
+ 	  	 

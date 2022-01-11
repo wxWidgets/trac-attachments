@@ -1,0 +1,282 @@
+Index: include/wx/textctrl.h
+===================================================================
+--- include/wx/textctrl.h	(revision 60238)
++++ include/wx/textctrl.h	(working copy)
+@@ -582,11 +582,13 @@
+     virtual wxTextCtrlHitTestResult HitTest(const wxPoint& pt,
+                                             wxTextCoord *col,
+                                             wxTextCoord *row) const;
++    virtual wxString GetValue() const = 0;
++    virtual void SetValue(const wxString& value) = 0;
+ 
+ protected:
+     // implementation of loading/saving
+-    virtual bool DoLoadFile(const wxString& file, int fileType) = 0;
+-    virtual bool DoSaveFile(const wxString& file, int fileType) = 0;
++    virtual bool DoLoadFile(const wxString& file, int fileType);
++    virtual bool DoSaveFile(const wxString& file, int fileType);
+ 
+ 
+     // the name of the last file loaded with LoadFile() which will be used by
+@@ -611,6 +613,16 @@
+ public:
+     wxTextCtrlIface() { }
+ 
++    // wxTextAreaBase overrides
++    virtual wxString GetValue() const
++    {
++       return wxTextEntryBase::GetValue();
++    }
++    virtual void SetValue(const wxString& value)
++    {
++       wxTextEntryBase::SetValue(value);
++    }
++
+ private:
+     wxDECLARE_NO_COPY_CLASS(wxTextCtrlIface);
+ };
+@@ -683,6 +695,16 @@
+     virtual bool GetStyle(long position, wxTextAttr& style);
+     virtual bool SetDefaultStyle(const wxTextAttr& style);
+ 
++    // wxTextAreaBase overrides
++    virtual wxString GetValue() const
++    {
++       return wxTextEntry::GetValue();
++    }
++    virtual void SetValue(const wxString& value)
++    {
++       wxTextEntry::SetValue(value);
++    }
++
+ protected:
+     // override streambuf method
+ #if wxHAS_TEXT_WINDOW_STREAM
+Index: include/wx/textentry.h
+===================================================================
+--- include/wx/textentry.h	(revision 60238)
++++ include/wx/textentry.h	(working copy)
+@@ -99,7 +99,6 @@
+     bool HasSelection() const;
+     virtual wxString GetStringSelection() const;
+ 
+-
+     // auto-completion
+     // ---------------
+ 
+Index: src/common/textcmn.cpp
+===================================================================
+--- src/common/textcmn.cpp	(revision 60238)
++++ src/common/textcmn.cpp	(working copy)
+@@ -739,29 +739,46 @@
+ // file IO functions
+ // ----------------------------------------------------------------------------
+ 
+-bool wxTextCtrlBase::DoLoadFile(const wxString& filename, int WXUNUSED(fileType))
++bool wxTextAreaBase::DoLoadFile(const wxString& filename, int WXUNUSED(fileType))
+ {
+ #if wxUSE_FFILE
+     wxFFile file(filename);
+-    if ( file.IsOpened() )
++    bool ok = file.IsOpened();
++    if (ok)
+     {
+         wxString text;
+-        if ( file.ReadAll(&text) )
++        ok = file.ReadAll(&text, *wxConvCurrent);
++        if (ok)
+         {
+             SetValue(text);
+-
+-            DiscardEdits();
+-
+-            m_filename = filename;
+-
+-            return true;
+         }
+     }
++    return ok;
++#else
++    return false;
++#endif // wxUSE_FFILE
++}
+ 
++bool wxTextCtrlBase::DoLoadFile(const wxString& filename, int fileType)
++{
++    if (wxTextAreaBase::DoLoadFile(filename, fileType))
++    {
++        DiscardEdits();
++        m_filename = filename;
++        return true;
++    }
+     wxLogError(_("File couldn't be loaded."));
+-#endif // wxUSE_FFILE
++    return false;
++}
+ 
++bool wxTextAreaBase::DoSaveFile(const wxString& filename, int WXUNUSED(fileType))
++{
++#if wxUSE_FFILE
++    wxFFile file(filename, _T("w"));
++    return file.IsOpened() && file.Write(GetValue(), *wxConvCurrent);
++#else
+     return false;
++#endif // wxUSE_FFILE
+ }
+ 
+ bool wxTextAreaBase::SaveFile(const wxString& filename, int fileType)
+@@ -771,18 +788,14 @@
+     {
+         // what kind of message to give? is it an error or a program bug?
+         wxLogDebug(wxT("Can't save textctrl to file without filename."));
+-
+         return false;
+     }
+-
+     return DoSaveFile(filenameToUse, fileType);
+ }
+ 
+-bool wxTextCtrlBase::DoSaveFile(const wxString& filename, int WXUNUSED(fileType))
++bool wxTextCtrlBase::DoSaveFile(const wxString& filename, int fileType)
+ {
+-#if wxUSE_FFILE
+-    wxFFile file(filename, _T("w"));
+-    if ( file.IsOpened() && file.Write(GetValue()) )
++    if (wxTextAreaBase::DoSaveFile(filename, fileType))
+     {
+         // if it worked, save for future calls
+         m_filename = filename;
+@@ -792,10 +805,6 @@
+ 
+         return true;
+     }
+-#endif // wxUSE_FFILE
+-
+-    wxLogError(_("The text couldn't be saved."));
+-
+     return false;
+ }
+ 
+Index: src/stc/stc.cpp
+===================================================================
+--- src/stc/stc.cpp	(revision 60238)
++++ src/stc/stc.cpp	(working copy)
+@@ -47,7 +47,7 @@
+ #include "wx/tokenzr.h"
+ #include "wx/mstream.h"
+ #include "wx/image.h"
+-#include "wx/file.h"
++#include "wx/ffile.h"
+ 
+ #include "ScintillaWX.h"
+ 
+@@ -3500,74 +3500,57 @@
+ 
+ 
+ #if wxUSE_TEXTCTRL
+-bool wxStyledTextCtrl::DoSaveFile(const wxString& filename, int WXUNUSED(fileType))
++bool wxStyledTextCtrl::DoSaveFile(const wxString& filename, int fileType)
++{
++   bool ok = wxTextAreaBase::DoSaveFile(filename, fileType);
+ #else
+ bool wxStyledTextCtrl::SaveFile(const wxString& filename)
+-#endif
+ {
+-    wxFile file(filename, wxFile::write);
+-
+-    if (!file.IsOpened())
+-        return false;
+-
+-    bool success = file.Write(GetText(), *wxConvCurrent);
+-
+-    if (success)
++#if wxUSE_FFILE
++    wxFFile file(filename, _T("w"));
++    bool ok = file.IsOpened() && file.Write(GetValue(), *wxConvCurrent);
++#else
++    bool ok = false;
++#endif // wxUSE_FFILE
++#endif
++    if (ok)
++    {
+         SetSavePoint();
+-
+-    return success;
++    }
++    return ok;
+ }
+ 
+ #if wxUSE_TEXTCTRL
+-bool wxStyledTextCtrl::DoLoadFile(const wxString& filename, int WXUNUSED(fileType))
++bool wxStyledTextCtrl::DoLoadFile(const wxString& filename, int fileType)
++{
++   bool ok = wxTextAreaBase::DoLoadFile(filename, fileType);
+ #else
+ bool wxStyledTextCtrl::LoadFile(const wxString& filename)
+-#endif
+ {
+-    bool success = false;
+-    wxFile file(filename, wxFile::read);
+-
+-    if (file.IsOpened())
++#if wxUSE_FFILE
++    wxFFile file(filename);
++    bool ok = file.IsOpened();
++    if (ok)
+     {
+-        wxString contents;
+-        // get the file size (assume it is not huge file...)
+-        ssize_t len = (ssize_t)file.Length();
+-
+-        if (len > 0)
++        wxString text;
++        ok = file.ReadAll(&text, *wxConvCurrent);
++        if (ok)
+         {
+-#if wxUSE_UNICODE
+-            wxMemoryBuffer buffer(len+1);
+-            success = (file.Read(buffer.GetData(), len) == len);
+-            if (success) {
+-                ((char*)buffer.GetData())[len] = 0;
+-                contents = wxString(buffer, *wxConvCurrent, len);
+-            }
+-#else
+-            wxString buffer;
+-            success = (file.Read(wxStringBuffer(buffer, len), len) == len);
+-            contents = buffer;
+-#endif
++            SetValue(text);
+         }
+-        else
+-        {
+-            if (len == 0)
+-                success = true;  // empty file is ok
+-            else
+-                success = false; // len == wxInvalidOffset
+-        }
+-
+-        if (success)
+-        {
+-            SetText(contents);
+-            EmptyUndoBuffer();
+-            SetSavePoint();
+-        }
+     }
+-
+-    return success;
++#else
++    bool ok = false;
++#endif // wxUSE_FFILE
++#endif
++   if (ok)
++   {
++       EmptyUndoBuffer();
++       SetSavePoint();
++   }
++   return ok;
+ }
+ 
+-
+ #if wxUSE_DRAG_AND_DROP
+ wxDragResult wxStyledTextCtrl::DoDragOver(wxCoord x, wxCoord y, wxDragResult def) {
+         return m_swx->DoDragOver(x, y, def);

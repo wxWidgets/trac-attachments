@@ -1,0 +1,305 @@
+Index: include/wx/datetime.h
+===================================================================
+--- include/wx/datetime.h	(revision 53642)
++++ include/wx/datetime.h	(working copy)
+@@ -30,6 +30,9 @@
+ class WXDLLIMPEXP_FWD_BASE wxDateTime;
+ class WXDLLIMPEXP_FWD_BASE wxTimeSpan;
+ class WXDLLIMPEXP_FWD_BASE wxDateSpan;
++#ifdef __WXMSW__
++struct _SYSTEMTIME;
++#endif
+ 
+ #include "wx/dynarray.h"
+ 
+@@ -598,6 +601,12 @@
+                       wxDateTime_t minute = 0,
+                       wxDateTime_t second = 0,
+                       wxDateTime_t millisec = 0);
++#ifdef __WXMSW__
++    wxDateTime(const struct _SYSTEMTIME& st)
++    {
++        SetFromMSWSysTime(st);
++    }
++#endif
+ 
+         // default copy ctor ok
+ 
+@@ -912,6 +921,17 @@
+         // pack the date in DOS format
+     unsigned long GetAsDOS() const;
+ 
++    // SYSTEMTIME format
++    // ------------------------------------------------------------------------
++#ifdef __WXMSW__
++
++    // convert SYSTEMTIME to wxDateTime
++    wxDateTime& SetFromMSWSysTime(const struct _SYSTEMTIME&);
++
++    // convert wxDateTime to SYSTEMTIME
++    void GetAsMSWSysTime(struct _SYSTEMTIME*) const;
++#endif
++
+     // comparison (see also functions below for operator versions)
+     // ------------------------------------------------------------------------
+ 
+Index: include/wx/msw/private/datecontrols.h
+===================================================================
+--- include/wx/msw/private/datecontrols.h	(revision 53642)
++++ include/wx/msw/private/datecontrols.h	(working copy)
+@@ -24,32 +24,8 @@
+ // happen with a very old version of common controls DLL, i.e. before 4.70)
+ extern bool CheckInitialization();
+ 
+-// convert SYSTEMTIME to wxDateTime
+-inline void FromSystemTime(wxDateTime *dt, const SYSTEMTIME& st)
+-{
+-    dt->Set(st.wDay,
+-            wx_static_cast(wxDateTime::Month, wxDateTime::Jan + st.wMonth - 1),
+-            st.wYear,
+-            0, 0, 0);
+-}
+-
+-// convert wxDateTime to SYSTEMTIME
+-inline void ToSystemTime(SYSTEMTIME *st, const wxDateTime& dt)
+-{
+-    const wxDateTime::Tm tm(dt.GetTm());
+-
+-    st->wYear = (WXWORD)tm.year;
+-    st->wMonth = (WXWORD)(tm.mon - wxDateTime::Jan + 1);
+-    st->wDay = tm.mday;
+-
+-    st->wDayOfWeek =
+-    st->wHour =
+-    st->wMinute =
+-    st->wSecond =
+-    st->wMilliseconds = 0;
+-}
+-
+ } // namespace wxMSWDateControls
+ 
+ #endif // _MSW_PRIVATE_DATECONTROLS_H_
+ 
++
+Index: interface/datetime.h
+===================================================================
+--- interface/datetime.h	(revision 53642)
++++ interface/datetime.h	(working copy)
+@@ -286,6 +286,17 @@
+                wxDateTime_t millisec = 0);
+ 
+     /**
++        Same as SetFromMSWSysTime.
++
++        @param st
++            Input, Windows SYSTEMTIME reference
++        @since 2.9.0
++        @remarks MSW only
++    */
++    wxDateTime(const struct _SYSTEMTIME& st);
++
++
++    /**
+         Reset time to midnight (00:00:00) without changing the date.
+     */
+     wxDateTime& ResetTime();
+@@ -411,6 +422,24 @@
+     long unsigned int GetAsDOS() const;
+ 
+     /**
++        Initialize using the Windows SYSTEMTIME structure.
++        @param st
++            Input, Windows SYSTEMTIME reference
++        @since 2.9.0
++        @remarks MSW only
++    */
++    wxDateTime& SetFromMSWSysTime(const struct _SYSTEMTIME& st);
++
++    /**
++        Returns the date and time in the Windows SYSTEMTIME format.
++        @param st
++            Output, pointer to Windows SYSTEMTIME
++        @since 2.9.0
++        @remarks MSW only
++    */
++    void GetAsMSWSysTime(struct _SYSTEMTIME* st) const;
++
++    /**
+         Returns the century of this date.
+     */
+     int GetCentury(const TimeZone& tz = Local) const;
+Index: src/common/datetime.cpp
+===================================================================
+--- src/common/datetime.cpp	(revision 53642)
++++ src/common/datetime.cpp	(working copy)
+@@ -4588,4 +4588,30 @@
+                                : (wxDateTime::WeekDay)(wd - 1);
+ }
+ 
++#ifdef __WXMSW__
++
++wxDateTime& wxDateTime::SetFromMSWSysTime(const SYSTEMTIME& st)
++{
++    return Set(st.wDay,
++            wx_static_cast(wxDateTime::Month, wxDateTime::Jan + st.wMonth - 1),
++            st.wYear,
++            0, 0, 0);
++}
++
++void wxDateTime::GetAsMSWSysTime(SYSTEMTIME* st) const
++{
++    const wxDateTime::Tm tm(GetTm());
++
++    st->wYear = (WXWORD)tm.year;
++    st->wMonth = (WXWORD)(tm.mon - wxDateTime::Jan + 1);
++    st->wDay = tm.mday;
++
++    st->wDayOfWeek =
++    st->wHour =
++    st->wMinute =
++    st->wSecond =
++    st->wMilliseconds = 0;
++}
++#endif
++
+ #endif // wxUSE_DATETIME
+Index: src/msw/calctrl.cpp
+===================================================================
+--- src/msw/calctrl.cpp	(revision 53642)
++++ src/msw/calctrl.cpp	(working copy)
+@@ -177,7 +177,7 @@
+ 
+         case MCHT_CALENDARDATE:
+             if ( date )
+-                wxMSWDateControls::FromSystemTime(date, hti.st);
++                date->SetFromMSWSysTime(hti.st);
+             return wxCAL_HITTEST_DAY;
+ 
+         case MCHT_CALENDARDAY:
+@@ -208,7 +208,7 @@
+     wxCHECK_MSG( dt.IsValid(), false, "invalid date" );
+ 
+     SYSTEMTIME st;
+-    wxMSWDateControls::ToSystemTime(&st, dt);
++    dt.GetAsMSWSysTime(&st);
+     if ( !MonthCal_SetCurSel(GetHwnd(), &st) )
+     {
+         wxLogDebug(_T("DateTime_SetSystemtime() failed"));
+@@ -232,8 +232,7 @@
+         return wxDefaultDateTime;
+     }
+ 
+-    wxDateTime dt;
+-    wxMSWDateControls::FromSystemTime(&dt, st);
++    wxDateTime dt(st);
+ 
+     wxASSERT_MSG( dt == m_date, "mismatch between data and control" );
+ #endif // __WXDEBUG__
+@@ -248,13 +247,13 @@
+     DWORD flags = 0;
+     if ( dt1.IsValid() )
+     {
+-        wxMSWDateControls::ToSystemTime(&st[0], dt1);
++        dt1.GetAsMSWSysTime(st + 0);
+         flags |= GDTR_MIN;
+     }
+ 
+     if ( dt2.IsValid() )
+     {
+-        wxMSWDateControls::ToSystemTime(&st[1], dt2);
++        dt2.GetAsMSWSysTime(st + 1);
+         flags |= GDTR_MAX;
+     }
+ 
+@@ -274,7 +273,7 @@
+     if ( dt1 )
+     {
+         if ( flags & GDTR_MIN )
+-            wxMSWDateControls::FromSystemTime(dt1, st[0]);
++            dt1->SetFromMSWSysTime(st[0]);
+         else
+             *dt1 = wxDefaultDateTime;
+     }
+@@ -282,7 +281,7 @@
+     if ( dt2 )
+     {
+         if ( flags & GDTR_MAX )
+-            wxMSWDateControls::FromSystemTime(dt2, st[1]);
++            dt2->SetFromMSWSysTime(st[1]);
+         else
+             *dt2 = wxDefaultDateTime;
+     }
+@@ -363,7 +362,7 @@
+                 // which expects GetDate() to return the new date
+                 const wxDateTime dateOld = m_date;
+                 const NMSELCHANGE * const sch = (NMSELCHANGE *)lParam;
+-                wxMSWDateControls::FromSystemTime(&m_date, sch->stSelStart);
++                m_date.SetFromMSWSysTime(sch->stSelStart);
+ 
+                 // changing the year or the month results in a second dummy
+                 // MCN_SELCHANGE event on this system which doesn't really
+Index: src/msw/datectrl.cpp
+===================================================================
+--- src/msw/datectrl.cpp	(revision 53642)
++++ src/msw/datectrl.cpp	(working copy)
+@@ -178,7 +178,7 @@
+ 
+     SYSTEMTIME st;
+     if ( dt.IsValid() )
+-        wxMSWDateControls::ToSystemTime(&st, dt);
++        dt.GetAsMSWSysTime(&st);
+     if ( !DateTime_SetSystemtime(GetHwnd(),
+                                  dt.IsValid() ? GDT_VALID : GDT_NONE,
+                                  &st) )
+@@ -200,7 +200,7 @@
+     SYSTEMTIME st;
+     if ( DateTime_GetSystemtime(GetHwnd(), &st) == GDT_VALID )
+     {
+-        wxMSWDateControls::FromSystemTime(&dt, st);
++        dt.SetFromMSWSysTime(st);
+     }
+ 
+     wxASSERT_MSG( m_date.IsValid() == dt.IsValid() &&
+@@ -218,13 +218,13 @@
+     DWORD flags = 0;
+     if ( dt1.IsValid() )
+     {
+-        wxMSWDateControls::ToSystemTime(&st[0], dt1);
++        dt1.GetAsMSWSysTime(st + 0);
+         flags |= GDTR_MIN;
+     }
+ 
+     if ( dt2.IsValid() )
+     {
+-        wxMSWDateControls::ToSystemTime(&st[1], dt2);
++        dt2.GetAsMSWSysTime(st + 1);
+         flags |= GDTR_MAX;
+     }
+ 
+@@ -242,7 +242,7 @@
+     if ( dt1 )
+     {
+         if ( flags & GDTR_MIN )
+-            wxMSWDateControls::FromSystemTime(dt1, st[0]);
++            dt1->SetFromMSWSysTime(st[0]);
+         else
+             *dt1 = wxDefaultDateTime;
+     }
+@@ -250,7 +250,7 @@
+     if ( dt2 )
+     {
+         if ( flags & GDTR_MAX )
+-            wxMSWDateControls::FromSystemTime(dt2, st[1]);
++            dt2->SetFromMSWSysTime(st[1]);
+         else
+             *dt2 = wxDefaultDateTime;
+     }
+@@ -273,7 +273,7 @@
+             NMDATETIMECHANGE *dtch = (NMDATETIMECHANGE *)hdr;
+             wxDateTime dt;
+             if ( dtch->dwFlags == GDT_VALID )
+-                wxMSWDateControls::FromSystemTime(&dt, dtch->st);
++                dt.SetFromMSWSysTime(dtch->st);
+ 
+             // filter out duplicate DTN_DATETIMECHANGE events which the native
+             // control sends us when using wxDP_DROPDOWN style

@@ -1,0 +1,1095 @@
+--- wxSVN\include\wx\valnum.h	2011-03-28 16:58:47.453125000 +0200
++++ mispatches\valnum_20110413\valnum.h	2011-04-13 18:53:53.296875000 +0200
+@@ -14,7 +14,8 @@
+ #include "wx/defs.h"
+ 
+-#if wxUSE_VALIDATORS
++#if wxUSE_VALIDATORS && (wxUSE_TEXTCTRL || wxUSE_COMBOBOX)
+ 
+ #include "wx/validate.h"
++#include "wx/numformatter.h"
+ 
+ #include <limits>
+@@ -23,12 +24,13 @@
+ enum wxNumValidatorStyle
+ {
+-    wxNUM_VAL_DEFAULT               = 0x0,
++    wxNUM_VAL_DEFAULT               = 0x0, //means "no style"
+     wxNUM_VAL_THOUSANDS_SEPARATOR   = 0x1,
+     wxNUM_VAL_ZERO_AS_BLANK         = 0x2,
+-    wxNUM_VAL_NO_TRAILING_ZEROES    = 0x4
++    wxNUM_VAL_NO_TRAILING_ZEROES    = 0x4,
++    wxNUM_VAL_DEFAULT_PRECISION     = 0x8
+ };
+ 
+ // ----------------------------------------------------------------------------
+-// Base class for all numeric validators.
++// Base class (abstract)
+ // ----------------------------------------------------------------------------
+ 
+@@ -36,23 +38,13 @@
+ {
+ public:
++    wxNumValidatorBase(int style = wxNUM_VAL_DEFAULT) {SetStyle(style);}
++    wxNumValidatorBase(const wxNumValidatorBase& val);
++    bool Copy(const wxNumValidatorBase& val);
++
++    // ACCESSORS
++    inline int GetStyle() const { return m_style; }
+     // Change the validator style. Usually it's specified during construction.
+     void SetStyle(int style) { m_style = style; }
+ 
+-
+-    // Override base class method to not do anything but always return success:
+-    // we don't need this as we do our validation on the fly here.
+-    virtual bool Validate(wxWindow * WXUNUSED(parent)) { return true; }
+-
+-protected:
+-    wxNumValidatorBase(int style)
+-    {
+-        m_style = style;
+-    }
+-
+-    wxNumValidatorBase(const wxNumValidatorBase& other) : wxValidator()
+-    {
+-        m_style = other.m_style;
+-    }
+-
+     bool HasFlag(wxNumValidatorStyle style) const
+     {
+@@ -60,4 +52,8 @@
+     }
+ 
++    // Convert wxNUM_VAL_THOUSANDS_SEPARATOR and wxNUM_VAL_NO_TRAILING_ZEROES
++    // bits of our style to the corresponding wxNumberFormatter::Style values.
++    int GetFormatFlags() const;
++
+     // Get the text entry of the associated control. Normally shouldn't ever
+     // return NULL (and will assert if it does return it) but the caller should
+@@ -65,96 +61,69 @@
+     wxTextEntry *GetTextEntry() const;
+ 
+-    // Convert wxNUM_VAL_THOUSANDS_SEPARATOR and wxNUM_VAL_NO_TRAILING_ZEROES
+-    // bits of our style to the corresponding wxNumberFormatter::Style values.
+-    int GetFormatFlags() const;
++    // Called when the value in the window must be validated.
++    // This function can pop up an error message.
++    virtual bool Validate(wxWindow *parent);
+ 
+-    // Return true if pressing a '-' key is acceptable for the current control
+-    // contents and insertion point. This is meant to be called from the
+-    // derived class IsCharOk() implementation.
+-    bool IsMinusOk(const wxString& val, int pos) const;
+-
+-    // Return the string which would result from inserting the given character
+-    // at the specified position.
+-    wxString GetValueAfterInsertingChar(wxString val, int pos, wxChar ch) const
+-    {
+-        val.insert(pos, ch);
+-        return val;
+-    }
++    //These functions are implemented in wxNumValidator
++    virtual bool TransferToWindow() = 0;
++    virtual wxString NormalizeString(const wxString& s) const = 0;
++    virtual bool StringCheck(const wxString& strNum, bool incomplete) const = 0;
++    virtual bool CheckItAll(wxString& errMsg) = 0;
+ 
+-private:
+-    // Check whether the specified character can be inserted in the control at
+-    // the given position in the string representing the current controls
+-    // contents.
+-    //
+-    // Notice that the base class checks for '-' itself so it's never passed to
+-    // this function.
+-    virtual bool IsCharOk(const wxString& val, int pos, wxChar ch) const = 0;
++protected:
+ 
+-    // NormalizeString the contents of the string if it's a valid number, return
+-    // empty string otherwise.
+-    virtual wxString NormalizeString(const wxString& s) const = 0;
++    // Return the string which would result from inserting the given character
++    wxString GetStringAfterInsertingChar(wxChar ch) const;
+ 
++    //Checks that it doesn't have too many decimal digits.
++    bool DecimalDigitsLessThanAllowed(const wxString& s);
+ 
+     // Event handlers.
++    void OnKeyDown(wxKeyEvent& event);
+     void OnChar(wxKeyEvent& event);
+     void OnKillFocus(wxFocusEvent& event);
+ 
+-
+-    // Determine the current insertion point and text in the associated control.
+-    void GetCurrentValueAndInsertionPoint(wxString& val, int& pos) const;
+-
+-
++    //vars
++    int m_precision;
++    bool m_LastKeyWasDecimal;
+     // Combination of wxVAL_NUM_XXX values.
+     int m_style;
+ 
+-
++private:
+     wxDECLARE_EVENT_TABLE();
+-
+     wxDECLARE_NO_ASSIGN_CLASS(wxNumValidatorBase);
+ };
+ 
+-namespace wxPrivate
+-{
+ 
+-// This is a helper class used by wxIntegerValidator and wxFloatingPointValidator
+-// below that implements Transfer{To,From}Window() adapted to the type of the
+-// variable.
+-//
+-// The template argument B is the name of the base class which must derive from
+-// wxNumValidatorBase and define LongestValueType type and {To,As}String()
+-// methods i.e. basically be one of wx{Integer,Number}ValidatorBase classes.
+-//
+-// The template argument T is just the type handled by the validator that will
+-// inherit from this one.
+-template <class B, typename T>
+-class wxNumValidator : public B
++// ----------------------------------------------------------------------------
++// wxNumValidator<T> implements all 'T' dependant code
++// ----------------------------------------------------------------------------
++
++template <typename T>
++class WXDLLIMPEXP_CORE wxNumValidator : public wxNumValidatorBase
+ {
+ public:
+-    typedef B BaseValidator;
+     typedef T ValueType;
+ 
+-    typedef typename BaseValidator::LongestValueType LongestValueType;
++    wxNumValidator(ValueType *value = NULL, int style = wxNUM_VAL_DEFAULT,
++                       int precision = wxNUM_VAL_DEFAULT_PRECISION);
++    wxNumValidator(const wxNumValidator& val);
++
++    // Make a clone of this validator (or return NULL) - currently necessary
++    // if you're passing a reference to a validator.
++    // Another possibility is to always pass a pointer to a new validator
++    // (so the calling code can use a copy constructor of the relevant class).
++    virtual wxObject *Clone() const { return new wxNumValidator(*this); }
++    bool Copy(const wxNumValidator& val);
++
++    // Called to transfer data to the window
++    virtual bool TransferToWindow();
+ 
+-    // FIXME-VC6: This compiler fails to compile the assert below with a
+-    // nonsensical error C2248: "'LongestValueType' : cannot access protected
+-    // typedef declared in class 'wxIntegerValidatorBase'" so just disable the
+-    // check for it.
+-#ifndef __VISUALC6__
+-    wxCOMPILE_TIME_ASSERT
+-    (
+-        sizeof(ValueType) <= sizeof(LongestValueType),
+-        UnsupportedType
+-    );
+-#endif // __VISUALC6__
++    // Called to transfer data from the window
++    virtual bool TransferFromWindow();
+ 
+-    void SetMin(ValueType min)
+-    {
+-        this->DoSetMin(min);
+-    }
+ 
+-    void SetMax(ValueType max)
+-    {
+-        this->DoSetMax(max);
+-    }
++    void SetMin(ValueType min) { m_min = min; }
++    void SetMax(ValueType max) { m_max = max; }
+ 
+     void SetRange(ValueType min, ValueType max)
+@@ -164,300 +133,317 @@
+     }
+ 
+-    virtual bool TransferToWindow()
+-    {
+-        if ( m_value )
+-        {
+-            wxTextEntry * const control = BaseValidator::GetTextEntry();
+-            if ( !control )
+-                return false;
+-
+-            control->SetValue(NormalizeValue(*m_value));
+-        }
+-
+-        return true;
+-    }
+-
+-    virtual bool TransferFromWindow()
+-    {
+-        if ( m_value )
+-        {
+-            wxTextEntry * const control = BaseValidator::GetTextEntry();
+-            if ( !control )
+-                return false;
+-
+-            const wxString s(control->GetValue());
+-            LongestValueType value;
+-            if ( s.empty() && BaseValidator::HasFlag(wxNUM_VAL_ZERO_AS_BLANK) )
+-                value = 0;
+-            else if ( !BaseValidator::FromString(s, &value) )
+-                return false;
+-
+-            if ( !this->IsInRange(value) )
+-                return false;
+-
+-            *m_value = static_cast<ValueType>(value);
+-        }
++    //Tell integers/floats type
++    bool IsInteger() const;
+ 
+-        return true;
+-    }
++    // Set precision i.e. the number of digits shown (and accepted on input)
++    // after the decimal point. By default this is set to the maximal precision
++    // supported by the type handled by the validator.
++    void SetPrecision(int precision);
+ 
+ protected:
+-    wxNumValidator(ValueType *value, int style)
+-        : BaseValidator(style),
+-          m_value(value)
+-    {
+-    }
+ 
+-    // Implement wxNumValidatorBase virtual method which is the same for
+-    // both integer and floating point numbers.
+-    virtual wxString NormalizeString(const wxString& s) const
++    bool IsInRange(ValueType value) const
+     {
+-        LongestValueType value;
+-        return BaseValidator::FromString(s, &value) ? NormalizeValue(value)
+-                                                    : wxString();
++        return m_min <= value && value <= m_max;
+     }
+ 
+-private:
+-    // Just a helper which is a common part of TransferToWindow() and
+-    // NormalizeString(): returns string representation of a number honouring
++    // Formats the contents of the string if it's a valid number, return
++    // empty string otherwise.
++    virtual wxString NormalizeString(const wxString& s) const;
++
++    // Returns formatted string representation of a number honouring
+     // wxNUM_VAL_ZERO_AS_BLANK flag.
+-    wxString NormalizeValue(LongestValueType value) const
+-    {
+-        wxString s;
+-        if ( value != 0 || !BaseValidator::HasFlag(wxNUM_VAL_ZERO_AS_BLANK) )
+-            s = this->ToString(value);
++    virtual wxString NormalizeValue(ValueType value) const;
+ 
+-        return s;
+-    }
++    //Conversions adpated to ValueType
++    static bool FromString(const wxString& s, ValueType *value);
++
++    //Checks if the string seems a valid number, even it's incomplete
++    bool StringCheck(const wxString& strNum, bool incomplete) const;
+ 
++    //Do all checks to ensure this is a valid value
++    bool CheckItAll(wxString& errMsg);
+ 
+-    ValueType * const m_value;
++    //Vars.
++    ValueType * m_valueVar; //The var outside associated with this validator
++    ValueType m_min, m_max;
+ 
+     wxDECLARE_NO_ASSIGN_CLASS(wxNumValidator);
+ };
+ 
+-} // namespace wxPrivate
+ 
+-// ----------------------------------------------------------------------------
+-// Validators for integer numbers.
+-// ----------------------------------------------------------------------------
++// Helper function for creating number validators which allows to avoid
++// explicitly specifying the type as it deduces it from its parameter.
++template <typename T>
++inline wxNumValidator<T>
++wxMakeNumValidator(T *value, int style = wxNUM_VAL_DEFAULT,
++                      int precision = wxNUM_VAL_DEFAULT_PRECISION)
++{
++    return wxNumValidator<T>(value, style, precision);
++}
++
++
++// ============================================================================
++// wxNumValidator implementation
++// ============================================================================
++//Needed in this file until compilers accept "export" in templates
+ 
+-// Base class for integer numbers validator. This class contains all non
+-// type-dependent code of wxIntegerValidator<> and always works with values of
+-// type LongestValueType. It is not meant to be used directly, please use
+-// wxIntegerValidator<> only instead.
+-class WXDLLIMPEXP_CORE wxIntegerValidatorBase : public wxNumValidatorBase
++template <typename T>
++wxNumValidator<T>::wxNumValidator(ValueType *value, int style, int precision)
+ {
+-protected:
+-    // Define the type we use here, it should be the maximal-sized integer type
+-    // we support to make it possible to base wxIntegerValidator<> for any type
+-    // on it.
+-#ifdef wxLongLong_t
+-    typedef wxLongLong_t LongestValueType;
+-#else
+-    typedef long LongestValueType;
+-#endif
++    m_valueVar = value;
++    m_style = style;
++    SetMin(std::numeric_limits<ValueType>::min());
++    SetMax(std::numeric_limits<ValueType>::max());
+ 
+-    wxIntegerValidatorBase(int style)
+-        : wxNumValidatorBase(style)
+-    {
+-        wxASSERT_MSG( !(style & wxNUM_VAL_NO_TRAILING_ZEROES),
+-                      "This style doesn't make sense for integers." );
+-    }
++    SetPrecision(precision);
++    m_LastKeyWasDecimal = false;
++}
+ 
+-    wxIntegerValidatorBase(const wxIntegerValidatorBase& other)
+-        : wxNumValidatorBase(other)
+-    {
+-        m_min = other.m_min;
+-        m_max = other.m_max;
+-    }
++template <typename T>
++wxNumValidator<T>::wxNumValidator(const wxNumValidator& val)
++    : wxNumValidatorBase()
++{
++    Copy(val);
++}
+ 
+-    // Provide methods for wxNumValidator use.
+-    wxString ToString(LongestValueType value) const;
+-    static bool FromString(const wxString& s, LongestValueType *value);
++template <typename T>
++bool wxNumValidator<T>::Copy(const wxNumValidator& val)
++{
++    wxNumValidatorBase::Copy(val);
+ 
+-    void DoSetMin(LongestValueType min) { m_min = min; }
+-    void DoSetMax(LongestValueType max) { m_max = max; }
++    m_valueVar  = val.m_valueVar;
++    m_min       = val.m_min;
++    m_max       = val.m_max;
++    return true;
++}
+ 
+-    bool IsInRange(LongestValueType value) const
++template <typename T>
++bool wxNumValidator<T>::TransferToWindow()
++{
++    if ( m_valueVar )
+     {
+-        return m_min <= value && value <= m_max;
++        wxTextEntry * const control = GetTextEntry();
++        if ( !control )
++            return false;
++        control->SetValue(NormalizeValue(*m_valueVar));
+     }
+ 
+-    // Implement wxNumValidatorBase pure virtual method.
+-    virtual bool IsCharOk(const wxString& val, int pos, wxChar ch) const;
+-
+-private:
+-    // Minimal and maximal values accepted (inclusive).
+-    LongestValueType m_min, m_max;
+-
+-    wxDECLARE_NO_ASSIGN_CLASS(wxIntegerValidatorBase);
+-};
++    return true;
++}
+ 
+-// Validator for integer numbers. It can actually work with any integer type
+-// (short, int or long and long long if supported) and their unsigned versions
+-// as well.
+ template <typename T>
+-class wxIntegerValidator
+-    : public wxPrivate::wxNumValidator<wxIntegerValidatorBase, T>
++bool wxNumValidator<T>::TransferFromWindow()
+ {
+-public:
+-    typedef T ValueType;
++    if ( m_valueVar )
++    {
++        wxTextEntry * const control = GetTextEntry();
++        if ( !control )
++           return false;
+ 
+-    typedef
+-        wxPrivate::wxNumValidator<wxIntegerValidatorBase, T> Base;
++        const wxString s(control->GetValue());
++        ValueType value;
++        if ( s.empty() && HasFlag(wxNUM_VAL_ZERO_AS_BLANK) )
++            value = 0;
++        else if ( !this->FromString(s, &value) )
++            return false;
+ 
+-    // Ctor for an integer validator.
+-    //
+-    // Sets the range appropriately for the type, including setting 0 as the
+-    // minimal value for the unsigned types.
+-    wxIntegerValidator(ValueType *value = NULL, int style = wxNUM_VAL_DEFAULT)
+-        : Base(value, style)
+-    {
+-        this->DoSetMin(std::numeric_limits<ValueType>::min());
+-        this->DoSetMax(std::numeric_limits<ValueType>::max());
+-    }
++        if ( !IsInRange(value) )
++            return false;
+ 
+-    virtual wxObject *Clone() const { return new wxIntegerValidator(*this); }
++        *m_valueVar = value;
++    }
+ 
+-private:
+-    wxDECLARE_NO_ASSIGN_CLASS(wxIntegerValidator);
+-};
++    return true;
++}
+ 
+-// Helper function for creating integer validators which allows to avoid
+-// explicitly specifying the type as it deduces it from its parameter.
++//Tell integers/floats type
+ template <typename T>
+-inline wxIntegerValidator<T>
+-wxMakeIntegerValidator(T *value, int style = wxNUM_VAL_DEFAULT)
++bool wxNumValidator<T>::IsInteger() const
+ {
+-    return wxIntegerValidator<T>(value, style);
++    //Set if we are working with an integer or with a float/double.
++    //We can't use typeid, but we can know it from its limits.
++    return (double)std::numeric_limits<ValueType>::max()
++          < (double)std::numeric_limits<float>::max() ;
+ }
+ 
+-// ----------------------------------------------------------------------------
+-// Validators for floating point numbers.
+-// ----------------------------------------------------------------------------
+-
+-// Similar to wxIntegerValidatorBase, this class is not meant to be used
+-// directly, only wxFloatingPointValidator<> should be used in the user code.
+-class WXDLLIMPEXP_CORE wxFloatingPointValidatorBase : public wxNumValidatorBase
++template <typename T>
++void wxNumValidator<T>::SetPrecision(int precision)
+ {
+-public:
+-    // Set precision i.e. the number of digits shown (and accepted on input)
+-    // after the decimal point. By default this is set to the maximal precision
+-    // supported by the type handled by the validator.
+-    void SetPrecision(unsigned precision) { m_precision = precision; }
++    //If we have an integer, precision has no sense
++    if ( this->IsInteger() )
++        m_precision = 0;
++    else
++    {
++        if (precision == wxNUM_VAL_DEFAULT_PRECISION || precision < 0)
++            m_precision = std::numeric_limits<ValueType>::digits10 ;
++        else
++            m_precision = precision;
++    }
++}
+ 
+-protected:
+-    // Notice that we can't use "long double" here because it's not supported
+-    // by wxNumberFormatter yet, so restrict ourselves to just double (and
+-    // float).
+-    typedef double LongestValueType;
++template <typename T>
++wxString wxNumValidator<T>::NormalizeString(const wxString& s) const
++{
++    ValueType value;
++    return FromString(s, &value) ? NormalizeValue(value) : wxString();
++}
+ 
+-    wxFloatingPointValidatorBase(int style)
+-        : wxNumValidatorBase(style)
++template <typename T>
++wxString wxNumValidator<T>::NormalizeValue(ValueType value) const
++{
++    wxString s;
++    if ( value != 0 || !HasFlag(wxNUM_VAL_ZERO_AS_BLANK) )
+     {
++        //wxNumberFormatter will take care of the type of the value
++        s = wxNumberFormatter::ToString(value, m_precision, GetFormatFlags());
+     }
++    return s;
++}
+ 
+-    wxFloatingPointValidatorBase(const wxFloatingPointValidatorBase& other)
+-        : wxNumValidatorBase(other)
+-    {
+-        m_precision = other.m_precision;
+-
+-        m_min = other.m_min;
+-        m_max = other.m_max;
+-    }
++template <typename T>
++bool wxNumValidator<T>::FromString(const wxString& s, ValueType *value)
++{
++    return wxNumberFormatter::FromString(s, value);
++}
+ 
+-    // Provide methods for wxNumValidator use.
+-    wxString ToString(LongestValueType value) const;
+-    static bool FromString(const wxString& s, LongestValueType *value);
++// ================== Ckecking ===============================================
++// Checks if the string seems a valid number, even it's incomplete.
++// 'incomplete == true means "allow incomplete string"
++template <typename T>
++bool wxNumValidator<T>::StringCheck(const wxString& strNum, bool incomplete) const
++{
++    bool signAlready = false; //main sign
++    bool decAlready  = false; //decimal separator
++    bool expAlready  = false; //exponential
++    bool sigEAlready = false; //exponential sign
++    bool digBAlready  = false; //digit before exponential
++    bool digAAlready  = false; //digit after exponential
++    wxChar c;
++    wxChar cMinus('-');
++    wxChar cPlus('+');
++    wxChar cEC('E');
++    wxChar cel('e');
++    wxChar cDec = wxNumberFormatter::GetDecimalSeparator();
+ 
+-    void DoSetMin(LongestValueType min) { m_min = min; }
+-    void DoSetMax(LongestValueType max) { m_max = max; }
++    wxString::const_iterator pos;
+ 
+-    bool IsInRange(LongestValueType value) const
++    //Test malformed cases
++    for(pos = strNum.begin(); pos != strNum.end(); ++pos )
+     {
+-        return m_min <= value && value <= m_max;
++        c = *pos;
++        if (c == cMinus || c == cPlus)
++        {
++            if (expAlready)
++            {
++                if (sigEAlready || digAAlready)
++                    return false; //exp. sign duplicated or after exp. digits
++                else
++                    sigEAlready = true;
++            }
++            else //before exponential
++            {
++                if (c == cMinus && m_min >= 0)
++                    return false; //prevents number to be out of range
++                if (signAlready || digBAlready || decAlready)
++                    return false; //main sign is not first char
++                else
++                    signAlready = true;
++            }
++        }
++        else if (c == cEC || c == cel)
++        {
++            if ( this->IsInteger() )
++                return false; //exp. not allowed for whole numbers
++            if ( !digBAlready || expAlready)
++                return false; //beguins with exp. or duplicated
++            else
++            {
++                expAlready = true;
++            }
++        }
++        else if ( c == cDec )
++        {
++            if ( this->IsInteger())
++                return false; //decimal not allowed for whole numbers
++            if (decAlready || expAlready)
++                return false; //dec. spe. duplicated or after exp.
++            else
++                decAlready = true;
++        }
++        else if ( c >= '0' && c <= '9' )
++        {
++            if (expAlready)
++                digAAlready = true; //this char is a digit after exp.
++            else
++                digBAlready = true; //this char is a digit before exp.
++        }
++        else
++            return false; //not valid char
+     }
+ 
+-    // Implement wxNumValidatorBase pure virtual method.
+-    virtual bool IsCharOk(const wxString& val, int pos, wxChar ch) const;
+-
+-private:
+-    // Maximum number of decimals digits after the decimal separator.
+-    unsigned m_precision;
+-
+-    // Minimal and maximal values accepted (inclusive).
+-    LongestValueType m_min, m_max;
++    //Now check for valid [and complete] number
++    if ( !digAAlready && expAlready && !incomplete )
++        return false; //lack digits after exponential
++    if ( !digBAlready && !incomplete )
++        return false; //lack digits before exponential
+ 
+-    wxDECLARE_NO_ASSIGN_CLASS(wxFloatingPointValidatorBase);
+-};
++    //Good number
++    return true;
++}
+ 
+-// Validator for floating point numbers. It can be used with float, double or
+-// long double values.
++//Do all checks to ensure this is a valid value.
++//Returns 'true' if the control has valid value.
++//Otherwise the cause is indicated in 'errMsg'.
+ template <typename T>
+-class wxFloatingPointValidator
+-    : public wxPrivate::wxNumValidator<wxFloatingPointValidatorBase, T>
++bool wxNumValidator<T>::CheckItAll(wxString& errMsg)
+ {
+-public:
+-    typedef T ValueType;
+-    typedef wxPrivate::wxNumValidator<wxFloatingPointValidatorBase, T> Base;
+-
+-    // Ctor using implicit (maximal) precision for this type.
+-    wxFloatingPointValidator(ValueType *value = NULL,
+-                             int style = wxNUM_VAL_DEFAULT)
+-        : Base(value, style)
+-    {
+-        DoSetMinMax();
+-
+-        this->SetPrecision(std::numeric_limits<ValueType>::digits10);
+-    }
++    wxTextEntry * const control = GetTextEntry();
++    if ( !control )
++       return false;
+ 
+-    // Ctor specifying an explicit precision.
+-    wxFloatingPointValidator(int precision,
+-                      ValueType *value = NULL,
+-                      int style = wxNUM_VAL_DEFAULT)
+-        : Base(value, style)
+-    {
+-        DoSetMinMax();
+-
+-        this->SetPrecision(precision);
+-    }
++    wxString s(control->GetValue());
++    wxNumberFormatter::RemoveThousandsSeparators(s);
+ 
+-    virtual wxObject *Clone() const
++    if ( s.empty() )
+     {
+-        return new wxFloatingPointValidator(*this);
++        if ( HasFlag(wxNUM_VAL_ZERO_AS_BLANK) )
++            return true; //Is blank, but allowed. Stop here
++        else
++        {
++            errMsg = _("Empty value");
++            return false; //We can't do any checks with an empty string
++        }
+     }
+ 
+-private:
+-    void DoSetMinMax()
+-    {
+-        // NB: Do not use min(), it's not the smallest representable value for
+-        //     the floating point types but rather the smallest representable
+-        //     positive value.
+-        this->DoSetMin(-std::numeric_limits<ValueType>::max());
+-        this->DoSetMax( std::numeric_limits<ValueType>::max());
++    bool res = this->StringCheck(s, false); //Is it malformed?
++    if ( !res )
++        errMsg = _("Malformed number");
++    else
++    {
++        ValueType value;
++        res = FromString(s, &value); //Can it be converted to a value?
++        if ( !res )
++            errMsg = _("Value overflow");
++        else
++        {
++            res = DecimalDigitsLessThanAllowed(s);
++            if ( !res )
++                errMsg = _("Too meany decimal digits");
++            else
++            {
++                res = IsInRange(value);
++                if ( !res )
++                    errMsg = _("Not in range");
++            }
++        }
+     }
+-};
+-
+-// Helper similar to wxMakeIntValidator().
+-//
+-// NB: Unfortunately we can't just have a wxMakeNumericValidator() which would
+-//     return either wxIntegerValidator<> or wxFloatingPointValidator<> so we
+-//     do need two different functions.
+-template <typename T>
+-inline wxFloatingPointValidator<T>
+-wxMakeFloatingPointValidator(T *value, int style = wxNUM_VAL_DEFAULT)
+-{
+-    return wxFloatingPointValidator<T>(value, style);
+-}
+ 
+-template <typename T>
+-inline wxFloatingPointValidator<T>
+-wxMakeFloatingPointValidator(int precision, T *value, int style = wxNUM_VAL_DEFAULT)
+-{
+-    return wxFloatingPointValidator<T>(precision, value, style);
++    return res;
+ }
+ 
+-#endif // wxUSE_VALIDATORS
++#endif // wxUSE_VALIDATORS && (wxUSE_TEXTCTRL || wxUSE_COMBOBOX)
+ 
+ #endif // _WX_VALNUM_H_
++
++
+
+--- wxSVN\src\common\valnum.cpp	2011-03-28 16:57:45.937500000 +0200
++++ mispatches\valnum_20110413\valnum.cpp	2011-04-12 17:26:16.312500000 +0200
+@@ -26,10 +26,11 @@
+ 
+ #ifndef WX_PRECOMP
+-    #include "wx/textctrl.h"
+-    #include "wx/combobox.h"
++  #include "wx/textctrl.h"
++  #include "wx/combobox.h"
++  #include "wx/msgdlg.h"
++  #include "wx/intl.h"
+ #endif
+ 
+ #include "wx/valnum.h"
+-#include "wx/numformatter.h"
+ 
+ // ============================================================================
+@@ -38,8 +39,25 @@
+ 
+ BEGIN_EVENT_TABLE(wxNumValidatorBase, wxValidator)
++    EVT_KEY_DOWN(wxNumValidatorBase::OnKeyDown)
+     EVT_CHAR(wxNumValidatorBase::OnChar)
+     EVT_KILL_FOCUS(wxNumValidatorBase::OnKillFocus)
+ END_EVENT_TABLE()
+ 
++wxNumValidatorBase::wxNumValidatorBase(const wxNumValidatorBase& val)
++        : wxValidator()
++{
++    Copy(val);
++}
++
++bool wxNumValidatorBase::Copy(const wxNumValidatorBase& val)
++{
++    wxValidator::Copy(val);
++
++    m_style     = val.m_style;
++    m_precision = val.m_precision;
++    m_LastKeyWasDecimal = val.m_LastKeyWasDecimal;
++    return true;
++}
++
+ int wxNumValidatorBase::GetFormatFlags() const
+ {
+@@ -53,5 +71,5 @@
+ }
+ 
+-wxTextEntry *wxNumValidatorBase::GetTextEntry() const
++wxTextEntry* wxNumValidatorBase::GetTextEntry() const
+ {
+ #if wxUSE_TEXTCTRL
+@@ -70,19 +88,17 @@
+ }
+ 
+-void
+-wxNumValidatorBase::GetCurrentValueAndInsertionPoint(wxString& val,
+-                                                             int& pos) const
++wxString wxNumValidatorBase::GetStringAfterInsertingChar(wxChar ch) const
+ {
++    wxString val;
+     wxTextEntry * const control = GetTextEntry();
+     if ( !control )
+-        return;
++        return val;
+ 
+     val = control->GetValue();
+-    pos = control->GetInsertionPoint();
+-
++    long pos = control->GetInsertionPoint();
+     long selFrom, selTo;
+     control->GetSelection(&selFrom, &selTo);
+-
+     const long selLen = selTo - selFrom;
++
+     if ( selLen )
+     {
+@@ -100,19 +116,72 @@
+         }
+     }
+-}
+ 
+-bool wxNumValidatorBase::IsMinusOk(const wxString& val, int pos) const
++    //insert char
++    val.insert(pos, ch);
++    return val;
++}
++
++//Checks that it doesn't have too many decimal digits. Returns 'true' if OK.
++bool wxNumValidatorBase::DecimalDigitsLessThanAllowed(const wxString& s)
++{
++    size_t posSep = s.find(wxNumberFormatter::GetDecimalSeparator());
++    posSep = posSep == wxString::npos ? s.length() : posSep;
++    //If user typed exponential 'e' the number of decimal digits is not
++    //important at all. But we must know that 'e' position.
++    size_t posExp = wxNumberFormatter::FindExponential(s);
++    posExp = posExp == wxString::npos ? s.length() : posExp;
++    //Return true if number has no more decimal digits than allowed
++    return (int)(posExp - posSep) - 1 <= m_precision;
++}
++
++// Called when the value in the window must be validated.
++// This function can pop up an error message.
++// We don't change here control's value. Only check it.
++bool wxNumValidatorBase::Validate(wxWindow *parent)
+ {
+-    // Minus is only ever accepted in the beginning of the string.
+-    if ( pos != 0 )
+-        return false;
++    // If window is disabled, simply return
++    if ( !m_validatorWindow->IsEnabled() )
++        return true;
+ 
+-    // And then only if there is no existing minus sign there.
+-    if ( !val.empty() && val[0] == '-' )
+-        return false;
++    wxString errmsg;
++    bool res = CheckItAll(errmsg);
+ 
++    if ( !res )
++    {
++        m_validatorWindow->SetFocus();
++        wxMessageBox(errmsg, _("Validation conflict"),
++                     wxOK | wxICON_EXCLAMATION, parent);
++        return false;
++    }
+     return true;
+ }
+ 
++// ----------------------------------------------------------------------------
++// Event handlers. Most of validation is done here.
++// ----------------------------------------------------------------------------
++
++//We need to handle this event (before EVT_CHAR) just to make sure the right
++//decimal separator is used, despite what OS sends to control at OnChar().
++
++//We also use it to process 'cancel/escape' key. If so, we discard actual
++//control's value and re-set outside-variable's one. This applies to a control
++//not belonging to a dialog that catches cancel/escape event before our control.
++
++void wxNumValidatorBase::OnKeyDown(wxKeyEvent& event)
++{
++    int keyC = event.GetKeyCode();
++    m_LastKeyWasDecimal = (keyC == WXK_DECIMAL || keyC == WXK_NUMPAD_DECIMAL )
++                          ? true : false;
++    if (keyC == WXK_ESCAPE || keyC == WXK_CANCEL)
++    {
++        TransferToWindow();
++        event.Skip(false); //Don't propagate this event.
++    }
++    else
++        event.Skip();
++}
++
++//In this event handler we only check that the char would be valid. We don't
++//make any change to control's value. So, no format is done.
+ void wxNumValidatorBase::OnChar(wxKeyEvent& event)
+ {
+@@ -141,5 +210,7 @@
+ #endif // wxUSE_UNICODE/!wxUSE_UNICODE
+ 
+-    if ( ch < WXK_SPACE || ch == WXK_DELETE )
++    //Space is an allowed thousands separator. But we don't allow user to type
++    //it. We will add it at formatting time in OnKillFocus().
++    if ( ch <= WXK_SPACE || ch == WXK_DELETE )
+     {
+         // Allow ASCII control characters and Delete.
+@@ -147,10 +218,24 @@
+     }
+ 
+-    // Check if this character is allowed in the current state.
+-    wxString val;
+-    int pos;
+-    GetCurrentValueAndInsertionPoint(val, pos);
++    //Special behaviour. Some user relate "wrong" character, not localized, when
++    //numpad decimal is pressed. In this case, we use the "right" one.
++    if (m_LastKeyWasDecimal)
++    {
++        if ( ch != wxNumberFormatter::GetDecimalSeparator() )
++        {
++            //TODO: Send a EVT_CHAR with the right decimal separator
++            ;
++        }
++        m_LastKeyWasDecimal = false;
++    }
++
++    // Check whether the value we'd obtain if we accepted this key is correct.
++    wxString testString(GetStringAfterInsertingChar(ch));
++    wxNumberFormatter::RemoveThousandsSeparators(testString);
++    bool res = StringCheck(testString, true); //Here we allow incomplete number
++    if (res)
++        res = DecimalDigitsLessThanAllowed(testString);
+ 
+-    if ( !IsCharOk(val, pos, ch) )
++    if ( !res )
+     {
+         if ( !wxValidator::IsSilent() )
+@@ -160,6 +245,8 @@
+         event.Skip(false);
+     }
++    //Default processing will insert the char.
+ }
+ 
++//This event handler validates and also formats control's value.
+ void wxNumValidatorBase::OnKillFocus(wxFocusEvent& event)
+ {
+@@ -168,4 +255,15 @@
+         return;
+ 
++    //We need to validate now because control would been changed pasting on it
++    wxString errmsg;
++    if ( ! CheckItAll(errmsg) )
++    {
++        if ( !wxValidator::IsSilent() )
++            wxBell();
++
++	event.Skip();
++        return; //Don't change control's value
++    }
++
+     // When we change the control value below, its "modified" status is reset
+     // so we need to explicitly keep it marked as modified if it was so in the
+@@ -185,115 +283,4 @@
+ }
+ 
+-// ============================================================================
+-// wxIntegerValidatorBase implementation
+-// ============================================================================
+-
+-wxString wxIntegerValidatorBase::ToString(LongestValueType value) const
+-{
+-    return wxNumberFormatter::ToString(value, GetFormatFlags());
+-}
+-
+-bool
+-wxIntegerValidatorBase::FromString(const wxString& s, LongestValueType *value)
+-{
+-    return wxNumberFormatter::FromString(s, value);
+-}
+-
+-bool
+-wxIntegerValidatorBase::IsCharOk(const wxString& val, int pos, wxChar ch) const
+-{
+-    // We may accept minus sign if we can represent negative numbers at all.
+-    if ( ch == '-' )
+-    {
+-        // Notice that entering '-' can make our value invalid, for example if
+-        // we're limited to -5..15 range and the current value is 12, then the
+-        // new value would be (invalid) -12. We consider it better to let the
+-        // user do this because perhaps he is going to press Delete key next to
+-        // make it -2 and forcing him to delete 1 first would be unnatural.
+-        //
+-        // TODO: It would be nice to indicate that the current control contents
+-        //       is invalid (if it's indeed going to be the case) once
+-        //       wxValidator supports doing this non-intrusively.
+-        return m_min < 0 && IsMinusOk(val, pos);
+-    }
+-
+-    // We only accept digits here (remember that '-' is taken care of by the
+-    // base class already).
+-    if ( ch < '0' || ch > '9' )
+-        return false;
+-
+-    // And the value after insertion needs to be in the defined range.
+-    LongestValueType value;
+-    if ( !FromString(GetValueAfterInsertingChar(val, pos, ch), &value) )
+-        return false;
+-
+-    return IsInRange(value);
+-}
+-
+-// ============================================================================
+-// wxFloatingPointValidatorBase implementation
+-// ============================================================================
+-
+-wxString wxFloatingPointValidatorBase::ToString(LongestValueType value) const
+-{
+-    return wxNumberFormatter::ToString(value, m_precision, GetFormatFlags());
+-}
+-
+-bool
+-wxFloatingPointValidatorBase::FromString(const wxString& s,
+-                                         LongestValueType *value)
+-{
+-    return wxNumberFormatter::FromString(s, value);
+-}
+-
+-bool
+-wxFloatingPointValidatorBase::IsCharOk(const wxString& val,
+-                                       int pos,
+-                                       wxChar ch) const
+-{
+-    // We may accept minus sign if we can represent negative numbers at all.
+-    if ( ch == '-' )
+-        return m_min < 0 && IsMinusOk(val, pos);
+-
+-    const wxChar separator = wxNumberFormatter::GetDecimalSeparator();
+-    if ( ch == separator )
+-    {
+-        if ( val.find(separator) != wxString::npos )
+-        {
+-            // There is already a decimal separator, can't insert another one.
+-            return false;
+-        }
+-
+-        // Prepending a separator before the minus sign isn't allowed.
+-        if ( pos == 0 && !val.empty() && val[0] == '-' )
+-            return false;
+-
+-        // Otherwise always accept it, adding a decimal separator doesn't
+-        // change the number value and, in particular, can't make it invalid.
+-        // OTOH the checks below might not pass because strings like "." or
+-        // "-." are not valid numbers so parsing them would fail, hence we need
+-        // to treat it specially here.
+-        return true;
+-    }
+-
+-    // Must be a digit then.
+-    if ( ch < '0' || ch > '9' )
+-        return false;
+-
+-    // Check whether the value we'd obtain if we accepted this key is correct.
+-    const wxString newval(GetValueAfterInsertingChar(val, pos, ch));
+-
+-    LongestValueType value;
+-    if ( !FromString(newval, &value) )
+-        return false;
+-
+-    // Also check that it doesn't have too many decimal digits.
+-    const size_t posSep = newval.find(separator);
+-    if ( posSep != wxString::npos && newval.length() - posSep - 1 > m_precision )
+-        return false;
+-
+-    // Finally check whether it is in the range.
+-    return IsInRange(value);
+-}
+-
+ #endif // wxUSE_VALIDATORS && wxUSE_TEXTCTRL
++

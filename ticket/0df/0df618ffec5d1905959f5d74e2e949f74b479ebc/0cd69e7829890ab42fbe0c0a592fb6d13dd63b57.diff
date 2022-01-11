@@ -1,0 +1,346 @@
+diff --git a/include/wx/fswatcher.h b/include/wx/fswatcher.h
+index 9792bce..1d9e2eb 100644
+--- a/include/wx/fswatcher.h
++++ b/include/wx/fswatcher.h
+@@ -200,8 +200,8 @@ public:
+     {
+     }
+ 
+-    wxFSWatchInfo(const wxString& path, int events, wxFSWPathType type) :
+-        m_path(path), m_events(events), m_type(type)
++    wxFSWatchInfo(const wxString& path, int events, wxFSWPathType type, const wxString& filespec = "") :
++        m_path(path), m_filespec(filespec), m_events(events), m_type(type)
+     {
+     }
+ 
+@@ -210,6 +210,11 @@ public:
+         return m_path;
+     }
+ 
++    const wxString& GetFilespec() const
++    {
++        return m_filespec;
++    }
++
+     int GetFlags() const
+     {
+         return m_events;
+@@ -222,6 +227,7 @@ public:
+ 
+ protected:
+     wxString m_path;
++    wxString m_filespec;      // For tree watches, holds any filespec to apply
+     int m_events;
+     wxFSWPathType m_type;
+ };
+@@ -260,7 +266,7 @@ public:
+      * of particular type.
+      */
+     virtual bool AddTree(const wxFileName& path, int events = wxFSW_EVENT_ALL,
+-                         const wxString& filter = wxEmptyString);
++                         const wxString& filespec = wxEmptyString);
+ 
+     /**
+      * Removes path from the list of watched paths.
+@@ -310,7 +316,8 @@ public:
+     //
+     // Delegates the real work of adding the path to wxFSWatcherImpl::Add() and
+     // updates m_watches if the new path was successfully added.
+-    bool AddAny(const wxFileName& path, int events, wxFSWPathType type);
++    bool AddAny(const wxFileName& path, int events, wxFSWPathType type,
++                                const wxString& filespec = "");
+ 
+ protected:
+ 
+diff --git a/src/common/fswatchercmn.cpp b/src/common/fswatchercmn.cpp
+index 7382c2f..c509186 100644
+--- a/src/common/fswatchercmn.cpp
++++ b/src/common/fswatchercmn.cpp
+@@ -101,7 +101,8 @@ bool wxFileSystemWatcherBase::Add(const wxFileName& path, int events)
+ bool
+ wxFileSystemWatcherBase::AddAny(const wxFileName& path,
+                                 int events,
+-                                wxFSWPathType type)
++                                wxFSWPathType type,
++                                const wxString& filespec /*= ""*/)
+ {
+     wxString canonical = GetCanonicalPath(path);
+     if (canonical.IsEmpty())
+@@ -111,7 +112,7 @@ wxFileSystemWatcherBase::AddAny(const wxFileName& path,
+                 wxString::Format("Path '%s' is already watched", canonical));
+ 
+     // adding a path in a platform specific way
+-    wxFSWatchInfo watch(canonical, events, type);
++    wxFSWatchInfo watch(canonical, events, type, filespec);
+     if ( !m_service->Add(watch) )
+         return false;
+ 
+@@ -140,7 +141,7 @@ bool wxFileSystemWatcherBase::Remove(const wxFileName& path)
+ }
+ 
+ bool wxFileSystemWatcherBase::AddTree(const wxFileName& path, int events,
+-                                      const wxString& filter)
++                                      const wxString& filespec)
+ {
+     if (!path.DirExists())
+         return false;
+@@ -150,8 +151,9 @@ bool wxFileSystemWatcherBase::AddTree(const wxFileName& path, int events,
+     class AddTraverser : public wxDirTraverser
+     {
+     public:
+-        AddTraverser(wxFileSystemWatcherBase* watcher, int events) :
+-            m_watcher(watcher), m_events(events)
++        AddTraverser(wxFileSystemWatcherBase* watcher, int events,
++                    const wxString& filespec) :
++            m_watcher(watcher), m_events(events), m_filespec(filespec)
+         {
+         }
+ 
+@@ -161,35 +163,47 @@ bool wxFileSystemWatcherBase::AddTree(const wxFileName& path, int events,
+         // about that, but Add() should also behave well then
+         virtual wxDirTraverseResult OnFile(const wxString& filename)
+         {
+-            wxLogTrace(wxTRACE_FSWATCHER,
++            if (m_watcher->AddAny(wxFileName::FileName(filename),
++                                  m_events, wxFSWPath_File))
++            {
++                wxLogTrace(wxTRACE_FSWATCHER,
+                        "--- AddTree adding file '%s' ---", filename);
+-            m_watcher->AddAny(wxFileName::FileName(filename),
+-                             m_events, wxFSWPath_File);
++            }
+             return wxDIR_CONTINUE;
+         }
+ 
+         virtual wxDirTraverseResult OnDir(const wxString& dirname)
+         {
+-            wxLogTrace(wxTRACE_FSWATCHER,
+-                       "--- AddTree adding directory '%s' ---", dirname);
+             // we add as much as possible and ignore errors
+-            m_watcher->AddAny(wxFileName::DirName(dirname),
+-                             m_events, wxFSWPath_Dir);
++            // However if there's a filespec, only pass the dir if it matches
++            // otherwise all its files will be watched, whatever their ext
++            // The easiest way to get any ext is to pretend it's a file :)
++            wxFileName fn(wxFileName::FileName(dirname));
++            if (m_filespec.empty() ||
++                wxMatchWild(m_filespec, "*." + fn.GetExt()))
++            {
++                if (m_watcher->AddAny(wxFileName::DirName(dirname),
++                                      m_events, wxFSWPath_Dir))
++                {
++                    wxLogTrace(wxTRACE_FSWATCHER,
++                       "--- AddTree adding directory '%s' ---", dirname);
++                }
++            }
+             return wxDIR_CONTINUE;
+         }
+ 
+     private:
+         wxFileSystemWatcherBase* m_watcher;
+         int m_events;
+-        wxString m_filter;
++        wxString m_filespec;
+     };
+ 
+     wxDir dir(path.GetFullPath());
+-    AddTraverser traverser(this, events);
+-    dir.Traverse(traverser, filter);
++    AddTraverser traverser(this, events, filespec);
++    dir.Traverse(traverser, filespec);
+ 
+     // Add the path itself explicitly as Traverse() doesn't return it.
+-    Add(path.GetPathWithSep(), events);
++    AddAny(path.GetPathWithSep(), events, wxFSWPath_Dir, filespec);
+ 
+     return true;
+ }
+@@ -204,8 +218,9 @@ bool wxFileSystemWatcherBase::RemoveTree(const wxFileName& path)
+     class RemoveTraverser : public wxDirTraverser
+     {
+     public:
+-        RemoveTraverser(wxFileSystemWatcherBase* watcher) :
+-            m_watcher(watcher)
++        RemoveTraverser(wxFileSystemWatcherBase* watcher,
++                        const wxString& filespec) :
++            m_watcher(watcher), m_filespec(filespec)
+         {
+         }
+ 
+@@ -217,17 +232,42 @@ bool wxFileSystemWatcherBase::RemoveTree(const wxFileName& path)
+ 
+         virtual wxDirTraverseResult OnDir(const wxString& dirname)
+         {
+-            m_watcher->Remove(wxFileName::DirName(dirname));
++            // If there's a filespec, only matching dirs will have been watched
++            wxFileName fn(wxFileName::FileName(dirname));
++            if (m_filespec.empty() ||
++                wxMatchWild(m_filespec, "*." + fn.GetExt()))
++            {
++                m_watcher->Remove(wxFileName::DirName(dirname));
++            }
+             return wxDIR_CONTINUE;
+         }
+ 
+     private:
+         wxFileSystemWatcherBase* m_watcher;
++        wxString m_filespec;
+     };
+ 
++    // If AddTree() used a filespec, we must use the same one
++    wxString canonical = GetCanonicalPath(path);
++    wxFSWatchInfoMap::iterator it = m_watches.find(canonical);
++    wxCHECK_MSG(it != m_watches.end(), false,
++                wxString::Format("Path '%s' is not watched", canonical));
++    wxFSWatchInfo watch = it->second;
++    const wxString filespec = watch.GetFilespec();
++
++#if defined(__WINDOWS__)
++    // When there's no filespec, the wxMSW AddTree() would have set a watch 
++    // on only the passed 'path'. We must therefore remove only this
++    if (filespec.empty())
++    {
++        return Remove(path);
++    }
++    // Otherwise fall through to the generic implementation
++#endif // __WINDOWS__
++
+     wxDir dir(path.GetFullPath());
+-    RemoveTraverser traverser(this);
+-    dir.Traverse(traverser);
++    RemoveTraverser traverser(this, filespec);
++    dir.Traverse(traverser, filespec);
+ 
+     // As in AddTree() above, handle the path itself explicitly.
+     Remove(path);
+diff --git a/tests/fswatcher/fswatchertest.cpp b/tests/fswatcher/fswatchertest.cpp
+index 2f9ff84..7e226a1 100644
+--- a/tests/fswatcher/fswatchertest.cpp
++++ b/tests/fswatcher/fswatchertest.cpp
+@@ -417,11 +417,9 @@ private:
+     CPPUNIT_TEST_SUITE( FileSystemWatcherTestCase );
+         CPPUNIT_TEST( TestEventCreate );
+         CPPUNIT_TEST( TestEventDelete );
+-
+-        // FIXME: Currently this test fails under Windows.
+-#ifndef __WINDOWS__
++#if !defined(__VISUALC__) || wxCHECK_VISUALC_VERSION(7)
+         CPPUNIT_TEST( TestTrees );
+-#endif // __WINDOWS__
++#endif
+ 
+         // kqueue-based implementation doesn't collapse create/delete pairs in
+         // renames and doesn't detect neither modifications nor access to the
+@@ -446,10 +444,9 @@ private:
+     void TestEventRename();
+     void TestEventModify();
+     void TestEventAccess();
+-#ifndef __WINDOWS__
+-    void TestTrees();
+-#endif // __WINDOWS__
+-
++#if !defined(__VISUALC__) || wxCHECK_VISUALC_VERSION(7)
++    void TestTrees();   // Visual C++ 6 can't build this
++#endif
+     void TestNoEventsAfterRemove();
+ 
+     DECLARE_NO_COPY_CLASS(FileSystemWatcherTestCase)
+@@ -641,7 +638,8 @@ void FileSystemWatcherTestCase::TestEventAccess()
+ // ----------------------------------------------------------------------------
+ // TestTrees
+ // ----------------------------------------------------------------------------
+-#ifndef __WINDOWS__
++
++#if !defined(__VISUALC__) || wxCHECK_VISUALC_VERSION(7)
+ void FileSystemWatcherTestCase::TestTrees()
+ {
+     class TreeTester : public EventHandler
+@@ -664,10 +662,11 @@ void FileSystemWatcherTestCase::TestTrees()
+                 CPPUNIT_ASSERT(dir.Mkdir());
+ 
+                 const wxString prefix = dir.GetPathWithSep();
++                const wxString ext[] = { ".txt", ".log", "" };
+                 for ( unsigned f = 0; f < files; ++f )
+                 {
+                     // Just create the files.
+-                    wxFile(prefix + wxString::Format("file%u", f+1),
++                    wxFile(prefix + wxString::Format("file%u", f+1) + ext[f],
+                            wxFile::write);
+                 }
+             }
+@@ -707,8 +706,13 @@ void FileSystemWatcherTestCase::TestTrees()
+         {
+             CPPUNIT_ASSERT(m_watcher);
+ 
+-            const size_t
+-                treeitems = (subdirs*files) + subdirs + 1; // +1 for the trunk
++            size_t treeitems = 1; // the trunk
++#ifndef __WINDOWS__
++            // When there's no file mask, wxMSW sets a single watch
++            // on the trunk which is implemented recursively.
++            // wxGTK always sets an additional watch for each file/subdir
++            treeitems += (subdirs*files) + subdirs;
++#endif // __WINDOWS__
+ 
+             // Store the initial count; there may already be some watches
+             const int initial = m_watcher->GetWatchedPathsCount();
+@@ -724,6 +728,28 @@ void FileSystemWatcherTestCase::TestTrees()
+             CPPUNIT_ASSERT_EQUAL(initial, m_watcher->GetWatchedPathsCount());
+         }
+ 
++        void WatchTreeWithFilespec(const wxFileName& dir)
++        {
++            CPPUNIT_ASSERT(m_watcher);
++            CPPUNIT_ASSERT(dir.DirExists()); // Was built in WatchTree()
++
++            // Store the initial count; there may already be some watches
++            const int initial = m_watcher->GetWatchedPathsCount();
++
++            // When we use a filter, both wxMSW and wxGTK implementations set
++            // an additional watch for each file/subdir. Test by passing *.txt
++            // We expect the dirs and the other 2 files to be skipped
++            const size_t treeitems = subdirs + 1;
++            m_watcher->AddTree(dir, wxFSW_EVENT_ALL, "*.txt");
++
++            const int plustree = m_watcher->GetWatchedPathsCount();
++            CPPUNIT_ASSERT_EQUAL(initial + treeitems, plustree);
++
++            // RemoveTree should try to remove only those files that were added
++            m_watcher->RemoveTree(dir);
++            CPPUNIT_ASSERT_EQUAL(initial, m_watcher->GetWatchedPathsCount());
++        }
++
+         void RemoveAllWatches()
+         {
+             CPPUNIT_ASSERT(m_watcher);
+@@ -750,13 +776,19 @@ void FileSystemWatcherTestCase::TestTrees()
+ 
+             WatchDir(singledir);
+             WatchTree(treedir);
++            // Now test adding and removing a tree using a filespec
++            // wxMSW uses the generic method to add matching files; which fails
++            // as it doesn't support adding files :/ So disable the test
++#ifndef __WINDOWS__
++            WatchTreeWithFilespec(treedir);
++#endif // __WINDOWS__
+ 
+             RemoveSingleWatch(singledir);
+             // Add it back again, ready to test RemoveAll()
+             WatchDir(singledir);
+ 
+             RemoveAllWatches();
+-
++            
+             // Clean up
+             RmDir(singledir);
+             RmDir(treedir);
+@@ -781,7 +813,8 @@ void FileSystemWatcherTestCase::TestTrees()
+     TreeTester tester;
+     tester.Run();
+ }
+-#endif // __WINDOWS__
++#endif // !defined(__VISUALC__) || wxCHECK_VISUALC_VERSION(7)
++
+ 
+ namespace
+ {

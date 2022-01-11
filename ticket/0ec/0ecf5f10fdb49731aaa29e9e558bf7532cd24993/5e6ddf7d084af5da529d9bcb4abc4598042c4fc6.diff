@@ -1,0 +1,208 @@
+Index: include/wx/sizer.h
+===================================================================
+--- include/wx/sizer.h	(revision 62378)
++++ include/wx/sizer.h	(working copy)
+@@ -901,13 +901,31 @@
+ // wxBoxSizer
+ //---------------------------------------------------------------------------
+ 
++// Determines whether minimal/best sizes are taken into account for proportion
++// calculations, or not
++enum wxBoxSizerProportionMode
++{
++    // take minimal sizes into account
++    wxBOX_PROPORTION_USE_MINIMAL,
++
++    // spread proportions out regardless of minimal size
++    wxBOX_PROPORTION_EVEN,
++
++    // use the current global default
++    wxBOX_PROPORTION_DEFAULT
++};
++
+ class WXDLLIMPEXP_CORE wxBoxSizer: public wxSizer
+ {
+ public:
+-    wxBoxSizer(int orient)
++    wxBoxSizer(int orient, wxBoxSizerProportionMode proportionMode = wxBOX_PROPORTION_DEFAULT)
+     {
+         m_orient = orient;
+         m_totalProportion = 0;
++        if (proportionMode == wxBOX_PROPORTION_DEFAULT)
++            m_proportionMode = sm_defaultProportionMode;
++        else
++            m_proportionMode = proportionMode;
+ 
+         wxASSERT_MSG( m_orient == wxHORIZONTAL || m_orient == wxVERTICAL,
+                       wxT("invalid value for wxBoxSizer orientation") );
+@@ -921,6 +939,14 @@
+ 
+     void SetOrientation(int orient) { m_orient = orient; }
+ 
++    // proportion mode
++    wxBoxSizerProportionMode GetProportionMode() const { return m_proportionMode; }
++    void SetProportionMode(wxBoxSizerProportionMode mode) { m_proportionMode = mode; }
++
++    // default proportion mode
++    static wxBoxSizerProportionMode GetDefaultPropotionMode() { return sm_defaultProportionMode; }
++    static void SetDefaultProportionMode(wxBoxSizerProportionMode mode) { sm_defaultProportionMode = mode; }
++
+     // implementation of our resizing logic
+     virtual wxSize CalcMin();
+     virtual void RecalcSizes();
+@@ -978,6 +1004,12 @@
+     // the sum of proportion of all of our elements
+     int m_totalProportion;
+ 
++    // proportion mode
++    wxBoxSizerProportionMode m_proportionMode;
++
++    // default proportion mode
++    static wxBoxSizerProportionMode sm_defaultProportionMode;
++
+     // the minimal size needed for this sizer as calculated by the last call to
+     // our CalcMin()
+     wxSize m_minSize;
+Index: src/common/sizer.cpp
+===================================================================
+--- src/common/sizer.cpp	(revision 62378)
++++ src/common/sizer.cpp	(working copy)
+@@ -1982,6 +1982,9 @@
+ // wxBoxSizer
+ //---------------------------------------------------------------------------
+ 
++// default proportion mode
++wxBoxSizerProportionMode wxBoxSizer::sm_defaultProportionMode = wxBOX_PROPORTION_USE_MINIMAL;
++
+ wxSizerItem *wxBoxSizer::AddSpacer(int size)
+ {
+     return IsVertical() ? Add(0, size) : Add(size, 0);
+@@ -1992,6 +1995,8 @@
+     if ( m_children.empty() )
+         return;
+ 
++    if (GetProportionMode() == wxBOX_PROPORTION_USE_MINIMAL)
++    {
+     const wxCoord totalMinorSize = GetSizeInMinorDir(m_size);
+ 
+     // the amount of free space which we should redistribute among the
+@@ -2104,6 +2109,119 @@
+ 
+         PosInMajorDir(pt) += majorSize;
+     }
++    }
++    else
++    {
++        int fixed_height = 0;
++        int fixed_width = 0;
++        int stretchable = 0;
++        wxSizerItemList::compatibility_iterator node;
++
++        // find fixed width and height, as well
++        // as the total stretchable proportions
++        node = m_children.GetFirst();
++        while (node)
++        {
++            wxSizerItem *item = node->GetData();
++
++            if (item->IsShown())
++            {
++                stretchable += item->GetProportion();
++
++                wxSize size(item->GetMinSizeWithBorder());
++                if (item->GetProportion() == 0)
++                {
++                    if (m_orient == wxVERTICAL)
++                    {
++                        fixed_height += size.y;
++                        fixed_width = wxMax(fixed_width, size.x);
++                    }
++                    else
++                    {
++                        fixed_width += size.x;
++                        fixed_height = wxMax(fixed_height, size.y);
++                    }
++                }
++            }
++
++            node = node->GetNext();
++        }
++
++
++        // delta specifies the total amount to be allocated to stretch spaces
++        int delta = 0;
++        if (stretchable)
++        {
++            if (m_orient == wxHORIZONTAL)
++                delta = m_size.x - fixed_width;
++            else
++                delta = m_size.y - fixed_height;
++        }
++
++        // go through each item and assign sizes
++        wxPoint pt(m_position);
++        node = m_children.GetFirst();
++        while (node)
++        {
++            wxSizerItem* item = node->GetData();
++
++            if (item->IsShown())
++            {
++                wxSize size(item->GetMinSizeWithBorder());
++
++                if (m_orient == wxVERTICAL)
++                {
++                    wxCoord height = size.y;
++                    if (item->GetProportion())
++                    {
++                        height = (delta * item->GetProportion()) / stretchable;
++                        delta -= height;
++                        stretchable -= item->GetProportion();
++                    }
++
++                    wxPoint child_pos(pt);
++                    wxSize child_size(size.x, height);
++
++                    if (item->GetFlag() & (wxEXPAND | wxSHAPED))
++                        child_size.x = m_size.x;
++                    else if (item->GetFlag() & wxALIGN_RIGHT)
++                        child_pos.x += m_size.x - size.x;
++                    else if (item->GetFlag() & (wxCENTER | wxALIGN_CENTER_HORIZONTAL))
++                        child_pos.x += (m_size.x - size.x) / 2;
++
++                    item->SetDimension(child_pos, child_size);
++
++                    pt.y += height;
++                }
++                else
++                {
++                    wxCoord width = size.x;
++                    if (item->GetProportion())
++                    {
++                        width = (delta * item->GetProportion()) / stretchable;
++                        delta -= width;
++                        stretchable -= item->GetProportion();
++                    }
++
++                    wxPoint child_pos(pt);
++                    wxSize child_size(width, size.y);
++
++                    if (item->GetFlag() & (wxEXPAND | wxSHAPED))
++                        child_size.y = m_size.y;
++                    else if (item->GetFlag() & wxALIGN_BOTTOM)
++                        child_pos.y += m_size.y - size.y;
++                    else if (item->GetFlag() & (wxCENTER | wxALIGN_CENTER_VERTICAL))
++                        child_pos.y += (m_size.y - size.y) / 2;
++
++                    item->SetDimension(child_pos, child_size);
++
++                    pt.x += width;
++                }
++            }
++
++            node = node->GetNext();
++        }
++    }
+ }
+ 
+ wxSize wxBoxSizer::CalcMin()

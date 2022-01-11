@@ -1,0 +1,230 @@
+diff --git a/include/wx/webview.h b/include/wx/webview.h
+index d83f9a8..1154195 100644
+--- a/include/wx/webview.h
++++ b/include/wx/webview.h
+@@ -78,6 +78,13 @@ enum wxWebViewFindFlags
+     wxWEBVIEW_FIND_DEFAULT =          0
+ };
+ 
++enum wxWebViewNavigationActionFlags
++{
++    wxWEBVIEW_NAV_ACTION_NONE,
++    wxWEBVIEW_NAV_ACTION_USER,
++    wxWEBVIEW_NAV_ACTION_OTHER
++};
++
+ //Base class for custom scheme handlers
+ class WXDLLIMPEXP_WEBVIEW wxWebViewHandler
+ {
+@@ -243,18 +250,23 @@ class WXDLLIMPEXP_WEBVIEW wxWebViewEvent : public wxNotifyEvent
+ public:
+     wxWebViewEvent() {}
+     wxWebViewEvent(wxEventType type, int id, const wxString& url,
+-                   const wxString& target)
+-        : wxNotifyEvent(type, id), m_url(url), m_target(target)
++                   const wxString target, 
++                   wxWebViewNavigationActionFlags flags = wxWEBVIEW_NAV_ACTION_NONE)
++        : wxNotifyEvent(type, id), m_url(url), m_target(target), 
++          m_actionFlags(flags)
+     {}
+ 
+ 
+     const wxString& GetURL() const { return m_url; }
+     const wxString& GetTarget() const { return m_target; }
+ 
++    wxWebViewNavigationActionFlags GetNavigationAction() const { return m_actionFlags; }
++
+     virtual wxEvent* Clone() const wxOVERRIDE { return new wxWebViewEvent(*this); }
+ private:
+     wxString m_url;
+     wxString m_target;
++    wxWebViewNavigationActionFlags m_actionFlags;
+ 
+     wxDECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxWebViewEvent);
+ };
+diff --git a/interface/wx/webview.h b/interface/wx/webview.h
+index 148d427..a905782 100644
+--- a/interface/wx/webview.h
++++ b/interface/wx/webview.h
+@@ -92,6 +92,21 @@ enum wxWebViewFindFlags
+     wxWEBVIEW_FIND_DEFAULT =          0
+ };
+ 
++/**
++    Navigation action types.
++    
++    @since 3.0
++*/
++enum wxWebViewNavigationActionFlags
++{
++    /** No navigation action */
++    wxWEBVIEW_NAV_ACTION_NONE,
++    /** The navigation was started by the user */
++    wxWEBVIEW_NAV_ACTION_USER,
++    /**The navigation was started but not by the user*/
++    wxWEBVIEW_NAV_ACTION_OTHER
++};
++
+ 
+ /**
+     @class wxWebViewHistoryItem
+@@ -881,7 +896,8 @@ class wxWebViewEvent : public wxNotifyEvent
+ public:
+     wxWebViewEvent();
+     wxWebViewEvent(wxEventType type, int id, const wxString href,
+-                   const wxString target);
++                   const wxString target,
++                   wxWebViewNavigationActionFlags flags = wxWEBVIEW_NAV_ACTION_NONE);
+ 
+     /**
+         Get the name of the target frame which the url of this event
+@@ -894,6 +910,14 @@ public:
+         Get the URL being visited
+     */
+     const wxString& GetURL() const;
++    
++    /**
++        Get the type of navigation action. Only valid for events of type 
++        @c wxEVT_WEBVIEW_NEWWINDOW
++        
++        @since 3.0
++    */
++    wxWebViewNavigationActionFlags GetNavigationAction() const;
+ };
+ 
+ 
+diff --git a/samples/webview/webview.cpp b/samples/webview/webview.cpp
+index 1dd4b68..93ccc8f 100644
+--- a/samples/webview/webview.cpp
++++ b/samples/webview/webview.cpp
+@@ -828,7 +828,14 @@ void WebFrame::OnDocumentLoaded(wxWebViewEvent& evt)
+   */
+ void WebFrame::OnNewWindow(wxWebViewEvent& evt)
+ {
+-    wxLogMessage("%s", "New window; url='" + evt.GetURL() + "'");
++    wxString flag = " (other)";
++
++    if(evt.GetNavigationAction() == wxWEBVIEW_NAV_ACTION_USER)
++    {
++        flag = " (user)";
++    }
++
++    wxLogMessage("%s", "New window; url='" + evt.GetURL() + "'" + flag);
+ 
+     //If we handle new window events then just load them in this window as we
+     //are a single window browser
+diff --git a/src/gtk/webview_webkit.cpp b/src/gtk/webview_webkit.cpp
+index ea0eb0d..aee9d50 100644
+--- a/src/gtk/webview_webkit.cpp
++++ b/src/gtk/webview_webkit.cpp
+@@ -80,7 +80,7 @@ static gboolean
+ wxgtk_webview_webkit_navigation(WebKitWebView *,
+                                 WebKitWebFrame *frame,
+                                 WebKitNetworkRequest *request,
+-                                WebKitWebNavigationAction *,
++                                WebKitWebNavigationAction *action,
+                                 WebKitWebPolicyDecision *policy_decision,
+                                 wxWebViewWebKit *webKitCtrl)
+ {
+@@ -92,10 +92,18 @@ wxgtk_webview_webkit_navigation(WebKitWebView *,
+     if(webKitCtrl->m_creating)
+     {
+         webKitCtrl->m_creating = false;
++    
++        WebKitWebNavigationReason reason = 
++                                  webkit_web_navigation_action_get_reason(action);
++        wxWebViewNavigationActionFlags flags = wxWEBVIEW_NAV_ACTION_USER;
++
++        if(reason == WEBKIT_WEB_NAVIGATION_REASON_OTHER)
++            flags = wxWEBVIEW_NAV_ACTION_OTHER;
++        
+         wxWebViewEvent event(wxEVT_WEBVIEW_NEWWINDOW,
+                              webKitCtrl->GetId(),
+                              wxString(uri, wxConvUTF8),
+-                             target);
++                             target, flags);
+ 
+         webKitCtrl->HandleWindowEvent(event);
+ 
+@@ -302,17 +310,24 @@ static gboolean
+ wxgtk_webview_webkit_new_window(WebKitWebView*,
+                                 WebKitWebFrame *frame,
+                                 WebKitNetworkRequest *request,
+-                                WebKitWebNavigationAction*,
++                                WebKitWebNavigationAction* action,
+                                 WebKitWebPolicyDecision *policy_decision,
+                                 wxWebViewWebKit *webKitCtrl)
+ {
+     const gchar* uri = webkit_network_request_get_uri(request);
+-
+     wxString target = webkit_web_frame_get_name (frame);
++    
++    WebKitWebNavigationReason reason = webkit_web_navigation_action_get_reason(action);
++    
++    wxWebViewNavigationActionFlags flags = wxWEBVIEW_NAV_ACTION_USER;
++
++    if(reason == WEBKIT_WEB_NAVIGATION_REASON_OTHER)
++        flags = wxWEBVIEW_NAV_ACTION_OTHER;
++    
+     wxWebViewEvent event(wxEVT_WEBVIEW_NEWWINDOW,
+                                        webKitCtrl->GetId(),
+                                        wxString( uri, wxConvUTF8 ),
+-                                       target);
++                                       target, flags);
+ 
+     webKitCtrl->HandleWindowEvent(event);
+ 
+diff --git a/src/msw/webview_ie.cpp b/src/msw/webview_ie.cpp
+index 46c26c3..8df8c4b 100644
+--- a/src/msw/webview_ie.cpp
++++ b/src/msw/webview_ie.cpp
+@@ -22,6 +22,7 @@
+ #include <exdispid.h>
+ #include <exdisp.h>
+ #include <mshtml.h>
++#include <shobjidl.h>
+ #include "wx/msw/registry.h"
+ #include "wx/msw/missing.h"
+ #include "wx/msw/ole/safearray.h"
+@@ -1472,9 +1473,15 @@ void wxWebViewIE::onActiveXEvent(wxActiveXEvent& evt)
+         case DISPID_NEWWINDOW3:
+         {
+             wxString url = evt[4].GetString();
++            long flags = evt[2].GetLong();
++
++            wxWebViewNavigationActionFlags navFlags = wxWEBVIEW_NAV_ACTION_OTHER;
++
++            if(flags & NWMF_USERINITED || flags & NWMF_USERREQUESTED)
++                navFlags = wxWEBVIEW_NAV_ACTION_USER;
+ 
+             wxWebViewEvent event(wxEVT_WEBVIEW_NEWWINDOW,
+-                                 GetId(), url, wxEmptyString);
++                                 GetId(), url, wxEmptyString, navFlags);
+             event.SetEventObject(this);
+             HandleWindowEvent(event);
+ 
+diff --git a/src/osx/webview_webkit.mm b/src/osx/webview_webkit.mm
+index 13b76e0..be3f646 100644
+--- a/src/osx/webview_webkit.mm
++++ b/src/osx/webview_webkit.mm
+@@ -979,12 +979,17 @@ wxString nsErrorToWxHtmlError(NSError* error, wxWebViewNavigationError* out)
+                         newFrameName:(NSString *)frameName
+                     decisionListener:(id < WebPolicyDecisionListener >)listener
+ {
+-    wxUnusedVar(actionInformation);
+-
+     NSString *url = [[request URL] absoluteString];
++
++    wxWebViewNavigationActionFlags flags = wxWEBVIEW_NAV_ACTION_USER;
++
++    int action = [[actionInformation objectForKey:WebActionNavigationTypeKey] intValue];
++    if (action == WebNavigationTypeOther)
++        flags = wxWEBVIEW_NAV_ACTION_OTHER;
++
+     wxWebViewEvent event(wxEVT_WEBVIEW_NEWWINDOW,
+                          webKitWindow->GetId(),
+-                         wxCFStringRef::AsString( url ), "");
++                         wxCFStringRef::AsString( url ), "", flags);
+ 
+     if (webKitWindow && webKitWindow->GetEventHandler())
+         webKitWindow->GetEventHandler()->ProcessEvent(event);

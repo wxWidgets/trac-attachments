@@ -1,0 +1,190 @@
+Index: include/wx/gtk/clipbrd.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/gtk/clipbrd.h,v
+retrieving revision 1.21
+diff -b -u -2 -r1.21 clipbrd.h
+--- include/wx/gtk/clipbrd.h	2005/08/02 22:57:52	1.21
++++ include/wx/gtk/clipbrd.h	2005/08/31 19:02:13
+@@ -67,5 +67,6 @@
+     bool              m_ownsClipboard;
+     bool              m_ownsPrimarySelection;
+-    wxDataObject     *m_data;
++    wxDataObject     *m_clipboardData;
++    wxDataObject     *m_primarySelectionData;
+ 
+     GtkWidget        *m_clipboardWidget;  /* for getting and offering data */
+Index: src/gtk/clipbrd.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/clipbrd.cpp,v
+retrieving revision 1.60
+diff -b -u -2 -r1.60 clipbrd.cpp
+--- src/gtk/clipbrd.cpp	2005/07/16 06:46:32	1.60
++++ src/gtk/clipbrd.cpp	2005/08/31 19:02:24
+@@ -208,10 +208,26 @@
+     {
+         wxTheClipboard->m_ownsPrimarySelection = FALSE;
++
++        if (wxTheClipboard->m_primarySelectionData)
++        {
++            wxLogTrace(TRACE_CLIPBOARD, wxT("Primary selection will get cleared" ));
++
++            delete wxTheClipboard->m_primarySelectionData;
++            wxTheClipboard->m_primarySelectionData = (wxDataObject*) NULL;
+     }
++    }
+     else
+     if (event->selection == g_clipboardAtom)
+     {
+         wxTheClipboard->m_ownsClipboard = FALSE;
++
++        if (wxTheClipboard->m_clipboardData)
++        {
++            wxLogTrace(TRACE_CLIPBOARD, wxT("Clipboard will get cleared" ));
++
++            delete wxTheClipboard->m_clipboardData;
++            wxTheClipboard->m_clipboardData = (wxDataObject*)NULL;
+     }
++    }
+     else
+     {
+@@ -220,17 +236,4 @@
+     }
+ 
+-    if ((!wxTheClipboard->m_ownsPrimarySelection) &&
+-        (!wxTheClipboard->m_ownsClipboard))
+-    {
+-        /* the clipboard is no longer in our hands. we can the delete clipboard data. */
+-        if (wxTheClipboard->m_data)
+-        {
+-            wxLogTrace(TRACE_CLIPBOARD, wxT("wxClipboard will get cleared" ));
+-
+-            delete wxTheClipboard->m_data;
+-            wxTheClipboard->m_data = (wxDataObject*) NULL;
+-        }
+-    }
+-
+     wxTheClipboard->m_waiting = FALSE;
+     return TRUE;
+@@ -252,7 +255,12 @@
+     if (!wxTheClipboard) return;
+ 
+-    if (!wxTheClipboard->m_data) return;
++    wxDataObject *data;
+ 
+-    wxDataObject *data = wxTheClipboard->m_data;
++    if (selection_data->selection == GDK_SELECTION_PRIMARY)
++        data = wxTheClipboard->m_primarySelectionData;
++    else
++        data = wxTheClipboard->m_clipboardData;
++
++    if (!data) return;
+ 
+     wxDataFormat format( selection_data->target );
+@@ -319,5 +327,6 @@
+     m_ownsPrimarySelection = FALSE;
+ 
+-    m_data = (wxDataObject*) NULL;
++    m_primarySelectionData = (wxDataObject*) NULL;
++    m_clipboardData = (wxDataObject*) NULL;
+     m_receivedData = (wxDataObject*) NULL;
+ 
+@@ -358,5 +367,8 @@
+ wxClipboard::~wxClipboard()
+ {
++    m_usePrimary = false;
+     Clear();
++    m_usePrimary = true;
++    Clear();
+ 
+     if (m_clipboardWidget) gtk_widget_destroy( m_clipboardWidget );
+@@ -366,6 +378,8 @@
+ void wxClipboard::Clear()
+ {
+-    if (m_data)
++    if (((m_usePrimary) && (m_primarySelectionData)) ||
++            ((!m_usePrimary) && (m_clipboardData)))
+     {
++
+ #if wxUSE_THREADS
+         /* disable GUI threads */
+@@ -373,10 +387,13 @@
+ 
+         //  As we have data we also own the clipboard. Once we no longer own
+-        //  it, clear_selection is called which will set m_data to zero
+-        if (gdk_selection_owner_get( g_clipboardAtom ) == m_clipboardWidget->window)
++        // it, clear_selection is called which will set m_clipboardData or
++        // m_primarySelectionData to zero.
++        if ((m_usePrimary) && (m_primarySelectionData))
++        {
++            if (gdk_selection_owner_get( GDK_SELECTION_PRIMARY ) == m_clipboardWidget->window)
+         {
+             m_waiting = TRUE;
+ 
+-            gtk_selection_owner_set( (GtkWidget*) NULL, g_clipboardAtom,
++                gtk_selection_owner_set( (GtkWidget*) NULL, GDK_SELECTION_PRIMARY,
+                                      (guint32) GDK_CURRENT_TIME );
+ 
+@@ -384,9 +401,15 @@
+         }
+ 
+-        if (gdk_selection_owner_get( GDK_SELECTION_PRIMARY ) == m_clipboardWidget->window)
++            delete m_primarySelectionData;
++            m_primarySelectionData = (wxDataObject*) NULL;
++        }
++
++        if ((!m_usePrimary) && (m_clipboardData))
++        {
++            if (gdk_selection_owner_get( g_clipboardAtom ) == m_clipboardWidget->window)
+         {
+             m_waiting = TRUE;
+ 
+-            gtk_selection_owner_set( (GtkWidget*) NULL, GDK_SELECTION_PRIMARY,
++                gtk_selection_owner_set( (GtkWidget*) NULL, g_clipboardAtom,
+                                      (guint32) GDK_CURRENT_TIME );
+ 
+@@ -394,8 +417,6 @@
+         }
+ 
+-        if (m_data)
+-        {
+-            delete m_data;
+-            m_data = (wxDataObject*) NULL;
++            delete m_clipboardData;
++            m_clipboardData = (wxDataObject*) NULL;
+         }
+ 
+@@ -438,9 +459,7 @@
+     Clear();
+ 
+-    m_data = data;
+-
+     // get formats from wxDataObjects
+-    wxDataFormat *array = new wxDataFormat[ m_data->GetFormatCount() ];
+-    m_data->GetAllFormats( array );
++    wxDataFormat *array = new wxDataFormat[ data->GetFormatCount() ];
++    data->GetAllFormats( array );
+ 
+     // primary selection or clipboard
+@@ -449,5 +468,5 @@
+ 
+ 
+-    for (size_t i = 0; i < m_data->GetFormatCount(); i++)
++    for (size_t i = 0; i < data->GetFormatCount(); i++)
+     {
+         wxLogTrace( TRACE_CLIPBOARD,
+@@ -481,7 +500,13 @@
+ 
+     if (m_usePrimary)
++    {
++        m_primarySelectionData = data;
+         m_ownsPrimarySelection = res;
++    }
+     else
++    {
++        m_clipboardData = data;
+         m_ownsClipboard = res;
++    }
+ 
+ #if wxUSE_THREADS
+
+ 	  	 

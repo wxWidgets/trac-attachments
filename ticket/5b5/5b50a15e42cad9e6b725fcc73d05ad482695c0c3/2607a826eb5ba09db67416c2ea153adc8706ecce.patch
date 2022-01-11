@@ -1,0 +1,135 @@
+diff --git a/include/wx/msw/nonownedwnd.h b/include/wx/msw/nonownedwnd.h
+index a3f8aa4274..fc057f17e6 100644
+--- a/include/wx/msw/nonownedwnd.h
++++ b/include/wx/msw/nonownedwnd.h
+@@ -22,6 +22,8 @@ public:
+     wxNonOwnedWindow();
+     virtual ~wxNonOwnedWindow();
+ 
++    virtual bool Reparent(wxWindowBase* newParent);
++
+ protected:
+     virtual bool DoClearShape() wxOVERRIDE;
+     virtual bool DoSetRegionShape(const wxRegion& region) wxOVERRIDE;
+diff --git a/include/wx/msw/private.h b/include/wx/msw/private.h
+index eec028852b..201599f61c 100644
+--- a/include/wx/msw/private.h
++++ b/include/wx/msw/private.h
+@@ -17,6 +17,8 @@
+ 
+ #include "wx/log.h"
+ 
++#include "wx/msw/private/winstyle.h"
++
+ #if wxUSE_GUI
+     #include "wx/window.h"
+ #endif // wxUSE_GUI
+@@ -1097,6 +1099,31 @@ inline wxLayoutDirection wxGetEditLayoutDirection(WXHWND hWnd)
+                                     : wxLayout_LeftToRight;
+ }
+ 
++// ensure that all our parent windows have WS_EX_CONTROLPARENT style
++inline void EnsureParentHasControlParentStyle(wxWindow* parent)
++{
++    /*
++       If we have WS_EX_CONTROLPARENT flag we absolutely *must* set it for our
++       parent as well as otherwise several Win32 functions using
++       GetNextDlgTabItem() to iterate over all controls such as
++       IsDialogMessage() or DefDlgProc() would enter an infinite loop: indeed,
++       all of them iterate over all the controls starting from the currently
++       focused one and stop iterating when they get back to the focus but
++       unless all parents have WS_EX_CONTROLPARENT bit set, they would never
++       get back to the initial (focused) window: as we do have this style,
++       GetNextDlgTabItem() will leave this window and continue in its parent,
++       but if the parent doesn't have it, it wouldn't recurse inside it later
++       on and so wouldn't have a chance of getting back to this window either.
++     */
++    while (parent && !parent->IsTopLevel())
++    {
++        // force the parent to have this style
++        wxMSWWinExStyleUpdater(GetHwndOf(parent)).TurnOn(WS_EX_CONTROLPARENT);
++
++        parent = parent->GetParent();
++    }
++}
++
+ // ----------------------------------------------------------------------------
+ // functions mapping HWND to wxWindow
+ // ----------------------------------------------------------------------------
+@@ -1153,6 +1180,11 @@ inline void *wxSetWindowUserData(HWND hwnd, void *data)
+     return (void *)(LONG_PTR)::SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
+ }
+ 
++inline void *wxSetWindowParent(HWND hwnd, HWND parent)
++{
++    return (void*)(LONG_PTR)::SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, (LONG_PTR)parent);
++}
++
+ #endif // wxUSE_GUI && __WXMSW__
+ 
+ #endif // _WX_PRIVATE_H_
+diff --git a/src/msw/nonownedwnd.cpp b/src/msw/nonownedwnd.cpp
+index 15f4f89a83..503616f298 100644
+--- a/src/msw/nonownedwnd.cpp
++++ b/src/msw/nonownedwnd.cpp
+@@ -79,6 +79,24 @@ bool wxNonOwnedWindow::DoSetRegionShape(const wxRegion& region)
+     return true;
+ }
+ 
++bool wxNonOwnedWindow::Reparent(wxWindowBase* parent)
++{
++    if (!wxWindowBase::Reparent(parent))
++        return false;
++
++    HWND hWndChild = GetHwnd();
++    HWND hWndParent = GetParent() ? GetWinHwnd(GetParent()) : (HWND)0;
++
++    wxSetWindowParent(hWndChild, hWndParent);
++
++    if (wxHasWindowExStyle(this, WS_EX_CONTROLPARENT))
++    {
++        EnsureParentHasControlParentStyle(GetParent());
++    }
++
++    return true;
++}
++
+ #if wxUSE_GRAPHICS_CONTEXT
+ 
+ #include "wx/msw/wrapgdip.h"
+diff --git a/src/msw/window.cpp b/src/msw/window.cpp
+index 2e5be999d9..25afe857e5 100644
+--- a/src/msw/window.cpp
++++ b/src/msw/window.cpp
+@@ -322,31 +322,6 @@ static inline void wxBringWindowToTop(HWND hwnd)
+     }
+ }
+ 
+-// ensure that all our parent windows have WS_EX_CONTROLPARENT style
+-static void EnsureParentHasControlParentStyle(wxWindow *parent)
+-{
+-    /*
+-       If we have WS_EX_CONTROLPARENT flag we absolutely *must* set it for our
+-       parent as well as otherwise several Win32 functions using
+-       GetNextDlgTabItem() to iterate over all controls such as
+-       IsDialogMessage() or DefDlgProc() would enter an infinite loop: indeed,
+-       all of them iterate over all the controls starting from the currently
+-       focused one and stop iterating when they get back to the focus but
+-       unless all parents have WS_EX_CONTROLPARENT bit set, they would never
+-       get back to the initial (focused) window: as we do have this style,
+-       GetNextDlgTabItem() will leave this window and continue in its parent,
+-       but if the parent doesn't have it, it wouldn't recurse inside it later
+-       on and so wouldn't have a chance of getting back to this window either.
+-     */
+-    while ( parent && !parent->IsTopLevel() )
+-    {
+-        // force the parent to have this style
+-        wxMSWWinExStyleUpdater(GetHwndOf(parent)).TurnOn(WS_EX_CONTROLPARENT);
+-
+-        parent = parent->GetParent();
+-    }
+-}
+-
+ // GetCursorPos can return an error, so use this function
+ // instead.
+ // Error observed when using Remote Desktop to connect to XP.

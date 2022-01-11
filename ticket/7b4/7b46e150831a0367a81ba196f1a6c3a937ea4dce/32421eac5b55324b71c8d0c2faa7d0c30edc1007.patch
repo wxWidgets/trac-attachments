@@ -1,0 +1,281 @@
+diff -rbu2 ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/editor.cpp ./wx2/contrib/utils/wxrcedit/editor.cpp
+--- ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/editor.cpp	Mon May 14 04:18:06 2001
++++ ./wx2/contrib/utils/wxrcedit/editor.cpp	Sat May 26 12:57:34 2001
+@@ -36,4 +36,64 @@
+ 
+ 
++void wxXmlRcEditDocument::UpgradeNodeValue(wxXmlNode *node)
++{
++    wxXmlNode *n = node;
++    if (n == NULL) return;
++    n = n->GetChildren();
++
++    while (n)
++    {
++        if (n->GetType() == wxXML_TEXT_NODE ||
++            n->GetType() == wxXML_CDATA_SECTION_NODE)
++        {
++            wxString str1 = n->GetContent();
++            const wxChar *dt;
++
++            for (dt = str1.c_str(); *dt; dt++)
++            {
++                // Remap amp_char to &, map double amp_char to amp_char (for things
++                // like "&File..." -- this is illegal in XML, so we use "_File..."):
++                if (*dt == '$')
++                {
++                    if ( *(++dt) != '$' )
++                        str1[size_t(dt-str1.c_str()-1)] = '_';
++                }
++            }
++            n->SetContent(str1);
++        }
++        n = n->GetNext();
++    }
++}
++
++void wxXmlRcEditDocument::UpgradeNode(wxXmlNode *node)
++{
++    if (node)
++    {
++        UpgradeNodeValue(node);
++        UpgradeNode(node->GetNext());
++        UpgradeNode(node->GetChildren());
++    }
++}
++
++void wxXmlRcEditDocument::Upgrade()
++{
++    int v1,v2,v3,v4;
++    long version;
++    wxXmlNode *node = GetRoot();
++    wxString verstr = wxT("0.0.0.0");
++    node->GetPropVal(wxT("version"),verstr);
++    if (wxSscanf(verstr.c_str(), wxT("%i.%i.%i.%i"),
++        &v1, &v2, &v3, &v4) == 4)
++        version = v1*256*256*256+v2*256*256+v3*256+v4;
++    else
++        version = 0;
++    if (!version)
++    {
++        UpgradeNode(node);
++    }
++    node->DeleteProperty(wxT("version"));
++    node->AddProperty(wxT("version"), wxT(WX_XMLRES_CURRENT_VERSION_STRING));
++}
++
+ 
+ class EditorTreeCtrl : public wxTreeCtrl
+@@ -231,6 +291,9 @@
+     delete m_Resource;
+     
++     // create new resource in order to handle version differences properly
++    PreviewFrame::Get()->ResetResource();
++    
+     m_FileName = "";
+-    m_Resource = new wxXmlDocument;
++    m_Resource = new wxXmlRcEditDocument;
+     m_Modified = FALSE;
+     
+@@ -245,4 +308,7 @@
+     {
+         m_FileName = filename;
++
++        // Upgrades old versions
++        m_Resource->Upgrade();
+         RefreshTree();
+     }
+@@ -256,9 +322,4 @@
+     m_FileName = filename;
+     
+-    // change version:
+-    wxXmlNode *root = m_Resource->GetRoot();
+-    root->DeleteProperty(wxT("version"));
+-    root->AddProperty(wxT("version"), wxT(WX_XMLRES_CURRENT_VERSION_STRING));
+-    
+     // save it:
+     if (!m_Resource->Save(filename))
+@@ -279,5 +340,5 @@
+     
+     m_FileName = "";
+-    m_Resource = new wxXmlDocument;
++    m_Resource = new wxXmlRcEditDocument;
+     m_Resource->SetRoot(new wxXmlNode(wxXML_ELEMENT_NODE, _("resource")));
+     
+@@ -434,5 +495,6 @@
+         RecursivelyExpand(m_TreeCtrl, event.GetItem());
+ 
+-        PreviewFrame::Get()->Preview(node);
++        PreviewFrame::Get()->Preview(node,m_Resource->GetRoot()->GetPropVal(
++                                      wxT("version"), wxT("0.0.0.0")));
+     }
+ }
+@@ -448,5 +510,6 @@
+             XmlTreeData* dt = (XmlTreeData*)m_TreeCtrl->GetItemData(m_TreeCtrl->GetSelection());;
+             if (dt != NULL && dt->Node != NULL)
+-                PreviewFrame::Get()->Preview(dt->Node);
++                PreviewFrame::Get()->Preview(dt->Node,m_Resource->GetRoot()->GetPropVal(
++                                      wxT("version"), wxT("0.0.0.0")));
+             break;
+             }
+diff -rbu2 ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/editor.h ./wx2/contrib/utils/wxrcedit/editor.h
+--- ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/editor.h	Fri Nov 24 17:19:48 2000
++++ ./wx2/contrib/utils/wxrcedit/editor.h	Sat May 26 13:00:24 2001
+@@ -48,4 +48,16 @@
+ 
+ 
++class wxXmlRcEditDocument : public wxXmlDocument
++{
++    // Helper functions for Upgrade()
++    void UpgradeNodeValue(wxXmlNode *node);
++    void UpgradeNode(wxXmlNode *node);
++
++ public:
++    // Upgrades older versions
++    void Upgrade();
++
++};
++
+ class EditorFrame : public wxFrame
+ {
+@@ -81,5 +93,5 @@
+ 
+         wxString m_FileName;
+-        wxXmlDocument *m_Resource;
++        wxXmlRcEditDocument *m_Resource;
+         
+         bool m_Modified;
+diff -rbu2 ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/pe_basic.cpp ./wx2/contrib/utils/wxrcedit/pe_basic.cpp
+--- ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/pe_basic.cpp	Mon Nov 27 13:55:04 2000
++++ ./wx2/contrib/utils/wxrcedit/pe_basic.cpp	Wed May 23 20:02:48 2001
+@@ -70,5 +70,7 @@
+ {
+     PropEditCtrlTxt::CreateEditCtrl();
++#if wxUSE_VALIDATORS
+     m_TextCtrl->SetValidator(wxTextValidator(wxFILTER_NUMERIC));
++#endif
+     return m_TextCtrl;
+ }
+diff -rbu2 ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/preview.cpp ./wx2/contrib/utils/wxrcedit/preview.cpp
+--- ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/preview.cpp	Wed May 23 05:48:54 2001
++++ ./wx2/contrib/utils/wxrcedit/preview.cpp	Thu May 24 23:01:36 2001
+@@ -76,11 +76,6 @@
+     SetMenuBar(new wxMenuBar());
+     
+-    m_RC = new wxXmlResource;
+-    // these handlers take precedence over std. ones:
+-    m_RC->AddHandler(new MyMenubarHandler(GetMenuBar()));
+-    // std handlers:
+-    m_RC->InitAllHandlers();
+-    m_TmpFile = wxGetTempFileName(_T("wxrcedit"));
+-    m_RC->Load(m_TmpFile);
++    m_RC = NULL;
++    ResetResource();
+ 
+     wxConfigBase *cfg = wxConfigBase::Get();
+@@ -104,4 +99,16 @@
+ 
+ 
++void PreviewFrame::ResetResource()
++{
++    delete m_RC;
++    m_RC = new wxXmlResource;
++    // these handlers take precedence over std. ones:
++    m_RC->AddHandler(new MyMenubarHandler(GetMenuBar()));
++    // std handlers:
++    m_RC->InitAllHandlers();
++    m_TmpFile = wxGetTempFileName(_T("wxrcedit"));
++    m_RC->Load(m_TmpFile);
++}
++
+ PreviewFrame::~PreviewFrame()
+ {
+@@ -133,5 +140,5 @@
+ 
+ 
+-void PreviewFrame::Preview(wxXmlNode *node)
++void PreviewFrame::Preview(wxXmlNode *node,const wxString &version)
+ {
+    while (node->GetParent()->GetParent() != NULL) node = node->GetParent();
+@@ -139,5 +146,7 @@
+    {
+        wxXmlDocument doc;
+-       doc.SetRoot(new wxXmlNode(wxXML_ELEMENT_NODE, _T("resource")));
++       wxXmlNode *root = new wxXmlNode(wxXML_ELEMENT_NODE, _T("resource"));
++       root->AddProperty(new wxXmlProperty(wxT("version"),version,NULL));
++       doc.SetRoot(root);
+        doc.GetRoot()->AddChild(new wxXmlNode(*node));
+ 
+@@ -159,4 +168,5 @@
+ 
+    m_Node = node;
++   m_Version = version;
+ 
+    m_LogCtrl->Clear();
+@@ -221,20 +231,10 @@
+ 
+ 
+-#ifdef __WXMSW__
+-// avoid Problems with setting the focus to a no longer existing child
+-void PreviewFrame::OnActivate(wxActivateEvent &event)
+-{
+-}
+-#endif
+-
+ BEGIN_EVENT_TABLE(PreviewFrame, wxFrame)
+     EVT_ENTER_WINDOW(PreviewFrame::OnMouseEnter)
+-#ifdef __WXMSW__
+-    EVT_ACTIVATE(PreviewFrame::OnActivate)
+-#endif
+ END_EVENT_TABLE()
+ 
+ void PreviewFrame::OnMouseEnter(wxMouseEvent& event)
+ {
+-    if (m_Dirty) Preview(m_Node);
++    if (m_Dirty) Preview(m_Node,m_Version);
+ }
+diff -rbu2 ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/preview.h ./wx2/contrib/utils/wxrcedit/preview.h
+--- ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/preview.h	Wed May 23 05:48:54 2001
++++ ./wx2/contrib/utils/wxrcedit/preview.h	Sat May 26 11:24:20 2001
+@@ -32,5 +32,5 @@
+         ~PreviewFrame();
+         
+-        void Preview(wxXmlNode *node);
++        void Preview(wxXmlNode *node,const wxString &version);
+         void MakeDirty();
+                 // current node updated, needs preview refresh
+@@ -38,4 +38,5 @@
+       
+         static PreviewFrame *Get();
++        void ResetResource();
+         
+     private:
+@@ -47,4 +48,5 @@
+         static PreviewFrame *ms_Instance;
+         wxXmlNode *m_Node;
++        wxString m_Version;
+         wxScrolledWindow *m_ScrollWin;
+         wxTextCtrl *m_LogCtrl;
+@@ -58,7 +60,4 @@
+         DECLARE_EVENT_TABLE()
+         void OnMouseEnter(wxMouseEvent& event);
+-#ifdef __WXMSW__
+-        void OnActivate(wxActivateEvent &event);
+-#endif
+ };
+ 
+diff -rbu2 ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/splittree.cpp ./wx2/contrib/utils/wxrcedit/splittree.cpp
+--- ./cvs/wx2/wxwindows/contrib/utils/wxrcedit/splittree.cpp	Thu May  3 18:19:04 2001
++++ ./wx2/contrib/utils/wxrcedit/splittree.cpp	Fri May 25 15:28:52 2001
+@@ -38,4 +38,9 @@
+ #include "wx/generic/treectlg.h"
+ 
++#ifdef __WXMSW__
++#include "windows.h"
++#include "wx/msw/winundef.h"
++#endif
++
+ #include "splittree.h"
+ 
+
+ 	  	 

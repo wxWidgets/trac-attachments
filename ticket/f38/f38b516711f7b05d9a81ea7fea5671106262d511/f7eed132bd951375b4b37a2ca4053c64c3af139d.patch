@@ -1,0 +1,141 @@
+Index: include/wx/dataview.h
+===================================================================
+--- include/wx/dataview.h	(revision 61111)
++++ include/wx/dataview.h	(working copy)
+@@ -754,7 +754,9 @@
+         m_model(NULL),
+         m_value(wxNullVariant),
+         m_column(NULL),
+-        m_pos(-1,-1)
++        m_pos(-1,-1),
++        m_cache_from(0),
++        m_cache_to(0)
+ #if wxUSE_DRAG_AND_DROP
+         , m_dataObject(NULL),
+         m_dataBuffer(NULL),
+@@ -769,7 +771,9 @@
+         m_model(event.m_model),
+         m_value(event.m_value),
+         m_column(event.m_column),
+-        m_pos(m_pos)
++        m_pos(m_pos),
++        m_cache_from(event.m_cache_from),
++        m_cache_to(event.m_cache_to)
+ #if wxUSE_DRAG_AND_DROP
+         , m_dataObject(event.m_dataObject),
+         m_dataFormat(event.m_dataFormat),
+@@ -798,6 +802,12 @@
+     wxPoint GetPosition() const { return m_pos; }
+     void SetPosition( int x, int y ) { m_pos.x = x; m_pos.y = y; }
+ 
++	// For wxEVT_COMMAND_DATAVIEW_CACHE_HINT
++    int GetCacheFrom() const { return m_cache_from; }
++    int GetCacheTo() const { return m_cache_to; }
++    void SetCache(int From, int To) { m_cache_from = From; m_cache_to = To; }
++
++
+ #if wxUSE_DRAG_AND_DROP
+     // For drag operations
+     void SetDataObject( wxDataObject *obj ) { m_dataObject = obj; }
+@@ -821,6 +831,8 @@
+     wxVariant           m_value;
+     wxDataViewColumn   *m_column;
+     wxPoint             m_pos;
++    int                 m_cache_from;
++    int                 m_cache_to;
+ 
+ #if wxUSE_DRAG_AND_DROP
+     wxDataObject       *m_dataObject;
+@@ -853,6 +865,8 @@
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_COMMAND_DATAVIEW_COLUMN_SORTED, wxDataViewEvent );
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_COMMAND_DATAVIEW_COLUMN_REORDERED, wxDataViewEvent );
+ 
++wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_COMMAND_DATAVIEW_CACHE_HINT, wxDataViewEvent );
++
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_COMMAND_DATAVIEW_ITEM_BEGIN_DRAG, wxDataViewEvent );
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_COMMAND_DATAVIEW_ITEM_DROP_POSSIBLE, wxDataViewEvent );
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_COMMAND_DATAVIEW_ITEM_DROP, wxDataViewEvent );
+@@ -883,6 +897,7 @@
+ #define EVT_DATAVIEW_COLUMN_HEADER_RIGHT_CLICKED(id, fn) wx__DECLARE_DATAVIEWEVT(COLUMN_HEADER_RIGHT_CLICK, id, fn)
+ #define EVT_DATAVIEW_COLUMN_SORTED(id, fn) wx__DECLARE_DATAVIEWEVT(COLUMN_SORTED, id, fn)
+ #define EVT_DATAVIEW_COLUMN_REORDERED(id, fn) wx__DECLARE_DATAVIEWEVT(COLUMN_REORDERED, id, fn)
++#define EVT_DATAVIEW_CACHE_HINT(id, fn) wx__DECLARE_DATAVIEWEVT(CACHE_HINT, id, fn)
+ 
+ #define EVT_DATAVIEW_ITEM_BEGIN_DRAG(id, fn) wx__DECLARE_DATAVIEWEVT(ITEM_BEGIN_DRAG, id, fn)
+ #define EVT_DATAVIEW_ITEM_DROP_POSSIBLE(id, fn) wx__DECLARE_DATAVIEWEVT(ITEM_DROP_POSSIBLE, id, fn)
+Index: interface/wx/dataview.h
+===================================================================
+--- interface/wx/dataview.h	(revision 61111)
++++ interface/wx/dataview.h	(working copy)
+@@ -2318,6 +2318,8 @@
+            Process a @c wxEVT_COMMAND_DATAVIEW_ITEM_DROP_POSSIBLE event.
+     @event{EVT_DATAVIEW_ITEM_DROP(id, func)}
+            Process a @c wxEVT_COMMAND_DATAVIEW_ITEM_DROP event.
++    @event{EVT_DATAVIEW_CACHE_HINT(id, func)}
++           Process a @c wxEVT_COMMAND_DATAVIEW_CACHE_HINT event.
+     @endEventTable
+     
+     @library{wxadv}
+@@ -2419,5 +2421,17 @@
+         Gets the data buffer for a drop data transfer.
+     */
+     void *GetDataBuffer() const;
++	 /**
++        Return the first row that will be displayed.
++    */
++    int GetCacheFrom() const;
++    /**
++        Return the last row that will be displayed.
++    */
++    int GetCacheTo() const;
++    /**
++        Set the first and last row for wxEVT_COMMAND_DATAVIEW_CACHE_HINT evet type.
++    */
++    void SetCache(int From, int To);
+ };
+ 
+Index: src/common/datavcmn.cpp
+===================================================================
+--- src/common/datavcmn.cpp	(revision 61111)
++++ src/common/datavcmn.cpp	(working copy)
+@@ -1250,10 +1250,14 @@
+ wxDEFINE_EVENT( wxEVT_COMMAND_DATAVIEW_COLUMN_SORTED, wxDataViewEvent );
+ wxDEFINE_EVENT( wxEVT_COMMAND_DATAVIEW_COLUMN_REORDERED, wxDataViewEvent );
+ 
++wxDEFINE_EVENT( wxEVT_COMMAND_DATAVIEW_CACHE_HINT, wxDataViewEvent );
++
+ wxDEFINE_EVENT( wxEVT_COMMAND_DATAVIEW_ITEM_BEGIN_DRAG, wxDataViewEvent );
+ wxDEFINE_EVENT( wxEVT_COMMAND_DATAVIEW_ITEM_DROP_POSSIBLE, wxDataViewEvent );
+ wxDEFINE_EVENT( wxEVT_COMMAND_DATAVIEW_ITEM_DROP, wxDataViewEvent );
+ 
++
++
+ // -------------------------------------
+ // wxDataViewSpinRenderer
+ // -------------------------------------
+Index: src/generic/datavgen.cpp
+===================================================================
+--- src/generic/datavgen.cpp	(revision 61111)
++++ src/generic/datavgen.cpp	(working copy)
+@@ -1676,7 +1676,12 @@
+         wxMin( (int)(  GetLineAt( wxMax(0,update.y+update.height) ) - item_start + 1),
+             (int)(GetRowCount( ) - item_start));
+     unsigned int item_last = item_start + item_count;
+-
++    // Get the parent of DataViewCtrl
++    wxWindow *parent = GetParent()->GetParent();
++    wxDataViewEvent cache_event(wxEVT_COMMAND_DATAVIEW_CACHE_HINT, parent->GetId());
++    cache_event.SetEventObject(GetParent());
++    cache_event.SetCache(item_start, item_last - 1);
++    parent->GetEventHandler()->ProcessEvent(cache_event);
+     // compute which columns needs to be redrawn
+     unsigned int cols = GetOwner()->GetColumnCount();
+     unsigned int col_start = 0;
+@@ -2365,6 +2370,7 @@
+         if (on)
+         {
+             m_selection.Add( row );
++            ChangeCurrentRow( row );
+             RefreshRow( row );
+         }
+     }

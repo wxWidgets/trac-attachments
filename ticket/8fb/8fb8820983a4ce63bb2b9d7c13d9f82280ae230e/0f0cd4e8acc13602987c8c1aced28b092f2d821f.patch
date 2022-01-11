@@ -1,0 +1,750 @@
+Index: include/wx/html/htmlcell.h
+===================================================================
+--- include/wx/html/htmlcell.h	(revision 67370)
++++ include/wx/html/htmlcell.h	(working copy)
+@@ -65,8 +65,35 @@
+     const wxHtmlCell *m_fromCell, *m_toCell;
+ };
+ 
++// wxHtmlMatch holds information about a match
++class WXDLLIMPEXP_HTML wxHtmlMatch
++{
++public:
++    wxHtmlMatch()
++        : m_fromPos(-1), m_toPos(-1),
++          m_fromCell(NULL), m_toCell(NULL) {}
+ 
++    void Set(const int& fromPos, const wxHtmlCell *fromCell,
++             const int& toPos, const wxHtmlCell *toCell);
++    void Set(const wxHtmlCell *fromCell, const wxHtmlCell *toCell);
+ 
++    const wxHtmlCell *GetFromCell() const { return m_fromCell; }
++    const wxHtmlCell *GetToCell() const { return m_toCell; }
++
++    const int& GetFromPos() const { return m_fromPos; }
++    const int& GetToPos() const { return m_toPos; }
++
++    bool IsEmpty() const
++        { return m_fromPos == -1 &&
++                 m_toPos == -1; }
++
++private:
++    int m_fromPos, m_toPos;
++    const wxHtmlCell *m_fromCell, *m_toCell;
++};
++
++WX_DECLARE_LIST (wxHtmlMatch, wxHtmlMatchList);
++
+ enum wxHtmlSelectionState
+ {
+     wxHTML_SEL_OUT,     // currently rendered cell is outside the selection
+@@ -74,23 +101,47 @@
+     wxHTML_SEL_CHANGING // ... is the cell on which selection state changes
+ };
+ 
++enum wxHtmlMatchState
++{
++    wxHTML_MATCH_OUT,   // currently rendered cell is outside any match
++    wxHTML_MATCH_IN,    // ... is entirely inside a match
++    wxHTML_MATCH_CHANGING // ... is a cell on which match state changes
++};
++
+ // Selection state is passed to wxHtmlCell::Draw so that it can render itself
+ // differently e.g. when inside text selection or outside it.
++// in addition the match state indicates whether to render in matched state
++// NB: when selection state is wxHTML_SEL_IN, match state is ignored
+ class WXDLLIMPEXP_HTML wxHtmlRenderingState
+ {
+ public:
+-    wxHtmlRenderingState() : m_selState(wxHTML_SEL_OUT) {}
++    wxHtmlRenderingState() : m_selState(wxHTML_SEL_OUT), m_matchState(wxHTML_MATCH_OUT), m_dcSelMatch(0) {}
+ 
+     void SetSelectionState(wxHtmlSelectionState s) { m_selState = s; }
+     wxHtmlSelectionState GetSelectionState() const { return m_selState; }
++    
++    void SetMatchState(wxHtmlMatchState s) { m_matchState = s; }
++    wxHtmlMatchState GetMatchState() const { return m_matchState; }
++    void SetNextMatch(const wxHtmlMatchList::const_iterator &at) { m_nextMatch = at; }
++    wxHtmlMatchList::const_iterator GetNextMatch() const { return m_nextMatch; }
+ 
++    void SetDcSetupForMatch() { m_dcSelMatch = 1; }
++    void SetDcSetupForSelection() { m_dcSelMatch = 2; }
++    void SetDcSetupForNormalState() { m_dcSelMatch = 0; }
++    bool IsDcSetupForMatch() const { return m_dcSelMatch == 1; }
++    bool IsDcSetupForSelection() const { return m_dcSelMatch == 2; }
++    bool IsDcSetupForNormalState() const { return m_dcSelMatch == 0; }
++
+     void SetFgColour(const wxColour& c) { m_fgColour = c; }
+     const wxColour& GetFgColour() const { return m_fgColour; }
+     void SetBgColour(const wxColour& c) { m_bgColour = c; }
+     const wxColour& GetBgColour() const { return m_bgColour; }
+ 
+ private:
++    int                   m_dcSelMatch; // stores which "SwitchToMatchAndSelState" was last called to avoid test on wxDC members
+     wxHtmlSelectionState  m_selState;
++    wxHtmlMatchState      m_matchState;
++    wxHtmlMatchList::const_iterator m_nextMatch;    // next match to check
+     wxColour              m_fgColour, m_bgColour;
+ };
+ 
+@@ -103,6 +154,8 @@
+     virtual ~wxHtmlRenderingStyle() {}
+     virtual wxColour GetSelectedTextColour(const wxColour& clr) = 0;
+     virtual wxColour GetSelectedTextBgColour(const wxColour& clr) = 0;
++    virtual wxColour GetFoundTextColour(const wxColour& clr) = 0;
++    virtual wxColour GetFoundTextBgColour(const wxColour& clr) = 0;
+ };
+ 
+ // Standard style:
+@@ -111,6 +164,8 @@
+ public:
+     virtual wxColour GetSelectedTextColour(const wxColour& clr);
+     virtual wxColour GetSelectedTextBgColour(const wxColour& clr);
++    virtual wxColour GetFoundTextColour(const wxColour& clr);
++    virtual wxColour GetFoundTextBgColour(const wxColour& clr);
+ };
+ 
+ 
+@@ -125,6 +180,9 @@
+     void SetSelection(wxHtmlSelection *s) { m_selection = s; }
+     wxHtmlSelection *GetSelection() const { return m_selection; }
+ 
++    void SetMatchList(wxHtmlMatchList *matchList) { m_matchList = matchList; }
++    wxHtmlMatchList *GetMatchList() const { return m_matchList; }
++
+     void SetStyle(wxHtmlRenderingStyle *style) { m_style = style; }
+     wxHtmlRenderingStyle& GetStyle() { return *m_style; }
+ 
+@@ -132,6 +190,7 @@
+ 
+ protected:
+     wxHtmlSelection      *m_selection;
++    wxHtmlMatchList      *m_matchList;
+     wxHtmlRenderingStyle *m_style;
+     wxHtmlRenderingState m_state;
+ };
+Index: include/wx/html/htmlwin.h
+===================================================================
+--- include/wx/html/htmlwin.h	(revision 67370)
++++ include/wx/html/htmlwin.h	(working copy)
+@@ -294,6 +294,14 @@
+     void SetRelatedFrame(wxFrame* frame, const wxString& format);
+     wxFrame* GetRelatedFrame() const {return m_RelatedFrame;}
+ 
++    void SearchAndHighlight (const wxString& keyword, bool case_sensitive, bool whole_word_only);
++    void DismissSearch ();
++
++    // navigates in the highlights direction should be wxLEFT, wxRIGHT, wxTOP (first), wxBOTTOM (last)
++    //  left and right start from current selection, if there is no such selection wxLEFT is like wxBOTTOM
++    //  wxRIGHT like wxTOP, returns true if a target was found in wanted direction
++    bool NavigateHighlights (wxDirection direction);
++
+ #if wxUSE_STATUSBAR
+     // After(!) calling SetRelatedFrame, this sets statusbar slot where messages
+     // will be displayed. Default is -1 = no messages.
+@@ -497,6 +505,9 @@
+     // current text selection or NULL
+     wxHtmlSelection *m_selection;
+ 
++    // current list of matches or NULL
++    wxHtmlMatchList *m_matchList;
++
+     // true if the user is dragging mouse to select text
+     bool m_makingSelection;
+ 
+@@ -599,8 +610,34 @@
+     DECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxHtmlCellEvent)
+ };
+ 
++//------------------------------------------------------------------------------
++// wxHtmlCellSearchEngine
++//                  This class takes cells as input and scans them for occurrence
++//                  of keyword(s)
++//------------------------------------------------------------------------------
+ 
++class WXDLLIMPEXP_HTML wxHtmlCellSearchEngine : public wxObject
++{
++public:
++    wxHtmlCellSearchEngine() : wxObject() {}
++    virtual ~wxHtmlCellSearchEngine() {}
+ 
++    // Sets the keyword we will be searching for
++    virtual void LookFor(const wxString& keyword, bool case_sensitive, bool whole_words_only);
++
++    // Scans the cells for the keyword.
++    // Fills @matches with found matches
++    virtual void Scan(const wxHtmlCell *insideCell, wxHtmlMatchList &matches);
++
++private:
++    wxString m_Keyword;
++    bool m_CaseSensitive;
++    bool m_WholeWords;
++
++    wxDECLARE_NO_COPY_CLASS(wxHtmlCellSearchEngine);
++};
++
++
+ /*!
+  * Html link event
+  */
+Index: src/html/htmlcell.cpp
+===================================================================
+--- src/html/htmlcell.cpp	(revision 67370)
++++ src/html/htmlcell.cpp	(working copy)
+@@ -30,6 +30,9 @@
+ 
+ #include <stdlib.h>
+ 
++#include "wx/listimpl.cpp"
++WX_DEFINE_LIST (wxHtmlMatchList);
++
+ //-----------------------------------------------------------------------------
+ // Helper classes
+ //-----------------------------------------------------------------------------
+@@ -55,6 +58,15 @@
+     Set(p1, fromCell, p2, toCell);
+ }
+ 
++void wxHtmlMatch::Set (const int& fromPos, const wxHtmlCell *fromCell,
++             const int& toPos, const wxHtmlCell *toCell)
++{
++    m_fromPos = fromPos;
++    m_fromCell = fromCell;
++    m_toPos = toPos;
++    m_toCell = toCell;
++}
++
+ wxColour
+ wxDefaultHtmlRenderingStyle::
+ GetSelectedTextColour(const wxColour& WXUNUSED(clr))
+@@ -69,7 +81,20 @@
+     return wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHT);
+ }
+ 
++wxColour
++wxDefaultHtmlRenderingStyle::
++GetFoundTextColour(const wxColour& clr)
++{
++    return clr;
++}
+ 
++wxColour
++wxDefaultHtmlRenderingStyle::
++GetFoundTextBgColour(const wxColour& WXUNUSED(clr))
++{
++    return *wxYELLOW;
++}
++
+ //-----------------------------------------------------------------------------
+ // wxHtmlCell
+ //-----------------------------------------------------------------------------
+@@ -490,26 +515,43 @@
+ }
+ 
+ 
+-static void SwitchSelState(wxDC& dc, wxHtmlRenderingInfo& info,
+-                           bool toSelection)
++static void SwitchMatchAndSelState(wxDC& dc, wxHtmlRenderingInfo& info,
++                           bool toSelection, bool toMatched)
+ {
++    if ((toSelection && info.GetState().IsDcSetupForSelection()) ||
++        (!toSelection && toMatched && info.GetState().IsDcSetupForMatch()) ||
++        (!toSelection && !toMatched && info.GetState().IsDcSetupForNormalState()))
++        return; // nothing to do
++
+     wxColour fg = info.GetState().GetFgColour();
+     wxColour bg = info.GetState().GetBgColour();
+ 
+-    if ( toSelection )
++    if ( toSelection )  // selection has priority over matched
+     {
+         dc.SetBackgroundMode(wxBRUSHSTYLE_SOLID);
+         dc.SetTextForeground(info.GetStyle().GetSelectedTextColour(fg));
+         dc.SetTextBackground(info.GetStyle().GetSelectedTextBgColour(bg));
+         dc.SetBackground(wxBrush(info.GetStyle().GetSelectedTextBgColour(bg),
+-                                 wxBRUSHSTYLE_SOLID));
++                                    wxBRUSHSTYLE_SOLID));
++        info.GetState().SetDcSetupForSelection ();
+     }
++    else if ( toMatched )
++    {
++        dc.SetBackgroundMode(wxBRUSHSTYLE_SOLID);
++        dc.SetTextForeground(info.GetStyle().GetFoundTextColour(fg));
++        dc.SetTextBackground(info.GetStyle().GetFoundTextBgColour(bg));
++        dc.SetBackground(wxBrush(info.GetStyle().GetFoundTextBgColour(bg),
++                                    wxBRUSHSTYLE_SOLID));
++        info.GetState().SetDcSetupForMatch ();
++    }
+     else
+     {
+         dc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
+         dc.SetTextForeground(fg);
+         dc.SetTextBackground(bg);
+         dc.SetBackground(wxBrush(bg, wxBRUSHSTYLE_SOLID));
++
++        info.GetState().SetDcSetupForNormalState ();
+     }
+ }
+ 
+@@ -523,15 +565,21 @@
+     dc.DrawRectangle(x+m_PosX,y+m_PosY,m_Width /* VZ: +1? */ ,m_Height);
+ #endif
+ 
+-    bool drawSelectionAfterCell = false;
++    // we use the rendering info to determine how to cut the cell into one or
++    //  more slices, each with a given background colour, selection is 
++    //  prevalent
++    // the match and selections states informs us about how hard it will be
++    //  to do the mix
++    // we use sorted approach and then qualify each segment to know which
++    //  color it actually uses.
+ 
++    // first of all, ensure the selection bounds is well known if it is going
++    //  to be used
++
+     if ( info.GetState().GetSelectionState() == wxHTML_SEL_CHANGING )
+     {
+         // Selection changing, we must draw the word piecewise:
+         wxHtmlSelection *s = info.GetSelection();
+-        wxString txt;
+-        int w, h;
+-        int ofs = 0;
+ 
+         wxPoint priv = (this == s->GetFromCell()) ?
+                            s->GetFromPrivPos() : s->GetToPrivPos();
+@@ -544,53 +592,94 @@
+         if ( priv == wxDefaultPosition )
+         {
+             SetSelectionPrivPos(dc, s);
+-            priv = (this == s->GetFromCell()) ?
+-                    s->GetFromPrivPos() : s->GetToPrivPos();
+         }
++    }
+ 
+-        int part1 = priv.x;
+-        int part2 = priv.y;
++    // we have now positions for sure for the matches and selection (there might
++    //  be several matches in a single word), matches are already ordered
++    // we iterate over the match and selection and determine what is state 'after'
++    //  so as to color correctly the space between this cell and a potential
++    //  consecutive cell
++    wxHtmlSelectionState selstate = info.GetState().GetSelectionState();
++    wxHtmlMatchState matchstate = info.GetState().GetMatchState();
+ 
+-        if ( part1 > 0 )
++    if ( selstate == wxHTML_SEL_CHANGING || 
++        (matchstate == wxHTML_MATCH_CHANGING && selstate != wxHTML_SEL_IN) )
++    {
++        // current cell is either on start or end of itm->GetFrom/ToPos if changing.
++        wxHtmlMatchList::const_iterator itm = info.GetState().GetNextMatch();
++        const wxHtmlSelection *selection = info.GetSelection();
++
++        // we consider the selection and matches as array of two limits each (2 means end)
++        // note that when reaching match limit 2, we accept to go into next match if
++        //  the FromCell is still current cell
++        unsigned next_selection_limit = selstate == wxHTML_SEL_CHANGING ? (this==selection->GetFromCell() ? 0 : 1) : 2;
++        unsigned next_match_limit = matchstate != wxHTML_MATCH_OUT ? (this==(*itm)->GetFromCell() ? 0 : 1) : 2;
++
++        wxString txt;
++        unsigned remain_pos = 0;
++        int w, h;
++        int ofs = 0;
++
++        // we need to interleave selection and match bounds to determine what 
++        //  is the next state change, rendering the few character in between
++        //  until we reach the end of the cell
++        // NB: each time we pass from a 0 to 1 limit we enter the state, 1 to 2 we leave
++        // we'll make a last pass on the end position to ensure we switch the DC
++        //  to the right state
++        bool last_loop_passed = false;
++        while (remain_pos <= m_Word.length() && !last_loop_passed)
+         {
+-            txt = m_Word.Mid(0, part1);
+-            dc.DrawText(txt, x + m_PosX, y + m_PosY);
+-            dc.GetTextExtent(txt, &w, &h);
+-            ofs += w;
+-        }
++            last_loop_passed = remain_pos == m_Word.length();
+ 
+-        SwitchSelState(dc, info, true);
++            unsigned next_sel_pos = next_selection_limit==0 ? selection->GetFromPrivPos().x : 
++                    ( next_selection_limit==1 ? (this==selection->GetToCell() ? selection->GetToPrivPos().y : m_Word.length()) : (unsigned)-1);
++            unsigned next_match_pos = next_match_limit==0 ? (*itm)->GetFromPos() : 
++                    ( next_match_limit==1 ? (this==(*itm)->GetToCell() ? (*itm)->GetToPos() : m_Word.length()) : (unsigned)-1);
+ 
+-        txt = m_Word.Mid(part1, part2-part1);
+-        dc.DrawText(txt, ofs + x + m_PosX, y + m_PosY);
++            bool sel_change_first = next_sel_pos < next_match_pos;
++            unsigned next_change_pos = sel_change_first ? next_sel_pos : next_match_pos;
+ 
+-        if ( (size_t)part2 < m_Word.length() )
+-        {
+-            dc.GetTextExtent(txt, &w, &h);
+-            ofs += w;
+-            SwitchSelState(dc, info, false);
+-            txt = m_Word.Mid(part2);
+-            dc.DrawText(txt, ofs + x + m_PosX, y + m_PosY);
++            SwitchMatchAndSelState (dc, info, next_selection_limit==1, next_match_limit==1);
++            txt = m_Word.Mid (remain_pos, wxMin(m_Word.length()-remain_pos, next_change_pos - remain_pos));
++
++            if (!txt.empty())
++            {
++                dc.DrawText(txt, x + ofs + m_PosX, y + m_PosY);
++                dc.GetTextExtent(txt, &w, &h);
++                ofs += w;
++
++                remain_pos += txt.length();
++            }
++
++            if (next_change_pos==(unsigned)-1)
++                break; // leave, all changes are AFTER the end of cell
++
++            if (next_change_pos==next_sel_pos)
++                ++next_selection_limit;
++
++            if (next_change_pos==next_match_pos)
++            {
++                ++next_match_limit;
++                
++                wxHtmlMatchList::const_iterator itm_next = itm;
++                ++itm_next;
++
++                if (next_match_limit==2 && itm_next!=info.GetMatchList()->end() && (*itm_next)->GetFromCell() == this)
++                {
++                    next_match_limit = 0;
++                    itm = itm_next;
++                    info.GetState().SetNextMatch (itm_next);
++                }
++            }
+         }
+-        else
+-            drawSelectionAfterCell = true;
+     }
+     else
+     {
+-        wxHtmlSelectionState selstate = info.GetState().GetSelectionState();
+         // Not changing selection state, draw the word in single mode:
+-        if ( selstate != wxHTML_SEL_OUT &&
+-             dc.GetBackgroundMode() != wxBRUSHSTYLE_SOLID )
+-        {
+-            SwitchSelState(dc, info, true);
+-        }
+-        else if ( selstate == wxHTML_SEL_OUT &&
+-                  dc.GetBackgroundMode() == wxBRUSHSTYLE_SOLID )
+-        {
+-            SwitchSelState(dc, info, false);
+-        }
++        SwitchMatchAndSelState (dc, info, selstate==wxHTML_SEL_IN, matchstate==wxHTML_MATCH_IN);
++
+         dc.DrawText(m_Word, x + m_PosX, y + m_PosY);
+-        drawSelectionAfterCell = (selstate != wxHTML_SEL_OUT);
+     }
+ 
+     // NB: If the text is justified then there is usually some free space
+@@ -599,7 +688,7 @@
+     //     this special case and renders the selection *outside* the sell,
+     //     too.
+     if ( m_Parent->GetAlignHor() == wxHTML_ALIGN_JUSTIFY &&
+-         drawSelectionAfterCell )
++         !info.GetState().IsDcSetupForNormalState() )
+     {
+         wxHtmlCell *nextCell = m_Next;
+         while ( nextCell && nextCell->IsFormattingCell() )
+@@ -1079,22 +1168,53 @@
+                                                   wxHtmlCell *cell) const
+ {
+     wxHtmlSelection *s = info.GetSelection();
+-    if (!s) return;
+-    if (s->GetFromCell() == cell || s->GetToCell() == cell)
++    if (s)
+     {
+-        info.GetState().SetSelectionState(wxHTML_SEL_CHANGING);
++        if (s->GetFromCell() == cell || s->GetToCell() == cell)
++        {
++            info.GetState().SetSelectionState(wxHTML_SEL_CHANGING);
++        }
+     }
++
++    wxHtmlMatchList::const_iterator itm = info.GetState().GetNextMatch();
++    if (info.GetMatchList() && itm != info.GetMatchList()->end())
++    {
++        if ((*itm)->GetFromCell() == cell || (*itm)->GetToCell() == cell)
++        {
++            info.GetState().SetMatchState (wxHTML_MATCH_CHANGING);
++        }
++    }
+ }
+ 
+ void wxHtmlContainerCell::UpdateRenderingStatePost(wxHtmlRenderingInfo& info,
+                                                    wxHtmlCell *cell) const
+ {
+     wxHtmlSelection *s = info.GetSelection();
+-    if (!s) return;
+-    if (s->GetToCell() == cell)
+-        info.GetState().SetSelectionState(wxHTML_SEL_OUT);
+-    else if (s->GetFromCell() == cell)
+-        info.GetState().SetSelectionState(wxHTML_SEL_IN);
++    if (s)
++    {
++        if (s->GetToCell() == cell)
++            info.GetState().SetSelectionState(wxHTML_SEL_OUT);
++        else if (s->GetFromCell() == cell)
++            info.GetState().SetSelectionState(wxHTML_SEL_IN);
++    }
++
++    wxHtmlMatchList::const_iterator itm = info.GetState().GetNextMatch();
++    if (info.GetMatchList() && itm != info.GetMatchList()->end())
++    {
++        if ((*itm)->GetToCell() == cell)
++        {
++            info.GetState().SetMatchState(wxHTML_MATCH_OUT);
++
++            // many match in single cell, jump all
++            while (itm != info.GetMatchList()->end() && (*itm)->GetToCell() == cell)
++                ++itm;  // move to next match in list
++
++            info.GetState().SetNextMatch (itm);
++        }
++        else if ((*itm)->GetFromCell() == cell)
++            info.GetState().SetMatchState(wxHTML_MATCH_IN);
++
++    }
+ }
+ 
+ #define mMin(a, b) (((a) < (b)) ? (a) : (b))
+Index: src/html/htmlwin.cpp
+===================================================================
+--- src/html/htmlwin.cpp	(revision 67370)
++++ src/html/htmlwin.cpp	(working copy)
+@@ -47,7 +47,6 @@
+ wxDEFINE_EVENT( wxEVT_COMMAND_HTML_CELL_HOVER, wxHtmlCellEvent );
+ wxDEFINE_EVENT( wxEVT_COMMAND_HTML_LINK_CLICKED, wxHtmlLinkEvent );
+ 
+-
+ #if wxUSE_CLIPBOARD
+ // ----------------------------------------------------------------------------
+ // wxHtmlWinAutoScrollTimer: the timer used to generate a stream of scroll
+@@ -311,6 +310,7 @@
+     m_Processors = NULL;
+     SetBorders(10);
+     m_selection = NULL;
++    m_matchList = NULL;
+     m_makingSelection = false;
+ #if wxUSE_CLIPBOARD
+     m_timerAutoScroll = NULL;
+@@ -354,6 +354,8 @@
+     HistoryClear();
+ 
+     delete m_selection;
++    
++    delete m_matchList;
+ 
+     delete m_Cell;
+ 
+@@ -376,8 +378,30 @@
+     m_TitleFormat = format;
+ }
+ 
++void wxHtmlWindow::SearchAndHighlight (const wxString& keyword, bool case_sensitive, bool whole_word_only)
++{
++    wxDELETE(m_matchList);
++    m_matchList = new wxHtmlMatchList;
+ 
++    wxHtmlCellSearchEngine  searchEngine;
++    searchEngine.LookFor (keyword, case_sensitive, whole_word_only);
++    searchEngine.Scan (m_Cell, *m_matchList);
+ 
++    Refresh();
++}
++
++void wxHtmlWindow::DismissSearch ()
++{
++    wxDELETE(m_matchList);
++
++    Refresh();
++}
++
++bool wxHtmlWindow::NavigateHighlights (wxDirection WXUNUSED(direction))
++{
++    return false; // not yet implemented
++}
++
+ #if wxUSE_STATUSBAR
+ void wxHtmlWindow::SetRelatedStatusBar(int index)
+ {
+@@ -423,6 +447,7 @@
+     wxString newsrc(source);
+ 
+     wxDELETE(m_selection);
++    wxDELETE(m_matchList);
+ 
+     // we will soon delete all the cells, so clear pointers to them:
+     m_tmpSelFromCell = NULL;
+@@ -1154,6 +1179,8 @@
+     wxHtmlRenderingInfo rinfo;
+     wxDefaultHtmlRenderingStyle rstyle;
+     rinfo.SetSelection(m_selection);
++    rinfo.SetMatchList(m_matchList);
++    if (m_matchList) rinfo.GetState().SetNextMatch (m_matchList->begin());
+     rinfo.SetStyle(&rstyle);
+     m_Cell->Draw(*dc, 0, 0,
+                  y * wxHTML_SCROLL_STEP + rect.GetTop(),
+@@ -1767,7 +1794,158 @@
+     return GetDefaultHTMLCursor(type);
+ }
+ 
++//------------------------------------------------------------------------------
++// wxHtmlCellSearchEngine
++//------------------------------------------------------------------------------
+ 
++// stores the position in a converted text of the end character in a cell
++// storing end character is less natural but more practical as it is then 
++//  trivial to check whether a position is inside a cell or not (no need
++//  for clumsy tests with next position in list)
++struct PositionForCell
++{
++    int                 m_endPositionInText;
++    const wxHtmlCell*   m_cell;
++
++    PositionForCell() : m_endPositionInText(-1), m_cell(0) {}
++    PositionForCell(int positionInText, const wxHtmlCell* cell)
++        : m_endPositionInText(positionInText), m_cell(cell) {}
++};
++
++WX_DECLARE_LIST (PositionForCell, PositionForCellList);
++
++WX_DEFINE_LIST ( PositionForCellList );
++
++
++void wxHtmlCellSearchEngine::LookFor(const wxString& keyword, bool case_sensitive, bool whole_words_only)
++{
++    m_Keyword = keyword;
++    m_Keyword.Trim();
++    // remove \n as it might make us match generated \n in between cells and make the engine KO
++    m_Keyword.Replace (wxT("\n"), wxT(""));
++    m_CaseSensitive = case_sensitive;
++    m_WholeWords = whole_words_only;
++
++    if (!m_CaseSensitive)
++        m_Keyword.LowerCase();
++}
++
++void wxHtmlCellSearchEngine::Scan(const wxHtmlCell *insideCell, wxHtmlMatchList &matches)
++{
++    if (m_Keyword.empty())
++        return; // nothing to search
++
++    // the idea here is to first convert 'insideCell' to text, note that here we will
++    //  want to ignore distinctions between spaces, tabs or line feeds, these are all
++    //  blanks with respect to m_WholeWords, so we'll match without and check for blanks
++    // we tell where in the string each text cell happens
++    
++    PositionForCellList position_for_cells;
++    wxHtmlTerminalCellsInterator i(insideCell->GetFirstTerminal(), insideCell->GetLastTerminal());
++    const wxHtmlCell *prev = NULL;
++    wxString    text;
++    
++    while ( i )
++    {
++        // conversion to text is based on DoSelectionToText code.
++
++        if ( prev && prev->GetParent() != i->GetParent() )
++            text << '\n';
++
++        wxString str(i->ConvertToText(NULL));
++        if (!str.IsEmpty())
++        {
++            position_for_cells.Append (new PositionForCell(text.length(), prev));
++
++            if (!m_CaseSensitive)
++                str.LowerCase(); // do lowercase before appending in case it changes @str length
++            text << str;
++        }
++
++        prev = *i;
++        ++i;
++    }
++
++    position_for_cells.Append (new PositionForCell(text.length(), prev));
++
++    // now match the keyword, matching is a bit clever because a space in the keyword
++    //  matches begin/end of string and one or more blanks.
++    // NB: the algorithm is trivial and not efficient, using Boyer Moore Horspool matching
++    //  or something similar could avoid some bad behaviours
++    wxString::const_iterator    itMatch, itRetry;
++    PositionForCellList::const_iterator itPosForCell = position_for_cells.begin();
++    int startPositionForCell = 0;
++
++    for (itRetry=text.begin(); itRetry!=text.end(); )
++    {
++        wxString::const_iterator    itKeyword = m_Keyword.begin();
++
++        bool ok = true;
++        if (m_WholeWords) // want to be on a word start limit, we define that as being after start or space
++            ok = itRetry==text.begin() || isspace(*(itRetry-1));
++
++        itKeyword = m_Keyword.begin();
++        for (itMatch=itRetry; ok && itKeyword!=m_Keyword.end(); ++itKeyword)
++        {
++            if (*itKeyword == ' ')
++            {
++                ok = false; // unless we match at least a space it's KO
++                while (itMatch!=text.end() && isspace(*itMatch))
++                {
++                    ++itMatch;
++                    ok = true;
++                }
++            }
++            else
++            {
++                ok = itMatch != text.end() && *itMatch == *itKeyword;
++                // simple char, not at end and matching, continue
++                if (ok)
++                    ++itMatch;
++            }
++        }
++
++        if (ok && m_WholeWords)
++            ok = itMatch==text.end() || isspace(*itMatch);
++
++        if (ok)
++        {
++            // itRetry is the start position, itMatch is the end
++            int beginPos = itRetry - text.begin(), beginRelativePos;
++            int endPos = itMatch - text.begin(), endRelativePos;
++            const wxHtmlCell *fromCell;
++            const wxHtmlCell *toCell;
++
++            while (itPosForCell!=position_for_cells.end() && (*itPosForCell)->m_endPositionInText <= beginPos)
++            {
++                startPositionForCell = (*itPosForCell)->m_endPositionInText;
++                ++itPosForCell;
++            }
++
++            fromCell = (*itPosForCell)->m_cell;
++            beginRelativePos = beginPos - startPositionForCell;
++
++            while (itPosForCell!=position_for_cells.end() && (*itPosForCell)->m_endPositionInText < endPos) // NB: strict less than here
++            {
++                startPositionForCell = (*itPosForCell)->m_endPositionInText;
++                ++itPosForCell;
++            }
++
++            toCell = (*itPosForCell)->m_cell;
++            endRelativePos = endPos - startPositionForCell;
++
++            wxHtmlMatch *match = new wxHtmlMatch;
++            match->Set(beginRelativePos, fromCell, endRelativePos, toCell);
++
++            matches.Append(match);
++
++            itRetry = itMatch; // retry after this match
++        }
++        else
++            ++itRetry;
++    }
++}
++
+ //-----------------------------------------------------------------------------
+ // wxHtmlWinModule
+ //-----------------------------------------------------------------------------

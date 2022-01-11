@@ -1,0 +1,314 @@
+Index: samples/docview/doc.cpp
+===================================================================
+--- samples/docview/doc.cpp	(revision 60687)
++++ samples/docview/doc.cpp	(working copy)
+@@ -34,6 +34,7 @@
+ #else
+     #include "wx/txtstrm.h"
+ #endif
++#include "wx/wfstream.h"
+ 
+ #include "doc.h"
+ #include "view.h"
+@@ -216,3 +217,58 @@
+     wxView* view = GetFirstView();
+     return view ? wxStaticCast(view, TextEditView)->GetText() : NULL;
+ }
++
++// ----------------------------------------------------------------------------
++// wxImageDocument implementation
++// ----------------------------------------------------------------------------
++
++/////////////////////////////////////////////////////////////////////////////
++// wxImageDocument
++
++IMPLEMENT_DYNAMIC_CLASS(wxImageDocument, wxDocument)
++
++wxImageDocument::wxImageDocument() : wxDocument()
++{
++}
++
++wxImageDocument::~wxImageDocument()
++{
++}
++
++bool wxImageDocument::DeleteContents()
++{
++    bool ok = wxDocument::DeleteContents();
++    if (ok && m_image.IsOk())
++    {
++        m_image.Destroy();
++    }
++    return ok;
++}
++
++bool wxImageDocument::SaveFile(wxOutputStream* stream, wxBitmapType type) const
++{
++    return m_image.IsOk() && m_image.SaveFile(*stream, type);
++}
++
++bool wxImageDocument::DoOpenDocument(const wxString& file)
++{
++    wxFileInputStream stream(file);
++    return stream.IsOk() && DoOpenDocument(&stream);
++}
++
++bool wxImageDocument::DoSaveDocument(const wxString& file)
++{
++    wxFileOutputStream stream(file);
++    return stream.IsOk() && DoSaveDocument(&stream);
++}
++
++bool wxImageDocument::DoOpenDocument(wxInputStream* stream)
++{
++    return m_image.LoadFile(*stream);
++}
++
++bool wxImageDocument::DoSaveDocument(wxOutputStream* stream) const
++{
++    return m_image.IsOk() && SaveFile(stream, m_image.GetType());
++}
++
+Index: samples/docview/doc.h
+===================================================================
+--- samples/docview/doc.h	(revision 60687)
++++ samples/docview/doc.h	(working copy)
+@@ -16,6 +16,7 @@
+ #include "wx/docview.h"
+ #include "wx/cmdproc.h"
+ #include "wx/vector.h"
++#include "wx/image.h"
+ 
+ // This sample is written to build both with wxUSE_STD_IOSTREAM==0 and 1, which
+ // somewhat complicates its code but is necessary in order to support building
+@@ -191,4 +192,34 @@
+     DECLARE_DYNAMIC_CLASS(TextEditDocument)
+ };
+ 
++// ----------------------------------------------------------------------------
++// A basic image document class
++// ----------------------------------------------------------------------------
++
++class wxImageDocument : public wxDocument
++{
++protected:
++    wxImage m_image;
++public:
++    wxImageDocument();
++
++    wxImage*       GetImage()       { return &m_image; }
++    const wxImage& GetImage() const { return m_image; }
++
++    bool SaveFile(wxOutputStream*, wxBitmapType) const;
++
++public:
++    virtual ~wxImageDocument();
++    virtual bool DeleteContents();
++
++    virtual bool DoOpenDocument(const wxString& file);
++    virtual bool DoSaveDocument(const wxString& file);
++
++    virtual bool DoOpenDocument(wxInputStream*);
++    virtual bool DoSaveDocument(wxOutputStream*) const;
++
++    wxDECLARE_NO_COPY_CLASS(wxImageDocument);
++    DECLARE_DYNAMIC_CLASS(wxImageDocument)
++};
++
+ #endif // _WX_SAMPLES_DOCVIEW_DOC_H_
+Index: samples/docview/docview.cpp
+===================================================================
+--- samples/docview/docview.cpp	(revision 60687)
++++ samples/docview/docview.cpp	(working copy)
+@@ -148,6 +148,8 @@
+     if ( !wxApp::OnInit() )
+         return false;
+ 
++    ::wxInitAllImageHandlers();
++
+     SetAppName("DocView Sample");
+ 
+     //// Create a document manager
+@@ -176,6 +178,10 @@
+ #if defined( __WXMAC__ ) && wxOSX_USE_CARBON
+         wxFileName::MacRegisterDefaultTypeAndCreator("txt" , 'TEXT' , 'WXMA');
+ #endif
++        // Create a template relating image documents to their views
++        new wxDocTemplate(docManager, "Image", "*.png;*.jpg", "", "png;jpg",
++                          "Image Doc", "Image View",
++                          CLASSINFO(wxImageDocument), CLASSINFO(wxImageView));
+     }
+ 
+     // create the main frame window
+Index: samples/docview/view.cpp
+===================================================================
+--- samples/docview/view.cpp	(revision 60687)
++++ samples/docview/view.cpp	(working copy)
+@@ -104,8 +104,9 @@
+     return wxStaticCast(wxView::GetDocument(), DrawingDocument);
+ }
+ 
+-void DrawingView::OnUpdate(wxView *WXUNUSED(sender), wxObject *WXUNUSED(hint))
++void DrawingView::OnUpdate(wxView* sender, wxObject* hint)
+ {
++    wxView::OnUpdate(sender, hint);
+     if ( m_canvas )
+         m_canvas->Refresh();
+ }
+@@ -282,3 +283,86 @@
+     m_lastMousePos = pt;
+ }
+ 
++// ----------------------------------------------------------------------------
++// wxImageCanvas implementation
++// ----------------------------------------------------------------------------
++
++BEGIN_EVENT_TABLE(wxImageCanvas, wxScrolledWindow)
++END_EVENT_TABLE()
++
++// Define a constructor for my canvas
++wxImageCanvas::wxImageCanvas(wxView* view, wxWindow* parent)
++    : wxScrolledWindow(parent, wxID_ANY, wxPoint(0, 0), parent->GetClientSize())
++{
++    m_view = view;
++}
++
++// Define the repainting behaviour
++void wxImageCanvas::OnDraw(wxDC& dc)
++{
++    if ( m_view )
++        m_view->OnDraw(& dc);
++}
++
++// ----------------------------------------------------------------------------
++// wxImageView implementation
++// ----------------------------------------------------------------------------
++
++IMPLEMENT_DYNAMIC_CLASS(wxImageView, wxView)
++
++BEGIN_EVENT_TABLE(wxImageView, wxView)
++END_EVENT_TABLE()
++
++wxImageDocument* wxImageView::GetDocument()
++{
++    return wxStaticCast(wxView::GetDocument(), wxImageDocument);
++}
++
++bool wxImageView::OnCreate(wxDocument* doc, long WXUNUSED(flags))
++{
++    m_frame = wxGetApp().CreateChildFrame(doc, this, false);
++    m_frame->SetTitle("Image View");
++    m_canvas = new wxImageCanvas(this, m_frame);
++    m_frame->Show(true);
++    Activate(true);
++    return true;
++}
++
++void wxImageView::OnUpdate(wxView* sender, wxObject* hint)
++{
++    wxView::OnUpdate(sender, hint);
++    const wxImage* image = GetDocument()->GetImage();
++    if (image->IsOk())
++    {
++        m_canvas->SetScrollbars( 1, 1, image->GetWidth(), image->GetHeight() );
++    }
++}
++
++void wxImageView::OnDraw(wxDC* dc)
++{
++    const wxImage* image = GetDocument()->GetImage();
++    if (image->IsOk())
++    {
++        dc->DrawBitmap(wxBitmap(*image), 0, 0);
++    }
++}
++
++bool wxImageView::OnClose(bool deleteWindow)
++{
++    if ( !GetDocument()->Close() )
++        return false;
++
++    Activate(false);
++
++    if ( wxGetApp().GetMode() == MyApp::Mode_Single )
++    {
++        GetDocument()->DeleteContents();
++    }
++    else // not single window mode
++    {
++        if ( deleteWindow )
++            wxDELETE(m_frame);
++    }
++    return true;
++}
++
+Index: samples/docview/view.h
+===================================================================
+--- samples/docview/view.h	(revision 60687)
++++ samples/docview/view.h	(working copy)
+@@ -114,4 +114,65 @@
+     DECLARE_DYNAMIC_CLASS(TextEditView)
+ };
+ 
++// ----------------------------------------------------------------------------
++// wxImageCanvas
++// ----------------------------------------------------------------------------
++
++class wxImageCanvas : public wxScrolledWindow
++{
++public:
++    wxImageCanvas(wxView*, wxWindow* parent);
++
++    virtual void OnDraw(wxDC& dc);
++
++    // in a normal multiple document application a canvas is associated with
++    // one view from the beginning until the end, but to support the single
++    // document mode in which all documents reuse the same MyApp::GetCanvas()
++    // we need to allow switching the canvas from one view to another one
++
++    void SetView(wxView* view)
++    {
++        wxASSERT_MSG( !m_view, "shouldn't be already associated with a view" );
++
++        m_view = view;
++    }
++
++    void ResetView()
++    {
++        wxASSERT_MSG( m_view, "should be associated with a view" );
++
++        m_view = NULL;
++    }
++
++protected:
++    wxView *m_view;
++
++    DECLARE_EVENT_TABLE()
++};
++
++// ----------------------------------------------------------------------------
++// wxImageView
++// ----------------------------------------------------------------------------
++
++class wxImageDocument;
++class wxImageView : public wxView
++{
++public:
++    wxImageView() : wxView(), m_frame(NULL) {}
++
++    virtual bool OnCreate(wxDocument*, long flags);
++    virtual void OnDraw(wxDC*);
++    virtual bool OnClose(bool deleteWindow = true);
++    virtual void OnUpdate(wxView *sender, wxObject *hint = NULL);
++
++    wxImageDocument* GetDocument();
++
++protected:
++    wxFrame* m_frame;
++    wxImageCanvas* m_canvas;
++
++    DECLARE_EVENT_TABLE()
++    DECLARE_DYNAMIC_CLASS(wxImageView)
++};
++
+ #endif // _WX_SAMPLES_DOCVIEW_VIEW_H_

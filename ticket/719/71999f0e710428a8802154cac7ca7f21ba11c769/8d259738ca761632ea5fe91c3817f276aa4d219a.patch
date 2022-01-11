@@ -1,0 +1,422 @@
+diff -ru2 -xCVS -x.#* -x*.orig -x*.rej -x*~ wxWindows.orig/include/wx/msw/timer.h wxWindows/include/wx/msw/timer.h
+--- wxWindows.orig/include/wx/msw/timer.h	Sat Feb  5 01:57:36 2000
++++ wxWindows/include/wx/msw/timer.h	Tue Sep 30 15:16:09 2003
+@@ -19,6 +19,6 @@
+ class WXDLLEXPORT wxTimer : public wxTimerBase
+ {
+-friend void wxProcessTimer(wxTimer& timer);
+-
++friend void wxProcessTimer ( UINT_PTR idTimer );
++friend int wxTimerCompFunc ( wxTimer* first, wxTimer* second );
+ public:
+     wxTimer() { Init(); }
+@@ -33,7 +33,8 @@
+ 
+ protected:
+-    void Init();
+ 
+-    long m_id;
++    UINT_PTR m_id;
++
++    void Init();
+ 
+ private:
+diff -ru2 -xCVS -x.#* -x*.orig -x*.rej -x*~ wxWindows.orig/src/msw/gsockmsw.c wxWindows/src/msw/gsockmsw.c
+--- wxWindows.orig/src/msw/gsockmsw.c	Fri May 10 00:31:44 2002
++++ wxWindows/src/msw/gsockmsw.c	Wed Aug  6 13:47:32 2003
+@@ -61,5 +61,8 @@
+ 
+ #define CLASSNAME  TEXT("_GSocket_Internal_Window_Class")
+-#define WINDOWNAME TEXT("_GSocket_Internal_Window_Name")
++//#define WINDOWNAME TEXT("_GSocket_Internal_Window_Name")
++
++/* implemented in utils.cpp */
++HWND wxCreateHiddenWND ( LPCTSTR* pclassname, LPCTSTR classname, WNDPROC wndproc );
+ 
+ /* Maximum number of different GSocket objects at a given time.
+@@ -87,24 +90,12 @@
+ {
+   WSADATA wsaData;
+-  WNDCLASS winClass;
+   int i;
++  LPCTSTR pclassname;
+ 
+   /* Create internal window for event notifications */
+-  winClass.style         = 0;
+-  winClass.lpfnWndProc   = _GSocket_Internal_WinProc;
+-  winClass.cbClsExtra    = 0;
+-  winClass.cbWndExtra    = 0;
+-  winClass.hInstance     = INSTANCE;
+-  winClass.hIcon         = (HICON) NULL;
+-  winClass.hCursor       = (HCURSOR) NULL;
+-  winClass.hbrBackground = (HBRUSH) NULL;
+-  winClass.lpszMenuName  = (LPCTSTR) NULL;
+-  winClass.lpszClassName = CLASSNAME;
+-
+-  RegisterClass(&winClass);
+-  hWin = CreateWindow(CLASSNAME,
+-                      WINDOWNAME,
+-                      0, 0, 0, 0, 0,
+-                      (HWND) NULL, (HMENU) NULL, INSTANCE, (LPVOID) NULL);
++
++  /* Use create hidden window utility */
++  pclassname = NULL;
++  hWin = wxCreateHiddenWND ( &pclassname, CLASSNAME, _GSocket_Internal_WinProc );
+ 
+   if (!hWin) return FALSE;
+diff -ru2 -xCVS -x.#* -x*.orig -x*.rej -x*~ wxWindows.orig/src/msw/timer.cpp wxWindows/src/msw/timer.cpp
+--- wxWindows.orig/src/msw/timer.cpp	Mon May 13 00:46:12 2002
++++ wxWindows/src/msw/timer.cpp	Mon Oct  6 13:15:24 2003
+@@ -26,5 +26,5 @@
+     #include "wx/setup.h"
+     #include "wx/window.h"
+-    #include "wx/list.h"
++    #include "wx/dynarray.h"
+     #include "wx/event.h"
+     #include "wx/app.h"
+@@ -41,6 +41,8 @@
+ // ----------------------------------------------------------------------------
+ 
+-wxList wxTimerList(wxKEY_INTEGER);
+-UINT WINAPI _EXPORT wxTimerProc(HWND hwnd, WORD, int idTimer, DWORD);
++WX_DEFINE_SORTED_ARRAY(wxTimer*,wxArrayTimer);
++wxArrayTimer wxTimerArray(wxTimerCompFunc);
++
++VOID WINAPI _EXPORT wxTimerProc(HWND WXUNUSED(hwnd), UINT, UINT_PTR idTimer, DWORD);
+ 
+ // ----------------------------------------------------------------------------
+@@ -69,4 +71,13 @@
+ // ----------------------------------------------------------------------------
+ 
++// these variables are for timer shared hwnd management
++static const wxChar* wxMSWTIMER_WNDCLASSNAME = wxT("wxTimer");
++static LPCTSTR wx_timer_sharedhwnd_classname = NULL;
++static HWND wx_timer_sharedhwnd = NULL;
++static int wx_timer_sharedhwnd_refcount = 0;
++
++// needed for wxTimerArray::Index
++static wxTimer dummytimer;
++
+ void wxTimer::Init()
+ {
+@@ -77,23 +88,90 @@
+ {
+     wxTimer::Stop();
+-
+-    wxTimerList.DeleteObject(this);
+ }
+ 
++// implemented in utils.cpp
++extern "C" HWND wxCreateHiddenWND ( LPCTSTR* pclassname, LPCTSTR classname, WNDPROC wndproc );
++
+ bool wxTimer::Start(int milliseconds, bool oneShot)
+ {
+     (void)wxTimerBase::Start(milliseconds, oneShot);
+ 
+-    wxCHECK_MSG( m_milli > 0, FALSE, wxT("invalid value for timer timeour") );
++    // this was wxCHECK_MSG
++    wxASSERT_MSG( m_milli > 0, wxT("invalid value for timer timeout") );
+ 
+     TIMERPROC wxTimerProcInst = (TIMERPROC)
+         MakeProcInstance((FARPROC)wxTimerProc, wxGetInstance());
+ 
+-    m_id = ::SetTimer(NULL, (UINT)(m_id ? m_id : 1),
++    // hwnd of SetTimer should be non-NULL HWND which is owned by this thread
++    HWND hwnd = NULL;
++        
++    // owner is preferred
++    if ( m_owner && m_owner->IsKindOf(CLASSINFO(wxWindow)) )
++    {
++        hwnd = (HWND)((wxWindow*)m_owner)->GetHandle();
++    }
++
++    // if no other choice, use timers shared hwnd
++    if ( !hwnd )
++    {
++        if ( !wx_timer_sharedhwnd )
++        {
++            wx_timer_sharedhwnd = wxCreateHiddenWND ( &wx_timer_sharedhwnd_classname,
++                wxMSWTIMER_WNDCLASSNAME, DefWindowProc );
++
++            if ( !wx_timer_sharedhwnd )
++            {
++                wxASSERT_MSG( wx_timer_sharedhwnd, wxT("can't create a HWND for wxTimer") );
++                return FALSE;
++            }
++        }
++        
++        wx_timer_sharedhwnd_refcount++;
++        hwnd = wx_timer_sharedhwnd;
++
++    }
++
++    // generate id now
++    if ( m_id < 1 )
++    {
++        m_id = 1;
++    
++        if ( wxTimerArray.GetCount() > 0 )
++        {
++            // use last + 1, if it's less than INT_MAX (quite likely...)
++            m_id = wxTimerArray.Last()->m_id + 1;
++            if ( m_id >= INT_MAX )
++            {
++                // this only occurs if some very strange application
++                // manages to call wxTimer::Init() 2^31 (~2,15 billion) times
++                size_t i;
++                UINT_PTR prev_id = 0;
++                for ( i=0; i<wxTimerArray.GetCount(); i++ )
++                {
++                    UINT_PTR id = wxTimerArray.Item(i)->m_id;
++                    wxASSERT(id > prev_id);
++                    if ( (id - prev_id) > 1 )
++                    {
++                        m_id = prev_id + 1;
++                        break;
++                    }
++                    prev_id = id;
++                }
++            }
++        }
++    }
++
++    
++    // this should be valid style for using SetTimer ( atleast according to Platform SDK Feb 2003 )
++    UINT_PTR res = ::SetTimer(hwnd, (UINT)m_id,
+                       (UINT)m_milli, wxTimerProcInst);
++     
+ 
+-    if ( m_id > 0 )
++    if ( res > 0 )
+     {
+-        wxTimerList.Append(m_id, this);
++        // this assertion should not fail, but still not 100% sure
++        wxASSERT_MSG( res == m_id, wxT("SetTimer returned id did not match id provided as argument"));
++        
++        wxTimerArray.Add(this);
+ 
+         return TRUE;
+@@ -109,9 +187,38 @@
+ void wxTimer::Stop()
+ {
+-    if ( m_id )
++    if ( m_id > 0 )
+     {
+-        ::KillTimer(NULL, (UINT)m_id);
++        // detect correct hwnd (if SetOwner was called between StartTimer and Stop,
++        //   then there will be problems)
++        HWND hwnd = wx_timer_sharedhwnd;
++
++        if ( m_owner && m_owner->IsKindOf(CLASSINFO(wxWindow)) )
++        {
++            HWND try_hwnd = (HWND)((wxWindow*)m_owner)->GetHandle();
++            if ( try_hwnd ) hwnd = try_hwnd;
++        }
++
++        wxASSERT ( hwnd != NULL );
++
++        ::KillTimer(hwnd, (UINT)m_id);
++        
++        if ( hwnd == wx_timer_sharedhwnd )
++        {
++            wxASSERT_MSG( wx_timer_sharedhwnd_refcount > 0,
++                wxT("wxTimer shared hwnd refcount was invalid in Stop()") );
++            
++            wx_timer_sharedhwnd_refcount--;
++
++            // if no timer uses shared wnd anymore, destroy it
++            if ( wx_timer_sharedhwnd_refcount == 0 )
++            {
++                ::DestroyWindow ( hwnd );
++                wx_timer_sharedhwnd = NULL;
++                // if window class is to be unregistered, it should be done here
++            }
++        }
++
++        wxTimerArray.Remove(this);
+ 
+-        wxTimerList.DeleteObject(this);
+     }
+ 
+@@ -123,26 +230,52 @@
+ // ----------------------------------------------------------------------------
+ 
+-void wxProcessTimer(wxTimer& timer)
++int wxTimerCompFunc (wxTimer* first, wxTimer* second)
+ {
+-    // Avoid to process spurious timer events
+-    if ( timer.m_id == 0)
+-        return;
+-
+-    if ( timer.IsOneShot() )
+-        timer.Stop();
+-
+-    timer.Notify();
++    return (int)(first->m_id - second->m_id);
+ }
+ 
+-UINT WINAPI _EXPORT wxTimerProc(HWND WXUNUSED(hwnd), WORD, int idTimer, DWORD)
++inline void wxProcessTimer ( UINT_PTR idTimer )
+ {
+-    wxNode *node = wxTimerList.Find((long)idTimer);
++    wxTimer* timer = NULL;
+ 
+-    wxCHECK_MSG( node, 0, wxT("bogus timer id in wxTimerProc") );
++    if ( wxTimerArray.GetCount() < 16 )
++    {
++        size_t i;
++        
++        for ( i=0; i<wxTimerArray.GetCount(); i++ )
++        {
++            wxTimer* pt = wxTimerArray.Item(i);
++            if ( pt->m_id == idTimer )
++            {
++                timer = pt;
++                break;
++            }
++        }
++    }
++    else
++    {
++        dummytimer.m_id = idTimer;
++        int ind = wxTimerArray.Index(&dummytimer);
++        dummytimer.m_id = 0; // must be reset
+ 
+-    wxProcessTimer(*(wxTimer *)node->Data());
++        if ( ind != wxNOT_FOUND )
++            timer = wxTimerArray.Item(ind);
++    }
++
++    // this was wxCHECK_MSG
++    wxASSERT_MSG( timer != NULL, wxT("bogus timer id in wxTimerProc") );
+ 
+-    return 0;
++    if ( timer->IsOneShot() )
++        timer->Stop();
++
++    timer->Notify();
++}
++
++// return was originally UINT instead of VOID. Windows API docs, both old and new, say it should be VOID.
++VOID WINAPI _EXPORT wxTimerProc(HWND WXUNUSED(hwnd), UINT, UINT_PTR idTimer, DWORD)
++{
++    wxProcessTimer(idTimer);
+ }
+ 
+ #endif // wxUSE_TIMER
++
+diff -ru2 -xCVS -x.#* -x*.orig -x*.rej -x*~ wxWindows.orig/src/msw/utils.cpp wxWindows/src/msw/utils.cpp
+--- wxWindows.orig/src/msw/utils.cpp	Thu Jul 17 17:06:49 2003
++++ wxWindows/src/msw/utils.cpp	Wed Aug  6 14:44:30 2003
+@@ -1727,4 +1727,60 @@
+ #endif // !wxUSE_GUI || !wxUSE_FONTMAP
+ 
++// wxCreateHiddenWND ( Jaakko Salli, Aug-05-2003 )
++// Creates a hidden window with supplied window proc. Registers class if necesssary.
++// Caller is responsible for destroying the window and unregistering the class
++// (which is automatically done when program exits, btw). pclassname is a pointer
++// to a caller stored classname, which must initially be NULL. classname is
++// the desired wndclass classname. If function succesfully registers the class,
++// LPCTSTR pointed by pclassname will be set to classname.
++//
++// Both GSocket_Init and wxExecute use this. Only difference to their original
++// versions was that gsocket also gave window name, and wxExecute set window style
++// to OVERLAPPEDWINDOW (neither should make difference - gsocket did not use the
++// name and if window is hidden, visual/manipulative styles hardly do any difference).
++extern "C" HWND wxCreateHiddenWND ( LPCTSTR* pclassname, LPCTSTR classname, WNDPROC wndproc )
++{
++    wxASSERT ( classname );
++    wxASSERT ( pclassname );
++    
++    if ( *pclassname == NULL )
++    {
++        wxASSERT ( wndproc );
++        
++        WNDCLASS wndclass;
++  
++        wndclass.style         = 0;
++        wndclass.lpfnWndProc   = wndproc;
++        wndclass.cbClsExtra    = 0;
++        wndclass.cbWndExtra    = 0;
++        wndclass.hInstance     = wxGetInstance();
++        wndclass.hIcon         = (HICON) NULL;
++        wndclass.hCursor       = (HCURSOR) NULL;
++        wndclass.hbrBackground = (HBRUSH) NULL;
++        wndclass.lpszMenuName  = (LPCTSTR) NULL;
++        wndclass.lpszClassName = classname;
++    
++        if ( !::RegisterClass(&wndclass) )
++        {
++            wxLogLastError(wxT("RegisterClass(in wxCreateHiddenWND)"));
++            return NULL;
++        }
++        
++        *pclassname = classname;
++    }
++    
++    HWND hwnd = ::CreateWindow(*pclassname, NULL,
++                0, 0, 0, 0, 0, (HWND) NULL,
++                (HMENU)NULL, wxGetInstance(), (LPVOID) NULL );
++
++    if ( !hwnd )
++    {
++        wxLogLastError(wxT("CreateWindow(in wxCreateHiddenWND)"));
++        return NULL;
++    }
++    
++    return hwnd;
++}
++
+ #endif // Win32
+ 
+diff -ru2 -xCVS -x.#* -x*.orig -x*.rej -x*~ wxWindows.orig/src/msw/utilsexc.cpp wxWindows/src/msw/utilsexc.cpp
+--- wxWindows.orig/src/msw/utilsexc.cpp	Mon Nov  4 21:37:14 2002
++++ wxWindows/src/msw/utilsexc.cpp	Wed Aug  6 14:44:33 2003
+@@ -96,5 +96,5 @@
+ // notifications and for this we need a (Win) class name for it which we will
+ // register the first time it's needed
+-static const wxChar *gs_classForHiddenWindow = NULL;
++static LPCTSTR gs_classForHiddenWindow = NULL;
+ 
+ // ----------------------------------------------------------------------------
+@@ -488,4 +488,7 @@
+ #endif // wxUSE_IPC
+ 
++// implemented in utils.cpp
++extern "C" HWND wxCreateHiddenWND ( LPCTSTR* pclassname, LPCTSTR classname, WNDPROC wndproc );
++
+ long wxExecute(const wxString& cmd, int flags, wxProcess *handler)
+ {
+@@ -728,27 +731,7 @@
+ #endif // wxUSE_STREAMS
+ 
+-    // register the class for the hidden window used for the notifications
+-    if ( !gs_classForHiddenWindow )
+-    {
+-        gs_classForHiddenWindow = _T("wxHiddenWindow");
+-
+-        WNDCLASS wndclass;
+-        wxZeroMemory(wndclass);
+-        wndclass.lpfnWndProc   = (WNDPROC)wxExecuteWindowCbk;
+-        wndclass.hInstance     = wxGetInstance();
+-        wndclass.lpszClassName = gs_classForHiddenWindow;
+-
+-        if ( !::RegisterClass(&wndclass) )
+-        {
+-            wxLogLastError(wxT("RegisterClass(hidden window)"));
+-        }
+-    }
+-
+-    // create a hidden window to receive notification about process
+-    // termination
+-    HWND hwnd = ::CreateWindow(gs_classForHiddenWindow, NULL,
+-                               WS_OVERLAPPEDWINDOW,
+-                               0, 0, 0, 0, NULL,
+-                               (HMENU)NULL, wxGetInstance(), 0);
++    // use create hidden window utility
++    HWND hwnd = wxCreateHiddenWND ( &gs_classForHiddenWindow, wxT("wxHiddenWindow"), (WNDPROC)wxExecuteWindowCbk );
++                               
+     wxASSERT_MSG( hwnd, wxT("can't create a hidden window for wxExecute") );
+ 
+
+ 	  	 

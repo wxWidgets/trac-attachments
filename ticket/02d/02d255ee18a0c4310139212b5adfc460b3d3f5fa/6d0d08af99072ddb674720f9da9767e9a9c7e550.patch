@@ -1,0 +1,179 @@
+Index: include/wx/xrc/xmlres.h
+===================================================================
+--- include/wx/xrc/xmlres.h	(revision 74246)
++++ include/wx/xrc/xmlres.h	(working copy)
+@@ -27,6 +27,9 @@
+ #include "wx/artprov.h"
+ #include "wx/colour.h"
+ #include "wx/vector.h"
++#if wxUSE_DOC_VIEW_ARCHITECTURE
++#include "wx/docview.h"
++#endif
+ 
+ #include "wx/xrc/xmlreshandler.h"
+ 
+@@ -185,6 +188,31 @@
+     wxFrame *LoadFrame(wxWindow* parent, const wxString& name);
+     bool LoadFrame(wxFrame* frame, wxWindow *parent, const wxString& name);
+ 
++#if wxUSE_DOC_VIEW_ARCHITECTURE
++    // Loads a document-view child frame. parent points to parent window
++    template <class ChildFrame, class ParentFrame, class wxChildFrameXmlHandler>
++    wxDocChildFrameAny<ChildFrame, ParentFrame>* LoadDocChildFrameAny(const wxString& xrcType,
++                                                                      wxDocument *doc,
++                                                                      wxView *view,
++                                                                      ParentFrame *parent,
++                                                                      const wxString& name)
++    {
++        return DoLoadDocChildFrameAny<ChildFrame, ParentFrame, wxChildFrameXmlHandler>(xrcType, NULL, doc, view, parent, name);
++    }
++    // Loads a docChildFrame. parent points to parent window. This form
++    // is used to finish creation of already existing instance.
++    template <class ChildFrame, class ParentFrame, class wxChildFrameXmlHandler>
++    bool LoadDocChildFrameAny(const wxString& xrcType,
++                              wxDocChildFrameAny<ChildFrame, ParentFrame> *frame,
++                              wxDocument *doc,
++                              wxView *view,
++                              ParentFrame *parent,
++                              const wxString& name)
++    {
++        return DoLoadDocChildFrameAny<ChildFrame, ParentFrame, wxChildFrameXmlHandler>(xrcType, frame, doc, view, parent, name) != NULL;
++    }
++#endif
++
+     // Load an object from the resource specifying both the resource name and
+     // the classname.  This lets you load nonstandard container windows.
+     wxObject *LoadObject(wxWindow *parent, const wxString& name,
+@@ -346,6 +374,17 @@
+                     : NULL;
+     }
+ 
++#if wxUSE_DOC_VIEW_ARCHITECTURE
++    // Helper of LoadDocChildFrameAny
++    template <class ChildFrame, class ParentFrame, class wxChildFrameXmlHandler>
++    wxDocChildFrameAny<ChildFrame, ParentFrame>* DoLoadDocChildFrameAny(const wxString& xrcType,
++                                                                        wxDocChildFrameAny<ChildFrame, ParentFrame>* frame,
++                                                                        wxDocument *doc,
++                                                                        wxView *view,
++                                                                        ParentFrame *parent,
++                                                                        const wxString& name);
++#endif
++
+     // Helper of Load() and Unload(): returns the URL corresponding to the
+     // given file if it's indeed a file, otherwise returns the original string
+     // unmodified
+@@ -629,7 +668,65 @@
+     virtual ~wxXmlSubclassFactory() {}
+ };
+ 
++// needs to be after #define XRC_MAKE_INSTANCE
++#if wxUSE_DOC_VIEW_ARCHITECTURE
++// Helper of wxXmlResource::LoadDocChildFrameAny
++template <class ChildFrame, class ParentFrame, class wxChildFrameXmlHandler>
++inline wxDocChildFrameAny<ChildFrame, ParentFrame>* wxXmlResource::DoLoadDocChildFrameAny(const wxString& xrcType,
++                                                                    wxDocChildFrameAny<ChildFrame, ParentFrame>* frame,
++                                                                    wxDocument *doc,
++                                                                    wxView *view,
++                                                                    ParentFrame *parent,
++                                                                    const wxString& name)
++{
++    // tweak the ChildFrame handler to create wxDocChildFrameAny<ChildFrame, ParentFrame>
++    class wxDocChildFrameAnyXmlHandler : public wxChildFrameXmlHandler
++    {
++    public:
++        wxDocChildFrameAnyXmlHandler(wxDocument *doc, wxView *view, ParentFrame *parent) :
++            m_doc(doc), m_view(view), m_parent(parent)
++        {
++        }
++        /* WARNING:  I'm not sure if this will work with all ChildFrames,
++                     but if it doesn't, I think we will need to create
++                     something like a trait template class to pass in the
++                     correct code for creating and setting up the frame
++        */
++        virtual wxObject *DoCreateResource()
++        {
++            typedef wxDocChildFrameAny<ChildFrame, ParentFrame> Frame;
++            XRC_MAKE_INSTANCE(frame, Frame)
+ 
++            frame->Show(false);
++            frame->Create(m_doc,
++                          m_view,
++                          m_parent,
++                          GetID(),
++                          GetText(wxT("title")),
++                          GetPosition(), GetSize(),
++                          GetStyle(wxT("style"), wxDEFAULT_FRAME_STYLE),
++                          GetName());
++
++            SetupWindow(frame);
++            CreateChildren(frame);
++            frame->Layout();
++
++            return frame;
++        }
++
++    protected:
++        wxDocument *m_doc;
++        wxView *m_view;
++        ParentFrame *m_parent;
++    };
++    wxDocChildFrameAnyXmlHandler handler(doc, view, parent);
++    wxXmlResourceHandlerImpl *impl = new wxXmlResourceHandlerImpl(&handler);
++    handler.SetImpl(impl);
++    handler.SetParentResource(this);
++    return (wxDocChildFrameAny<ChildFrame, ParentFrame>*)CreateResFromNode(FindResource(name, xrcType), parent, frame, &handler);
++}
++#endif
++
+ /* -------------------------------------------------------------------------
+    Backward compatibility macros. Do *NOT* use, they may disappear in future
+    versions of the XRC library!
+Index: interface/wx/xrc/xmlres.h
+===================================================================
+--- interface/wx/xrc/xmlres.h	(revision 74246)
++++ interface/wx/xrc/xmlres.h	(working copy)
+@@ -274,6 +274,44 @@
+     bool LoadDialog(wxDialog* dlg, wxWindow* parent, const wxString& name);
+ 
+     /**
++        Loads a document-view child frame. @a ChildFrame is the type of wxWindow-
++        derived class that is associated with the view. @a ParentFrame is the
++        type of window that contains ChildFrame windows. @a wxChildFrameXmlHandler
++        is the handler that knows how to create ChildFrame windows from .xrc files. 
++        @xrcType is the class name of the window to be loaded (typically, this is
++        one of wxPanel, wxFrame, or wxDialog, not the class name of ChildFrame). 
++        @a parent points to parent window. @a frame is an existing instance of
++        wxDocChildFrameAny<ChildFrame, ParentFrame> to be finished. 
++        This can be NULL, in which case the object will be created by this
++        function. @a doc and @a view are the Doc-View objects associated with the
++        frame being created. @a parent points to parent window. @a name is the
++        specific resource to be loaded.
++
++        Example:
++        @code
++          // assume a project using AUI and Doc/View classes
++          class MyView : public wxView
++          {
++          public:
++              virtual bool OnCreate(wxDocument *doc, long WXUNUSED(flags))
++              {
++                  m_frame = wxXmlResource::Get()->LoadDocChildFrameAny<wxAuiMDIChildFrame, wxAuiMDIParentFrame, wxPanelXmlHandler>(wxT("wxPanel"), NULL, doc, this, wxStaticCast(wxGetApp().GetTopWindow(), wxAuiMDIParentFrame), "my_frame");
++                  return true;
++              }
++          protected:
++              wxDocChildFrameAny<wxAuiMDIChildFrame, wxAuiMDIParentFrame>* m_frame;
++          };
++        @endcode
++    */
++    template <class ChildFrame, class ParentFrame, class wxChildFrameXmlHandler>
++    bool LoadDocChildFrameAny(const wxString& xrcType,
++                              wxDocChildFrameAny<ChildFrame, ParentFrame> *frame,
++                              wxDocument *doc,
++                              wxView *view,
++                              ParentFrame *parent,
++                              const wxString& name);
++
++    /**
+        Loads a frame from the resource. @a parent points to parent window (if any).
+     */
+     wxFrame *LoadFrame(wxWindow* parent, const wxString& name);

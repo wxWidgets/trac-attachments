@@ -1,0 +1,170 @@
+--- d:\wxWindows.orig\src\msw\treectrl.cpp	Sat Dec  1 12:26:28 2001
++++ d:\wxWindows\src\msw\treectrl.cpp	Wed Mar 13 14:53:44 2002
+@@ -113,4 +113,5 @@
+ static bool IsItemSelected(HWND hwndTV, HTREEITEM hItem)
+ {
++
+     TV_ITEM tvi;
+     tvi.mask = TVIF_STATE | TVIF_HANDLE;
+@@ -295,4 +296,15 @@
+ };
+ 
++// wxVirutalNode is used in place of a single root when 'hidden' root is specified.
++struct wxVirtualNode
++{
++    TCHAR* m_text;
++    int m_image;
++    int m_selectedImage;    
++    wxTreeItemData *m_data;
++    wxTreeViewItem *m_tvItem;
++    bool m_isVisible;
++};
++
+ #ifdef __VISUALC__
+ #pragma warning( default : 4097 )
+@@ -342,4 +354,10 @@
+     virtual bool OnVisit(const wxTreeItemId& item)
+     {
++        // can't visit a virtual node.
++        if ( (GetTree()->GetRootItem() == item) && (GetTree()->GetWindowStyle() & wxTR_HIDE_ROOT))
++        {
++            return TRUE;
++        }
++
+ #if wxUSE_CHECKBOXES_IN_MULTI_SEL_TREE
+         if ( GetTree()->IsItemChecked(item) )
+@@ -508,4 +526,5 @@
+     m_dragImage = NULL;
+     m_htSelStart = 0;
++    m_pVirtualRoot = 0;
+ 
+     // Initialize static array of events, because with the new event system,
+@@ -657,4 +676,5 @@
+ 
+     // delete user data to prevent memory leaks
++    // also deletes hidden root node storage.
+     DeleteAllItems();
+ 
+@@ -671,5 +691,10 @@
+ bool wxTreeCtrl::DoGetItem(wxTreeViewItem* tvItem) const
+ {
+-    if ( !TreeView_GetItem(GetHwnd(), tvItem) )
++    if ( (tvItem->hItem == TVI_ROOT) && (m_windowStyle & wxTR_HIDE_ROOT) )
++    {
++        // Hidden root node requested.
++        *tvItem = *((wxVirtualNode*)m_pVirtualRoot)->m_tvItem;
++    }
++    else if ( !TreeView_GetItem(GetHwnd(), tvItem) )
+     {
+         wxLogLastError(wxT("TreeView_GetItem"));
+@@ -864,4 +889,10 @@
+                              wxTreeItemIcon which) const
+ {
++    if ( (HITEM(item) == TVI_ROOT) && (m_windowStyle & wxTR_HIDE_ROOT) )
++    {
++        // TODO: Maybe a hidden root can still provide images?
++        return -1;
++    }
++
+     if ( HasIndirectData(item) )
+     {
+@@ -897,4 +928,10 @@
+                               wxTreeItemIcon which)
+ {
++    if ( (HITEM(item) == TVI_ROOT) && (m_windowStyle & wxTR_HIDE_ROOT) )
++    {
++        // TODO: Maybe a hidden root can still store images?
++        return;
++    }
++
+     int imageNormal, imageSel;
+     switch ( which )
+@@ -950,4 +987,10 @@
+ {
+     wxTreeViewItem tvItem(item, TVIF_PARAM);
++
++    // Hidden root may have data.
++    if (m_pVirtualRoot && ((wxVirtualNode*)m_pVirtualRoot)->m_tvItem->hItem == tvItem.hItem)
++        return ((wxVirtualNode*)m_pVirtualRoot)->m_data;
++
++    // Visible node.
+     if ( !DoGetItem(&tvItem) )
+     {
+@@ -1142,4 +1185,9 @@
+ wxTreeItemId wxTreeCtrl::GetRootItem() const
+ {
++    // Root may be real (visible) or virtual (hidden).
++    wxVirtualNode* pRoot = (wxVirtualNode*)m_pVirtualRoot;
++    if (pRoot)
++        return pRoot->m_tvItem->hItem;
++    else
+     return wxTreeItemId((WXHTREEITEM) TreeView_GetRoot(GetHwnd()));
+ }
+@@ -1241,4 +1289,6 @@
+     wxTreeViewItem tvItem(item, TVIF_STATE, TVIS_STATEIMAGEMASK);
+ 
++    DoGetItem(&tvItem); //gep
++
+     // state images are one-based
+     tvItem.state = (check ? 2 : 1) << 12;
+@@ -1346,6 +1396,29 @@
+                                  wxTreeItemData *data)
+ {
+-    return DoInsertItem(wxTreeItemId((long) (WXHTREEITEM) 0), (long)(WXHTREEITEM) 0,
++
++    if (m_windowStyle & wxTR_HIDE_ROOT)
++    {
++        // wxTR_HIDE_ROOT is non-toggleable.  If it is set when we add the 
++        // root, then we are in charge of it and its data item.  
++        wxVirtualNode* pItem = new wxVirtualNode;
++        pItem->m_text = new TCHAR[text.size()+1];
++        _tcscpy(pItem->m_text, text.c_str());
++        pItem->m_image = image;
++        pItem->m_selectedImage = selectedImage;
++        pItem->m_data = data;
++        m_pVirtualRoot = pItem;
++
++        pItem->m_tvItem = new wxTreeViewItem(TVI_ROOT, 0);
++        memset(pItem->m_tvItem, 0, sizeof(wxTreeViewItem));
++        pItem->m_isVisible = false;
++        pItem->m_tvItem->hItem = TVI_ROOT;
++        pItem->m_tvItem->pszText = pItem->m_text;
++        return pItem->m_tvItem->hItem;
++    }
++    else
++    {
++        return DoInsertItem(wxTreeItemId((WXHTREEITEM) 0), (WXHTREEITEM) 0,
+                         text, image, selectedImage, data);
++    }
+ }
+ 
+@@ -1435,4 +1508,15 @@
+ void wxTreeCtrl::DeleteAllItems()
+ {
++    // delete stored root item.
++    if (m_pVirtualRoot)
++    {
++        wxVirtualNode* pTVRI = (wxVirtualNode*)m_pVirtualRoot;
++        delete pTVRI->m_data;
++        delete pTVRI->m_tvItem;
++        delete[] pTVRI->m_text;
++        delete pTVRI;
++        m_pVirtualRoot = 0;
++    }
++
+     if ( !TreeView_DeleteAllItems(GetHwnd()) )
+     {
+@@ -1449,4 +1533,11 @@
+                   wxT("Unknown flag in wxTreeCtrl::DoExpand") );
+ 
++    // A hidden root can be neither expanded nor collapsed.
++    if ( (HITEM(item) == TVI_ROOT) && (m_windowStyle & wxTR_HIDE_ROOT) )
++    {
++        // No action will be taken.
++        return;
++    }
++
+     // TreeView_Expand doesn't send TVN_ITEMEXPAND(ING) messages, so we must
+     // emulate them. This behaviour has changed slightly with comctl32.dll
+
+ 	  	 

@@ -1,0 +1,167 @@
+diff --git a/include/wx/private/fswatcher.h b/include/wx/private/fswatcher.h
+index 91f7bcd..c684fdb 100644
+--- a/include/wx/private/fswatcher.h
++++ b/include/wx/private/fswatcher.h
+@@ -89,6 +89,12 @@ public:
+         return true;
+     }
+ 
++    // Check whether any filespec matches the file's ext (if present)
++    bool FilterByFilespec(const wxFileName& fn, const wxString& filespec) const
++    {
++        return filespec.empty() || wxMatchWild(filespec, "*." + fn.GetExt());
++    }
++
+ protected:
+     virtual bool DoAdd(wxSharedPtr<wxFSWatchEntry> watch) = 0;
+ 
+diff --git a/src/common/fswatchercmn.cpp b/src/common/fswatchercmn.cpp
+index 04b6353..29019f6 100644
+--- a/src/common/fswatchercmn.cpp
++++ b/src/common/fswatchercmn.cpp
+@@ -186,19 +186,11 @@ bool wxFileSystemWatcherBase::AddTree(const wxFileName& path, int events,
+         virtual wxDirTraverseResult OnDir(const wxString& dirname)
+         {
+             // we add as much as possible and ignore errors
+-            // However if there's a filespec, only pass the dir if it matches
+-            // otherwise all its files will be watched, whatever their ext
+-            // The easiest way to get any ext is to pretend it's a file :)
+-            wxFileName fn(wxFileName::FileName(dirname));
+-            if (m_filespec.empty() ||
+-                wxMatchWild(m_filespec, "*." + fn.GetExt()))
++            if (m_watcher->AddAny(wxFileName::DirName(dirname),
++                                  m_events, wxFSWPath_Tree, m_filespec))
+             {
+-                if (m_watcher->AddAny(wxFileName::DirName(dirname),
+-                                      m_events, wxFSWPath_Dir))
+-                {
+-                    wxLogTrace(wxTRACE_FSWATCHER,
+-                       "--- AddTree adding directory '%s' ---", dirname);
+-                }
++                wxLogTrace(wxTRACE_FSWATCHER,
++                   "--- AddTree adding directory '%s' ---", dirname);
+             }
+             return wxDIR_CONTINUE;
+         }
+@@ -214,7 +206,7 @@ bool wxFileSystemWatcherBase::AddTree(const wxFileName& path, int events,
+     dir.Traverse(traverser, filespec);
+ 
+     // Add the path itself explicitly as Traverse() doesn't return it.
+-    AddAny(path.GetPathWithSep(), events, wxFSWPath_Dir, filespec);
++    AddAny(path.GetPathWithSep(), events, wxFSWPath_Tree, filespec);
+ 
+     return true;
+ }
+@@ -243,13 +235,7 @@ bool wxFileSystemWatcherBase::RemoveTree(const wxFileName& path)
+ 
+         virtual wxDirTraverseResult OnDir(const wxString& dirname)
+         {
+-            // If there's a filespec, only matching dirs will have been watched
+-            wxFileName fn(wxFileName::FileName(dirname));
+-            if (m_filespec.empty() ||
+-                wxMatchWild(m_filespec, "*." + fn.GetExt()))
+-            {
+-                m_watcher->Remove(wxFileName::DirName(dirname));
+-            }
++            m_watcher->Remove(wxFileName::DirName(dirname));
+             return wxDIR_CONTINUE;
+         }
+ 
+diff --git a/src/msw/fswatcher.cpp b/src/msw/fswatcher.cpp
+index 69c19e1..2c25838 100644
+--- a/src/msw/fswatcher.cpp
++++ b/src/msw/fswatcher.cpp
+@@ -316,8 +316,12 @@ void wxIOCPThread::ProcessNativeEvents(wxVector<wxEventProcessingData>& events)
+             // CHECK I heard that returned path can be either in short on long
+             // form...need to account for that!
+             wxFileName path = GetEventPath(*watch, e);
+-            wxFileSystemWatcherEvent event(flags, path, path);
+-            SendEvent(event);
++            // For files, check that it matches any filespec
++			if (m_service->FilterByFilespec(path, watch->GetFilespec()))
++			{
++				wxFileSystemWatcherEvent event(flags, path, path);
++				SendEvent(event);
++			}
+         }
+     }
+ }
+diff --git a/src/unix/fswatcher_inotify.cpp b/src/unix/fswatcher_inotify.cpp
+index 2590b4e..024ae12 100644
+--- a/src/unix/fswatcher_inotify.cpp
++++ b/src/unix/fswatcher_inotify.cpp
+@@ -282,29 +287,39 @@ protected:
+             {
+                 inotify_event& oldinevt = *(it->second);
+ 
+-                wxFileSystemWatcherEvent event(flags);
+-                if ( inevt.mask & IN_MOVED_FROM )
++                // Tell the owner, in case it's interested
++                // If there's a filespec, assume he's not
++                if (watch.GetFilespec().empty())
+                 {
+-                    event.SetPath(GetEventPath(watch, inevt));
+-                    event.SetNewPath(GetEventPath(watch, oldinevt));
++                    wxFileSystemWatcherEvent event(flags);
++                    if ( inevt.mask & IN_MOVED_FROM )
++                    {
++                        event.SetPath(GetEventPath(watch, inevt));
++                        event.SetNewPath(GetEventPath(watch, oldinevt));
++                    }
++                    else
++                    {
++                        event.SetPath(GetEventPath(watch, oldinevt));
++                        event.SetNewPath(GetEventPath(watch, inevt));
++                    }
++                    SendEvent(event);
+                 }
+-                else
+-                {
+-                    event.SetPath(GetEventPath(watch, oldinevt));
+-                    event.SetNewPath(GetEventPath(watch, inevt));
+-                }
+-                SendEvent(event);
+ 
+                 m_cookies.erase(it);
+                 delete &oldinevt;
+             }
+         }
++
+         // every other kind of event
+         else
+         {
+             wxFileName path = GetEventPath(watch, inevt);
+-            wxFileSystemWatcherEvent event(flags, path, path);
+-            SendEvent(event);
++            // For files, check that it matches any filespec
++            if (FilterByFilespec(path, watch.GetFilespec()))
++            {
++                wxFileSystemWatcherEvent event(flags, path, path);
++                SendEvent(event);
++            }
+         }
+     }
+ 
+@@ -323,11 +338,18 @@ protected:
+             wxCHECK_RET(wit != m_watchMap.end(),
+                              "Watch descriptor not present in the watch map!");
+ 
++            // Tell the owner, in case it's interested
++            // If there's a filespec, assume he's not
+             wxFSWatchEntry& watch = *(wit->second);
+-            int flags = Native2WatcherFlags(inevt.mask);
+-            wxFileName path = GetEventPath(watch, inevt);
+-            wxFileSystemWatcherEvent event(flags, path, path);
+-            SendEvent(event);
++            if (watch.GetFilespec().empty())
++            {
++                int flags = Native2WatcherFlags(inevt.mask);
++                wxFileName path = GetEventPath(watch, inevt);
++                {
++                    wxFileSystemWatcherEvent event(flags, path, path);
++                    SendEvent(event);
++                }
++            }
+ 
+             m_cookies.erase(it);
+             delete &inevt;

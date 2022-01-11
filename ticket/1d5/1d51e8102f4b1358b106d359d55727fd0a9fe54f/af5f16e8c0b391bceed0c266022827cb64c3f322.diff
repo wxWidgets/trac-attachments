@@ -1,0 +1,142 @@
+--- include/wx/mstream.h.old	2007-02-02 21:56:44.000000000 +0300
++++ include/wx/mstream.h	2007-03-12 18:53:55.000000000 +0300
+@@ -25,6 +25,8 @@
+ public:
+     wxMemoryInputStream(const void *data, size_t length);
+     wxMemoryInputStream(const wxMemoryOutputStream& stream);
++    wxMemoryInputStream(wxInputStream& stream,
++        wxFileOffset lenFile = wxInvalidOffset);
+     virtual ~wxMemoryInputStream();
+     virtual wxFileOffset GetLength() const { return m_length; }
+     virtual bool IsSeekable() const { return true; }
+--- src/common/mstream.cpp.old	2007-02-02 21:58:15.000000000 +0300
++++ src/common/mstream.cpp	2007-03-12 18:54:05.000000000 +0300
+@@ -73,6 +73,30 @@
+     m_length = len;
+ }
+ 
++wxMemoryInputStream::wxMemoryInputStream(wxInputStream& stream,
++        wxFileOffset lenFile)
++{
++    if ( lenFile == wxInvalidOffset )
++        lenFile = stream.GetLength();
++
++    if ( lenFile == wxInvalidOffset )
++    {
++        m_i_streambuf = NULL;
++        m_lasterror = wxSTREAM_EOF;
++        return;
++    }
++
++    const size_t len = wx_truncate_cast(size_t, lenFile);
++    wxASSERT_MSG( len == lenFile + size_t(0), _T("huge files not supported") );
++
++    m_i_streambuf = new wxStreamBuffer(wxStreamBuffer::read);
++    m_i_streambuf->SetBufferIO(len); // create buffer
++    stream.Read(m_i_streambuf->GetBufferStart(), len);
++    m_i_streambuf->SetIntPosition(0); // seek to start pos
++    m_i_streambuf->Fixed(true);
++    m_length = stream.LastRead();
++}
++
+ wxMemoryInputStream::~wxMemoryInputStream()
+ {
+     delete m_i_streambuf;
+--- docs/latex/wx/strmmem.tex.old	2007-02-02 21:56:35.000000000 +0300
++++ docs/latex/wx/strmmem.tex	2007-03-15 18:32:21.000000000 +0300
+@@ -33,6 +33,16 @@
+ Creates a new read-only memory stream, initializing it with the
+ data from the given output stream \arg{stream}.
+ 
++\func{}{wxMemoryInputStream}{\param{wxInputStream\&}{ stream},
++        \param{wxFileOffset}{ len = wxInvalidOffset}}
++
++Creates a new read-only memory stream, initializing it with the
++data from the given input stream \arg{stream}.
++
++The \arg{len} argument specifies the amount of data to read from
++the \arg{stream}. Setting it to {\it wxInvalidOffset} means that
++the \arg{stream} is to be read entirely (i.e. till the EOF is reached).
++
+ \membersection{wxMemoryInputStream::\destruct{wxMemoryInputStream}}\label{wxmemoryinputstreamdtor}
+ 
+ \func{}{\destruct{wxMemoryInputStream}}{\void}
+--- tests/streams/memstream.cpp.old	2005-04-03 23:12:58.000000000 +0400
++++ tests/streams/memstream.cpp	2007-03-16 15:28:27.000000000 +0300
+@@ -56,11 +56,13 @@
+         CPPUNIT_TEST(Output_TellO);
+ 
+         // Other test specific for Memory stream test case.
++        CPPUNIT_TEST(Ctor_InFromIn);
+         CPPUNIT_TEST(Ctor_InFromOut);
+     CPPUNIT_TEST_SUITE_END();
+ 
+ protected:
+     // Add own test here.
++    void Ctor_InFromIn();
+     void Ctor_InFromOut();
+ 
+ private:
+@@ -105,20 +107,58 @@
+     return pMemOutStream;
+ }
+ 
++void memStream::Ctor_InFromIn()
++{
++    wxMemoryInputStream *pMemInStream1 = DoCreateInStream();
++    wxMemoryInputStream *pMemInStream2 =
++            new wxMemoryInputStream(* (wxInputStream *)pMemInStream1);
++    /* Unfortunately the CanRead() is completely broken, so the
++     * below test is commented out. :( */
++    /*CPPUNIT_ASSERT(!pMemInStream1->CanRead());*/
++    CPPUNIT_ASSERT(pMemInStream2->IsOk());
++    CPPUNIT_ASSERT_EQUAL(pMemInStream1->GetLength(), pMemInStream2->GetLength());
++    size_t len = pMemInStream2->GetLength();
++    char *dat = new char[len];
++    pMemInStream2->Read(dat, len);
++    CPPUNIT_ASSERT_EQUAL(len, pMemInStream2->LastRead());
++    /*CPPUNIT_ASSERT(!pMemInStream2->CanRead());*/
++    wxStreamBuffer *buf = pMemInStream1->GetInputStreamBuffer();
++    void *pIn = buf->GetBufferStart();
++    CPPUNIT_ASSERT(memcmp(pIn, dat, len) == 0);
++    delete pMemInStream2;
++    size_t len2 = len / 2;
++    CPPUNIT_ASSERT(len2);
++    CPPUNIT_ASSERT(pMemInStream1->SeekI(-len2, wxFromCurrent) != wxInvalidOffset);
++    pIn = buf->GetBufferPos();
++    pMemInStream2 = new wxMemoryInputStream(*pMemInStream1, len2);
++    /*CPPUNIT_ASSERT(!pMemInStream1->CanRead());*/
++    CPPUNIT_ASSERT(pMemInStream2->IsOk());
++    CPPUNIT_ASSERT_EQUAL((wxFileOffset)len2, pMemInStream2->GetLength());
++    pMemInStream2->Read(dat, len2);
++    CPPUNIT_ASSERT_EQUAL(len2, pMemInStream2->LastRead());
++    /*CPPUNIT_ASSERT(!pMemInStream2->CanRead());*/
++    CPPUNIT_ASSERT(memcmp(pIn, dat, len2) == 0);
++    delete[] dat;
++    delete pMemInStream2;
++    delete pMemInStream1;
++}
++
+ void memStream::Ctor_InFromOut()
+ {
+     wxMemoryOutputStream *pMemOutStream = DoCreateOutStream();
+     pMemOutStream->Write(GetDataBuffer(), DATABUFFER_SIZE);
+     wxMemoryInputStream *pMemInStream = new wxMemoryInputStream(*pMemOutStream);
+     CPPUNIT_ASSERT(pMemInStream->IsOk());
+-    CPPUNIT_ASSERT(pMemInStream->GetLength() == pMemOutStream->GetLength());
+-    int len = pMemInStream->GetLength();
++    CPPUNIT_ASSERT_EQUAL(pMemInStream->GetLength(), pMemOutStream->GetLength());
++    size_t len = pMemInStream->GetLength();
+     wxStreamBuffer *in = pMemInStream->GetInputStreamBuffer();
+     wxStreamBuffer *out = pMemOutStream->GetOutputStreamBuffer();
+     void *pIn = in->GetBufferStart();
+     void *pOut = out->GetBufferStart();
+     CPPUNIT_ASSERT(pIn != pOut);
+     CPPUNIT_ASSERT(memcmp(pIn, pOut, len) == 0);
++    delete pMemInStream;
++    delete pMemOutStream;
+ }
+ 
+ // Register the stream sub suite, by using some stream helper macro.
+
+ 	  	 

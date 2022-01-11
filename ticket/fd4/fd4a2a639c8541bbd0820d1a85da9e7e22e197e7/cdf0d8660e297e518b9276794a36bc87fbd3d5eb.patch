@@ -1,0 +1,254 @@
+Index: include/wx/wxchar.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/wxchar.h,v
+retrieving revision 1.206
+diff -u -r1.206 wxchar.h
+--- include/wx/wxchar.h	2006/11/27 21:30:45	1.206
++++ include/wx/wxchar.h	2006/12/27 17:21:42
+@@ -982,13 +982,18 @@
+ #endif /* wxUSE_PRINTF_POS_PARAMS/!wxUSE_PRINTF_POS_PARAMS */
+ 
+ #ifndef wxSnprintf_
+-    /* no [v]snprintf(), cook our own */
++    /* no snprintf(), cook our own */
+     WXDLLIMPEXP_BASE int
+     wxSnprintf_(wxChar *buf, size_t len, const wxChar *format, ...) ATTRIBUTE_PRINTF_3;
+ #endif
+ #ifndef wxVsnprintf_
++    /* no vsnprintf(), cook our own */
+     WXDLLIMPEXP_BASE int
+     wxVsnprintf_(wxChar *buf, size_t len, const wxChar *format, va_list argptr);
++
++    #define wxUSE_WXIMPLEMENTATION_VSNPRINTF 1
++#else
++    #define wxUSE_WXIMPLEMENTATION_VSNPRINTF 0
+ #endif
+ 
+ /*
+Index: src/common/wxchar.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/wxchar.cpp,v
+retrieving revision 1.134
+diff -u -r1.134 wxchar.cpp
+--- src/common/wxchar.cpp	2006/12/03 18:54:48	1.134
++++ src/common/wxchar.cpp	2006/12/27 17:47:49
+@@ -167,6 +167,11 @@
+ 
+ #if !defined(wxVsnprintf_)
+ 
++#if !wxUSE_WXIMPLEMENTATION_VSNPRINTF
++    // wxUSE_WXIMPLEMENTATION_VSNPRINTF should be set to 1
++    #error Some error occurred with wxVsnprintf_ definition!
++#endif
++
+ // wxUSE_STRUTILS says our wxVsnprintf_ implementation to use or not to
+ // use wxStrlen and wxStrncpy functions over one-char processing loops.
+ //
+@@ -1124,6 +1129,7 @@
+     va_end(ap);
+ 
+     // something failed while loading arguments from the variable list...
++    // (e.g. the user repeated twice the same positional argument)
+     if (!ok)
+     {
+         buf[0] = 0;
+@@ -1143,7 +1149,7 @@
+         if (lenCur == lenMax)
+         {
+             buf[lenMax - 1] = 0;
+-            return -1;
++            return lenMax+1;      // not enough space in the output buffer !
+         }
+ 
+         // process this specifier directly in the output buffer
+@@ -1151,7 +1157,7 @@
+         if (n == -1)
+         {
+             buf[lenMax-1] = wxT('\0');  // be sure to always NUL-terminate the string
+-            return -1;      // not enough space in the output buffer !
++            return lenMax+1;      // not enough space in the output buffer !
+         }
+         lenCur += n;
+ 
+@@ -1171,7 +1177,7 @@
+     if (buf[lenCur])
+     {
+         buf[lenCur] = 0;
+-        return -1;
++        return lenMax+1;     // not enough space in the output buffer !
+     }
+ 
+     wxASSERT(lenCur == wxStrlen(buf));
+@@ -1181,8 +1187,15 @@
+ #undef APPEND_CH
+ #undef APPEND_STR
+ #undef CHECK_PREC
++
++#else    // wxVsnprintf_ is defined
++
++#if wxUSE_WXIMPLEMENTATION_VSNPRINTF
++    // wxUSE_WXIMPLEMENTATION_VSNPRINTF should be set to zero
++    #error Some error occurred with wxVsnprintf_ definition!
++#endif
+ 
+-#endif // !wxVsnprintfA
++#endif // !wxVsnprintf_
+ 
+ #if !defined(wxSnprintf_)
+ int WXDLLEXPORT wxSnprintf_(wxChar *buf, size_t len, const wxChar *format, ...)
+Index: src/common/string.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/string.cpp,v
+retrieving revision 1.288
+diff -u -r1.288 string.cpp
+--- src/common/string.cpp	2006/11/27 15:03:06	1.288
++++ src/common/string.cpp	2006/12/27 19:13:30
+@@ -1837,15 +1837,29 @@
+         // buffer were large enough (newer standards such as Unix98)
+         if ( len < 0 )
+         {
++#if wxUSE_WXIMPLEMENTATION_VSNPRINTF
++            // we know that our own implementation of wxVsnprintf() returns -1
++            // only for a format error - thus there's something wrong with
++            // the user's format string
++            return -1;
++#else
+             // still not enough, as we don't know how much we need, double the
+             // current size of the buffer
+             size *= 2;
++#endif
+         }
+         else if ( len >= size )
+         {
++#if wxUSE_WXIMPLEMENTATION_VSNPRINTF
++            // we know that our own implementation of wxVsnprintf() returns 
++            // size+1 when there's not enough space but that's not the size
++            // of the required buffer!
++            size *= 2;      // so we just double the current size of the buffer
++#else
+             // some vsnprintf() implementations NUL-terminate the buffer and
+             // some don't in len == size case, to be safe always add 1
+             size = len + 1;
++#endif
+         }
+         else // ok, there was enough space
+         {
+Index: tests/strings/vsnprintf.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/tests/strings/vsnprintf.cpp,v
+retrieving revision 1.12
+diff -u -r1.12 vsnprintf.cpp
+--- tests/strings/vsnprintf.cpp	2006/12/09 15:58:19	1.12
++++ tests/strings/vsnprintf.cpp	2006/12/27 17:53:18
+@@ -31,35 +31,36 @@
+ 
+ // temporary buffers
+ static wxChar buf[MAX_TEST_LEN];
++int r;
+ 
+ // these macros makes it possible to write all tests without repeating a lot of times wxT() macro
+ 
+ #define ASSERT_STR_EQUAL( a, b ) \
+     CPPUNIT_ASSERT_EQUAL( wxString(a), wxString(b) );
+ 
+-#define CMP5(expected, x, y, z, w)                  \
+-    wxSnprintf(buf, MAX_TEST_LEN, wxT(x), y, z, w); \
+-                                                    \
++#define CMP5(expected, x, y, z, w)                    \
++    r=wxSnprintf(buf, MAX_TEST_LEN, wxT(x), y, z, w); \
++    CPPUNIT_ASSERT( r > 0 );                          \
+     ASSERT_STR_EQUAL( wxT(expected), buf );
+ 
+ #define CMP4(expected, x, y, z)                     \
+-    wxSnprintf(buf, MAX_TEST_LEN, wxT(x), y, z);    \
+-                                                    \
++    r=wxSnprintf(buf, MAX_TEST_LEN, wxT(x), y, z);  \
++    CPPUNIT_ASSERT( r > 0 );                        \
+     ASSERT_STR_EQUAL( wxT(expected), buf );
+ 
+ #define CMP3(expected, x, y)                        \
+-    wxSnprintf(buf, MAX_TEST_LEN, wxT(x), y);       \
+-                                                    \
++    r=wxSnprintf(buf, MAX_TEST_LEN, wxT(x), y);     \
++    CPPUNIT_ASSERT( r > 0 );                        \
+     ASSERT_STR_EQUAL( wxT(expected), buf );
+ 
+ #define CMP2(expected, x)                           \
+-    wxSnprintf(buf, MAX_TEST_LEN, wxT(x));          \
+-                                                    \
++    r=wxSnprintf(buf, MAX_TEST_LEN, wxT(x));        \
++    CPPUNIT_ASSERT( r > 0 );                        \
+     ASSERT_STR_EQUAL( wxT(expected), buf );
+ 
+ #define CMPTOSIZE(buffer, size, expected, fmt, x, y, z, w)          \
+-    wxSnprintf(buffer, size, wxT(fmt), x, y, z, w);                 \
+-                                                                    \
++    r=wxSnprintf(buffer, size, wxT(fmt), x, y, z, w);               \
++    CPPUNIT_ASSERT( r > 0 );                                        \
+     CPPUNIT_ASSERT_EQUAL( wxString(wxT(expected)).Left(size - 1),   \
+                           wxString(buffer) )
+ 
+@@ -92,6 +93,7 @@
+ #endif
+ 
+         CPPUNIT_TEST( BigToSmallBuffer );
++        CPPUNIT_TEST( WrongFormatStrings );
+         CPPUNIT_TEST( Miscellaneous );
+     CPPUNIT_TEST_SUITE_END();
+ 
+@@ -112,6 +114,7 @@
+     void Unicode();
+ 
+     void BigToSmallBuffer();
++    void WrongFormatStrings();
+     void Miscellaneous();
+     void Misc(wxChar *buffer, int size);
+ 
+@@ -321,9 +324,12 @@
+     //     value can be the number of characters required for the output buffer
+     //     (conforming to ISO C99; implemented in e.g. GNU libc >= 2.1), or
+     //     just a negative number, usually -1; (this is how e.g. MSVC's
+-    //     *printf() behaves).  Fortunately, in all implementations, when the
++    //     *printf() behaves). Luckily, in all implementations, when the
+     //     output buffer is too small, it's nonetheless filled up to its max
+     //     size.
++    //
++    //     Note that in the second case (i.e. when we're using our own implementation),
++    //     wxVsnprintf() will always return the number of characters which 
+ 
+     // test without positionals
+     CMPTOSIZE(buffer, size, "123 444444444 - test - 555 -0.666",
+@@ -348,6 +354,31 @@
+               "unicode string: unicode!! W - ansi string: ansi!! w\n\n",
+               "unicode string: %ls %lc - ansi string: %hs %hc\n\n",
+               L"unicode!!", L'W', "ansi!!", 'w');
++}
++
++void VsnprintfTestCase::WrongFormatStrings()
++{
++    // test how wxVsnprintf() behaves with wrong format string:
++
++#if wxUSE_PRINTF_POS_PARAMS
++
++    // two positionals with the same index:
++    r = wxSnprintf(buf, MAX_TEST_LEN, wxT("%1$s %1$s"), "hello");
++    CPPUNIT_ASSERT(r == -1);
++
++    // three positionals with the same index mixed with other pos args:
++    r = wxSnprintf(buf, MAX_TEST_LEN, wxT("%4$d %2$f %1$s %2$s %3$d"), "hello", "world", 3, 4);
++    CPPUNIT_ASSERT(r == -1);
++
++    // a missing positional arg:
++    r = wxSnprintf(buf, MAX_TEST_LEN, wxT("%1$d %3$d"), 1, 2, 3);
++    CPPUNIT_ASSERT(r == -1);
++
++    // positional and non-positionals in the same format string:
++    r = wxSnprintf(buf, MAX_TEST_LEN, wxT("%1$d %d %3$d"), 1, 2, 3);
++    CPPUNIT_ASSERT(r == -1);
++
++#endif      // wxUSE_PRINTF_POS_PARAMS
+ }
+ 
+ void VsnprintfTestCase::BigToSmallBuffer()
+
+ 	  	 

@@ -1,0 +1,438 @@
+Index: src/osx/cocoa/filedlg.mm
+===================================================================
+--- src/osx/cocoa/filedlg.mm	(revision 65218)
++++ src/osx/cocoa/filedlg.mm	(working copy)
+@@ -31,7 +31,12 @@
+ 
+ #include "wx/filename.h"
+ #include "wx/tokenzr.h"
++#include "wx/sizer.h"
++#include "wx/panel.h"
++#include "wx/choice.h"
++#include "wx/stattext.h"
+ 
++
+ #include "wx/osx/private.h"
+ 
+ // ============================================================================
+@@ -50,6 +55,8 @@
+     long style, const wxPoint& pos, const wxSize& sz, const wxString& name)
+     : wxFileDialogBase(parent, message, defaultDir, defaultFileName, wildCard, style, pos, sz, name)
+ {
++        m_FilterPanel=NULL;
++        m_FilterChoice=NULL;
+ }
+ 
+ bool wxFileDialog::SupportsExtraControl() const
+@@ -57,96 +64,94 @@
+     return true;
+ }
+ 
+-NSArray* GetTypesFromFilter( const wxString filter )
++void wxFileDialog::ParseFilter()
+ {
++    m_FilterNames.Clear();
++    m_FilterExtensions.Clear();
++    SplitFilterIntoNamesAndExtensions( m_wildCard, m_FilterNames,  m_FilterExtensions );
++}
++
++// split a ;-separated list of extensions into an NSArray of file types
++NSArray* wxFileDialog__GetTypeArrayFromFilter( const wxString &extensiongroup )
++{
+     NSMutableArray* types = nil;
+-    if ( !filter.empty() )
++    wxStringTokenizer tokenizer( extensiongroup , wxT(";") ) ;
++    while ( tokenizer.HasMoreTokens() )
+     {
+-        wxArrayString names ;
+-        wxArrayString extensions;
++        wxString extension = tokenizer.GetNextToken() ;
++        // Remove leading '*'
++        if (extension.length() && (extension.GetChar(0) == '*'))
++            extension = extension.Mid( 1 );
+ 
+-        wxString filter2(filter) ;
+-        int filterIndex = 0;
+-        bool isName = true ;
+-        wxString current ;
++        // Remove leading '.'
++        if (extension.length() && (extension.GetChar(0) == '.'))
++            extension = extension.Mid( 1 );
+ 
+-        for ( unsigned int i = 0; i < filter2.length() ; i++ )
++        // Remove leading '*', this is for handling *.*
++        if (extension.length() && (extension.GetChar(0) == '*'))
++            extension = extension.Mid( 1 );
++
++        if ( extension.IsEmpty() )
+         {
+-            if ( filter2.GetChar(i) == wxT('|') )
+-            {
+-                if ( isName )
+-                {
+-                    names.Add( current ) ;
+-                }
+-                else
+-                {
+-                    extensions.Add( current ) ;
+-                    ++filterIndex ;
+-                }
+-
+-                isName = !isName ;
+-                current = wxEmptyString ;
+-            }
+-            else
+-            {
+-                current += filter2.GetChar(i) ;
+-            }
++            if ( types != nil )
++                [types release];
++            return nil;
+         }
+-        // we allow for compatibility reason to have a single filter expression (like *.*) without
+-        // an explanatory text, in that case the first part is name and extension at the same time
+ 
+-        wxASSERT_MSG( filterIndex == 0 || !isName , wxT("incorrect format of format string") ) ;
+-        if ( current.empty() )
+-            extensions.Add( names[filterIndex] ) ;
+-        else
+-            extensions.Add( current ) ;
+-        if ( filterIndex == 0 || isName )
+-            names.Add( current ) ;
++        if ( types == nil )
++            types = [[NSMutableArray alloc] init];
+ 
+-        ++filterIndex ;
++        wxCFStringRef cfext(extension);
++        [types addObject: (NSString*)cfext.AsNSString()  ];
++#if 0
++        // add support for classic fileType / creator here
++        wxUint32 fileType, creator;
++        // extension -> mactypes
++#endif
++    }
++    return types;
++}
+ 
+-        const size_t extCount = extensions.GetCount();
+-        for ( size_t i = 0 ; i < extCount; i++ )
+-        {
+-            wxString extensiongroup = extensions[i];
+-            wxStringTokenizer tokenizer( extensiongroup , wxT(";") ) ;
+-            while ( tokenizer.HasMoreTokens() )
+-            {
+-                wxString extension = tokenizer.GetNextToken() ;
+-                // Remove leading '*'
+-                if (extension.length() && (extension.GetChar(0) == '*'))
+-                    extension = extension.Mid( 1 );
++// return the types array for the n'th filter index
++// returns nil if index < 0 or index >= num extensions 
++NSArray* wxFileDialog__GetTypeArrayForFilterIndex(const wxArrayString &filterExtensions, int index)
++{
++    if(index >= (int)filterExtensions.GetCount())
++    {
++        index = -1;
++    }
++    if(index < 0)
++    {
++        return nil;
++    }
++    return wxFileDialog__GetTypeArrayFromFilter( filterExtensions[index] );
++}
+ 
+-                // Remove leading '.'
+-                if (extension.length() && (extension.GetChar(0) == '.'))
+-                    extension = extension.Mid( 1 );
+ 
+-                // Remove leading '*', this is for handling *.*
+-                if (extension.length() && (extension.GetChar(0) == '*'))
+-                    extension = extension.Mid( 1 );
+-
+-                if ( extension.IsEmpty() )
+-                {
+-                    if ( types != nil )
+-                        [types release];
+-                    return nil;
+-                }
+-
+-                if ( types == nil )
+-                    types = [[NSMutableArray alloc] init];
+-
+-                wxCFStringRef cfext(extension);
+-                [types addObject: (NSString*)cfext.AsNSString()  ];
+-#if 0
+-                // add support for classic fileType / creator here
+-                wxUint32 fileType, creator;
+-                // extension -> mactypes
+-#endif
+-            }
+-
++// Split the |-separated filter string into names and extensionlists
++void wxFileDialog::SplitFilterIntoNamesAndExtensions( const wxString &filter, wxArrayString &names, wxArrayString &extensions )
++{
++    wxStringTokenizer tokenizer(filter,wxT("|"));
++    int numtokens=(int)tokenizer.CountTokens();
++    if(numtokens == 1)
++    {
++        // we allow for compatibility reason to have a single filter expression (like *.*) without
++        // an explanatory text, in that case the first part is name and extension at the same time
++        wxString extension = tokenizer.GetNextToken();
++        names.Add( extension );
++        extensions.Add( extension );
++    }
++    else
++    {
++        int numextensions = numtokens / 2;
++        for(int i=0; i < numextensions; i++)
++        {
++            wxString name = tokenizer.GetNextToken();
++            wxString extension = tokenizer.GetNextToken();
++            names.Add( name );
++            extensions.Add( extension );            
+         }
+     }
+-    return types;
+ }
+ 
+ void wxFileDialog::ShowWindowModal()
+@@ -163,6 +168,9 @@
+         parentWindow = dynamic_cast<wxNonOwnedWindow*>(wxGetTopLevelParent(GetParent()));
+ 
+     wxASSERT_MSG(parentWindow, "Window modal display requires parent.");
++
++    ParseFilter();
++    NSArray* types = wxFileDialog__GetTypeArrayForFilterIndex(m_FilterExtensions,0);
+     
+     if (HasFlag(wxFD_SAVE))
+     {
+@@ -177,6 +185,8 @@
+         // be able to pass this in
+         [sPanel setTreatsFilePackagesAsDirectories:NO];
+         [sPanel setCanSelectHiddenExtension:YES];
++        [sPanel setAllowedFileTypes:types];
++        [sPanel setAllowsOtherFileTypes:NO];
+         
+         NSWindow* nativeParent = parentWindow->GetWXWindow();
+         ModalDialogDelegate* sheetDelegate = [[ModalDialogDelegate alloc] init];
+@@ -188,7 +198,6 @@
+     }
+     else 
+     {
+-        NSArray* types = GetTypesFromFilter( m_wildCard ) ;
+         NSOpenPanel* oPanel = [NSOpenPanel openPanel];
+         
+         SetupExtraControls(oPanel);
+@@ -198,7 +207,17 @@
+         [oPanel setResolvesAliases:YES];
+         [oPanel setCanChooseFiles:YES];
+         [oPanel setMessage:cf.AsNSString()];
+-    
++        [oPanel setAllowsOtherFileTypes:NO];
++        if(HasFlag(wxFD_MULTIPLE))
++        {
++            [oPanel setAllowsMultipleSelection:YES];
++        }
++
++        // somehow this seems to be necessary; if left out, the first change
++        // to the wxChoice gets ignored for some reason.
++        [oPanel setAllowedFileTypes:nil];
++        [oPanel setAllowedFileTypes:types];
++
+         NSWindow* nativeParent = parentWindow->GetWXWindow();
+         ModalDialogDelegate* sheetDelegate = [[ModalDialogDelegate alloc] init];
+         [sheetDelegate setImplementation: this];
+@@ -207,30 +226,93 @@
+             modalDelegate: sheetDelegate
+             didEndSelector: @selector(sheetDidEnd:returnCode:contextInfo:)
+             contextInfo: nil];
++
+     }
++
++    CleanupExtraControls();
++    
+ }
+ 
++// Create a panel with the file type drop down list
++// If extra controls need to be added (see wxFileDialog::SetExtraControlCreator), add
++// them to the panel as well
++// Returns the newly created wxPanel
++wxWindow* wxFileDialog::CreateFilterPanel(wxWindow *extracontrol)
++{
++    wxPanel *extrapanel=new wxPanel(this,wxID_ANY,wxDefaultPosition,wxDefaultSize);
++    wxBoxSizer *boxsizer1=new wxBoxSizer(wxVERTICAL);
++    extrapanel->SetSizer(boxsizer1);
++    wxBoxSizer *boxsizer2=new wxBoxSizer(wxHORIZONTAL);
++    boxsizer1->Add(boxsizer2,wxALIGN_CENTER_HORIZONTAL);
++    wxStaticText *stattext=new wxStaticText(extrapanel,wxID_ANY,_("File type:"));
++    boxsizer2->Add(stattext,0,wxALIGN_CENTER_VERTICAL|wxALL,5);
++    m_FilterChoice=new wxChoice(extrapanel,wxID_ANY);
++    boxsizer2->Add(m_FilterChoice,0,wxALIGN_CENTER_VERTICAL|wxALL,5);
++    m_FilterChoice->Append(m_FilterNames);
++    if( m_FilterNames.GetCount() > 0)
++    {
++        m_FilterChoice->SetSelection(0);
++    }
++    m_FilterChoice->Connect(wxEVT_COMMAND_CHOICE_SELECTED, wxCommandEventHandler(wxFileDialog::OnFilterSelected), NULL, this);
++    
++    if(extracontrol)
++    {
++      // todo: extracontrol appears at the top of the file selection dialog instead of below the file filter
++      // I think this code is correct so it might be a bug in Reparent()?
++      extracontrol->Reparent(extrapanel);
++      boxsizer1->Add(extracontrol);
++    }
++    boxsizer1->Layout();
++    boxsizer1->SetSizeHints(extrapanel);
++    return extrapanel;
++}
++
++// An item has been selected in the file filter wxChoice:
++void wxFileDialog::OnFilterSelected(wxCommandEvent &event)
++{
++    int index = m_FilterChoice->GetSelection();
++    NSArray* types = wxFileDialog__GetTypeArrayForFilterIndex(m_FilterExtensions,index);
++    NSSavePanel* panel = (NSSavePanel*) GetWXWindow();
++    [panel setAllowedFileTypes:types];
++}
++
++void wxFileDialog::CleanupExtraControls()
++{
++    if(m_FilterPanel)
++    {
++        // destroy the filter panel. I'm not sure if this is the correct way
++        // to do this; below we've done [m_FilterPanel->GetHandle() removeFromSuperView]
++        // so I guess this means internally the NSView is detached from the wxPanel.
++        // Can we safely delete m_FilterPanel, and won't it give any leaks?
++        NSSavePanel* panel = (NSSavePanel*) GetWXWindow();
++        NSView* accView = m_FilterPanel->GetHandle();
++        [panel setAccessoryView:nil];
++        delete m_FilterPanel;
++    }
++}
++
+ void wxFileDialog::SetupExtraControls(WXWindow nativeWindow)
+ {
+     NSSavePanel* panel = (NSSavePanel*) nativeWindow;
+     
+     wxNonOwnedWindow::Create( GetParent(), nativeWindow );
+-    
++
++    // get any custom controls (see wxFileDialog::SetExtraControlCreator)
++    wxWindow *extracontrol = NULL;
+     if (HasExtraControlCreator())
+     {
+         CreateExtraControl();
+-        wxWindow* control = GetExtraControl();
+-        if ( control )
+-        {
+-            NSView* accView = control->GetHandle();
+-            [accView removeFromSuperview];
+-            [panel setAccessoryView:accView];
+-        }
+-        else
+-        {
+-            [panel setAccessoryView:nil];
+-        }
++        extracontrol = GetExtraControl();
+     }
++    
++    // create the panel with the file type filter:
++    m_FilterPanel=CreateFilterPanel(extracontrol);
++    
++    // and add the panel as an accessoryview to the NSSavePanel
++    NSView* accView = m_FilterPanel->GetHandle();
++    [accView removeFromSuperview];
++    [panel setAccessoryView:accView];
++    return;    
+ }
+ 
+ int wxFileDialog::ShowModal()
+@@ -254,6 +336,9 @@
+         parentWindow = dynamic_cast<wxNonOwnedWindow*>(wxGetTopLevelParent(GetParent()));
+     }
+ 
++    ParseFilter();
++    NSArray* types = wxFileDialog__GetTypeArrayForFilterIndex(m_FilterExtensions,0);
++
+     if (HasFlag(wxFD_SAVE))
+     {
+         NSSavePanel* sPanel = [NSSavePanel savePanel];
+@@ -267,6 +352,8 @@
+         // be able to pass this in
+         [sPanel setTreatsFilePackagesAsDirectories:NO];
+         [sPanel setCanSelectHiddenExtension:YES];
++        [sPanel setAllowedFileTypes:types];
++        [sPanel setAllowsOtherFileTypes:NO];
+ 
+         if ( HasFlag(wxFD_OVERWRITE_PROMPT) )
+         {
+@@ -279,7 +366,6 @@
+     }
+     else
+     {
+-        NSArray* types = GetTypesFromFilter( m_wildCard ) ;
+         NSOpenPanel* oPanel = [NSOpenPanel openPanel];
+         
+         SetupExtraControls(oPanel);
+@@ -289,6 +375,16 @@
+         [oPanel setResolvesAliases:YES];
+         [oPanel setCanChooseFiles:YES];
+         [oPanel setMessage:cf.AsNSString()];
++        [oPanel setAllowsOtherFileTypes:NO];
++        if(HasFlag(wxFD_MULTIPLE))
++        {
++            [oPanel setAllowsMultipleSelection:YES];
++        }
++        
++        // somehow this seems to be necessary; if left out, the first change
++        // to the wxChoice gets ignored for some reason.
++        [oPanel setAllowedFileTypes:nil];
++        [oPanel setAllowedFileTypes:types];
+ 
+         returnCode = [oPanel runModalForDirectory:dir.AsNSString()
+                         file:file.AsNSString() types:types];
+@@ -300,6 +396,8 @@
+         if ( types != nil )
+             [types release];
+     }
++    
++    CleanupExtraControls();
+ 
+     return GetReturnCode();
+ }
+Index: include/wx/osx/filedlg.h
+===================================================================
+--- include/wx/osx/filedlg.h	(revision 65218)
++++ include/wx/osx/filedlg.h	(working copy)
+@@ -16,6 +16,9 @@
+ // wxFileDialog
+ //-------------------------------------------------------------------------
+ 
++class wxChoice;
++
++
+ class WXDLLIMPEXP_CORE wxFileDialog: public wxFileDialogBase
+ {
+ DECLARE_DYNAMIC_CLASS(wxFileDialog)
+@@ -53,6 +56,21 @@
+                            int WXUNUSED(sizeFlags) = wxSIZE_AUTO) {}
+     
+     void SetupExtraControls(WXWindow nativeWindow);
++#if wxOSX_USE_COCOA
++    virtual wxWindow* CreateFilterPanel(wxWindow *extracontrol);
++    virtual void OnFilterSelected(wxCommandEvent &event);
++    void ParseFilter();
++    void SplitFilterIntoNamesAndExtensions( const wxString &filter, wxArrayString &names, wxArrayString &extensions );
++    void CleanupExtraControls();
++#endif
++
++protected:
++#if wxOSX_USE_COCOA
++    wxArrayString m_FilterExtensions;
++    wxArrayString m_FilterNames;
++    wxChoice* m_FilterChoice;
++    wxWindow* m_FilterPanel;
++#endif
+ };
+ 
+ #endif // _WX_FILEDLG_H_

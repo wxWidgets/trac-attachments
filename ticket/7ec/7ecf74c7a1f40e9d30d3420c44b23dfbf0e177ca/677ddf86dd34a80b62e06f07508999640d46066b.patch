@@ -1,0 +1,61 @@
+Index: interface/wx/sysopt.h
+===================================================================
+--- interface/wx/sysopt.h	(révision 70911)
++++ interface/wx/sysopt.h	(copie de travail)
+@@ -48,6 +48,12 @@
+         Default: 0. In some circumstances the MaskBlt function can be slower than using
+         the fallback code, especially if using DC caching. By default, MaskBlt will be
+         used where it is implemented by the operating system and driver.
++    @flag{msw.dc.soft-alphablend}
++        1 to force using software alpha blending. Default is 0. Use this option to 
++        workaround buggy AlphaBlend() on some windows versions (64 bits Win7 and Vista).
++        You may have to set this, for instance, if you remark that you have icons with transparency that 
++        looks weirds. This setting is cached for performance reason, so you have to set it before the
++        first bitmap/icon is displayed.
+     @flag{msw.remap}
+         If 1 (the default), wxToolBar bitmap colours will be remapped to the current
+         theme's values. Set this to 0 to disable this functionality, for example if
+Index: src/msw/dc.cpp
+===================================================================
+--- src/msw/dc.cpp	(révision 70911)
++++ src/msw/dc.cpp	(copie de travail)
+@@ -2725,7 +2725,15 @@
+ 
+     static AlphaBlend_t
+         pfnAlphaBlend = (AlphaBlend_t)wxMSIMG32DLL.GetSymbol(wxT("AlphaBlend"));
+-    if ( pfnAlphaBlend )
++        
++    // We also use a software fallback when the msw.dc.soft-alphablend option is set.
++    // This allow have correct blending on Windows versions that have a buggy AlphaBlend().
++    // Known buggy versions of windows are 64 bits Win7 and Vista that incorrectly handles 
++    // bitmaps with per-pixel alpha in AlphaBlend().
++    // The setting is cached for performance reasons, so initialise it as soon as possible
++    static bool useSoftAlphaBlend = wxSystemOptions::GetOptionInt(wxS("msw.dc.soft-alphablend")) != 0;
++                    
++    if (!useSoftAlphaBlend && pfnAlphaBlend )
+     {
+         BLENDFUNCTION bf;
+         bf.BlendOp = AC_SRC_OVER;
+@@ -2803,14 +2811,15 @@
+             // (but does not impact performance)
+             pSrc.MoveTo(dataSrc, srcX + (srcWidth*x/dstWidth), srcY + (srcHeight*y/dstHeight));
+ 
+-            // note that source bitmap uses premultiplied alpha (as required by
+-            // the real AlphaBlend)
+-            const unsigned beta = 255 - pSrc.Alpha();
++            // Apply blending as described in MSDN for AlphaBlend(). This 
++            // fallback implementation uses integer arithmetic instead of FP.
++            // There should be a division by 255, but it is here replaced by a right shift that
++            // performs a division by 256. This is a little less accurate, but much faster.
++            pDst.Red()   = ((pSrc.Alpha()*(pSrc.Red()-pDst.Red())) >> 8)  + pDst.Red(); 
++            pDst.Green() = ((pSrc.Alpha()*(pSrc.Green()-pDst.Green())) >> 8)  + pDst.Green(); 
++            pDst.Blue()  = ((pSrc.Alpha()*(pSrc.Blue()-pDst.Blue())) >> 8)  + pDst.Blue(); 
++            pDst.Alpha() = ((pSrc.Alpha()*(pSrc.Alpha()-pDst.Alpha())) >> 8)  + pDst.Alpha(); 
+ 
+-            pDst.Red() = pSrc.Red() + (beta * pDst.Red() + 127) / 255;
+-            pDst.Blue() = pSrc.Blue() + (beta * pDst.Blue() + 127) / 255;
+-            pDst.Green() = pSrc.Green() + (beta * pDst.Green() + 127) / 255;
+-
+             ++pDst;
+         }
+ 

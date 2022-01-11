@@ -1,0 +1,1225 @@
+diff -x*.o -xCVS -x.#* -x*.orig -x*.rej -x*~ -bNu2 wxWindows-CVS/src/common/chmstrm.cpp wxWindows-CVS-patched/src/common/chmstrm.cpp
+--- wxWindows-CVS/src/common/chmstrm.cpp	Thu Jan  1 01:00:00 1970
++++ wxWindows-CVS-patched/src/common/chmstrm.cpp	Wed Aug 27 15:18:03 2003
+@@ -0,0 +1,407 @@
++////////////////////////////////////////////////////////////////////////////
++// Name:        chmstream.cpp
++// Purpose:     input stream for CHM archive access
++// Author:      Markus Sinner
++// Copyright:   (c) 2003 Herd Software Development
++// Licence:     wxWindows Licence
++/////////////////////////////////////////////////////////////////////////////
++
++
++#ifdef __GNUG__
++#pragma implementation "chmstrm.h"
++#endif
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++  #pragma hdrstop
++#endif
++
++#if wxUSE_STREAMS && wxUSE_CHMSTREAM 
++#include <wx/chmstrm.h>
++
++#include "wx/log.h"
++#include "wx/stream.h"
++#include "wx/mstream.h"
++#include "wx/utils.h"
++#include "wx/filename.h"
++#include "wx/wfstream.h"
++
++#include "wx/chmtools.h"
++#include <stdio.h>
++#include <unistd.h>
++
++//---------------------------------------------------------------
++/// wxChmInputStream
++/// Creates an Input Stream on a file compressed in a CHM-archive
++//---------------------------------------------------------------
++
++
++/** 
++ * Constructor
++ * @param archive  The name of the .chm archive. Remember that archive must
++ *                 be local file accesible via fopen, fread functions!
++ * @param filename The Name of the file to be extracted from archive
++ * @param simulate if TRUE than class should simulate .HHP-File based on #SYSTEM
++ *                 if FALSE than class does nothing if it doesnt find .hhp
++ */
++wxChmInputStream::wxChmInputStream(const wxString& archive, const wxString& filename, bool simulate) : wxInputStream()
++{
++  wxLogDebug("wxChmInputStream::wxChmInputStream archive: %s, filename %s\n", archive.c_str(), filename.c_str());
++
++  m_Pos = 0;
++  m_Size = 0;
++  m_Content = NULL;
++  m_ContentStream = NULL;
++  m_lasterror = wxSTREAM_NO_ERROR;
++  m_Chm = new wxChmTools (wxFileName(archive));
++  m_file = NULL;
++  m_FileName = wxString(filename).MakeLower();
++  m_SimulateHHP = simulate;
++
++  if ( ! m_Chm->Contains(m_FileName) ) {
++    // if the file could not be located, but was *.hhp, than we create
++    // the content of the hhp-file on the fly and store it for reading 
++    // by the application
++    if (strstr(m_FileName, ".hhp")>0 && m_SimulateHHP) {
++      // now we open an hhp-file
++#ifdef DEBUG_VERBOSE
++      wxLogDebug( "Need to create .hhp file\n");
++#endif
++      CreateHHPStream();   
++    }
++    else {
++      wxLogError("chmstrm.cpp: Could not locate file %s\n", filename.c_str() );
++      m_lasterror = wxSTREAM_READ_ERROR;
++      return;
++    }
++  }
++  else {  // file FOUND
++    CreateFileStream(m_FileName);
++  }
++}
++
++
++
++
++/** 
++ * destructor
++ *
++ * destroys all created decompressor objects
++ */
++wxChmInputStream::~wxChmInputStream()
++{
++#ifdef DEBUG_VERBOSE
++  wxLogDebug( "wxChmInputStream::~wxChmInputStream() --- Destructor\n");
++#endif
++
++  delete m_Chm;
++  
++  if (m_ContentStream)
++    delete m_ContentStream;
++
++  if (m_Content) {
++    free (m_Content);
++    m_Content=NULL;
++  }
++  
++}
++
++
++
++
++/**
++ * End of File
++ *
++ * currentlly 
++ */
++bool wxChmInputStream::Eof() const
++{
++  bool eof = (m_Content==NULL ||
++              m_ContentStream==NULL ||  
++              m_ContentStream->Eof() ||
++              m_Pos>m_Size);
++#ifdef DEBUG_VERBOSE
++  wxLogDebug( "Eof\n");
++#endif
++  return eof;
++}
++
++
++
++size_t wxChmInputStream::OnSysRead(void *buffer, size_t bufsize)
++{
++  if ( m_Pos >= m_Size ) {
++#ifdef DEBUG_VERBOSE
++    wxLogDebug( "OnSysRead() while Eof!\n");
++#endif
++    
++    m_lasterror = wxSTREAM_EOF;
++    return 0;
++  }
++  m_lasterror = wxSTREAM_NO_ERROR;
++
++  // If the rest to read from the stream is less
++  // than the buffer size, than only read the rest
++  if (m_Pos+bufsize>m_Size)
++    bufsize = m_Size-m_Pos;
++
++  
++  m_ContentStream->SeekI(m_Pos);
++  m_ContentStream->Read(buffer, bufsize);
++  m_Pos +=bufsize;
++
++#ifdef DEBUG_VERBOSE
++  wxLogDebug( 
++          "OnSysRead() on file %s len: %i (startswith:0x%2X )\n"
++          "  oldpos: 0x%04X  newpos: 0x%04X\n",
++          m_FileName.c_str(), (int) bufsize, ((char*) buffer)[0], 
++          oldpos, m_Pos );
++#endif
++  
++  m_ContentStream->SeekI(m_Pos);
++  return bufsize;    
++}
++
++
++
++
++off_t wxChmInputStream::OnSysSeek(off_t seek, wxSeekMode mode)
++{  
++  wxString mode_str = wxEmptyString;
++  
++  if (!m_ContentStream || m_ContentStream->Eof()) {
++    m_lasterror = wxSTREAM_EOF;
++    return 0;
++  }  
++  m_lasterror = wxSTREAM_NO_ERROR;
++
++  off_t nextpos;
++
++  switch ( mode )
++    {
++    case wxFromCurrent: nextpos = seek + m_Pos;      mode_str = ("wxFromCurrent"); break;
++    case wxFromStart  : nextpos = seek;              mode_str = ("wxFromStart"); break;
++    case wxFromEnd    : nextpos = m_Size - 1 + seek; mode_str = ("wxFromEnd"); break;
++    default : nextpos = m_Pos; mode_str = wxString ("UNKNOWN"); break; /* just to fool compiler, never happens */
++    }
++  m_Pos=nextpos;
++
++  
++#ifdef DEBUG_VERBOSE
++  wxLogDebug(
++          "Seek() on %s with offset %i with mode %s\n"
++          "   from pos 0x%04X to 0x%04X\n",
++          m_FileName.c_str(), (int)seek, mode_str.c_str(), (int)oldpos, (int)m_Pos );
++#endif
++  
++  // Set current position on stream
++  m_ContentStream->SeekI(m_Pos);
++  return m_Pos;  
++}
++
++
++
++
++/**
++ * Help Browser tries to read the contents of the
++ * file by interpreting a .hhp file in the Archiv.
++ * For .chm doesnt include such a file, we need
++ * to rebuild the information based on stored
++ * system-files.
++ */
++void
++wxChmInputStream::CreateHHPStream() {
++  wxFileName file;
++  bool topic=FALSE;
++  //bool title=FALSE;
++  bool hhc=FALSE;
++  bool hhk=FALSE;
++  wxInputStream * i;
++  wxMemoryOutputStream * out;
++  const char * tmp;
++
++  
++
++  // Try to open the #SYSTEM-File and create the HHP File out of it
++  // see http://bonedaddy.net/pabs3/chmspec/0.1/ch05s03.html#SYSTEM
++  if ( ! m_Chm->Contains("/#SYSTEM") ) {
++#ifdef DEBUG
++    wxLogDebug( "Archive doesnt contain #SYSTEM file\n");
++#endif
++    return;
++  }
++  else {
++    file = wxFileName("/#SYSTEM");
++  }
++  
++  if (CreateFileStream("/#SYSTEM")) {
++    // New stream for writing a memory area to simulate the
++    // .hhp-file
++    out = new wxMemoryOutputStream();
++    
++    tmp = "[OPTIONS]\r\n";
++    out->Write( (const void *) tmp, strlen(tmp) );
++
++    u_int16_t code;
++    u_int16_t len;
++    void * buf;
++
++    // use the actual stream for reading
++    i = m_ContentStream;
++    
++    /* Now read the contents, and try to get the needed information */
++
++    // First 4 Bytes are Version information, skip
++    i->SeekI(4);
++    
++    while (! i->Eof()) {
++      // Read #SYSTEM-Code and length
++      i->Read(&code, 2);
++      i->Read(&len, 2);
++      // data
++      buf = malloc(len);
++      i->Read(buf, len);
++      
++#ifdef DEBUG_VERBOSE
++      wxLogDebug( "#SYSTEM code: %i, len: %i, buf: %s\n", code, len, buf);
++#endif      
++
++      switch (code) {
++      case 0: // CONTENTS_FILE
++        tmp = "Contents file=";
++        hhc=TRUE;        
++        break;
++      case 1: // INDEX_FILE
++        tmp = "Index file=";
++        hhk = TRUE;        
++        break;
++      case 2: // DEFAULT_TOPIC
++        tmp = "Default Topic=";
++        topic = TRUE;        
++        break;
++      case 3: // TITLE
++        tmp = "Title=";        
++        break;
++//       case 6: // COMPILED_FILE
++//         tmp = "Compiled File=";
++//         break;        
++      case 7: // COMPILED_FILE
++        tmp = "Binary Index=YES\r\n";
++#ifdef DEBUG_VERBOSE
++        wxLogDebug( "writing \"%s\"  strlen:%i  TellO():%i\n", tmp,strlen(tmp),out->TellO()); 
++#endif
++        out->Write( (const void *) tmp, strlen(tmp));
++        tmp = NULL;
++        break;        
++      case 4: // STRUCT        
++      default:
++        tmp=NULL;        
++      } // switch
++
++      if (tmp) {        
++#ifdef DEBUG_VERBOSE
++        wxLogDebug( "writing \"%s%s\"  strlen:%i  TellO():%i\n", tmp,buf,strlen(tmp),out->TellO()); 
++#endif
++        out->Write( (const void *) tmp, strlen(tmp) );
++        out->Write( buf, strlen((char*)buf));
++        out->Write( "\r\n", 2);
++      }
++      
++      
++      // free used memory
++      free(buf);
++      buf=NULL;
++    } // while
++    
++
++    // Free the old data which wont be used any more
++    delete m_ContentStream;
++    if (m_Content) {
++      free (m_Content);
++    }
++    
++
++    // Now add entrys which are missing
++    if (!hhc && m_Chm->Contains("*.hhc")) {
++      tmp = "Contents File=*.hhc\r\n";
++      out->Write( (const void *) tmp, strlen(tmp) );
++    }
++    
++    if (!hhk && m_Chm->Contains("*.hhk") ) {
++      tmp = "Index File=*.hhk\r\n";
++      out->Write( (const void *) tmp, strlen(tmp) );
++    }
++
++    
++
++    // Now copy the Data from the memory
++    out->SeekO(0, wxFromEnd);
++    m_Size = out->TellO();
++    out->SeekO(0, wxFromStart);    
++    m_Content = (char *) malloc ( m_Size+1 );
++    out->CopyTo(m_Content, m_Size);
++    m_Content[m_Size]='\0';
++    m_Size++;
++    m_ContentStream = new wxMemoryInputStream(m_Content, m_Size);
++    
++#ifdef DEBUG_VERBOSE
++    wxLogDebug( "\n.hhc size %i, copied: %i\n --- contains:\n%s\n\n", m_Size, s, m_Content);
++#endif
++    
++    delete out;    
++  }  
++}
++
++
++/**
++ * Creates a Stream pointing to a virtual file in
++ * the current archive
++ */
++bool
++wxChmInputStream::CreateFileStream(const wxString& pattern) {
++  wxFileInputStream * fin;
++  wxString tmpfile = wxFileName::CreateTempFileName("chmstrm", NULL);  
++  
++  if ( tmpfile == wxEmptyString ){
++    wxLogError("could not create tempfile: failed to open\n");
++    return false;
++  }
++
++
++  // try to extract the file
++  if ( m_Chm->Extract(pattern, tmpfile) <=0 ) {
++    wxLogError("extraction of %s into %s failed\n", pattern.c_str(), tmpfile.c_str());
++    unlink (tmpfile.c_str());    
++    return FALSE;
++  }
++  else {
++    // Open a filestream to extracted file
++    fin = new wxFileInputStream(tmpfile);
++    m_Size = fin->GetSize();        
++    m_Content = (char *) malloc(m_Size+1);
++    fin->Read(m_Content, m_Size);
++    m_Content[m_Size]='\0';
++
++#ifdef DEBUG
++    wxLogDebug( "Extracted %s - %i bytes of data \n", pattern.c_str(), m_Size);
++#endif
++
++    unlink (tmpfile.c_str());
++    
++    delete fin;
++    
++    // SUCCESS
++    m_ContentStream = new wxMemoryInputStream (m_Content, m_Size);
++    
++    return m_ContentStream->IsOk();
++  } // else (extract)
++}
++
++
++
++#endif // wxUSE_STREAMS && wxUSE_CHMSTREAM 
++
++
++
+diff -x*.o -xCVS -x.#* -x*.orig -x*.rej -x*~ -bNu2 wxWindows-CVS/src/common/chmtools.cpp wxWindows-CVS-patched/src/common/chmtools.cpp
+--- wxWindows-CVS/src/common/chmtools.cpp	Thu Jan  1 01:00:00 1970
++++ wxWindows-CVS-patched/src/common/chmtools.cpp	Thu Aug 28 13:22:06 2003
+@@ -0,0 +1,336 @@
++//////////////////////////////////////////////////////////
++// Name:        chmtools.cpp
++// Purpose:     Abstraction of c-library mspack 
++// Author:      Markus Sinner
++// Copyright:   (c) 2003 Herd Software Development
++// Licence:     wxWindows Licence
++//////////////////////////////////////////////////////////
++
++#ifdef __GNUG__
++#pragma implementation "chmtools.h"
++#endif
++
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++//#if wxUSE_STREAMS && wxUSE_CHMSTREAM #&& wxUSE_MSPACKLIB
++#if wxUSE_STREAMS && wxUSE_CHMSTREAM 
++
++
++#ifndef WXPRECOMP
++#include "wx/intl.h"
++#include "wx/log.h"
++#endif
++
++#include "wx/string.h"
++
++// mspack headers
++#include <mspack.h>
++#include "wx/chmtools.h"
++
++/***
++ * constructor
++ *
++ * @param archive The filename of the archive to open
++ */
++wxChmTools::wxChmTools ( const wxFileName &archive ) 
++{ 
++  m_ChmFileName = wxString (archive.GetFullPath());
++  
++  if ( m_ChmFileName==wxEmptyString) {
++    wxLogError ("wxChmTools: Empty archive-string in Constructor");
++    
++  }
++
++  m_Archive = NULL;
++  m_Decompressor = NULL;
++  m_FileNames = NULL;
++  m_lasterror = 0;
++  
++  struct mschmd_header *chmh;
++  struct mschm_decompressor *chmd;
++  struct mschmd_file *file;
++
++  // Create decompressor
++  chmd =  mspack_create_chm_decompressor(NULL);
++  m_Decompressor = (struct mschm_decompressor *) chmd;
++  
++  // Open the archiv and store it in class
++  if ( (chmh = chmd->open(chmd, (char *) m_ChmFileName.c_str() )) ) {        
++    m_Archive = (struct mschmd_header *) chmh;
++    
++    // Create Filenamearray
++    m_FileNames = new wxArrayString();
++    
++    // Store Filenames in array
++    for (file = chmh->files; file; file = file->next) {
++      m_FileNames->Add( wxString(file->filename) );
++    }
++  }
++  else {
++    wxLogDebug( "MSCHMD: Failed to open archive %s\n", archive.GetFullPath().c_str() );
++    m_lasterror = (chmd->last_error(chmd));
++    return;
++  }  
++} // Constructor
++
++
++/***
++ * Destructor
++ */
++wxChmTools::~wxChmTools(){
++  struct mschm_decompressor * chmd = (struct mschm_decompressor *) m_Decompressor;
++  struct mschmd_header      * chmh = (struct mschmd_header *)      m_Archive;
++  
++  delete m_FileNames;
++  
++  // Close Archive
++  if (chmh && chmd)
++    chmd->close(chmd, chmh);
++
++  // Destroy Decompressor
++  if (chmd)
++    mspack_destroy_chm_decompressor(chmd);
++} // Destructor
++
++
++
++/**
++ * Checks if the given pattern matches to any
++ * filename stored in archive
++ *
++ * @param  pattern The filename pattern, may include '*' and/or '?'
++ * @return TRUE, if any file matching pattern has been found,
++ *         FALSE if not
++ */
++bool
++wxChmTools::Contains (const wxString& pattern) {
++  int count;
++  wxString pattern_tmp=wxString(pattern).MakeLower();
++
++  // loop through filearay
++  if (m_FileNames && (count=m_FileNames->GetCount())>0 ) {
++    for (int i=0; i<count; i++){
++      wxString tmp = m_FileNames->Item(i).MakeLower();
++      if ( tmp.Matches(pattern_tmp) ||
++           tmp.Mid(1).Matches(pattern_tmp))
++        return TRUE;
++    }
++  }
++  
++  return FALSE;
++}
++
++
++
++/** 
++ * Find()
++ *
++ * Finds the next file descibed by a pattern in the archive, starting
++ * the file given by second parameter
++ * 
++ * @param pattern   The file-pattern to search for. May contain '*' and/or '?'
++ * @param startfrom The filename which the search should start after
++ * @returns         The full pathname of the found file
++ */
++const wxString
++wxChmTools::Find (const wxString& pattern, const wxString& startfrom) {
++  int count;
++  wxString tmp;
++  wxString pattern_tmp=wxString (pattern);
++  wxString startfrom_tmp=wxString (startfrom); 
++  pattern_tmp.MakeLower();
++  startfrom_tmp.MakeLower();
++
++  if (m_FileNames && (count=m_FileNames->GetCount())>0 ) {
++    for (int i=0; i<count; i++){
++      tmp = wxString(m_FileNames->Item(i)).MakeLower();
++      // if we find the string where the search should began
++      if ( tmp.Matches(startfrom_tmp) || 
++           tmp.Mid(1).Matches(startfrom_tmp))
++        continue;
++      if ( tmp.Matches(pattern_tmp) ||
++           tmp.Mid(1).Matches(pattern_tmp)) {
++        return wxString(tmp);
++#ifdef DEBUG_VERBOSE
++        wxLogDebug( "wxChmTools::Find found pattern %s in %s\n", pattern.c_str(), tmp.c_str());
++#endif
++      } // if
++    } // for
++  } // if
++    
++  return wxEmptyString;
++}
++
++
++
++/**
++ * ExtractAll ()
++ *
++ * extract all files in Archive to destination directory
++ *
++ * @param destinationDir The directory-root where the files should go
++ * @returns the number of files extracted or 0 on error
++ */
++int
++wxChmTools::ExtractAll (const wxFileName& destinationDir) {
++  int count = 0;
++  wxFileName dstdir = wxFileName(destinationDir);
++  wxFileName dst;
++
++  if (dstdir.FileExists() && !dstdir.IsDir() ) {
++    // File Exists but no Dir
++    wxLogError(wxT("Destination %s exists, but is not a directory!"), dstdir.GetFullPath().c_str());
++    return 0;
++  }
++  else if (!dstdir.FileExists()) {
++    wxLogDebug( "Creating dir %s\n", dstdir.GetFullPath().c_str());
++    // create dir
++    if (!dstdir.Mkdir( 0755, wxPATH_MKDIR_FULL)) {
++      wxLogError(wxT("Could not create destination directory"));
++      return 0;
++    } // mkdir
++    
++  }
++
++  // now this should be true
++  if (dstdir.IsDir()) {
++    // Dir is valid and exists, so just extract
++    wxString current;
++    for ( size_t i=0; i<m_FileNames->GetCount(); i++) {
++      // Perhaps need to create dirs
++      current = wxString(m_FileNames->Item(i));
++      dst = wxFileName(dstdir.GetFullPath(), current, wxPATH_NATIVE);
++      wxLogDebug( "Attempting to extract %s to %s\n", current.c_str(), dst.GetFullPath().c_str() );
++      if (Extract(current, dst.GetFullPath() )) {
++        count++;
++      }
++      else {
++        wxLogError(wxT("Error while Extracting file %s"), current.c_str() );
++        return count;;
++      }
++    } // for    
++  } // if (dstdir.FileExists() && dstdir.IsDir()) {
++  else {
++    wxLogError(wxT("Damn. Unexpected error happened on dir %s"), dstdir.GetFullPath().c_str());
++    return 0;
++  }
++    
++  return count;
++}
++
++
++/**
++ * Extract ()
++ *
++ * extracts the first hit of pattern to the given position
++ *
++ * @param pattern  A filename pattern (may contain * and ? chars)
++ * @param filename The FileName where to temporary extract the file to
++ * @return 0 at no file extracted<br>
++ *         number of bytes extracted else
++ */
++size_t
++wxChmTools::Extract (const wxString& pattern, const wxString& filename) {
++  struct mschm_decompressor * d = (struct mschm_decompressor *) m_Decompressor;
++  struct mschmd_header      * h = (struct mschmd_header *) m_Archive;
++  struct mschmd_file        * f;
++  
++  
++#ifdef DEBUG_VERBOSE
++  wxLogDebug("wxChmTools::Extract ( <%s> to <%s>)\n", pattern.c_str(), filename.c_str() );
++#endif
++
++  wxString tmp;
++  wxString pattern_tmp=(wxString (pattern)).MakeLower();
++  
++  for (f = h->files; f; f = f->next) {
++    tmp = wxString(f->filename).MakeLower();
++    if ( tmp.Matches(pattern_tmp) || 
++         tmp.Mid(1).Matches(pattern_tmp) ) { // ignore leading '/' 
++      
++      if (d->extract(d, f,  (char *) filename.c_str())) {
++        // Error
++        m_lasterror = d->last_error(d);
++        wxLogError("MSCHMD: Could not extract %s into %s: %s\n", 
++                   f->filename, filename.c_str(),ChmErrorMsg(m_lasterror).c_str() );
++        return 0;
++      } // d->extract
++      else {        
++#ifdef DEBUG_VERBOSE
++        wxLogDebug ( "MSCHMD: Extracted %s into %s: %i bytes\n",
++                     f->filename, filename.c_str(), (int)f->length );
++#endif            
++        return (size_t) f->length;
++      } // else
++    } // if tmp.matches           
++  } // for
++  
++  return 0;
++} // Extract
++
++
++
++/**
++ * Find a file by pattern
++ *
++ * @param  pattern A filename pattern (may contain * and ? chars)
++ * @return A pointer to the file (mschmd_file*)
++ */
++void *
++wxChmTools::GetMschmdFile (const wxString& pattern_orig) {
++  struct mschmd_file * f;
++  struct mschmd_header *h = (struct mschmd_header *) m_Archive;
++  wxString tmp;
++  wxString pattern=wxString ( pattern_orig).MakeLower();
++
++  for (f = h->files; f; f = f->next) {
++    tmp = wxString(f->filename).MakeLower();
++    if ( tmp.Matches(pattern) || 
++         tmp.Mid(1).Matches(pattern) ) { // ignore leading '/'       
++      return f;  
++    } // if
++  } // for
++  
++  return NULL;
++}
++
++
++/**
++ * 
++ *
++ */
++const wxString 
++wxChmTools::GetLastErrorMessage() {
++  return ChmErrorMsg(m_lasterror);
++}
++
++/**
++ * 
++ *
++ */
++const wxString 
++wxChmTools::ChmErrorMsg(int error) {
++  
++  switch (error) {
++  case MSPACK_ERR_OK:         return wxT("no error");
++  case MSPACK_ERR_ARGS:       return wxT("bad arguments to library function");
++  case MSPACK_ERR_OPEN:       return wxT("error opening file");
++  case MSPACK_ERR_READ:       return wxT("read error");
++  case MSPACK_ERR_WRITE:      return wxT("write error");
++  case MSPACK_ERR_SEEK:       return wxT("seek error");
++  case MSPACK_ERR_NOMEMORY:   return wxT("out of memory");
++  case MSPACK_ERR_SIGNATURE:  return wxT("bad signature");
++  case MSPACK_ERR_DATAFORMAT: return wxT("error in data format");
++  case MSPACK_ERR_CHECKSUM:   return wxT("checksum error");
++  case MSPACK_ERR_CRUNCH:     return wxT("compression error");
++  case MSPACK_ERR_DECRUNCH:   return wxT("decompression error");
++  }
++  return wxT("unknown error");
++}
++
++
++#endif // #if wxUSE_STREAMS && wxUSE_CHMSTREAM && wxUSE_MSPACKLIB
+diff -x*.o -xCVS -x.#* -x*.orig -x*.rej -x*~ -bNu2 wxWindows-CVS/src/common/fs_chm.cpp wxWindows-CVS-patched/src/common/fs_chm.cpp
+--- wxWindows-CVS/src/common/fs_chm.cpp	Thu Jan  1 01:00:00 1970
++++ wxWindows-CVS-patched/src/common/fs_chm.cpp	Wed Aug 27 14:08:25 2003
+@@ -0,0 +1,224 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        fs_chm.cpp
++// Purpose:     CHM (Help) file system
++// Author:      Markus Sinner
++// Copyright:   (c) 2003 Herd Software Development 
++// CVS-ID:      $Id: fs_chm.cpp
++// Licence:     wxWindows Licence
++/////////////////////////////////////////////////////////////////////////////
++
++
++#ifdef __GNUG__
++#pragma implementation "fs_chm.h"
++#endif
++
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++
++#if wxUSE_FILESYSTEM && wxUSE_FS_CHM && wxUSE_CHMSTREAM
++
++#ifndef WXPRECOMP
++#include "wx/intl.h"
++#include "wx/log.h"
++#endif
++
++#include "wx/filesys.h"
++#include "wx/fs_chm.h"
++#include "wx/chmstrm.h"
++
++// mspack headers
++#include "wx/chmtools.h"
++
++//--------------------------------------------------------------------------------
++// wxChmFSHandler
++//--------------------------------------------------------------------------------
++
++
++
++
++/**
++ * Constructor
++ */
++wxChmFSHandler::wxChmFSHandler() : wxFileSystemHandler()
++{
++  m_lasterror=0;  
++  m_Pattern=wxEmptyString;
++  m_Found=wxEmptyString;
++  m_Chm=NULL;
++}
++
++
++/**
++ * Destructor
++ *
++ * Delete created Objects
++ */
++wxChmFSHandler::~wxChmFSHandler()
++{
++  if (m_Chm)
++    delete m_Chm;
++}
++
++
++
++/**
++ * Doku see wxFileSystemHandler
++ */
++bool wxChmFSHandler::CanOpen(const wxString& location)
++{
++#ifdef DEBUG_VERBOSE
++  wxLogDebug( "wxChmFSHandler::Can open ( %s )\n", location.c_str());
++#endif
++
++  wxString p = GetProtocol(location);
++
++  return (p == wxT("chm")) &&
++    (GetProtocol(GetLeftLocation(location)) == wxT("file"));
++}
++
++/**
++ * Doku see wxFileSystemHandler
++ */
++wxFSFile* wxChmFSHandler::OpenFile(wxFileSystem& WXUNUSED(fs), const wxString& location)
++{
++#ifdef DEBUG_VERBOSE
++  wxLogDebug( "wxChmFSHandler::OpenFile(<unused>, %s\n", location.c_str());
++#endif
++
++  wxString right = GetRightLocation(location);
++  wxString right_abs;
++  wxString left = GetLeftLocation(location);
++
++  wxInputStream *s;
++
++  int index;
++  
++  if (GetProtocol(left) != wxT("file"))
++    {      
++      wxLogError(_("CHM handler currently supports only local files!"));
++      return NULL;
++    }
++  
++   // Work around java-skript
++   wxString tmp = wxString(right);
++   if (tmp.MakeLower().Contains("javascipt") && tmp.Contains("\'") ) {
++     right = right.AfterFirst('\'').BeforeLast('\'');
++   }
++
++
++  // now work on the right location
++  if (right.Contains("..")) {
++    wxFileName * abs = new wxFileName(wxString(right));
++    abs->MakeAbsolute("/");
++    right = wxString(abs->GetFullPath());
++    delete abs;
++  } //  if (right.Contains(".."))
++
++
++  // a workaround for absolute links to root
++  if ( (index=right.Index("//")) != wxNOT_FOUND) {
++    right=wxString(right.Mid(index+1));
++    wxLogWarning("Link contained '//' which was converted to absolute link\n");
++  }
++
++
++  //if (right.GetChar(0) == wxT('/')) right = right.Mid(1);
++  
++  
++  wxFileName leftFilename = wxFileSystem::URLToFileName(left);
++
++
++
++  // Open a stream to read the content of the chm-file
++  s = new wxChmInputStream(leftFilename.GetFullPath(), right, TRUE);
++  
++  
++  //wxString mime = "application/x-chm";
++  
++  wxString mime = wxString(GetMimeTypeFromExt(location));
++  
++  //  if (s && s->IsOk() ) {
++  if (s ) {
++    return new wxFSFile(s,
++                        left + wxT("#chm:") + right,
++                        mime,
++                        GetAnchor(location),
++                        wxDateTime(wxFileModificationTime(left)));
++  }
++  else {
++    wxStreamError err = s->GetLastError();
++    if (err == wxSTREAM_NO_ERROR)    wxLogError("Stream could not be opened: No error occurred.");
++    if (err == wxSTREAM_EOF)         wxLogError("Stream could not be opened: An End-Of-File occurred.");
++    if (err == wxSTREAM_WRITE_ERROR) wxLogError("Stream could not be opened: A generic error occurred on the last WRITE call.");
++    if (err == wxSTREAM_READ_ERROR)  wxLogError("Stream could not be opened: A generic error occurred on the last READ call.");
++  }
++  
++    
++  if (s)
++    delete s;
++  
++  return NULL;
++}
++
++
++
++/**
++ * Doku see wxFileSystemHandler
++ */
++wxString wxChmFSHandler::FindFirst(const wxString& spec, int flags)
++{
++#ifdef DEBUG
++  wxLogDebug( "FindFirst - spec: %s\n", spec.c_str());
++#endif
++
++
++  wxString right = GetRightLocation(spec);
++  wxString left = GetLeftLocation(spec);
++  wxString nativename = wxFileSystem::URLToFileName(left).GetFullPath();
++  
++  if (GetProtocol(left) != wxT("file"))
++    {
++      wxLogError(_("CHM handler currently supports only local files!"));
++      return wxEmptyString;
++    }
++  
++  
++  m_Chm = new wxChmTools ( wxFileName(nativename) );
++  m_Pattern = right.AfterLast(wxT('/'));
++
++  wxString m_Found =  m_Chm->Find(m_Pattern);
++  
++  // now fake around hhp-files which are not existing in projects...
++  if (m_Found==wxEmptyString && m_Pattern.Contains(".hhp") && !m_Pattern.Contains(".hhp.cached") ){
++    m_Found = "file:"+left+"#chm:"+m_Pattern.BeforeLast('.')+".hhp";
++#ifdef DEBUG
++    wxLogDebug( "Cannot find .hhp in CHM, so simulate: %s\n", m_Found.c_str());
++#endif
++  }
++
++  return m_Found;
++
++}
++
++
++
++wxString wxChmFSHandler::FindNext()
++{
++#ifdef DEBUG
++  wxLogDebug( "::FindNext\n");
++#endif
++
++  if (m_Pattern==wxEmptyString)
++    return wxEmptyString;
++
++
++  return  m_Chm->Find(m_Pattern, m_Found);
++}
++
++
++#endif
++//wxUSE_FILESYSTEM && wxUSE_FS_CHM && wxUSE_CHMSTREAM
+diff -x*.o -xCVS -x.#* -x*.orig -x*.rej -x*~ -bNu2 wxWindows-CVS/include/wx/chmstrm.h wxWindows-CVS-patched/include/wx/chmstrm.h
+--- wxWindows-CVS/include/wx/chmstrm.h	Thu Jan  1 01:00:00 1970
++++ wxWindows-CVS-patched/include/wx/chmstrm.h	Wed Aug 27 11:30:37 2003
+@@ -0,0 +1,82 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        chmstrm.h
++// Purpose:     wxChmInputStream for reading files from CHM archive
++// Author:      Markus Sinner
++// Copyright:   (c) 2003 Herd Software Development
++// Licence:     wxWindows Licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef __CHMSTREAM_H__
++#define __CHMSTREAM_H__
++
++#if defined(__GNUG__) && !defined(__APPLE__)
++#pragma interface "chmstrm.h"
++#endif
++
++#include "wx/defs.h"
++
++#if wxUSE_STREAMS && wxUSE_CHMSTREAM
++
++#include "wx/stream.h"
++#include "wx/mstream.h"
++#include "wx/chmtools.h"
++
++//------------------------------------------------------------------------
++/// wxChmInputStream
++//------------------------------------------------------------------------
++class WXDLLEXPORT wxChmInputStream : public wxInputStream
++{
++public:
++  /// Constructor
++  wxChmInputStream(const wxString& archive, const wxString& file, bool simulate = FALSE);
++  /// Destructor
++  ~wxChmInputStream();
++
++  /// Return the size of the accessed file in archive
++  virtual size_t GetSize() const {return m_Size;}
++  /// End of Stream?
++  virtual bool Eof() const;
++  /// Set simulation-mode of HHP-File (if non is found)
++  void SimulateHHP (bool sim) { m_SimulateHHP = sim; };
++
++ protected:
++  /// See wxInputStream
++  virtual size_t OnSysRead(void *buffer, size_t bufsize);
++  /// See wxInputStream
++  virtual off_t OnSysSeek(off_t seek, wxSeekMode mode);
++  /// See wxInputStream
++  virtual off_t OnSysTell() const {return m_Pos;}
++  
++ private:
++  size_t m_Size;
++  off_t m_Pos;
++  bool m_SimulateHHP;
++
++  char * m_Content;
++  wxInputStream * m_ContentStream;
++
++  void CreateHHPStream();
++  bool CreateFileStream(const wxString& pattern);
++  // this void* is handle of archive . I'm sorry it is void and not proper
++  // type but I don't want to make unzip.h header public.
++
++  
++
++  // locates the file and returns a mspack_file *
++  void * LocateFile(wxString filename );
++
++  // should store pointer to current file
++  void *m_file;
++
++  // The Chm-Class for extracting the data
++  wxChmTools * m_Chm;
++
++  wxString m_FileName;
++};
++
++
++#endif 
++   // wxUSE_STREAMS && wxUSE_CHMSTREAM
++
++#endif 
++   // __CHMSTREAM_H__
+diff -x*.o -xCVS -x.#* -x*.orig -x*.rej -x*~ -bNu2 wxWindows-CVS/include/wx/chmtools.h wxWindows-CVS-patched/include/wx/chmtools.h
+--- wxWindows-CVS/include/wx/chmtools.h	Thu Jan  1 01:00:00 1970
++++ wxWindows-CVS-patched/include/wx/chmtools.h	Wed Aug 27 14:07:32 2003
+@@ -0,0 +1,91 @@
++//////////////////////////////////////////////////////////
++// Name:        chmtools.cpp
++// Purpose:     Abstraction of c-library mspack 
++// Author:      Markus Sinner
++// Copyright:   (c) 2003 Herd Software Development
++// Licence:     wxWindows Licence
++//////////////////////////////////////////////////////////
++
++#ifndef _WX_CHM_PACK_TOOLS_H_
++#define _WX_CHM_PACK_TOOLS_H_
++
++#if defined(__GNUG__) && !defined(__APPLE__)
++#pragma interface "chmtools.h"
++#endif
++
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++#if wxUSE_FILESYSTEM && wxUSE_FS_CHM && wxUSE_STREAMS
++
++#include "wx/filesys.h"
++#include "wx/arrimpl.cpp"
++#include "wx/dynarray.h"
++
++//-------------------------------------------------------
++/// wxChmTools
++/// <p>
++/// this class is used to abstract access to CHM-Archives
++/// with library mspack written by Stuart Caie
++/// http://www.kyz.uklinux.net/libmspack/
++//-------------------------------------------------------
++class WXDLLEXPORT wxChmTools
++{
++ public:
++  /// constructor
++  wxChmTools( const wxFileName &archive );
++  /// destructor
++  ~wxChmTools();
++  
++  /// Generate error-string for error-code
++  static const wxString  ChmErrorMsg(int error);
++
++  /// get an array of archive-member-filenames 
++  const wxArrayString  * GetFileNames   () { return m_FileNames; }; 
++
++  /// get the name of the archive representated by this class
++  const wxString GetArchiveName () { return wxString(m_ChmFileName); }; 
++
++  /// Find a file in the archive
++  const wxString Find (const wxString& pattern, const wxString& startfrom = wxEmptyString );
++
++  /// Extract a file in the archive into a file
++  size_t Extract (const wxString& pattern, const wxString& filename);
++
++  /// Extract all files in archive into a directory
++  int ExtractAll (const wxFileName& dstdir);
++
++  /// check archive for a file
++  bool Contains (const wxString& pattern);
++
++  /// get a string for the last error occured
++  const wxString GetLastErrorMessage();
++
++  /// Last Error
++  int m_lasterror;
++  
++ private:
++  // these vars are used by FindFirst/Next:
++  wxString m_ChmFileName;
++
++  /// mspack-pointer to mschmd_header
++  void * m_Archive;
++  /// mspack-pointer to mschm_decompressor
++  void * m_Decompressor;
++  
++  /// Array of filenames in archive
++  wxArrayString * m_FileNames;
++  
++  /// Internal function to get filepointer 
++  void * GetMschmdFile (const wxString& pattern);
++};
++
++
++#endif
++// wxUSE_FILESYSTEM && wxUSE_FS_CHM && wxUSE_STREAMS
++
++#endif // _WX_CHM_PACK_TOOLS_H_
++
+diff -x*.o -xCVS -x.#* -x*.orig -x*.rej -x*~ -bNu2 wxWindows-CVS/include/wx/fs_chm.h wxWindows-CVS-patched/include/wx/fs_chm.h
+--- wxWindows-CVS/include/wx/fs_chm.h	Thu Jan  1 01:00:00 1970
++++ wxWindows-CVS-patched/include/wx/fs_chm.h	Wed Aug 27 14:07:12 2003
+@@ -0,0 +1,59 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        fs_chm.h
++// Purpose:     CHM (help) file system
++// Author:      Markus Sinner
++// Copyright:   (c) 2003 Herd Software Development
++// CVS-ID:      $Id: fs_chm.h
++// Licence:     wxWindows Licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_FS_CHM_H_
++#define _WX_FS_CHM_H_
++
++#if defined(__GNUG__) && !defined(__APPLE__)
++#pragma interface "fs_chm.h"
++#endif
++
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++#if wxUSE_FILESYSTEM && wxUSE_FS_CHM && wxUSE_STREAMS
++
++#include "wx/filesys.h"
++#include "wx/chmtools.h"
++
++//----------------------------------------------------------
++/// wxChmFSHandler
++//----------------------------------------------------------
++class WXDLLEXPORT wxChmFSHandler : public wxFileSystemHandler
++{
++ public:
++  /// Constructor and Destructor
++  wxChmFSHandler();
++  ~wxChmFSHandler();
++
++  /// Is able to open location?
++  virtual bool CanOpen(const wxString& location);
++  /// Open a file
++  virtual wxFSFile* OpenFile(wxFileSystem& fs, const wxString& location);
++  /// Find first occurence of spec
++  virtual wxString FindFirst(const wxString& spec, int flags = 0);
++  /// Find next occurence of spec
++  virtual wxString FindNext();
++
++ private:
++  int m_lasterror;
++  wxString m_Pattern;
++  wxString m_Found;
++  wxChmTools * m_Chm;
++};
++
++
++#endif
++// wxUSE_FILESYSTEM && wxUSE_FS_CHM && wxUSE_STREAMS
++
++#endif // _WX_FS_CHM_H_
++
+
+ 	  	 

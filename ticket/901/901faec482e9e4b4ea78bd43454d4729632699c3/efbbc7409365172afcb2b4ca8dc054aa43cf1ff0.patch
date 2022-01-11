@@ -1,0 +1,220 @@
+Index: samples/statbar/statbar.cpp
+===================================================================
+--- samples/statbar/statbar.cpp	(revisione 59723)
++++ samples/statbar/statbar.cpp	(copia locale)
+@@ -735,22 +735,21 @@
+ 
+ void MyStatusBar::OnSize(wxSizeEvent& event)
+ {
++    // NOTE: wxStatusBar is a generic control on some ports (e.g. wxGTK) and there
++    //       it intercepts the wxEVT_SIZE events to update its internal data.
++    //       To make sure GetFieldRect() returns updated informations, we need
++    //       to make sure that the size event is processed first by wxStatusBar
++    //       and only after that, by our code:
++    ProcessEventInParent(event);
++
+ #if wxUSE_CHECKBOX
+     if ( !m_checkbox )
+         return;
+ #endif
+ 
+-    // TEMPORARY HACK: TODO find a more general solution
+-#ifdef wxStatusBarGeneric
+-    wxStatusBar::OnSize(event);
+-#endif
+-
+     wxRect rect;
+     if (!GetFieldRect(Field_Checkbox, rect))
+-    {
+-        event.Skip();
+         return;
+-    }
+ 
+ #if wxUSE_CHECKBOX
+     m_checkbox->SetSize(rect.x + 2, rect.y + 2, rect.width - 4, rect.height - 4);
+@@ -761,8 +760,6 @@
+ 
+     m_statbmp->Move(rect.x + (rect.width - size.x) / 2,
+                     rect.y + (rect.height - size.y) / 2);
+-
+-    event.Skip();
+ }
+ 
+ void MyStatusBar::OnButton(wxCommandEvent& WXUNUSED(event))
+Index: include/wx/event.h
+===================================================================
+--- include/wx/event.h	(revisione 59723)
++++ include/wx/event.h	(copia locale)
+@@ -2796,6 +2796,7 @@
+     //       can be that the event table is not yet full initialize, the hash
+     //       will gets initialized when handling the first event look-up request.
+     wxEventHashTable(const wxEventTable &table);
++    
+     // Destructor.
+     ~wxEventHashTable();
+ 
+@@ -2807,18 +2808,20 @@
+     void Clear();
+ 
+ #if wxUSE_MEMORY_TRACING
+-    // Clear all tables: only used to work around problems in memory tracing
+-    // code
++    // Clear all tables: only used to work around problems in memory tracing code
+     static void ClearAll();
+ #endif // wxUSE_MEMORY_TRACING
+ 
+ protected:
+     // Init the hash table with the entries of the static event table.
+     void InitHashTable();
++
+     // Helper funtion of InitHashTable() to insert 1 entry into the hash table.
+     void AddEntry(const wxEventTableEntry &entry);
++
+     // Allocate and init with null pointers the base hash table.
+     void AllocEventTypeTable(size_t size);
++
+     // Grow the hash table in size and transfer all items currently
+     // in the table to the correct location in the new table.
+     void GrowEventTypeTable();
+@@ -2841,8 +2844,8 @@
+ // wxEvtHandler: the base class for all objects handling wxWidgets events
+ // ----------------------------------------------------------------------------
+ 
+-class WXDLLIMPEXP_BASE wxEvtHandler : public wxObject
+-                                    , public wxTrackable
++class WXDLLIMPEXP_BASE wxEvtHandler : public wxObject,
++                                      public wxTrackable
+ {
+ public:
+     wxEvtHandler();
+@@ -3059,20 +3062,45 @@
+                                         wxEvent& event);
+ 
+     virtual bool SearchEventTable(wxEventTable& table, wxEvent& event);
++        // calls ProcessEventIfMatchesId()
++        
+     bool SearchDynamicEventTable( wxEvent& event );
++        // calls ProcessEventIfMatchesId()
+ 
+     // Avoid problems at exit by cleaning up static hash table gracefully
+     void ClearEventHashTable() { GetEventHashTable().Clear(); }
+     void OnSinkDestroyed( wxEvtHandler *sink );
+ 
+-
+-    // The method tries to process the event in this event handler.
++    // The method tries to process the event with the dynamic table of this
++    // object and if there are no handlers for the given event there, it tries
++    // to process the event using the given table of handlers.
+     //
+-    // It is meant to be called from ProcessEvent() only and is not virtual,
++    // It is meant to be called from ProcessEvent*() only and is not virtual,
+     // additional event handlers can be hooked into the normal event processing
+     // logic using TryBefore() and TryAfter() hooks.
+-    bool ProcessEventHere(wxEvent& event);
++    bool ProcessEventUsingTable(wxEvent& event, wxEventHashTable& table, bool excludeDynamics);
+ 
++    // Processes the given event in this class
++    bool ProcessEventHere(wxEvent& event)
++    { 
++        return ProcessEventUsingTable(event, GetEventHashTable(), false);
++    }
++
++    // Processes the given event in the parent class.
++    // This method can safely be called from inside an event handler.
++    // It will process the event in the parent only if the parent uses static tables.
++    bool ProcessEventInParent(wxEvent& event)
++    {
++        wxEventHashTable *table = GetEventHashTableForParent();
++        if (!table)
++            return false;
++
++        // NOTE: we exclude the dynamic table lookup because dynamic event handlers
++        //       are not associated with a specific inheritance level; there's no
++        //       way to find which dynamic handlers were registered by our parent 
++        //       and which not
++        return ProcessEventUsingTable(event, *table, true); 
++    }
+ 
+ private:
+     void DoConnect(int winid,
+@@ -3119,6 +3147,7 @@
+ 
+     static wxEventHashTable   sm_eventHashTable;
+     virtual wxEventHashTable& GetEventHashTable() const;
++    virtual wxEventHashTable* GetEventHashTableForParent() const;
+ 
+     wxEvtHandler*       m_nextHandler;
+     wxEvtHandler*       m_previousHandler;
+@@ -3130,7 +3159,7 @@
+     wxCriticalSection m_pendingEventsLock;
+ #endif // wxUSE_THREADS
+ 
+-    // Is event handler enabled?
++    // Is this event handler enabled?
+     bool                m_enabled;
+ 
+ 
+@@ -3405,7 +3434,8 @@
+         static const wxEventTable        sm_eventTable; \
+         virtual const wxEventTable*      GetEventTable() const; \
+         static wxEventHashTable          sm_eventHashTable; \
+-        virtual wxEventHashTable&        GetEventHashTable() const;
++        virtual wxEventHashTable&        GetEventHashTable() const; \
++        virtual wxEventHashTable*        GetEventHashTableForParent() const;
+ 
+ // N.B.: when building DLL with Borland C++ 5.5 compiler, you must initialize
+ //       sm_eventTable before using it in GetEventTable() or the compiler gives
+@@ -3419,6 +3449,8 @@
+     wxEventHashTable theClass::sm_eventHashTable(theClass::sm_eventTable); \
+     wxEventHashTable &theClass::GetEventHashTable() const \
+         { return theClass::sm_eventHashTable; } \
++    wxEventHashTable *theClass::GetEventHashTableForParent() const \
++        { return &baseClass::GetEventHashTable(); } \
+     const wxEventTableEntry theClass::sm_eventTableEntries[] = { \
+ 
+ #define BEGIN_EVENT_TABLE_TEMPLATE1(theClass, baseClass, T1) \
+Index: src/common/event.cpp
+===================================================================
+--- src/common/event.cpp	(revisione 59723)
++++ src/common/event.cpp	(copia locale)
+@@ -115,6 +115,13 @@
+ wxEventHashTable &wxEvtHandler::GetEventHashTable() const
+     { return wxEvtHandler::sm_eventHashTable; }
+ 
++wxEventHashTable *wxEvtHandler::GetEventHashTableForParent() const
++    {
++        // the parent of wxEvtHandler is wxObject and it does not have any event
++        // hash table...
++        return NULL; 
++    }
++
+ wxEventHashTable wxEvtHandler::sm_eventHashTable(wxEvtHandler::sm_eventTable);
+ 
+ const wxEventTableEntry wxEvtHandler::sm_eventTableEntries[] =
+@@ -1363,7 +1370,8 @@
+     return TryAfter(event);
+ }
+ 
+-bool wxEvtHandler::ProcessEventHere(wxEvent& event)
++bool wxEvtHandler::ProcessEventUsingTable(wxEvent& event, wxEventHashTable& table, 
++                                          bool excludeDynamics)
+ {
+     // If the event handler is disabled it doesn't process any events
+     if ( !GetEvtHandlerEnabled() )
+@@ -1373,12 +1381,15 @@
+     if ( TryBefore(event) )
+         return true;
+ 
++    if ( !excludeDynamics )
++    {
+     // Handle per-instance dynamic event tables first
+     if ( m_dynamicEvents && SearchDynamicEventTable(event) )
+         return true;
++    }
+ 
+     // Then static per-class event tables
+-    if ( GetEventHashTable().HandleEvent(event, this) )
++    if ( table.HandleEvent(event, this) )
+         return true;
+ 
+     // We don't have a handler for this event.

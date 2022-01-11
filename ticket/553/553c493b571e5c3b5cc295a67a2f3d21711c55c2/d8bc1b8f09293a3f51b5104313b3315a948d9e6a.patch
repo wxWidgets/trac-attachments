@@ -1,0 +1,799 @@
+--- C:\dev\sdk\wxWidgets-2.6.3-wx\build\bakefiles\files.bkl	2006-03-06 13:10:24.000 +0100
++++ c:\dev\sdk\wxWidgets-2.6.3\build\bakefiles\files.bkl	2006-12-28 18:44:00.000 +0100
+@@ -62,6 +62,7 @@
+     src/unix/stackwalk.cpp
+     src/unix/stdpaths.cpp
+     src/unix/threadpsx.cpp
++    src/unix/tls.cpp
+ </set>
+ <set var="BASE_AND_GUI_UNIX_SRC" hints="files">
+     src/unix/utilsunx.cpp
+@@ -93,6 +94,7 @@
+     src/msw/stackwalk.cpp
+     src/msw/stdpaths.cpp
+     src/msw/thread.cpp
++    src/msw/tls.cpp
+     src/msw/utils.cpp
+     src/msw/utilsexc.cpp
+ </set>
+@@ -151,6 +153,7 @@
+     src/mac/carbon/mimetmac.cpp
+     src/mac/carbon/utilsexc.cpp
+     src/mac/carbon/thread.cpp
++    src/mac/carbon/tls.cpp
+     src/mac/carbon/macnotfy.cpp
+     <!-- One would think MoreFilesX is only for OS X but it seems to
+          apply to CarbonLib as well (FSRefMakeFSSpec) -->
+@@ -425,9 +429,11 @@
+     wx/sysopt.h
+     wx/textbuf.h
+     wx/textfile.h
++    wx/thrdata.h
+     wx/thread.h
+     wx/thrimpl.cpp
+     wx/timer.h
++    wx/tls.h
+     wx/tokenzr.h
+     wx/txtstrm.h
+     wx/types.h
+
+--- C:\dev\sdk\wxWidgets-2.6.3-wx\include\wx\log.h	2005-07-17 15:00:08.000 +0200
++++ c:\dev\sdk\wxWidgets-2.6.3\include\wx\log.h	2006-11-06 13:40:10.000 +0100
+@@ -79,6 +79,8 @@
+     class WXDLLIMPEXP_CORE wxWindow;
+ #endif // wxUSE_GUI
+ 
++struct WXDLLIMPEXP_BASE wxPerThreadData;
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -163,7 +165,7 @@
+     // flush the active target if any
+     static void FlushActive()
+     {
+-        if ( !ms_suspendCount )
++        if ( !GetThreadSpecificData()->m_suspendCount )
+         {
+             wxLog *log = GetActiveTarget();
+             if ( log )
+@@ -174,18 +176,38 @@
+     // only one sink is active at each moment
+     // get current log target, will call wxApp::CreateLogTarget() to
+     // create one if none exists
++    // if you used SetActiveTargetPerThread with a non-null parameter,
++    //  the set target is returned
+     static wxLog *GetActiveTarget();
+ 
+-    // change log target, pLogger may be NULL
++    // change global log target, pLogger may be NULL
+     static wxLog *SetActiveTarget(wxLog *pLogger);
+ 
++#if wxUSE_THREADS
++
++    // returns the thread specific active target, if not
++    //  set simply returns NULL
++    static wxLog *GetActiveTargetPerThread();
++
++    // change thread specific log target, pLogger may be NULL
++    //  setting a NULL logger will redirect logs toward global log
++    //  target
++    static wxLog *SetActiveTargetPerThread(wxLog *pLogger);
++
++#else
++
++    static wxLog *GetActiveTargetPerThread() { return GetActiveTarget(); }
++    static wxLog *SetActiveTargetPerThread(wxLog *pLogger) { return SetActiveTarget(pLogger); }
++
++#endif // wxUSE_THREADS
++
+     // suspend the message flushing of the main target until the next call
+     // to Resume() - this is mainly for internal use (to prevent wxYield()
+     // from flashing the messages)
+-    static void Suspend() { ms_suspendCount++; }
++    static void Suspend() { GetThreadSpecificData()->m_suspendCount++; }
+ 
+     // must be called for each Suspend()!
+-    static void Resume() { ms_suspendCount--; }
++    static void Resume() { GetThreadSpecificData()->m_suspendCount--; }
+ 
+     // functions controlling the default wxLog behaviour
+     // verbose mode is activated by standard command-line '-verbose'
+@@ -264,18 +286,39 @@
+     virtual void DoLogString(const wxChar *szString, time_t t);
+ 
+ private:
++    friend struct wxPerThreadData;
++
++    struct WXDLLIMPEXP_BASE PerThreadData
++    {
++        PerThreadData();
++
++        // traditional behaviour or counting repetitions
++        bool        m_bRepetCounting;
++        wxString    m_prevString;   // previous message that was logged
++        // how many times the previous message was logged
++        unsigned    m_prevCounter;
++        time_t      m_prevTimeStamp;// timestamp of the previous message
++        wxLogLevel  m_prevLevel;    // level of the previous message
++        wxLog      *m_pLogger;      // currently active log sink
++
++        size_t      m_suspendCount; // if positive, logs are not flushed
++    };
++
+     // static variables
+     // ----------------
++    
++    // global version of the per-thread-data, allowing old implementation, this version
++    //  is used when the per thread active target is NULL
++    static PerThreadData ms_globalPtd;
++
++    static PerThreadData *GetThreadSpecificData ();    
+ 
+-    static wxLog      *ms_pLogger;      // currently active log sink
+     static bool        ms_doLog;        // false => all logging disabled
+     static bool        ms_bAutoCreate;  // create new log targets on demand?
+     static bool        ms_bVerbose;     // false => ignore LogInfo messages
+ 
+     static wxLogLevel  ms_logLevel;     // limit logging to levels <= ms_logLevel
+ 
+-    static size_t      ms_suspendCount; // if positive, logs are not flushed
+-
+     // format string for strftime(), if NULL, time stamping log messages is
+     // disabled
+     static const wxChar *ms_timestamp;
+@@ -370,14 +413,24 @@
+         // ~wxLogNull called, old log sink restored
+     }
+  */
+-class WXDLLIMPEXP_BASE wxLogNull
++class WXDLLIMPEXP_BASE wxLogNull : public wxLog
+ {
+ public:
+-    wxLogNull() : m_flagOld(wxLog::EnableLogging(false)) { }
+-    ~wxLogNull() { (void)wxLog::EnableLogging(m_flagOld); }
++    wxLogNull () {
++        m_logOld = SetActiveTargetPerThread(this);
++    }
++    ~wxLogNull () {
++        SetActiveTargetPerThread(m_logOld);
++    }
++
++protected:
++    
++    // from wxLog, be sure they do nothing!
++    virtual void DoLog(wxLogLevel WXUNUSED(level), const wxChar *WXUNUSED(szString), time_t WXUNUSED(t)) {}
++    virtual void DoLogString(const wxChar *WXUNUSED(szString), time_t WXUNUSED(t)) {}
+ 
+ private:
+-    bool m_flagOld; // the previous value of the wxLog::ms_doLog
++    wxLog *m_logOld;
+ };
+ 
+ // ----------------------------------------------------------------------------
+
+--- C:\dev\sdk\wxWidgets-2.6.3-wx\include\wx\thrdata.h	1970-01-01 01:00:00.000 +0100
++++ c:\dev\sdk\wxWidgets-2.6.3\include\wx\thrdata.h	2006-08-11 20:52:01.000 +0200
+@@ -0,0 +1,41 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        wx/thrdata.h
++// Purpose:     Per Thread Data for 
++// Author:      Armel Asselin
++// Created:     11/08/2006
++// RCS-ID:      $Id:  $
++// Copyright:   (c) Armel Asselin
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_THREAD_DATA_H_
++#define _WX_THREAD_DATA_H_
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++#include "wx/tls.h"
++#include "wx/log.h"
++
++// forward declarations
++
++// from wx/thread.h
++class WXDLLIMPEXP_BASE wxThread; 
++
++// this structure holds wx internal data which have a thread related scope
++struct WXDLLIMPEXP_BASE wxPerThreadData
++{
++    wxPerThreadData() /*: wxThread_this(0), */ {}
++
++    //------ wxThread ---------------------------------------------------------
++    // stores the pointer to current thread
++    //wxThread*   wxThread_this;    // will do this in a second time
++    
++    //------ wxLog ------------------------------------------------------------
++    wxLog::PerThreadData   m_logs;
++};
++
++extern wxThreadSpecificData<wxPerThreadData> WXDLLIMPEXP_BASE g_perThreadData;
++
++#endif // _WX_THREAD_DATA_H_
+
+--- C:\dev\sdk\wxWidgets-2.6.3-wx\include\wx\tls.h	1970-01-01 01:00:00.000 +0100
++++ c:\dev\sdk\wxWidgets-2.6.3\include\wx\tls.h	2006-08-11 18:17:03.000 +0200
+@@ -0,0 +1,131 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        wx/tls.h
++// Purpose:     TLS API
++// Author:      Armel Asselin
++// Created:     04/13/98
++// RCS-ID:      $Id:  $
++// Copyright:   (c) Armel Asselin
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_TLS_H_
++#define _WX_TLS_H_
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// get the value of wxUSE_THREADS configuration flag
++#include "wx/defs.h"
++
++#if wxUSE_THREADS
++
++// forward declarations
++template <class T> class wxThreadSpecificData;
++class WXDLLIMPEXP_BASE wxThreadSpecificDataUnTyped;
++class WXDLLIMPEXP_BASE wxThreadSpecificDataUnTypedImpl;
++
++
++// this object is used when you want to store directly into TLS
++//    on object which is not 'delete-able'
++// declare this object as a global in your code such as:
++//        wxThreadSpecificDataUnTyped
++
++class WXDLLIMPEXP_BASE wxThreadSpecificDataUnTyped
++{
++public:
++    typedef void (*DestructorFunction)(void *data);
++
++    // constructor & destructor
++    // ------------------------
++
++    wxThreadSpecificDataUnTyped(DestructorFunction destructor=0);
++
++    ~wxThreadSpecificDataUnTyped();
++
++    // test if the slot could be allocated
++    bool IsOk() const;
++
++    void *Get() const;
++
++    // setting a new pointer automatically destroys previous one if a destructor
++    //  was provided during construction
++    void Set (void *data);
++
++    // cleans up all the instances of data stored into the TLS
++    // called when a thread is about to terminate, inside platform specific code
++    // (until we handle a 
++//    static void Cleanup ();
++
++protected:
++    wxThreadSpecificDataUnTypedImpl *m_impl;
++
++    friend class wxThreadSpecificDataUnTypedImpl;
++
++    DECLARE_NO_COPY_CLASS(wxThreadSpecificDataUnTyped)
++};
++
++#else // !wxUSE_THREADS
++
++class wxThreadSpecificDataUnTyped
++{
++public:
++    typedef void (*DestructorFunction)(void *data);
++
++    wxThreadSpecificDataUnTyped(DestructorFunction destructor=0) : m_destructor(destructor), data(NULL) {}
++    ~wxThreadSpecificDataUnTyped() { empty(); }
++
++    // see true implementation for documentation
++    bool IsOk() const { return true; }
++    void *Get() const { return m_data; }
++    void Set (void *data) { empty(); m_data = data;
++
++private:
++    void empty() {
++        if (destructor) (*destructor)(data);
++        m_data = NULL;
++    }
++
++    void *m_data;
++    DestructorFunction m_destructor;
++};
++
++#endif // !wxUSE_THREADS
++
++template <class T>
++class wxThreadSpecificData
++{
++    static void destructfunc (T *data) {
++        delete data;
++    }
++
++public:
++    wxThreadSpecificData (bool doDestroy=true) : m_data(doDestroy?(wxThreadSpecificDataUnTyped::DestructorFunction)destructfunc:(wxThreadSpecificDataUnTyped::DestructorFunction)0) {}
++
++    // get the instance of T stored in the TLS
++    // creates it if it does not yet exist
++    T *GetInstance() {
++        T* inst=Get();
++        if (!inst) {
++            inst = new T;
++            Set(inst);
++        }
++        return inst;
++    }
++
++    // identical to GetInstance
++    T * operator -> () {
++        return GetInstance();
++    }
++
++    // see wxThreadSpecificDataUnTyped for documentation
++    bool IsOk() const { return m_data.IsOk(); }
++    T *Get() const { return (T*)m_data.Get(); }
++    void Set (T *data) { m_data.Set((void*)data); }
++
++    
++private:
++    wxThreadSpecificDataUnTyped m_data;
++};
++
++#endif // _WX_TLS_H_
+
+--- C:\dev\sdk\wxWidgets-2.6.3-wx\src\common\log.cpp	2006-01-18 04:16:30.000 +0100
++++ c:\dev\sdk\wxWidgets-2.6.3\src\common\log.cpp	2006-11-06 13:46:26.000 +0100
+@@ -46,6 +46,7 @@
+ #include "wx/thread.h"
+ #include "wx/utils.h"
+ #include "wx/wxchar.h"
++#include "wx/thrdata.h"
+ 
+ // other standard headers
+ #ifndef __WXWINCE__
+@@ -176,6 +177,7 @@
+     ::MessageBox(NULL, text, title, MB_OK | MB_ICONSTOP);
+ #else
+     wxFprintf(stderr, _T("%s: %s\n"), title.c_str(), text.c_str());
++    fflush(stderr);
+ #endif
+ }
+ 
+@@ -386,18 +388,24 @@
+ 
+ wxLog *wxLog::GetActiveTarget()
+ {
+-    if ( ms_bAutoCreate && ms_pLogger == NULL ) {
++    // NB: it will return global stuff only if thread specific target is not set
++    // it implies that this function NEVER set the thread specific target
++    wxLog::PerThreadData *threadSpecificData = GetThreadSpecificData();
++
++    if ( ms_bAutoCreate && threadSpecificData->m_pLogger == NULL ) {
+         // prevent infinite recursion if someone calls wxLogXXX() from
+         // wxApp::CreateLogTarget()
++        // I consider that auto-creation happens far before thread stuff comes
++        //  if user wants threads specific target s/he does it by himself before
+         static bool s_bInGetActiveTarget = false;
+         if ( !s_bInGetActiveTarget ) {
+             s_bInGetActiveTarget = true;
+ 
+             // ask the application to create a log target for us
+             if ( wxTheApp != NULL )
+-                ms_pLogger = wxTheApp->GetTraits()->CreateLogTarget();
++                threadSpecificData->m_pLogger = wxTheApp->GetTraits()->CreateLogTarget();
+             else
+-                ms_pLogger = new wxLogStderr;
++                threadSpecificData->m_pLogger = new wxLogStderr;
+ 
+             s_bInGetActiveTarget = false;
+ 
+@@ -405,23 +413,47 @@
+         }
+     }
+ 
+-    return ms_pLogger;
++    return threadSpecificData->m_pLogger;
+ }
+ 
+ wxLog *wxLog::SetActiveTarget(wxLog *pLogger)
+ {
+-    if ( ms_pLogger != NULL ) {
++    wxLog::PerThreadData *threadSpecificData = GetThreadSpecificData();
++    if ( threadSpecificData->m_pLogger != NULL ) {
++        // flush the old messages before changing because otherwise they might
++        // get lost later if this target is not restored
++        threadSpecificData->m_pLogger->Flush();
++    }
++
++    wxLog *pOldLogger = threadSpecificData->m_pLogger;
++    threadSpecificData->m_pLogger = pLogger;
++
++    return pOldLogger;
++}
++
++#if wxUSE_THREADS
++wxLog *wxLog::SetActiveTargetPerThread(wxLog *pLogger)
++{
++    wxLog::PerThreadData *threadSpecificData = &g_perThreadData->m_logs;
++
++    if ( threadSpecificData->m_pLogger != NULL ) {
+         // flush the old messages before changing because otherwise they might
+         // get lost later if this target is not restored
+-        ms_pLogger->Flush();
++        threadSpecificData->m_pLogger->Flush();
+     }
+ 
+-    wxLog *pOldLogger = ms_pLogger;
+-    ms_pLogger = pLogger;
++    wxLog *pOldLogger = threadSpecificData->m_pLogger;
++    threadSpecificData->m_pLogger = pLogger;
+ 
+     return pOldLogger;
+ }
+ 
++wxLog *wxLog::GetActiveTargetPerThread()
++{
++    return g_perThreadData->m_logs.m_pLogger;
++}
++#endif // wxUSE_THREADS
++
+ void wxLog::DontCreateOnDemand()
+ {
+     ms_bAutoCreate = false;
+@@ -522,6 +554,25 @@
+     return false;
+ }
+ 
++/*static*/ wxLog::PerThreadData *wxLog::GetThreadSpecificData ()
++{
++    PerThreadData *ptd = &g_perThreadData->m_logs;
++    
++    if (ptd->m_pLogger == NULL)
++        return &ms_globalPtd;
++    return ptd;
++}
++
++// ----------------------------------------------------------------------------
++// wxLog::PerThreadData implementation
++// ----------------------------------------------------------------------------
++wxLog::PerThreadData::PerThreadData()
++: m_bRepetCounting(false), m_prevCounter(0), m_prevTimeStamp(0),
++    /*m_prevLevel;,*/ m_pLogger ((wxLog *)NULL), 
++    m_suspendCount (0)
++{
++}
++
+ // ----------------------------------------------------------------------------
+ // wxLogBuffer implementation
+ // ----------------------------------------------------------------------------
+@@ -705,15 +756,14 @@
+ // static variables
+ // ----------------------------------------------------------------------------
+ 
+-wxLog          *wxLog::ms_pLogger      = (wxLog *)NULL;
++wxLog::PerThreadData wxLog::ms_globalPtd;
++
+ bool            wxLog::ms_doLog        = true;
+ bool            wxLog::ms_bAutoCreate  = true;
+ bool            wxLog::ms_bVerbose     = false;
+ 
+ wxLogLevel      wxLog::ms_logLevel     = wxLOG_Max;  // log everything by default
+ 
+-size_t          wxLog::ms_suspendCount = 0;
+-
+ const wxChar   *wxLog::ms_timestamp    = wxT("%X");  // time only, no date
+ 
+ wxTraceMask     wxLog::ms_ulTraceMask  = (wxTraceMask)0;
+@@ -837,4 +887,3 @@
+ }
+ 
+ #endif // wxUSE_LOG
+-
+
+--- C:\dev\sdk\wxWidgets-2.6.3-wx\src\mac\carbon\tls.cpp	1970-01-01 01:00:00.000 +0100
++++ c:\dev\sdk\wxWidgets-2.6.3\src\mac\carbon\tls.cpp	2006-08-20 22:50:29.000 +0200
+@@ -0,0 +1,96 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        src/msw/tls.cpp
++// Purpose:     wxThreadSpecificDataUnTyped Implementation
++// Author:      Armel Asselin
++// Created:     11/08/2006
++// RCS-ID:      $Id:  $
++// Copyright:   (c) Armel Asselin
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#if defined(__BORLANDC__)
++    #pragma hdrstop
++#endif
++
++#include "wx/tls.h"
++#include "wx/thrdata.h"
++#include "Multiprocessing.h"
++
++wxThreadSpecificData<wxPerThreadData> WXDLLIMPEXP_BASE g_perThreadData;
++
++#if wxUSE_THREADS
++
++const UInt32 TLS_OUT_OF_INDEXES = 0xFFFFFFFF;
++
++// ----------------------------------------------------------------------------
++// constants
++// ----------------------------------------------------------------------------
++
++// ----------------------------------------------------------------------------
++// this module globals
++// ----------------------------------------------------------------------------
++
++// ============================================================================
++// Windows implementation of TLS and related classes
++// ============================================================================
++
++class wxThreadSpecificDataUnTypedImpl
++{
++public:
++    wxThreadSpecificDataUnTypedImpl(wxThreadSpecificDataUnTyped::DestructorFunction destructor)
++        : m_destructor(destructor)
++    {
++        if (MPAllocateTaskStorageIndex(&m_tlsSlot))
++            m_tlsSlot = TLS_OUT_OF_INDEXES;
++            
++    }
++    ~wxThreadSpecificDataUnTypedImpl ()
++    {
++        if (m_tlsSlot != TLS_OUT_OF_INDEXES)
++            MPDeallocateTaskStorageIndex(m_tlsSlot);
++    }
++
++    wxThreadSpecificDataUnTyped::DestructorFunction m_destructor;
++    UInt32 m_tlsSlot;
++};
++
++wxThreadSpecificDataUnTyped::wxThreadSpecificDataUnTyped(DestructorFunction destructor)
++{
++    m_impl = new wxThreadSpecificDataUnTypedImpl (destructor);
++}
++
++wxThreadSpecificDataUnTyped::~wxThreadSpecificDataUnTyped()
++{
++    // cannot delete per thread stuff here, per thread cleanup must occur before!
++    delete m_impl;
++}
++
++bool wxThreadSpecificDataUnTyped::IsOk() const
++{
++    return m_impl && m_impl->m_tlsSlot != TLS_OUT_OF_INDEXES;
++}
++
++void *wxThreadSpecificDataUnTyped::Get() const
++{
++    wxCHECK_MSG(IsOk(), 0, wxT("using wxThreadSpecificDataUnTyped, but slot could not be allocated"));
++    return (void*)MPGetTaskStorageValue(m_impl->m_tlsSlot);
++}
++
++void wxThreadSpecificDataUnTyped::Set (void *data)
++{
++    wxCHECK_RET(IsOk(), wxT("using wxThreadSpecificDataUnTyped, but slot could not be allocated"));
++    void *old_data = Get();
++    if (old_data != NULL && m_impl->m_destructor)
++        (*m_impl->m_destructor)(old_data);
++
++    MPSetTaskStorageValue(m_impl->m_tlsSlot, (TaskStorageValue)data);
++}
++
++#endif // wxUSE_THREADS
+
+--- C:\dev\sdk\wxWidgets-2.6.3-wx\src\msw\tls.cpp	1970-01-01 01:00:00.000 +0100
++++ c:\dev\sdk\wxWidgets-2.6.3\src\msw\tls.cpp	2006-08-21 15:30:11.000 +0200
+@@ -0,0 +1,91 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        src/msw/tls.cpp
++// Purpose:     wxThreadSpecificDataUnTyped Implementation
++// Author:      Armel Asselin
++// Created:     11/08/2006
++// RCS-ID:      $Id:  $
++// Copyright:   (c) Armel Asselin
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#if defined(__BORLANDC__)
++    #pragma hdrstop
++#endif
++
++#include "wx/tls.h"
++#include "wx/thrdata.h"
++
++wxThreadSpecificData<wxPerThreadData> WXDLLIMPEXP_BASE g_perThreadData;
++
++#if wxUSE_THREADS
++
++
++// ----------------------------------------------------------------------------
++// constants
++// ----------------------------------------------------------------------------
++
++// ----------------------------------------------------------------------------
++// this module globals
++// ----------------------------------------------------------------------------
++
++// ============================================================================
++// Windows implementation of TLS and related classes
++// ============================================================================
++
++class wxThreadSpecificDataUnTypedImpl
++{
++public:
++    wxThreadSpecificDataUnTypedImpl(wxThreadSpecificDataUnTyped::DestructorFunction destructor)
++        : m_destructor(destructor)
++    {
++        m_tlsSlot = TlsAlloc ();
++    }
++    ~wxThreadSpecificDataUnTypedImpl ()
++    {
++        TlsFree (m_tlsSlot);
++    }
++
++    wxThreadSpecificDataUnTyped::DestructorFunction m_destructor;
++    DWORD m_tlsSlot;
++};
++
++wxThreadSpecificDataUnTyped::wxThreadSpecificDataUnTyped(DestructorFunction destructor)
++{
++    m_impl = new wxThreadSpecificDataUnTypedImpl (destructor);
++}
++
++wxThreadSpecificDataUnTyped::~wxThreadSpecificDataUnTyped()
++{
++    // cannot delete per thread stuff here, per thread cleanup must occur before!
++    delete m_impl;
++}
++
++bool wxThreadSpecificDataUnTyped::IsOk() const
++{
++    return m_impl && m_impl->m_tlsSlot != TLS_OUT_OF_INDEXES;
++}
++
++void *wxThreadSpecificDataUnTyped::Get() const
++{
++    wxCHECK_MSG(IsOk(), 0, wxT("using wxThreadSpecificDataUnTyped, but slot could not be allocated"));
++    return TlsGetValue (m_impl->m_tlsSlot);
++}
++
++void wxThreadSpecificDataUnTyped::Set (void *data)
++{
++    wxCHECK_RET(IsOk(), wxT("using wxThreadSpecificDataUnTyped, but slot could not be allocated"));
++    void *old_data = Get();
++    if (old_data != NULL && m_impl->m_destructor)
++        (*m_impl->m_destructor)(old_data);
++
++    TlsSetValue (m_impl->m_tlsSlot, data);
++}
++
++#endif // wxUSE_THREADS
+
+--- C:\dev\sdk\wxWidgets-2.6.3-wx\src\unix\tls.cpp	1970-01-01 01:00:00.000 +0100
++++ c:\dev\sdk\wxWidgets-2.6.3\src\unix\tls.cpp	2006-08-21 14:56:38.000 +0200
+@@ -0,0 +1,95 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        src/unix/tls.cpp
++// Purpose:     wxThreadSpecificDataUnTyped Implementation
++// Author:      Armel Asselin
++// Created:     21/08/2006
++// RCS-ID:      $Id:  $
++// Copyright:   (c) Armel Asselin
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#if defined(__BORLANDC__)
++    #pragma hdrstop
++#endif
++
++#include "wx/tls.h"
++#include "wx/thrdata.h"
++
++wxThreadSpecificData<wxPerThreadData> WXDLLIMPEXP_BASE g_perThreadData;
++
++#if wxUSE_THREADS
++#include <pthread.h>
++static const pthread_key_t TLS_OUT_OF_INDEXES = (pthread_key_t)-1;
++
++// ----------------------------------------------------------------------------
++// constants
++// ----------------------------------------------------------------------------
++
++// ----------------------------------------------------------------------------
++// this module globals
++// ----------------------------------------------------------------------------
++
++// ============================================================================
++// Windows implementation of TLS and related classes
++// ============================================================================
++
++class wxThreadSpecificDataUnTypedImpl
++{
++public:
++    wxThreadSpecificDataUnTypedImpl(wxThreadSpecificDataUnTyped::DestructorFunction destructor)
++        : m_destructor(destructor)
++    {
++        if (pthread_key_create (&m_tlsSlot, destructor))
++            m_tlsSlot = TLS_OUT_OF_INDEXES;
++    }
++    
++    ~wxThreadSpecificDataUnTypedImpl()
++    {
++        if (m_tlsSlot != TLS_OUT_OF_INDEXES)
++            pthread_key_delete (m_tlsSlot);
++    }
++
++    wxThreadSpecificDataUnTyped::DestructorFunction m_destructor;
++    pthread_key_t m_tlsSlot;
++};
++
++wxThreadSpecificDataUnTyped::wxThreadSpecificDataUnTyped(DestructorFunction destructor)
++{
++    m_impl = new wxThreadSpecificDataUnTypedImpl (destructor);
++}
++
++wxThreadSpecificDataUnTyped::~wxThreadSpecificDataUnTyped()
++{
++    // cannot delete per thread stuff here, per thread cleanup must occur before!
++    delete m_impl;
++}
++
++bool wxThreadSpecificDataUnTyped::IsOk() const
++{
++    return m_impl && m_impl->m_tlsSlot != TLS_OUT_OF_INDEXES;
++}
++
++void *wxThreadSpecificDataUnTyped::Get() const
++{
++    wxCHECK_MSG(IsOk(), 0, wxT("using wxThreadSpecificDataUnTyped, but slot could not be allocated"));
++    return pthread_getspecific (m_impl->m_tlsSlot);
++}
++
++void wxThreadSpecificDataUnTyped::Set (void *data)
++{
++    wxCHECK_RET(IsOk(), wxT("using wxThreadSpecificDataUnTyped, but slot could not be allocated"));
++    void *old_data = Get();
++    if (old_data != NULL && m_impl->m_destructor)
++        (*m_impl->m_destructor)(old_data);
++
++    pthread_setspecific (m_impl->m_tlsSlot, data);
++}
++
++#endif // wxUSE_THREADS
+
+
+ 	  	 

@@ -1,0 +1,241 @@
+Index: include/wx/gtk/webview_webkit.h
+===================================================================
+--- include/wx/gtk/webview_webkit.h	(revision 72780)
++++ include/wx/gtk/webview_webkit.h	(working copy)
+@@ -63,6 +63,7 @@
+     virtual bool CanGoBack() const;
+     virtual bool CanGoForward() const;
+     virtual void ClearHistory();
++    virtual void EnableContextMenu(bool enable = true);
+     virtual void EnableHistory(bool enable = true);
+     virtual wxVector<wxSharedPtr<wxWebViewHistoryItem> > GetBackwardHistory();
+     virtual wxVector<wxSharedPtr<wxWebViewHistoryItem> > GetForwardHistory();
+Index: include/wx/msw/webview_ie.h
+===================================================================
+--- include/wx/msw/webview_ie.h	(revision 72780)
++++ include/wx/msw/webview_ie.h	(working copy)
+@@ -271,8 +271,9 @@
+ class DocHostUIHandler : public wxIDocHostUIHandler
+ {
+ public:
+-    DocHostUIHandler() {};
++    DocHostUIHandler(wxWebView* browser) { m_browser = browser; }
+     ~DocHostUIHandler() {};
++
+     virtual HRESULT wxSTDCALL ShowContextMenu(DWORD dwID, POINT *ppt,
+                                               IUnknown *pcmdtReserved,
+                                               IDispatch *pdispReserved);
+@@ -319,6 +320,9 @@
+                                                IDataObject **ppDORet);
+     //IUnknown
+     DECLARE_IUNKNOWN_METHODS;
++
++private:
++    wxWebView* m_browser;
+ };
+ 
+ class wxFindPointers
+Index: include/wx/webview.h
+===================================================================
+--- include/wx/webview.h	(revision 72780)
++++ include/wx/webview.h	(working copy)
+@@ -103,6 +103,11 @@
+ class WXDLLIMPEXP_WEBVIEW wxWebView : public wxControl
+ {
+ public:
++    wxWebView()
++    {
++        m_showMenu = true;
++    }
++
+     virtual ~wxWebView() {}
+ 
+     virtual bool Create(wxWindow* parent,
+@@ -124,12 +129,17 @@
+            const wxString& name = wxWebViewNameStr);
+ 
+     //General methods
++    virtual void EnableContextMenu(bool enable = true)
++    {
++        m_showMenu = enable;
++    }
+     virtual wxString GetCurrentTitle() const = 0;
+     virtual wxString GetCurrentURL() const = 0;
+     // TODO: handle choosing a frame when calling GetPageSource()?
+     virtual wxString GetPageSource() const = 0;
+     virtual wxString GetPageText() const = 0;
+     virtual bool IsBusy() const = 0;
++    virtual bool IsContextMenuEnabled() { return m_showMenu; }
+     virtual bool IsEditable() const = 0;
+     virtual void LoadURL(const wxString& url) = 0;
+     virtual void Print() = 0;
+@@ -197,6 +207,9 @@
+ protected:
+     virtual void DoSetPage(const wxString& html, const wxString& baseUrl) = 0;
+ 
++private:
++    bool m_showMenu;
++
+     wxDECLARE_ABSTRACT_CLASS(wxWebView);
+ };
+ 
+Index: samples/webview/webview.cpp
+===================================================================
+--- samples/webview/webview.cpp	(revision 72780)
++++ samples/webview/webview.cpp	(working copy)
+@@ -143,6 +143,7 @@
+     void OnFindDone(wxCommandEvent& evt);
+     void OnFindText(wxCommandEvent& evt);
+     void OnFindOptions(wxCommandEvent& evt);
++    void OnEnableContextMenu(wxCommandEvent& evt);
+ 
+ private:
+     wxTextCtrl* m_url;
+@@ -188,6 +189,7 @@
+     wxMenuItem* m_selection_clear;
+     wxMenuItem* m_selection_delete;
+     wxMenuItem* m_find;
++    wxMenuItem* m_context_menu;
+ 
+     wxInfoBar *m_info;
+     wxStaticText* m_info_text;
+@@ -403,6 +405,8 @@
+     wxMenuItem* loadscheme =  m_tools_menu->Append(wxID_ANY, _("Custom Scheme Example"));
+     wxMenuItem* usememoryfs =  m_tools_menu->Append(wxID_ANY, _("Memory File System Example"));
+ 
++    m_context_menu = m_tools_menu->AppendCheckItem(wxID_ANY, _("Enable Context Menu"));
++
+     //By default we want to handle navigation and new windows
+     m_tools_handle_navigation->Check();
+     m_tools_handle_new_window->Check();
+@@ -509,6 +513,8 @@
+             wxCommandEventHandler(WebFrame::OnUseMemoryFS),  NULL, this );
+     Connect(m_find->GetId(), wxEVT_COMMAND_MENU_SELECTED,
+             wxCommandEventHandler(WebFrame::OnFind),  NULL, this );
++    Connect(m_context_menu->GetId(), wxEVT_COMMAND_MENU_SELECTED,
++            wxCommandEventHandler(WebFrame::OnEnableContextMenu),  NULL, this );
+ 
+     //Connect the idle events
+     Connect(wxID_ANY, wxEVT_IDLE, wxIdleEventHandler(WebFrame::OnIdle), NULL, this);
+@@ -659,6 +665,11 @@
+     m_browser->LoadURL("memory:page1.htm");
+ }
+ 
++void WebFrame::OnEnableContextMenu(wxCommandEvent& evt)
++{
++    m_browser->EnableContextMenu(evt.IsChecked());
++}
++
+ void WebFrame::OnFind(wxCommandEvent& WXUNUSED(evt))
+ {
+     wxString value = m_browser->GetSelectedText();
+@@ -850,6 +861,8 @@
+     m_selection_clear->Enable(m_browser->HasSelection());
+     m_selection_delete->Enable(m_browser->HasSelection());
+ 
++    m_context_menu->Check(m_browser->IsContextMenuEnabled());
++
+     //Firstly we clear the existing menu items, then we add the current ones
+     wxMenuHistoryMap::const_iterator it;
+     for( it = m_histMenuItems.begin(); it != m_histMenuItems.end(); ++it )
+Index: src/gtk/webview_webkit.cpp
+===================================================================
+--- src/gtk/webview_webkit.cpp	(revision 72780)
++++ src/gtk/webview_webkit.cpp	(working copy)
+@@ -378,6 +378,23 @@
+     }
+ }
+ 
++#if WEBKIT_CHECK_VERSION(1, 10, 0)
++
++static gboolean
++wxgtk_webview_webkit_context_menu(WebKitWebView *,
++                                  GtkWidget *,
++                                  WebKitHitTestResult *,
++                                  gboolean,
++                                  wxWebViewWebKit *webKitCtrl)
++{
++    if(webKitCtrl->IsContextMenuEnabled())
++        return FALSE;
++    else
++        return TRUE;
++}
++
++#endif
++
+ } // extern "C"
+ 
+ //-----------------------------------------------------------------------------
+@@ -433,6 +450,11 @@
+ 
+     g_signal_connect_after(m_web_view, "resource-request-starting",
+                            G_CALLBACK(wxgtk_webview_webkit_resource_req), this);
++      
++#if WEBKIT_CHECK_VERSION(1, 10, 0)    
++     g_signal_connect_after(m_web_view, "context-menu",
++                           G_CALLBACK(wxgtk_webview_webkit_context_menu), this);
++#endif
+ 
+     m_parent->DoAddChild( this );
+ 
+@@ -926,6 +948,15 @@
+     m_handlerList.push_back(handler);
+ }
+ 
++void wxWebViewWebKit::EnableContextMenu(bool enable)
++{
++#if !WEBKIT_CHECK_VERSION(1, 10, 0) //If we are using an older version
++    g_object_set(webkit_web_view_get_settings(m_web_view), 
++                 "enable-default-context-menu", enable, NULL);
++#endif
++    wxWebView::EnableContextMenu(enable);
++}
++
+ long wxWebViewWebKit::Find(const wxString& text, int flags)
+ {
+     bool newSearch = false;
+Index: src/msw/webview_ie.cpp
+===================================================================
+--- src/msw/webview_ie.cpp	(revision 72780)
++++ src/msw/webview_ie.cpp	(working copy)
+@@ -92,7 +92,7 @@
+     m_webBrowser->put_RegisterAsBrowser(VARIANT_TRUE);
+     m_webBrowser->put_RegisterAsDropTarget(VARIANT_TRUE);
+ 
+-    m_uiHandler = new DocHostUIHandler;
++    m_uiHandler = new DocHostUIHandler(this);
+ 
+     m_container = new wxIEContainer(this, IID_IWebBrowser2, m_webBrowser, m_uiHandler);
+ 
+@@ -1600,7 +1600,10 @@
+     wxUnusedVar(ppt);
+     wxUnusedVar(pcmdtReserved);
+     wxUnusedVar(pdispReserved);
+-    return E_NOTIMPL;
++    if(m_browser->IsContextMenuEnabled())
++        return E_NOTIMPL;
++    else
++        return S_OK;
+ }
+ 
+ HRESULT wxSTDCALL DocHostUIHandler::GetHostInfo(DOCHOSTUIINFO *pInfo)
+Index: src/osx/webview_webkit.mm
+===================================================================
+--- src/osx/webview_webkit.mm	(revision 72780)
++++ src/osx/webview_webkit.mm	(working copy)
+@@ -1346,6 +1346,15 @@
+ 
+     webKitWindow->Print();
+ }
++
++- (NSArray *)webView:(WebView *)sender contextMenuItemsForElement:(NSDictionary *)element 
++                                                 defaultMenyItems:(NSArray *) defaultMenuItems
++{
++    if(webKitWindow->IsContextMenuEnabled())
++        return defaultMenuItems;
++    else
++        return nil;
++}
+ @end
+ 
+ #endif //wxUSE_WEBVIEW && wxUSE_WEBVIEW_WEBKIT

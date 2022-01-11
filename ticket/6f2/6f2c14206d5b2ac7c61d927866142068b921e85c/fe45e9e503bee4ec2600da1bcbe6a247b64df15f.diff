@@ -1,0 +1,1453 @@
+Index: src/osx/window_osx.cpp
+===================================================================
+--- src/osx/window_osx.cpp	(revision 57954)
++++ src/osx/window_osx.cpp	(working copy)
+@@ -346,7 +346,7 @@
+ 
+     m_peer->SetData<ControlSize>(kControlEntireControl, kControlSizeTag, &size ) ;
+     font.MacCreateFromThemeFont( themeFont ) ;
+-#else
++#elif wxOSX_USE_CORE_TEXT
+     CTFontUIFontType themeFont = kCTFontSystemFontType ;
+     switch ( variant )
+     {
+@@ -371,6 +371,37 @@
+             break ;
+     }
+     font.MacCreateFromUIFont( themeFont ) ;
++#else
++    ThemeFontID themeFont = kThemeSystemFont ;
++
++    // we will get that from the settings later
++    // and make this NORMAL later, but first
++    // we have a few calculations that we must fix
++
++    switch ( variant )
++    {
++        case wxWINDOW_VARIANT_NORMAL :
++            themeFont = kThemeSystemFont ;
++            break ;
++
++        case wxWINDOW_VARIANT_SMALL :
++            themeFont = kThemeSmallSystemFont ;
++            break ;
++
++        case wxWINDOW_VARIANT_MINI :
++            // not always defined in the headers
++            themeFont = 109 ;
++            break ;
++
++        case wxWINDOW_VARIANT_LARGE :
++            themeFont = kThemeSystemFont ;
++            break ;
++
++        default:
++            wxFAIL_MSG(_T("unexpected window variant"));
++            break ;
++    }
++    font.MacCreateFromThemeFont( themeFont ) ;
+ #endif
+ 
+     SetFont( font ) ;
+@@ -432,6 +463,10 @@
+ void wxWindowMac::DoCaptureMouse()
+ {
+     wxApp::s_captureWindow = (wxWindow*) this ;
++
++    m_peer->SetFocus() ;
++
++    m_peer->CaptureMouse() ;
+ }
+ 
+ wxWindow * wxWindowBase::GetCapture()
+@@ -442,6 +477,8 @@
+ void wxWindowMac::DoReleaseMouse()
+ {
+     wxApp::s_captureWindow = NULL ;
++
++    m_peer->ReleaseMouse() ;
+ }
+ 
+ #if wxUSE_DRAG_AND_DROP
+@@ -696,38 +733,9 @@
+     wxASSERT_MSG( m_cursor.Ok(),
+         wxT("cursor must be valid after call to the base version"));
+ 
+-    wxWindowMac *mouseWin = 0 ;
+-#if wxOSX_USE_CARBON
+-    {
+-        wxNonOwnedWindow *tlw = MacGetTopLevelWindow() ;
+-        WindowRef window = (WindowRef) ( tlw ? tlw->GetWXWindow() : 0 ) ;
++    if (GetPeer() != NULL)
++        GetPeer()->SetCursor(cursor);
+ 
+-        ControlPartCode part ;
+-        ControlRef control ;
+-        Point pt ;
+- #if MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_5
+-        HIPoint hiPoint ;
+-        HIGetMousePosition(kHICoordSpaceWindow, window, &hiPoint);
+-        pt.h = hiPoint.x;
+-        pt.v = hiPoint.y;
+- #else
+-        GetGlobalMouse( &pt );
+-        int x = pt.h;
+-        int y = pt.v;
+-        ScreenToClient(&x, &y);
+-        pt.h = x;
+-        pt.v = y;
+-#endif
+-        control = FindControlUnderMouse( pt , window , &part ) ;
+-        if ( control )
+-            mouseWin = wxFindWindowFromWXWidget( (WXWidget) control ) ;
+-
+-    }
+-#endif
+-
+-    if ( mouseWin == this && !wxIsBusy() )
+-        m_cursor.MacInstall() ;
+-
+     return true ;
+ }
+ 
+@@ -748,30 +756,8 @@
+     {
+         ClientToScreen( &x , &y ) ;
+     }
+-#ifdef __WXOSX_CARBON__
+-    long menuResult = ::PopUpMenuSelect((MenuHandle) menu->GetHMenu() , y, x, 0) ;
+-    if ( HiWord(menuResult) != 0 )
+-    {
+-        MenuCommand macid;
+-        GetMenuItemCommandID( GetMenuHandle(HiWord(menuResult)) , LoWord(menuResult) , &macid );
+-        int id = wxMacCommandToId( macid );
+-        wxMenuItem* item = NULL ;
+-        wxMenu* realmenu ;
+-        item = menu->FindItem( id, &realmenu ) ;
+-        if ( item )
+-        {
+-            if (item->IsCheckable())
+-                item->Check( !item->IsChecked() ) ;
++    menu->GetPeer()->PopUp(this, x, y);
+ 
+-            menu->SendEvent( id , item->IsCheckable() ? item->IsChecked() : -1 ) ;
+-        }
+-    }
+-
+-#else
+-    menu->SetInvokingWindow( NULL );
+-    return false;
+-#endif
+-
+     return true;
+ #else
+     // actually this shouldn't be called, because universal is having its own implementation
+Index: src/osx/cocoa/window.mm
+===================================================================
+--- src/osx/cocoa/window.mm	(revision 57954)
++++ src/osx/cocoa/window.mm	(working copy)
+@@ -36,6 +36,7 @@
+ }
+ 
+ - (void)drawRect: (NSRect) rect;
++- (void)resetCursorRects;
+ 
+ -(void)mouseDown:(NSEvent *)event ;
+ -(void)rightMouseDown:(NSEvent *)event ;
+@@ -43,12 +44,17 @@
+ -(void)mouseUp:(NSEvent *)event ;
+ -(void)rightMouseUp:(NSEvent *)event ;
+ -(void)otherMouseUp:(NSEvent *)event ;
++-(void)mouseMoved:(NSEvent *)event ;
++-(void)mouseDragged:(NSEvent *)event ;
++-(void)mouseEntered:(NSEvent *)event ;
++-(void)mouseExited:(NSEvent *)event ;
+ -(void)handleMouseEvent:(NSEvent *)event;
+ 
+ - (void)keyDown:(NSEvent *)event;
+ - (void)keyUp:(NSEvent *)event;
++- (BOOL)performKeyEquivalent:(NSEvent *)event;
+ - (void)flagsChanged:(NSEvent *)event;
+-- (void)handleKeyEvent:(NSEvent *)event;
++- (BOOL)handleKeyEvent:(NSEvent *)event;
+ 
+ - (void)setImplementation: (wxWidgetImpl *) theImplementation;
+ - (wxWidgetImpl*) implementation;
+@@ -61,7 +67,7 @@
+ 
+ long wxOSXTranslateCocoaKey(unsigned short code, int unichar )
+ {
+-    long retval = code;
++    long retval = unichar;
+     switch( unichar )
+     {
+         case NSUpArrowFunctionKey :
+@@ -131,11 +137,14 @@
+     }
+     
+     int unichar = chars.Length() > 0 ? chars[0] : 0;
++    int keyval = wxOSXTranslateCocoaKey( [nsEvent keyCode], unichar ) ;
++    if ( keyval == unichar && ( wxevent.GetEventType() == wxEVT_KEY_UP || wxevent.GetEventType() == wxEVT_KEY_DOWN ) )
++        keyval = wxToupper( keyval ) ;
+     
+ #if wxUSE_UNICODE
+     wxevent.m_uniChar = unichar;
+ #endif
+-    wxevent.m_keyCode = wxOSXTranslateCocoaKey( [nsEvent keyCode], unichar ) ;
++    wxevent.m_keyCode = keyval;
+ //    wxevent.m_rawCode = keymessage;
+     wxevent.m_rawFlags = modifiers;
+     
+@@ -156,6 +165,9 @@
+     }
+ }
+ 
++UInt32 g_lastButton = 0 ;
++bool g_lastButtonWasFakeRight = false ;
++
+ void SetupMouseEvent( wxMouseEvent &wxevent , NSEvent * nsEvent )
+ {
+     UInt32 modifiers = [nsEvent modifierFlags] ;
+@@ -174,12 +186,30 @@
+     wxevent.m_metaDown = modifiers & NSCommandKeyMask;
+     wxevent.m_clickCount = clickCount;
+     wxevent.SetTimestamp( [nsEvent timestamp] * 1000.0 ) ;
+-/*
++
++    int eventType = [nsEvent type];
++
++    switch (eventType)
++    {
++        case NSLeftMouseDown :
++        case NSLeftMouseDragged :
++            mouseChord = 1U;
++            break;
++        case NSRightMouseDown :
++        case NSRightMouseDragged :
++            mouseChord = 2U;
++            break;
++        case NSOtherMouseDown :
++        case NSOtherMouseDragged :
++            mouseChord = 4U;
++            break;
++    }
++
+     // a control click is interpreted as a right click
+     bool thisButtonIsFakeRight = false ;
+-    if ( button == kEventMouseButtonPrimary && (modifiers & controlKey) )
++    if ( button == 0 && (modifiers & NSControlKeyMask) )
+     {
+-        button = kEventMouseButtonSecondary ;
++        button = 1 ;
+         thisButtonIsFakeRight = true ;
+     }
+ 
+@@ -189,10 +219,15 @@
+     // we must make sure that our synthetic 'right' button corresponds in
+     // mouse down, moved and mouse up, and does not deliver a right down and left up
+ 
+-    if ( cEvent.GetKind() == kEventMouseDown )
++    // translate into wx types
++    switch (eventType)
+     {
+-        g_lastButton = button ;
+-        g_lastButtonWasFakeRight = thisButtonIsFakeRight ;
++        case NSLeftMouseDown :
++        case NSRightMouseDown :
++        case NSOtherMouseDown :
++            g_lastButton = button ;
++            g_lastButtonWasFakeRight = thisButtonIsFakeRight ;
++            break;
+     }
+ 
+     if ( button == 0 )
+@@ -200,7 +235,7 @@
+         g_lastButton = 0 ;
+         g_lastButtonWasFakeRight = false ;
+     }
+-    else if ( g_lastButton == kEventMouseButtonSecondary && g_lastButtonWasFakeRight )
++    else if ( g_lastButton == 1 && g_lastButtonWasFakeRight )
+         button = g_lastButton ;
+ 
+     // Adjust the chord mask to remove the primary button and add the
+@@ -217,9 +252,6 @@
+     if(mouseChord & 4U)
+                 wxevent.m_middleDown = true ;
+ 
+-*/
+-    // translate into wx types
+-    int eventType = [nsEvent type];
+     switch (eventType)
+     {
+         case NSLeftMouseDown :
+@@ -348,6 +380,15 @@
+     }
+ }
+ 
++- (void) resetCursorRects
++{
++    [super resetCursorRects];
++    wxWindow* wxpeer = impl->GetWXPeer();
++    NSCursor *cursor = (NSCursor*)wxpeer->GetCursor().GetHCURSOR();
++    [self addCursorRect: [self bounds]
++          cursor: cursor];
++}
++
+ -(void)mouseDown:(NSEvent *)event 
+ {
+     [self handleMouseEvent:event];
+@@ -378,6 +419,26 @@
+     [self handleMouseEvent:event];
+ }
+ 
++-(void)mouseMoved:(NSEvent *)event 
++{
++    [self handleMouseEvent:event];
++}
++
++-(void)mouseDragged:(NSEvent *)event 
++{
++    [self handleMouseEvent:event];
++}
++
++-(void)mouseEntered:(NSEvent *)event 
++{
++    [self handleMouseEvent:event];
++}
++
++-(void)mouseExited:(NSEvent *)event 
++{
++    [self handleMouseEvent:event];
++}
++
+ -(void)handleMouseEvent:(NSEvent *)event 
+ { 
+     NSPoint clickLocation; 
+@@ -400,16 +461,55 @@
+     [self handleKeyEvent:event];
+ }
+ 
++- (BOOL)performKeyEquivalent:(NSEvent *)event
++{
++    return [self handleKeyEvent:event];
++}
++
+ - (void)flagsChanged:(NSEvent *)event
+ {
+     [self handleKeyEvent:event];
+ }
+ 
+-- (void)handleKeyEvent:(NSEvent *)event
++- (BOOL)handleKeyEvent:(NSEvent *)event
+ {
+     wxKeyEvent wxevent(wxEVT_KEY_DOWN);
+     SetupKeyEvent( wxevent, event );
+-    impl->GetWXPeer()->HandleWindowEvent(wxevent);
++    bool handled = impl->GetWXPeer()->HandleWindowEvent(wxevent);
++
++#if wxUSE_ACCEL
++    if ( !handled )
++    {
++        wxWindow *ancestor = impl->GetWXPeer();
++        while (ancestor)
++        {
++            int command = ancestor->GetAcceleratorTable()->GetCommand( wxevent );
++            if (command != -1)
++            {
++                wxEvtHandler * const handler = ancestor->GetEventHandler();
++
++                wxCommandEvent command_event( wxEVT_COMMAND_MENU_SELECTED, command );
++                handled = handler->ProcessEvent( command_event );
++
++                if ( !handled )
++                {
++                    // accelerators can also be used with buttons, try them too
++                    command_event.SetEventType(wxEVT_COMMAND_BUTTON_CLICKED);
++                    handled = handler->ProcessEvent( command_event );
++                }
++
++                break;
++            }
++
++            if (ancestor->IsTopLevel())
++                break;
++
++            ancestor = ancestor->GetParent();
++        }
++    }
++#endif // wxUSE_ACCEL
++
++    return handled ;
+ }
+ 
+ 
+@@ -502,6 +602,18 @@
+ 
+ void wxWidgetCocoaImpl::ScrollRect( const wxRect *rect, int dx, int dy )
+ {
++#if 1
++    SetNeedsDisplay() ;
++#else
++    // We should do something like this, but it wasn't working in 10.4.
++    if (GetNeedsDisplay() )
++    {
++        SetNeedsDisplay() ;
++    }
++    NSRect r = wxToNSRect( [m_osxView superview], *rect );
++    NSSize offset = NSMakeSize((float)dx, (float)dy);
++    [m_osxView scrollRect:r by:offset];
++#endif
+ }
+ 
+ void wxWidgetCocoaImpl::Move(int x, int y, int width, int height)
+@@ -718,6 +830,29 @@
+     // TODO
+ }
+ 
++void wxWidgetCocoaImpl::SetCursor(const wxCursor& cursor)
++{
++    NSPoint location = [NSEvent mouseLocation];
++    location = [[m_osxView window] convertScreenToBase:location];
++    NSPoint locationInView = [m_osxView convertPoint:location fromView:nil];
++
++    if( NSMouseInRect(locationInView, [m_osxView bounds], YES) )
++    {
++        [(NSCursor*)cursor.GetHCURSOR() set];
++    }
++    [[m_osxView window] invalidateCursorRectsForView:m_osxView];
++}
++
++void wxWidgetCocoaImpl::CaptureMouse()
++{
++    [[m_osxView window] disableCursorRects];
++}
++
++void wxWidgetCocoaImpl::ReleaseMouse()
++{
++    [[m_osxView window] enableCursorRects];
++}
++
+ void wxWidgetCocoaImpl::InstallEventHandler( WXWidget control )
+ {
+ }
+Index: src/osx/cocoa/scrolbar.mm
+===================================================================
+--- src/osx/cocoa/scrolbar.mm	(revision 57954)
++++ src/osx/cocoa/scrolbar.mm	(working copy)
+@@ -48,9 +48,68 @@
+ {
+     if ( impl )
+     {
+-        wxWindow* wxpeer = (wxWindow*) impl->GetWXPeer();
+-        if ( wxpeer )
+-            wxpeer->HandleClicked(0);
++        wxScrollBar* wxpeer = (wxScrollBar*) impl->GetWXPeer();
++        if ( wxpeer ) {
++            int position = wxpeer->GetThumbPosition();
++            int minPos = 0 ;
++            int maxPos = wxpeer->GetRange();
++
++            wxEventType scrollEvent = wxEVT_NULL;
++            int nScrollInc = 0;
++
++            switch ([self hitPart]) {
++            case NSScrollerIncrementLine:
++                nScrollInc = 1;
++                scrollEvent = wxEVT_SCROLL_LINEDOWN;
++                break;
++            case NSScrollerIncrementPage:
++                nScrollInc = wxpeer->GetPageSize();
++                scrollEvent = wxEVT_SCROLL_PAGEDOWN;
++                break;
++            case NSScrollerDecrementLine:
++                nScrollInc = -1;
++                scrollEvent = wxEVT_SCROLL_LINEUP;
++                break;
++            case NSScrollerDecrementPage:
++                nScrollInc = -wxpeer->GetPageSize();
++                scrollEvent = wxEVT_SCROLL_PAGEUP;
++                break;
++            case NSScrollerKnob:
++            case NSScrollerKnobSlot:
++                nScrollInc = 0;
++                scrollEvent = wxEVT_SCROLL_THUMBTRACK;
++                break;
++            case NSScrollerNoPart:
++            default:
++                return;
++            }
++
++            int new_pos = position + nScrollInc;
++
++            if (new_pos < minPos)
++                new_pos = minPos;
++            else if (new_pos > maxPos)
++                new_pos = maxPos;
++
++            if ( nScrollInc )
++                wxpeer->SetThumbPosition( new_pos );
++
++            wxScrollEvent event( scrollEvent, wxpeer->GetId() );
++            if ( wxpeer->GetWindowStyle() & wxHORIZONTAL )
++                event.SetOrientation( wxHORIZONTAL );
++            else
++                event.SetOrientation( wxVERTICAL );
++
++            event.SetPosition( new_pos );
++            event.SetEventObject( wxpeer );
++
++            wxWindow* window = wxpeer->GetParent();
++            if (window && window->MacIsWindowScrollbar( wxpeer ))
++                // this is hardcoded
++                window->MacOnScroll( event );
++            else
++                wxpeer->HandleWindowEvent( event );
++        }
+     }
+ }
+ 
+@@ -80,7 +139,7 @@
+     
+     void SetMaximum(wxInt32 v)
+     {
+-        m_maximum = v;
++        m_maximum = (v == 0) ? 1 : v;
+     }
+     
+     void    SetScrollThumb( wxInt32 value, wxInt32 thumbSize ) 
+@@ -116,5 +175,6 @@
+ 
+     wxWidgetCocoaImpl* c = new wxOSXScrollBarCocoaImpl( wxpeer, v );
+     [v setImplementation:c];
++    [v setEnabled:YES];
+     return c;
+ }
+Index: src/osx/cocoa/textctrl.mm
+===================================================================
+--- src/osx/cocoa/textctrl.mm	(revision 57954)
++++ src/osx/cocoa/textctrl.mm	(working copy)
+@@ -51,6 +51,58 @@
+ 
+ @implementation wxNSTextField
+ 
++- (id)initWithFrame:(NSRect)frame
++{
++    [super initWithFrame:frame];
++    impl = NULL;
++    [self setDelegate: self];
++    [self setTarget: self];
++    [self setAction: @selector(enterAction:)];
++    return self;
++}
++
++- (void)controlTextDidChange:(NSNotification *)aNotification
++{
++    if ( impl )
++    {
++        wxWindow* wxpeer = (wxWindow*) impl->GetWXPeer();
++        if ( wxpeer ) {
++            wxCommandEvent event(wxEVT_COMMAND_TEXT_UPDATED, wxpeer->GetId());
++            event.SetEventObject( wxpeer );
++            event.SetString( static_cast<wxTextCtrl*>(wxpeer)->GetValue() );
++            wxpeer->HandleWindowEvent( event );
++        }
++    }
++}
++
++- (void)controlTextDidEndEditing:(NSNotification *)aNotification
++{
++    if ( impl )
++    {
++        wxWindow* wxpeer = (wxWindow*) impl->GetWXPeer();
++        if ( wxpeer ) {
++            wxFocusEvent event(wxEVT_KILL_FOCUS, wxpeer->GetId());
++            event.SetEventObject( wxpeer );
++            event.SetWindow( wxpeer );
++            wxpeer->HandleWindowEvent( event );
++        }
++    }
++}
++
++- (void) enterAction: (id) sender
++{
++    if ( impl )
++    {
++        wxWindow* wxpeer = (wxWindow*) impl->GetWXPeer();
++        if ( wxpeer && (wxpeer->GetWindowStyle() & wxTE_PROCESS_ENTER) ) {
++            wxCommandEvent event(wxEVT_COMMAND_TEXT_ENTER, wxpeer->GetId());
++            event.SetEventObject( wxpeer );
++            event.SetString( static_cast<wxTextCtrl*>(wxpeer)->GetValue() );
++            wxpeer->HandleWindowEvent( event );
++        }
++    }
++}
++
+ - (void)setImplementation: (wxWidgetImpl *) theImplementation
+ {
+     impl = theImplementation;
+@@ -110,6 +162,7 @@
+ 
+ void wxNSTextFieldControl::SetEditable(bool editable) 
+ {
++    [(wxNSTextField*) m_osxView setEditable:editable];
+ }
+ 
+ void wxNSTextFieldControl::GetSelection( long* from, long* to) const 
+Index: src/osx/cocoa/stattext.mm
+===================================================================
+--- src/osx/cocoa/stattext.mm	(revision 57954)
++++ src/osx/cocoa/stattext.mm	(working copy)
+@@ -69,7 +69,9 @@
+             wxClientDC dc(const_cast<wxStaticText*>(this));
+             wxCoord width, height ;
+             dc.GetTextExtent( m_label , &width, &height);
+-            bounds.h = width;
++            // Some labels seem to have their last characters
++            // stripped out.  Adding 4 pixels seems to be enough to fix this.
++            bounds.h = width+4;
+             bounds.v = height;
+         }
+ 
+Index: src/osx/cocoa/listbox.mm
+===================================================================
+--- src/osx/cocoa/listbox.mm	(revision 57954)
++++ src/osx/cocoa/listbox.mm	(working copy)
+@@ -59,6 +59,15 @@
+ 
+ - (void)setImplementation: (wxListWidgetCocoaImpl *) theImplementation;
+ - (wxListWidgetCocoaImpl*) implementation;
++- (void)clickedAction: (id) sender;
++- (void)doubleClickedAction: (id) sender;
++- (void)mouseDown:(NSEvent *)event ;
++- (void)rightMouseDown:(NSEvent *)event;
++- (void)otherMouseDown:(NSEvent *)event;
++- (void)mouseUp:(NSEvent *)event ;
++- (void)rightMouseUp:(NSEvent *)event;
++- (void)otherMouseUp:(NSEvent *)event;
++- (void)handleMouseEvent:(NSEvent *)event;
+ 
+ @end
+ 
+@@ -249,7 +258,7 @@
+         row:(NSInteger)rowIndex
+ {
+     wxNSTableColumn* tablecol = (wxNSTableColumn *)aTableColumn;
+-    wxListBox* lb = dynamic_cast<wxListBox*>(impl->GetWXPeer());
++    wxListBox* lb = static_cast<wxListBox*>(impl->GetWXPeer());
+     wxCocoaTableColumn* col = [tablecol column];
+     id value = nil;
+     wxNSTableViewCellValue cellvalue(value);
+@@ -262,7 +271,7 @@
+         row:(NSInteger)rowIndex
+ {
+     wxNSTableColumn* tablecol = (wxNSTableColumn *)aTableColumn;
+-    wxListBox* lb = dynamic_cast<wxListBox*>(impl->GetWXPeer());
++    wxListBox* lb = static_cast<wxListBox*>(impl->GetWXPeer());
+     wxCocoaTableColumn* col = [tablecol column];
+     wxNSTableViewCellValue cellvalue(value);
+     lb->SetValueCallback(rowIndex, col, cellvalue);
+@@ -270,8 +279,118 @@
+ 
+ @end
+ 
++extern UInt32 g_lastButton;
++extern bool g_lastButtonWasFakeRight;
++extern void SetupMouseEvent( wxMouseEvent &wxevent , NSEvent * nsEvent );
++
+ @implementation wxNSTableView
+ 
++- (id) init
++{
++    [super init];
++    impl = NULL;
++    [self setTarget: self];
++    [self setAction: @selector(clickedAction:)];
++    [self setDoubleAction: @selector(doubleClickedAction:)];
++    return self;
++}
++
++- (void) clickedAction: (id) sender
++{
++    if ( impl )
++    {
++        wxListBox *list = static_cast<wxListBox*> ( impl->GetWXPeer());
++        wxCHECK_RET( list != NULL , wxT("Listbox expected"));
++
++        wxCommandEvent event( wxEVT_COMMAND_LISTBOX_SELECTED, list->GetId() );
++
++        int sel = [self clickedRow];
++        if ((sel < 0) || (sel > (int) list->GetCount()))  // OS X can select an item below the last item (why?)
++           return;
++        event.SetEventObject( list );
++        if ( list->HasClientObjectData() )
++            event.SetClientObject( list->GetClientObject(sel) );
++        else if ( list->HasClientUntypedData() )
++            event.SetClientData( list->GetClientData(sel) );
++        event.SetString( list->GetString(sel) );
++        event.SetInt( sel );
++        event.SetExtraLong( 1 );
++        list->HandleWindowEvent(event);
++    }
++}
++
++- (void) doubleClickedAction: (id) sender
++{
++    if ( impl )
++    {
++        wxListBox *list = static_cast<wxListBox*> ( impl->GetWXPeer());
++        wxCHECK_RET( list != NULL , wxT("Listbox expected"));
++
++        wxCommandEvent event( wxEVT_COMMAND_LISTBOX_DOUBLECLICKED, list->GetId() );
++
++        int sel = [self clickedRow];
++        if ((sel < 0) || (sel > (int) list->GetCount()))  // OS X can select an item below the last item (why?)
++           return;
++        event.SetEventObject( list );
++        if ( list->HasClientObjectData() )
++            event.SetClientObject( list->GetClientObject(sel) );
++        else if ( list->HasClientUntypedData() )
++            event.SetClientData( list->GetClientData(sel) );
++        event.SetString( list->GetString(sel) );
++        event.SetInt( sel );
++        event.SetExtraLong( 1 );
++        list->HandleWindowEvent(event);
++    }
++}
++
++-(void)mouseDown:(NSEvent *)event 
++{
++    if ( ([event modifierFlags] & NSControlKeyMask) )
++        [self handleMouseEvent:event];
++    else
++        [super mouseDown:event];
++}
++
++-(void)rightMouseDown:(NSEvent *)event 
++{
++    [self handleMouseEvent:event];
++}
++
++-(void)otherMouseDown:(NSEvent *)event 
++{
++    [self handleMouseEvent:event];
++}
++
++-(void)mouseUp:(NSEvent *)event 
++{
++    if (g_lastButtonWasFakeRight)
++        [self handleMouseEvent:event];
++    else
++        [super mouseDown:event];
++}
++
++-(void)rightMouseUp:(NSEvent *)event 
++{
++    [self handleMouseEvent:event];
++}
++
++-(void)otherMouseUp:(NSEvent *)event 
++{
++    [self handleMouseEvent:event];
++}
++
++-(void)handleMouseEvent:(NSEvent *)event 
++{ 
++    NSPoint clickLocation; 
++    clickLocation = [self convertPoint:[event locationInWindow] fromView:nil]; 
++    wxPoint pt = wxFromNSPoint( self, clickLocation );
++    wxMouseEvent wxevent(wxEVT_LEFT_DOWN);
++    SetupMouseEvent( wxevent , event ) ;
++    wxevent.m_x = pt.x;
++    wxevent.m_y = pt.y;
++    impl->GetWXPeer()->HandleWindowEvent(wxevent);
++}
++
+ - (void)setImplementation: (wxListWidgetCocoaImpl *) theImplementation
+ {
+     impl = theImplementation;
+@@ -301,7 +420,7 @@
+ 
+ unsigned int wxListWidgetCocoaImpl::ListGetCount() const 
+ {
+-    wxListBox* lb = dynamic_cast<wxListBox*> ( GetWXPeer() );
++    wxListBox* lb = static_cast<wxListBox*> ( GetWXPeer() );
+     return lb->GetCount();
+ }
+ 
+@@ -428,17 +547,27 @@
+ 
+ int wxListWidgetCocoaImpl::ListGetSelection() const 
+ {
+-    return 0;
++    return [m_tableView selectedRow];
+ }
+ 
+ int wxListWidgetCocoaImpl::ListGetSelections( wxArrayInt& aSelections ) const 
+ {
+-    return 0;
++    aSelections.Empty();
++
++    int count = ListGetCount();
++
++    for ( int i = 0; i < count; ++i)
++    {
++        if ([m_tableView isRowSelected:count])
++        aSelections.Add(i);
++    }
++
++    return aSelections.Count();
+ }
+ 
+ bool wxListWidgetCocoaImpl::ListIsSelected( unsigned int n ) const 
+ {
+-    return false;
++    return [m_tableView isRowSelected:n];
+ }
+ 
+ // display
+Index: src/osx/cocoa/menu.mm
+===================================================================
+--- src/osx/cocoa/menu.mm	(revision 57954)
++++ src/osx/cocoa/menu.mm	(working copy)
+@@ -166,6 +166,24 @@
+ 
+     WXHMENU GetHMenu() { return m_osxMenu; }
+ 
++    virtual void PopUp( wxWindow *win, int x, int y )
++    {
++        win->ScreenToClient( &x , &y ) ;
++        NSView *view = win->GetPeer()->GetWXWidget();
++        NSRect frame = [view frame];
++        frame.origin.x = x;
++        frame.origin.y = y;
++        frame.size.width = 1;
++        frame.size.height = 1;
++        NSPopUpButtonCell *popUpButtonCell = [[NSPopUpButtonCell alloc] initTextCell:@"" pullsDown:NO];
++        [popUpButtonCell setAutoenablesItems:NO];
++        [popUpButtonCell setAltersStateOfSelectedItem:NO];
++        [popUpButtonCell setMenu:m_osxMenu];
++        [popUpButtonCell selectItem:nil];
++        [popUpButtonCell performClickWithFrame:frame inView:view];
++        [popUpButtonCell release];
++    }
++
+     static wxMenuImpl* Create( wxMenu* peer, const wxString& title );
+     static wxMenuImpl* CreateRootMenu( wxMenu* peer );
+ protected :
+Index: src/osx/cocoa/filedlg.mm
+===================================================================
+--- src/osx/cocoa/filedlg.mm	(revision 57954)
++++ src/osx/cocoa/filedlg.mm	(working copy)
+@@ -140,7 +140,7 @@
+ 
+     wxCFStringRef cf( m_message );
+ 
+-    wxCFStringRef dir( m_path );
++    wxCFStringRef dir( m_dir );
+     wxCFStringRef file( m_fileName );
+ 
+     m_path = wxEmptyString;
+Index: src/osx/cocoa/slider.mm
+===================================================================
+--- src/osx/cocoa/slider.mm	(revision 57954)
++++ src/osx/cocoa/slider.mm	(working copy)
+@@ -24,7 +24,8 @@
+ - (void)setImplementation: (wxWidgetImpl *) theImplementation;
+ - (wxWidgetImpl*) implementation;
+ - (BOOL) isFlipped;
+- - (void) clickedAction: (id) sender;
++- (void) clickedAction: (id) sender;
++- (void)mouseDown:(NSEvent *)event ;
+ 
+ @end
+ 
+@@ -45,7 +46,7 @@
+     {
+         wxWindow* wxpeer = (wxWindow*) impl->GetWXPeer();
+         if ( wxpeer )
+-            wxpeer->HandleClicked(0);
++            wxpeer->MacHandleControlClick(NULL,0,false);
+     }
+ }
+ 
+@@ -64,6 +65,17 @@
+     return YES;
+ }
+ 
++-(void)mouseDown:(NSEvent *)event 
++{
++    [super mouseDown:event];
++    if ( impl )
++    {
++        wxWindow* wxpeer = (wxWindow*) impl->GetWXPeer();
++        if ( wxpeer )
++            wxpeer->HandleClicked(0);
++    }
++}
++
+ @end
+ 
+ wxWidgetImplType* wxWidgetImpl::CreateSlider( wxWindowMac* wxpeer, 
+Index: src/osx/cocoa/taskbar.mm
+===================================================================
+--- src/osx/cocoa/taskbar.mm	(revision 57954)
++++ src/osx/cocoa/taskbar.mm	(working copy)
+@@ -21,6 +21,11 @@
+ 
+ #include "wx/taskbar.h"
+ 
++#ifndef __LP64__
++// To compile with 10.4 SDK
++#include <Carbon/Carbon.h>
++#endif
++
+ #import <AppKit/NSApplication.h>
+ #import <AppKit/NSImage.h>
+ #import <AppKit/NSMenu.h>
+Index: src/osx/cocoa/bmpbuttn.mm
+===================================================================
+--- src/osx/cocoa/bmpbuttn.mm	(revision 57954)
++++ src/osx/cocoa/bmpbuttn.mm	(working copy)
+@@ -34,7 +34,7 @@
+     NSRect r = wxOSXGetFrameForControl( wxpeer, pos , size ) ;
+     wxNSButton* v = [[wxNSButton alloc] initWithFrame:r];
+     
+-    [v setBezelStyle:NSRegularSquareBezelStyle];
++    [v setBezelStyle:NSShadowlessSquareBezelStyle];
+     [v setImage:bitmap.GetNSImage() ];
+     [v setButtonType:NSMomentaryPushInButton];
+     wxWidgetCocoaImpl* c = new wxWidgetCocoaImpl( wxpeer, v );
+Index: src/osx/cocoa/utils.mm
+===================================================================
+--- src/osx/cocoa/utils.mm	(revision 57954)
++++ src/osx/cocoa/utils.mm	(working copy)
+@@ -88,6 +90,12 @@
+ void wxGetMousePosition( int* x, int* y )
+ {
+     wxPoint pt = wxFromNSPoint(NULL, [NSEvent mouseLocation]);
++    NSRect frame = [[NSScreen mainScreen] frame];
++    pt.y = frame.size.height - ( pt.y );
++    if ( x )
++        *x = pt.x;
++    if ( y )
++        *y = pt.y;
+ };
+ 
+ wxTimerImpl* wxGUIAppTraits::CreateTimerImpl(wxTimer *timer)
+@@ -180,4 +188,4 @@
+ 
+ 
+ 
+-#endif // wxOSX_USE_COCOA
+\ No newline at end of file
++#endif // wxOSX_USE_COCOA
+Index: src/osx/cocoa/nonownedwnd.mm
+===================================================================
+--- src/osx/cocoa/nonownedwnd.mm	(revision 57954)
++++ src/osx/cocoa/nonownedwnd.mm	(working copy)
+@@ -423,10 +423,10 @@
+     return true;
+ }
+ 
+-void wxNonOwnedWindowCocoaImpl::MoveWindow(int x, int y, int width, int height)
++void wxNonOwnedWindowCocoaImpl::MoveWindow(int x, int y, int width, int height, bool display)
+ {
+     NSRect r = wxToNSRect( NULL, wxRect(x,y,width, height) );
+-    [m_macWindow setFrame:r display:YES];
++    [m_macWindow setFrame:r display:display];
+ }
+ 
+ void wxNonOwnedWindowCocoaImpl::GetPosition( int &x, int &y ) const
+@@ -533,13 +533,14 @@
+ 
+ void wxNonOwnedWindowCocoaImpl::ScreenToWindow( int *x, int *y )
+ {
+-    wxPoint p((x ? *x : 0), (y ? *y : 0) );
+-    /*
+-    NSPoint nspt = wxToNSPoint( NULL, p );
+-    
+-    nspt = [[m_macWindow contentView] convertPoint:p toV:nil];
+-    p = wxFromNSPoint( 
+-    */
++    wxPoint p(  (x ? *x : 0), (y ? *y : 0) );
++    NSRect frame = [m_macWindow frame];
++    NSPoint nsp = wxToNSPoint(NULL, p);
++    NSRect sframe = [[NSScreen mainScreen] frame];
++    nsp.y = sframe.size.height - nsp.y;
++    nsp = [m_macWindow convertScreenToBase:nsp];
++    nsp.y = frame.size.height - nsp.y;
++    p = wxFromNSPoint(NULL, nsp);
+     if ( x )
+         *x = p.x;
+     if ( y )
+@@ -549,9 +550,13 @@
+ void wxNonOwnedWindowCocoaImpl::WindowToScreen( int *x, int *y )
+ {
+     wxPoint p(  (x ? *x : 0), (y ? *y : 0) );
+-    /*
+-    p = [m_macWindow convertPoint:p toWindow:nil];
+-    */
++    NSRect frame = [m_macWindow frame];
++    NSPoint nsp = wxToNSPoint(NULL, p);
++    nsp.y = frame.size.height - nsp.y;
++    nsp = [m_macWindow convertBaseToScreen:nsp];
++    NSRect sframe = [[NSScreen mainScreen] frame];
++    nsp.y = sframe.size.height - nsp.y;
++    p = wxFromNSPoint(NULL, nsp);
+     if ( x )
+         *x = p.x;
+     if ( y )
+@@ -564,4 +569,4 @@
+     wxNonOwnedWindowImpl* now = new wxNonOwnedWindowCocoaImpl( wxpeer );
+     now->Create( parent, pos, size, style , extraStyle, name );
+     return now;
+-}
+\ No newline at end of file
++}
+Index: src/osx/core/printmac.cpp
+===================================================================
+--- src/osx/core/printmac.cpp	(revision 57954)
++++ src/osx/core/printmac.cpp	(working copy)
+@@ -160,7 +160,7 @@
+     PMSetCopies( m_macPrintSettings , data.GetNoCopies() , false ) ;
+     PMSetCollate(m_macPrintSettings, data.GetCollate());
+     
+-#if wxOSX_USE_CARBON
++#ifndef __LP64__
+     PMColorMode color ;
+     PMGetColorMode(  (PMPrintSettings) m_macPrintSettings, &color ) ;
+     if ( data.GetColour() )
+@@ -257,7 +257,7 @@
+         PMSetOrientation( (PMPageFormat) m_macPageFormat , ( data.GetOrientation() == wxLANDSCAPE ) ?
+             kPMLandscape : kPMPortrait , false ) ;
+     
+-#if wxOSX_USE_CARBON
++#if MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_5 
+     PMTag tag = kPMMaxSquareResolution;
+     PMPrinterGetPrinterResolution(printer, tag, &res);
+     PMSetResolution((PMPageFormat) m_macPageFormat, &res);
+@@ -502,7 +502,7 @@
+     PMResolution res;
+     wxMacCarbonPrintData* nativeData = (wxMacCarbonPrintData*)
+           (m_printDialogData.GetPrintData().GetNativeData());
+-#if wxOSX_USE_CARBON
++#if MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_5 
+     PMGetResolution((PMPageFormat) (nativeData->m_macPageFormat), &res);
+ #else 
+     PMPrinter printer;
+Index: src/osx/slider_osx.cpp
+===================================================================
+--- src/osx/slider_osx.cpp	(revision 57954)
++++ src/osx/slider_osx.cpp	(working copy)
+@@ -22,8 +22,13 @@
+ END_EVENT_TABLE()
+ 
+  // The dimensions of the different styles of sliders (from Aqua document)
++#ifdef wxOSX_USE_COCOA
++#define wxSLIDER_DIMENSIONACROSS_WITHTICKMARKS 25
++#define wxSLIDER_DIMENSIONACROSS_ARROW 21
++#else
+ #define wxSLIDER_DIMENSIONACROSS_WITHTICKMARKS 24
+ #define wxSLIDER_DIMENSIONACROSS_ARROW 18
++#endif
+ 
+ // Distance between slider and text
+ #define wxSLIDER_BORDERTEXT 5
+Index: src/osx/nonownedwnd_osx.cpp
+===================================================================
+--- src/osx/nonownedwnd_osx.cpp	(revision 57954)
++++ src/osx/nonownedwnd_osx.cpp	(working copy)
+@@ -355,7 +355,8 @@
+ 
+     m_cachedClippedRectValid = false ;
+ 
+-    m_nowpeer->MoveWindow(x, y, width, height);
++    // do not trigger refreshes upon invisible and possible partly created objects
++    m_nowpeer->MoveWindow(x, y, width, height, IsShownOnScreen());
+     wxWindowMac::MacSuperChangedPosition() ; // like this only children will be notified
+ }
+ 
+Index: src/osx/iphone/nonownedwnd.mm
+===================================================================
+--- src/osx/iphone/nonownedwnd.mm	(revision 57954)
++++ src/osx/iphone/nonownedwnd.mm	(working copy)
+@@ -139,7 +139,7 @@
+     return true;
+ }
+ 
+-void wxNonOwnedWindowIPhoneImpl::MoveWindow(int x, int y, int width, int height)
++void wxNonOwnedWindowIPhoneImpl::MoveWindow(int x, int y, int width, int height, bool)
+ {
+     CGRect r = CGRectMake( 0,0,width,height) ;
+     [m_macWindow setFrame:r];
+Index: src/osx/listbox_osx.cpp
+===================================================================
+--- src/osx/listbox_osx.cpp	(revision 57954)
++++ src/osx/listbox_osx.cpp	(working copy)
+@@ -24,6 +24,11 @@
+     #include "wx/dcclient.h"
+ #endif
+ 
++#if !wxOSX_USE_CORE_TEXT
++    // for themeing support
++    #include <Carbon/Carbon.h>
++#endif
++
+ IMPLEMENT_DYNAMIC_CLASS(wxListBox, wxControlWithItems)
+ 
+ BEGIN_EVENT_TABLE(wxListBox, wxControl)
+@@ -272,7 +277,7 @@
+ 
+     attr.colFg = wxSystemSettings::GetColour( wxSYS_COLOUR_WINDOWTEXT );
+     attr.colBg = wxSystemSettings::GetColour( wxSYS_COLOUR_LISTBOX );
+-#if wxOSX_USE_CARBON
++#if wxOSX_USE_CARBON || !wxOSX_USE_CORE_TEXT
+     attr.font.MacCreateFromThemeFont(kThemeViewsFont);
+ #else
+     attr.font.MacCreateFromUIFont(kCTFontViewsFontType);
+Index: src/osx/carbon/menu.cpp
+===================================================================
+--- src/osx/carbon/menu.cpp	(revision 57954)
++++ src/osx/carbon/menu.cpp	(working copy)
+@@ -259,6 +259,27 @@
+ 
+     WXHMENU GetHMenu() { return m_osxMenu; }
+ 
++    virtual void PopUp( wxWindow *WXUNUSED(win), int x, int y )
++    {
++        long menuResult = ::PopUpMenuSelect(m_osxMenu, y, x, 0) ;
++        if ( HiWord(menuResult) != 0 )
++        {
++            MenuCommand macid;
++            GetMenuItemCommandID( GetMenuHandle(HiWord(menuResult)) , LoWord(menuResult) , &macid );
++            int id = wxMacCommandToId( macid );
++            wxMenuItem* item = NULL ;
++            wxMenu* realmenu ;
++            item = m_peer->FindItem( id, &realmenu ) ;
++            if ( item )
++            {
++                if (item->IsCheckable())
++                    item->Check( !item->IsChecked() ) ;
++
++                m_peer->SendEvent( id , item->IsCheckable() ? item->IsChecked() : -1 ) ;
++            }
++        }
++    }
++
+     static wxMenuImpl* Create( wxMenu* peer, const wxString& title );
+     static wxMenuImpl* CreateRootMenu( wxMenu* peer );
+ protected :
+Index: src/osx/carbon/window.cpp
+===================================================================
+--- src/osx/carbon/window.cpp	(revision 57954)
++++ src/osx/carbon/window.cpp	(working copy)
+@@ -1211,6 +1211,48 @@
+ #endif
+ }
+ 
++void wxMacControl::SetCursor(const wxCursor& cursor)
++{
++    wxWindowMac *mouseWin = 0 ;
++    WindowRef window = GetControlOwner( m_controlRef ) ;
++
++    wxNonOwnedWindow* tlwwx = wxNonOwnedWindow::GetFromWXWindow( (WXWindow) window ) ;
++    if ( tlwwx != NULL )
++    {
++        ControlPartCode part ;
++        ControlRef control ;
++        Point pt ;
++ #if MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_5
++        HIPoint hiPoint ;
++        HIGetMousePosition(kHICoordSpaceWindow, window, &hiPoint);
++        pt.h = hiPoint.x;
++        pt.v = hiPoint.y;
++ #else
++        GetGlobalMouse( &pt );
++        int x = pt.h;
++        int y = pt.v;
++        tlwwx->ScreenToClient(&x, &y);
++        pt.h = x;
++        pt.v = y;
++#endif
++        control = FindControlUnderMouse( pt , window , &part ) ;
++        if ( control )
++            mouseWin = wxFindWindowFromWXWidget( (WXWidget) control ) ;
++
++    }
++
++    if ( mouseWin == tlwwx && !wxIsBusy() )
++        cursor.MacInstall() ;
++}
++
++void wxMacControl::CaptureMouse()
++{
++}
++
++void wxMacControl::ReleaseMouse()
++{
++}
++
+ void wxMacControl::SetBackgroundColour( const wxColour &WXUNUSED(col) )
+ {
+ //    HITextViewSetBackgroundColor( m_textView , color );
+Index: src/osx/carbon/gdiobj.cpp
+===================================================================
+--- src/osx/carbon/gdiobj.cpp	(revision 57954)
++++ src/osx/carbon/gdiobj.cpp	(working copy)
+@@ -22,6 +22,11 @@
+ #include "wx/osx/private.h"
+ #include "wx/font.h"
+ 
++#if !wxOSX_USE_CORE_TEXT
++    // for themeing support
++    #include <Carbon/Carbon.h>
++#endif
++
+ // Linker will discard entire object file without this
+ wxFORCE_LINK_THIS_MODULE(gdiobj)
+ 
+@@ -64,7 +69,7 @@
+ #if wxOSX_USE_COCOA_OR_CARBON
+         case FONT_NORMAL:
+             font = new wxFont;
+-#if wxOSX_USE_CARBON
++#if wxOSX_USE_CARBON || !wxOSX_USE_CORE_TEXT
+             font->MacCreateFromThemeFont(kThemeSystemFont);
+ #else
+             font->MacCreateFromUIFont(kCTFontSystemFontType);
+@@ -72,7 +77,7 @@
+             break;
+         case FONT_SMALL:
+             font = new wxFont;
+-#if wxOSX_USE_CARBON
++#if wxOSX_USE_CARBON || !wxOSX_USE_CORE_TEXT
+             font->MacCreateFromThemeFont(kThemeSmallSystemFont);
+ #else
+             font->MacCreateFromUIFont(kCTFontSmallSystemFontType);
+Index: src/osx/carbon/nonownedwnd.cpp
+===================================================================
+--- src/osx/carbon/nonownedwnd.cpp	(revision 57954)
++++ src/osx/carbon/nonownedwnd.cpp	(working copy)
+@@ -156,7 +156,7 @@
+     height = content.bottom - content.top ;
+ }
+ 
+-void wxNonOwnedWindowCarbonImpl::MoveWindow(int x, int y, int width, int height)
++void wxNonOwnedWindowCarbonImpl::MoveWindow(int x, int y, int width, int height, bool)
+ {
+     Rect bounds = { y , x , y + height , x + width } ;
+     verify_noerr(SetWindowBounds( (WindowRef) m_macWindow, kWindowStructureRgn , &bounds )) ;
+Index: src/osx/carbon/font.cpp
+===================================================================
+--- src/osx/carbon/font.cpp	(revision 57954)
++++ src/osx/carbon/font.cpp	(working copy)
+@@ -754,7 +754,7 @@
+ 
+ #endif
+ 
+-#if wxOSX_USE_CARBON
++#if wxOSX_USE_CARBON || !wxOSX_USE_CORE_TEXT
+ bool wxFont::MacCreateFromThemeFont(wxUint16 themeFontID)
+ {
+ #if wxOSX_USE_CORE_TEXT
+Index: src/osx/carbon/app.cpp
+===================================================================
+--- src/osx/carbon/app.cpp	(revision 57954)
++++ src/osx/carbon/app.cpp	(working copy)
+@@ -79,7 +79,7 @@
+ 
+ bool      wxApp::sm_isEmbedded = false; // Normally we're not a plugin
+ 
+-#if wxOSX_USE_COCOA_OR_CARBON
++#if wxOSX_USE_CARBON
+ 
+ //----------------------------------------------------------------------
+ // Core Apple Event Support
+Index: src/osx/checklst_osx.cpp
+===================================================================
+--- src/osx/checklst_osx.cpp	(revision 57954)
++++ src/osx/checklst_osx.cpp	(working copy)
+@@ -134,6 +134,8 @@
+ 
+ void wxCheckListBox::OnItemInserted(unsigned int pos)
+ {
++    wxListBox::OnItemInserted(pos);
++
+     m_checks.Insert(false, pos );
+ }
+ 
+@@ -146,6 +148,8 @@
+ 
+ void wxCheckListBox::DoClear()
+ {
++    wxListBox::DoClear();
++
+     m_checks.Empty();
+ }
+ 
+Index: src/generic/treectlg.cpp
+===================================================================
+--- src/generic/treectlg.cpp	(revision 57954)
++++ src/generic/treectlg.cpp	(working copy)
+@@ -43,6 +43,8 @@
+ 
+ #ifdef __WXMAC__
+     #include "wx/osx/private.h"
++    // for themeing support
++    #include <Carbon/Carbon.h>
+ #endif
+ 
+ // -----------------------------------------------------------------------------
+@@ -989,7 +991,7 @@
+     m_lastOnSame = false;
+ 
+ #if defined( __WXMAC__ )
+-#if wxOSX_USE_CARBON
++#if wxOSX_USE_CARBON || !wxOSX_USE_CORE_TEXT
+     m_normalFont.MacCreateFromThemeFont( kThemeViewsFont ) ;
+ #else
+     m_normalFont.MacCreateFromUIFont( kCTFontViewsFontType ) ;
+Index: src/generic/listctrl.cpp
+===================================================================
+--- src/generic/listctrl.cpp	(revision 57954)
++++ src/generic/listctrl.cpp	(working copy)
+@@ -5060,7 +5060,7 @@
+     if ( GetWindowVariant() == wxWINDOW_VARIANT_NORMAL )
+     {
+         wxFont font;
+-#if wxOSX_USE_CARBON
++#if wxOSX_USE_CARBON || !wxOSX_USE_CORE_TEXT
+         font.MacCreateFromThemeFont( kThemeViewsFont );
+ #else
+         font.MacCreateFromUIFont( kCTFontViewsFontType );
+@@ -5077,7 +5077,7 @@
+         if (m_headerWin)
+         {
+             wxFont font;
+-#if wxOSX_USE_CARBON
++#if wxOSX_USE_CARBON || !wxOSX_USE_CORE_TEXT
+             font.MacCreateFromThemeFont( kThemeSmallSystemFont );
+ #else
+         font.MacCreateFromUIFont( kCTFontSystemFontType );
+Index: include/wx/osx/iphone/private.h
+===================================================================
+--- include/wx/osx/iphone/private.h	(revision 57954)
++++ include/wx/osx/iphone/private.h	(working copy)
+@@ -89,7 +89,7 @@
+     bool SetBackgroundStyle(wxBackgroundStyle style);    
+     bool CanSetTransparent();
+ 
+-    void MoveWindow(int x, int y, int width, int height);
++    void MoveWindow(int x, int y, int width, int height, bool display);
+     void GetPosition( int &x, int &y ) const;
+     void GetSize( int &width, int &height ) const;
+ 
+Index: include/wx/osx/cocoa/private.h
+===================================================================
+--- include/wx/osx/cocoa/private.h	(revision 57954)
++++ include/wx/osx/cocoa/private.h	(working copy)
+@@ -160,6 +160,10 @@
+ 
+     void                SetFont( const wxFont & font , const wxColour& foreground , long windowStyle, bool ignoreBlack = true );
+ 
++    void                SetCursor( const wxCursor & cursor );
++    void                CaptureMouse();
++    void                ReleaseMouse();
++
+     void                InstallEventHandler( WXWidget control = NULL );
+ protected:
+     WXWidget m_osxView;
+@@ -191,7 +195,7 @@
+     bool SetBackgroundStyle(wxBackgroundStyle style);    
+     bool CanSetTransparent();
+ 
+-    void MoveWindow(int x, int y, int width, int height);
++    void MoveWindow(int x, int y, int width, int height, bool display);
+     void GetPosition( int &x, int &y ) const;
+     void GetSize( int &width, int &height ) const;
+ 
+Index: include/wx/osx/core/private.h
+===================================================================
+--- include/wx/osx/core/private.h	(revision 57954)
++++ include/wx/osx/core/private.h	(working copy)
+@@ -149,7 +149,9 @@
+     virtual void SetTitle( const wxString& text ) = 0;
+ 
+     virtual WXHMENU GetHMenu() = 0;
+-    
++
++    virtual void PopUp( wxWindow *win, int x, int y ) = 0;
++
+     wxMenu* GetWXPeer() { return m_peer ; }
+ 
+     static wxMenuImpl* Create( wxMenu* peer, const wxString& title );
+@@ -232,6 +234,10 @@
+ 
+     virtual void        SetFont( const wxFont & font , const wxColour& foreground , long windowStyle, bool ignoreBlack = true ) = 0;
+ 
++    virtual void        SetCursor( const wxCursor & cursor ) = 0;
++    virtual void        CaptureMouse() = 0;
++    virtual void        ReleaseMouse() = 0;
++
+     // is the clicked event sent AFTER the state already changed, so no additional
+     // state changing logic is required from the outside
+     virtual bool        ButtonClickDidStateChange() = 0;
+@@ -652,7 +658,7 @@
+     }
+ 
+     virtual void GetContentArea( int &left , int &top , int &width , int &height ) const = 0;    
+-    virtual void MoveWindow(int x, int y, int width, int height) = 0;
++    virtual void MoveWindow(int x, int y, int width, int height, bool display) = 0;
+     virtual void GetPosition( int &x, int &y ) const = 0;
+     virtual void GetSize( int &width, int &height ) const = 0;
+ 
+Index: include/wx/osx/carbon/font.h
+===================================================================
+--- include/wx/osx/carbon/font.h	(revision 57954)
++++ include/wx/osx/carbon/font.h	(working copy)
+@@ -63,7 +63,7 @@
+ 
+     bool Create(const wxNativeFontInfo& info);
+ 
+-#if wxOSX_USE_CARBON
++#if wxOSX_USE_CARBON || !wxOSX_USE_CORE_TEXT
+     bool MacCreateFromThemeFont( wxUint16 themeFontID ) ;
+ #endif
+ #if wxOSX_USE_CORE_TEXT
+Index: include/wx/osx/carbon/app.h
+===================================================================
+--- include/wx/osx/carbon/app.h	(revision 57954)
++++ include/wx/osx/carbon/app.h	(working copy)
+@@ -110,7 +110,7 @@
+     bool    MacSendKeyUpEvent( wxWindow* focus , long keyval , long modifiers , long when , short wherex , short wherey , wxChar uniChar ) ;
+     bool    MacSendCharEvent( wxWindow* focus , long keymessage , long modifiers , long when , short wherex , short wherey , wxChar uniChar ) ;
+     void    MacCreateKeyEvent( wxKeyEvent& event, wxWindow* focus , long keymessage , long modifiers , long when , short wherex , short wherey , wxChar uniChar ) ;
+-#if wxOSX_USE_COCOA_OR_CARBON
++#if wxOSX_USE_CARBON
+     // we only have applescript on these
+     virtual short         MacHandleAEODoc(const WXAPPLEEVENTREF event , WXAPPLEEVENTREF reply) ;
+     virtual short         MacHandleAEGURL(const WXAPPLEEVENTREF event , WXAPPLEEVENTREF reply) ;
+Index: include/wx/osx/carbon/private.h
+===================================================================
+--- include/wx/osx/carbon/private.h	(revision 57954)
++++ include/wx/osx/carbon/private.h	(working copy)
+@@ -430,6 +430,10 @@
+     void SetActionProc( ControlActionUPP   actionProc );
+     SInt32 GetViewSize() const;
+ 
++    virtual void SetCursor( const wxCursor & cursor );
++    virtual void CaptureMouse();
++    virtual void ReleaseMouse();
++
+     virtual void SetVisibility( bool visible );
+ 
+     virtual bool IsActive() const;
+@@ -1027,7 +1031,7 @@
+     void SetExtraStyle( long exStyle );    
+     bool SetBackgroundStyle(wxBackgroundStyle style);    
+     bool CanSetTransparent();
+-    void MoveWindow(int x, int y, int width, int height);
++    void MoveWindow(int x, int y, int width, int height, bool display);
+     void GetPosition( int &x, int &y ) const;
+     void GetSize( int &width, int &height ) const;
+     void GetContentArea( int &left , int &top , int &width , int &height ) const;    

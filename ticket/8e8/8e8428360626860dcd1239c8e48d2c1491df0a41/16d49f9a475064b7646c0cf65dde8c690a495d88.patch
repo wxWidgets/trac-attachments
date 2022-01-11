@@ -1,0 +1,83 @@
+diff -uNrb wxWidgets-trunk\src/msw/dib.cpp wxWidgets-work\src/msw/dib.cpp
+--- wxWidgets-trunk\src/msw/dib.cpp	2013-12-29
++++ wxWidgets-work\src/msw/dib.cpp	2014-02-28
+@@ -276,6 +276,79 @@
+ 
+     if ( !m_handle )
+     {
++        if( ::GetLastError() == ERROR_SUCCESS )
++        {
++            // If handle == NULL && error == 0  => problems with file format.
++            // It can be e.g. caused by negative value of biHeight parameter
++            // (this is a legitimate value but it's not handled by LoadImage).
++            // Try to load DIB manually.
++#if wxUSE_FILE
++            wxFile file(filename, wxFile::read);
++            if ( file.IsOpened() )
++            {
++                BITMAPFILEHEADER bmpHdr;
++                if( file.Read(&bmpHdr, sizeof(bmpHdr)) == sizeof(bmpHdr) )
++                {
++                    BITMAPINFO bmi;
++                    wxZeroMemory(bmi);
++                    if( file.Read(&bmi.bmiHeader, sizeof(bmi.bmiHeader)) == sizeof(bmi.bmiHeader) )
++                    {
++                        if( file.Seek(bmpHdr.bfOffBits) != wxInvalidOffset )
++                        {
++                            // Wee need bottom-up DIB.
++                            bool isTopDown = bmi.bmiHeader.biHeight < 0;
++                            if( isTopDown )
++                                bmi.bmiHeader.biHeight = -bmi.bmiHeader.biHeight;
++
++                            m_handle = ::CreateDIBSection(0,              // hdc unused with DIB_RGB_COLORS
++                                                          &bmi,           // bitmap description
++                                                          DIB_RGB_COLORS, // use RGB, not palette
++                                                          &m_data,        // [out] DIB bits
++                                                          NULL, 0);
++                            if ( m_handle )
++                            {
++                                unsigned long lineSize = GetLineSize(bmi.bmiHeader.biWidth, bmi.bmiHeader.biBitCount);
++                                ssize_t sizeImage = (bmi.bmiHeader.biSizeImage > 0 )? 
++                                                    bmi.bmiHeader.biSizeImage: lineSize*bmi.bmiHeader.biHeight;
++
++                                if( file.Read(m_data, sizeImage) == sizeImage )
++                                {
++                                    if( isTopDown )
++                                    {
++                                        // We need to flip top-down DIB to the standard bottom-up form
++                                        // because it can be converted further to DDB (wxDib::CreateDDB)
++                                        // and this conversion is unaware of vertical orientation of the DIB.
++                                        unsigned char *pTopLine = reinterpret_cast<unsigned char*>(m_data);
++                                        unsigned char *pBottomLine = pTopLine + (bmi.bmiHeader.biHeight-1)*lineSize;
++                                        wxScopedPtr<unsigned char> line(new unsigned char[lineSize]);
++                                        for( int y = 0; y < bmi.bmiHeader.biHeight/2; y++ )
++                                        {
++                                            memcpy(line.get(), pTopLine, lineSize);
++                                            memcpy(pTopLine, pBottomLine, lineSize);
++                                            memcpy(pBottomLine, line.get(), lineSize);
++
++                                            pTopLine += lineSize;
++                                            pBottomLine -= lineSize;
++                                        }
++                                    }
++                                    ::GdiFlush();
++                                    m_width = bmi.bmiHeader.biWidth;
++                                    m_height = bmi.bmiHeader.biHeight;
++                                    m_depth = bmi.bmiHeader.biBitCount;
++
++                                    return true;
++                                }
++
++                                // Unsuccessful manual load.
++                                ::DeleteObject(m_handle);
++                                m_handle = 0;
++                            }
++                        }
++                    }
++                }
++            }
++#endif
++        }
+         wxLogLastError(wxT("Loading DIB from file"));
+ 
+         return false;

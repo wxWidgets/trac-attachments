@@ -1,0 +1,458 @@
+Index: src/gtk/statbox.cpp
+===================================================================
+--- src/gtk/statbox.cpp	(revisione 60255)
++++ src/gtk/statbox.cpp	(copia locale)
+@@ -31,7 +31,9 @@
+     GtkWidget* label_widget = gtk_frame_get_label_widget(GTK_FRAME(widget));
+     int w = alloc->width -
+         2 * widget->style->xthickness - 2 * LABEL_PAD - 2 * LABEL_SIDE_PAD;
+-    if (w < 0) w = 0;
++    if (w < 0) 
++        w = 0;
++
+     if (label_widget->allocation.width > w)
+     {
+         GtkAllocation alloc2 = label_widget->allocation;
+@@ -41,6 +43,251 @@
+ }
+ }
+ 
++
++/* event handling, etc */
++
++struct ChildLocation
++{
++  GtkWidget *child;
++  GtkWidget *container;
++  GtkWidget *toskip;
++
++  gint x;
++  gint y;
++};
++
++static void
++child_location_foreach (GtkWidget *child,
++            gpointer   data)
++{
++  gint x, y;
++  struct ChildLocation *child_loc = (struct ChildLocation *)data;
++
++  /* Ignore invisible widgets */
++  if (!GTK_WIDGET_DRAWABLE (child))
++    return;
++  
++  if (child == child_loc->toskip)
++      return;
++
++  x = 0;
++  y = 0;
++
++  /* (child_loc->x, child_loc->y) are relative to
++   * child_loc->container's allocation.
++   */
++
++  if (!child_loc->child &&
++      gtk_widget_translate_coordinates (child_loc->container, child,
++                    child_loc->x, child_loc->y,
++                    &x, &y))
++    {
++#ifdef DEBUG_TOOLTIP
++      g_print ("candidate: %s  alloc=[(%d,%d)  %dx%d]     (%d, %d)->(%d, %d)\n",
++           gtk_widget_get_name (child),
++           child->allocation.x,
++           child->allocation.y,
++           child->allocation.width,
++           child->allocation.height,
++           child_loc->x, child_loc->y,
++           x, y);
++#endif /* DEBUG_TOOLTIP */
++
++      /* (x, y) relative to child's allocation. */
++      if (x >= 0 && x < child->allocation.width
++      && y >= 0 && y < child->allocation.height)
++        {
++      if (GTK_IS_CONTAINER (child))
++        {
++          struct ChildLocation tmp = { NULL, NULL, 0, 0 };
++
++          /* Take (x, y) relative the child's allocation and
++           * recurse.
++           */
++          tmp.x = x;
++          tmp.y = y;
++          tmp.container = child;
++
++          gtk_container_forall (GTK_CONTAINER (child),
++                    child_location_foreach, &tmp);
++
++          if (tmp.child)
++        child_loc->child = tmp.child;
++          else
++        child_loc->child = child;
++        }
++      else
++        child_loc->child = child;
++    }
++    }
++}
++
++/* Translates coordinates from dest_widget->window relative (src_x, src_y),
++ * to allocation relative (dest_x, dest_y) of dest_widget.
++ */
++static void
++window_to_alloc (GtkWidget *dest_widget,
++         gint       src_x,
++         gint       src_y,
++         gint      *dest_x,
++         gint      *dest_y)
++{
++  /* Translate from window relative to allocation relative */
++  if (!GTK_WIDGET_NO_WINDOW (dest_widget) && dest_widget->parent)
++    {
++      gint wx, wy;
++      gdk_window_get_position (dest_widget->window, &wx, &wy);
++
++      /* Offset coordinates if widget->window is smaller than
++       * widget->allocation.
++       */
++      src_x += wx - dest_widget->allocation.x;
++      src_y += wy - dest_widget->allocation.y;
++    }
++  else
++    {
++      src_x -= dest_widget->allocation.x;
++      src_y -= dest_widget->allocation.y;
++    }
++
++  if (dest_x)
++    *dest_x = src_x;
++  if (dest_y)
++    *dest_y = src_y;
++}
++
++/* Translates coordinates from window relative (x, y) to
++ * allocation relative (x, y) of the returned widget.
++ */
++static GtkWidget *
++find_widget_under_pointer (GdkWindow *window,
++               gint      *x,
++               gint      *y, GtkWidget * toskip)
++{
++  GtkWidget *event_widget;
++  struct ChildLocation child_loc = { NULL, NULL, NULL, 0, 0 };
++
++  gdk_window_get_user_data (window, (void **)&event_widget);
++
++  if (!event_widget)
++    return NULL;
++
++#ifdef DEBUG_TOOLTIP
++  g_print ("event window %p (belonging to %p (%s))  (%d, %d)\n",
++       window, event_widget, gtk_widget_get_name (event_widget),
++       *x, *y);
++#endif
++
++  /* Coordinates are relative to event window */
++  child_loc.x = *x;
++  child_loc.y = *y;
++  child_loc.toskip = toskip;
++
++  /* We go down the window hierarchy to the widget->window,
++   * coordinates stay relative to the current window.
++   * We end up with window == widget->window, coordinates relative to that.
++   */
++  while (window && window != event_widget->window)
++    {
++      gint px, py;
++
++      gdk_window_get_position (window, &px, &py);
++      child_loc.x += px;
++      child_loc.y += py;
++
++      window = gdk_window_get_parent (window);
++    }
++
++  /* Failing to find widget->window can happen for e.g. a detached handle box;
++   * chaining ::query-tooltip up to its parent probably makes little sense,
++   * and users better implement tooltips on handle_box->child.
++   * so we simply ignore the event for tooltips here.
++   */
++  if (!window)
++    return NULL;
++
++  /* Convert the window relative coordinates to allocation
++   * relative coordinates.
++   */
++  window_to_alloc (event_widget,
++           child_loc.x, child_loc.y,
++           &child_loc.x, &child_loc.y);
++
++  if (GTK_IS_CONTAINER (event_widget))
++    {
++      GtkWidget *container = event_widget;
++
++      child_loc.container = event_widget;
++      child_loc.child = NULL;
++
++      gtk_container_forall (GTK_CONTAINER (event_widget),
++                child_location_foreach, &child_loc);
++
++      /* Here we have a widget, with coordinates relative to
++       * child_loc.container's allocation.
++       */
++
++      if (child_loc.child)
++    event_widget = child_loc.child;
++      else if (child_loc.container)
++    event_widget = child_loc.container;
++
++      /* Translate to event_widget's allocation */
++      gtk_widget_translate_coordinates (container, event_widget,
++                    child_loc.x, child_loc.y,
++                    &child_loc.x, &child_loc.y);
++
++    }
++
++  /* We return (x, y) relative to the allocation of event_widget. */
++  if (x)
++    *x = child_loc.x;
++  if (y)
++    *y = child_loc.y;
++
++  return event_widget;
++}
++
++extern "C" {
++static gboolean
++statbox_query_tooltip (GtkWidget  *widget,
++                       gint        x,
++                       gint        y,
++                       gboolean    keyboard_tip,
++                       GtkTooltip *tooltip)
++{
++    printf("statbox_query_tooltip for %p\n", widget);
++    
++    if (!widget || !GTK_IS_FRAME(widget)) { printf("afdasfdsa\n");
++        return false; }
++    
++    if (!widget->parent || !widget->parent->window) { printf("invalid parent\n");
++        return false; }
++        
++    GtkWidget *w = find_widget_under_pointer(widget->parent->window, &x, &y, widget);
++    if (!w) { printf("invalid widget\n"); return false; }
++    
++    gboolean has_tooltip = FALSE;
++    gboolean return_value = FALSE;
++
++    g_object_get(w, "has-tooltip", &has_tooltip, NULL);
++
++    if (has_tooltip) {
++        printf("querying tooltip for %p\n", w);
++        g_signal_emit_by_name(w,
++                                "query-tooltip",
++                                x, y,
++                                keyboard_tip,
++                                tooltip,
++                                &return_value);
++    }
++    else
++        printf("no tooltip set on %p\n", w);
++    
++    return return_value;
++}
++}
++
+ //-----------------------------------------------------------------------------
+ // wxStaticBox
+ //-----------------------------------------------------------------------------
+@@ -79,6 +326,7 @@
+ 
+     m_widget = GTKCreateFrame(label);
+     g_object_ref(m_widget);
++
+     // only base SetLabel needs to be called after GTKCreateFrame
+     wxControl::SetLabel(label);
+ 
+@@ -97,11 +345,15 @@
+ 
+     if (gtk_check_version(2, 12, 0))
+     {
+-        // for clipping label as GTK >= 2.12 does
+-        g_signal_connect(m_widget, "size_allocate",
+-            G_CALLBACK(size_allocate), NULL);
++        // we connect this signal to perform label-clipping as GTK >= 2.12 does
++        g_signal_connect(m_widget, "size_allocate", G_CALLBACK(size_allocate), NULL);
+     }
+ 
++    printf("connecting on %p\n", m_widget);
++    g_signal_connect(m_widget, "query-tooltip", 
++                     G_CALLBACK(statbox_query_tooltip), NULL);
++    g_object_set(m_widget, "has-tooltip", TRUE, NULL);
++
+     return true;
+ }
+ 
+Index: samples/minimal/minimal.cpp
+===================================================================
+--- samples/minimal/minimal.cpp	(revisione 60255)
++++ samples/minimal/minimal.cpp	(copia locale)
+@@ -30,6 +30,8 @@
+     #include "wx/wx.h"
+ #endif
+ 
++#include "wx/artprov.h"
++
+ // ----------------------------------------------------------------------------
+ // resources
+ // ----------------------------------------------------------------------------
+@@ -172,6 +174,14 @@
+     CreateStatusBar(2);
+     SetStatusText("Welcome to wxWidgets!");
+ #endif // wxUSE_STATUSBAR
++
++    wxStaticBoxSizer * sz = new wxStaticBoxSizer(wxVERTICAL, this, "ciao");
++    wxButton* btn = new wxBitmapButton(this, wxID_ANY, wxArtProvider::GetBitmap("gtk-cdrom"), wxPoint(20,20));
++    wxButton* btn2 = new wxButton(this, wxID_ANY, "asdfdass", wxPoint(50,20));
++    btn->SetToolTip("test");
++    btn2->SetToolTip("test2");
++    sz->Add(btn);
++    SetSizer(sz);
+ }
+ 
+ 
+Index: src/gtk/window.cpp
+===================================================================
+--- src/gtk/window.cpp	(revisione 60257)
++++ src/gtk/window.cpp	(copia locale)
+@@ -3721,13 +3721,35 @@
+     wxCHECK_RET( m_widget != NULL, wxT("invalid window") );
+ }
+ 
++static void
++child_location_foreach (GtkWidget *child,
++                        gpointer data)
++{
++    const gchar *tip = (const gchar *)data;
++    gtk_tooltips_set_tip(wxToolTip::s_tooltips, child, tip, NULL);
++    
++    if (GTK_IS_CONTAINER (child))
++    {
++        gtk_container_forall (GTK_CONTAINER (child),
++                              child_location_foreach, (void*)tip);
++    }
++}
++
+ #if wxUSE_TOOLTIPS
+ void wxWindowGTK::DoSetToolTip( wxToolTip *tip )
+ {
+     wxWindowBase::DoSetToolTip(tip);
+ 
+     if (m_tooltip)
++    {
++        const gchar* tipText = wxGTK_CONV_SYS(tip->m_text);
++        
+         m_tooltip->GTKApply( (wxWindow *)this );
++        
++        if (m_widget)
++            gtk_container_forall (GTK_CONTAINER (m_widget),
++                                  child_location_foreach, (void*)tipText);
++    }
+ }
+ 
+ void wxWindowGTK::GTKApplyToolTip( GtkTooltips *tips, const gchar *tip )
+Index: src/gtk/tooltip.cpp
+===================================================================
+--- src/gtk/tooltip.cpp	(revisione 60255)
++++ src/gtk/tooltip.cpp	(copia locale)
+@@ -24,7 +24,7 @@
+ // global data
+ //-----------------------------------------------------------------------------
+ 
+-static GtkTooltips *gs_tooltips = NULL;
++GtkTooltips *wxToolTip::s_tooltips = NULL;
+ 
+ //-----------------------------------------------------------------------------
+ // wxToolTip
+@@ -49,35 +49,35 @@
+     if (!win)
+         return;
+ 
+-    if ( !gs_tooltips )
+-        gs_tooltips = gtk_tooltips_new();
++    if ( !s_tooltips )
++        s_tooltips = gtk_tooltips_new();
+ 
+     m_window = win;
+ 
+     if (m_text.empty())
+-        m_window->GTKApplyToolTip( gs_tooltips, NULL );
++        m_window->GTKApplyToolTip( s_tooltips, NULL );
+     else
+-        m_window->GTKApplyToolTip( gs_tooltips, wxGTK_CONV_SYS(m_text) );
++        m_window->GTKApplyToolTip( s_tooltips, wxGTK_CONV_SYS(m_text) );
+ }
+ 
+ /* static */
+ void wxToolTip::GTKApply(GtkWidget *w, const gchar *tip)
+ {
+-    if ( !gs_tooltips )
+-        gs_tooltips = gtk_tooltips_new();
++    if ( !s_tooltips )
++        s_tooltips = gtk_tooltips_new();
+ 
+-    gtk_tooltips_set_tip(gs_tooltips, w, tip, NULL);
++    gtk_tooltips_set_tip(s_tooltips, w, tip, NULL);
+ }
+ 
+ void wxToolTip::Enable( bool flag )
+ {
+-    if (!gs_tooltips)
++    if (!s_tooltips)
+         return;
+ 
+     if (flag)
+-        gtk_tooltips_enable( gs_tooltips );
++        gtk_tooltips_enable( s_tooltips );
+     else
+-        gtk_tooltips_disable( gs_tooltips );
++        gtk_tooltips_disable( s_tooltips );
+ }
+ 
+ G_BEGIN_DECLS
+@@ -87,12 +87,12 @@
+ 
+ void wxToolTip::SetDelay( long msecs )
+ {
+-    if (!gs_tooltips)
++    if (!s_tooltips)
+         return;
+ 
+     // FIXME: This is a deprecated function and might not even have an effect.
+     // Try to not use it, after which remove the prototype above.
+-    gtk_tooltips_set_delay( gs_tooltips, (int)msecs );
++    gtk_tooltips_set_delay( s_tooltips, (int)msecs );
+ }
+ 
+ void wxToolTip::SetAutoPop( long WXUNUSED(msecs) )
+Index: include/wx/gtk/tooltip.h
+===================================================================
+--- include/wx/gtk/tooltip.h	(revisione 60255)
++++ include/wx/gtk/tooltip.h	(copia locale)
+@@ -45,6 +45,9 @@
+     wxWindow *GetWindow() const { return m_window; }
+     bool IsOk() const { return m_window != NULL; }
+ 
++    // the global instance of GtkTooltips
++    static GtkTooltips* s_tooltips;
++    wxString     m_text;
+ 
+     // this forwards back to wxWindow::GTKApplyToolTip()
+     void GTKApply( wxWindow *win );
+@@ -54,7 +57,6 @@
+     static void GTKApply(GtkWidget *w, const gchar *tip);
+ 
+ private:
+-    wxString     m_text;
+     wxWindow    *m_window;
+ 
+     DECLARE_ABSTRACT_CLASS(wxToolTip)

@@ -1,0 +1,1073 @@
+Index: src/common/event.cpp
+===================================================================
+--- src/common/event.cpp	(revision 55693)
++++ src/common/event.cpp	(working copy)
+@@ -115,7 +115,7 @@
+ wxEventHashTable wxEvtHandler::sm_eventHashTable(wxEvtHandler::sm_eventTable);
+ 
+ const wxEventTableEntry wxEvtHandler::sm_eventTableEntries[] =
+-    { DECLARE_EVENT_TABLE_ENTRY(wxEVT_NULL, 0, 0, (wxObjectEventFunction)NULL, NULL) };
++    { DECLARE_EVENT_TABLE_TERMINATOR() };
+ 
+ 
+ // wxUSE_MEMORY_TRACING considers memory freed from the static objects dtors
+@@ -925,7 +925,7 @@
+     {
+         // Retrieve all valid event handler entries
+         const wxEventTableEntry *entry = table->entries;
+-        while (entry->m_fn != 0)
++        while (entry->m_eventType != wxEVT_NULL)
+         {
+             // Add the event entry in the Hash.
+             AddEntry(*entry);
+@@ -1023,6 +1023,16 @@
+ }
+ 
+ // ----------------------------------------------------------------------------
++// wxEventConnection
++// ----------------------------------------------------------------------------
++void wxEventConnection::Disconnect()
++{
++    wxEvtHandler* handler = m_handler.get();
++    if(handler)
++        handler->Disconnect(*this);
++}
++
++// ----------------------------------------------------------------------------
+ // wxEvtHandler
+ // ----------------------------------------------------------------------------
+ 
+@@ -1255,13 +1265,13 @@
+             // call the handler via wxApp method which allows the user to catch
+             // any exceptions which may be thrown by any handler in the program
+             // in one place
+-            wxTheApp->HandleEvent(handler, (wxEventFunction)entry.m_fn, event);
++            wxTheApp->HandleEvent(handler, entry.m_fn, event);
+         }
+         else
+ #endif // wxUSE_EXCEPTIONS
+         {
+             // no need for an extra virtual function call
+-            (handler->*((wxEventFunction) (entry.m_fn)))(event);
++            entry.m_fn->Relay(handler, event);
+         }
+ 
+         if (!event.GetSkipped())
+@@ -1388,15 +1398,8 @@
+     return false;
+ }
+ 
+-void wxEvtHandler::Connect( int id, int lastId,
+-                            int eventType,
+-                            wxObjectEventFunction func,
+-                            wxObject *userData,
+-                            wxEvtHandler* eventSink )
++void wxEvtHandler::Connect( wxDynamicEventTableEntry* entry )
+ {
+-    wxDynamicEventTableEntry *entry =
+-        new wxDynamicEventTableEntry(eventType, id, lastId, func, userData, eventSink);
+-
+     if (!m_dynamicEvents)
+         m_dynamicEvents = new wxList;
+ 
+@@ -1404,6 +1407,7 @@
+     m_dynamicEvents->Insert( (wxObject*) entry );
+ 
+     // Make sure we get to know when a sink is destroyed
++    wxEvtHandler* eventSink = entry->m_fn->GetFunctorObject();
+     if ( eventSink && eventSink != this )
+     {
+         wxEventConnectionRef *evtConnRef = FindRefInTrackerList(eventSink);
+@@ -1438,8 +1442,8 @@
+         if ((entry->m_id == id) &&
+             ((entry->m_lastId == lastId) || (lastId == wxID_ANY)) &&
+             ((entry->m_eventType == eventType) || (eventType == wxEVT_NULL)) &&
+-            ((entry->m_fn == func) || (func == (wxObjectEventFunction)NULL)) &&
+-            ((entry->m_eventSink == eventSink) || (eventSink == (wxEvtHandler*)NULL)) &&
++            ((entry->m_fn->GetFunctorMethod() == func) || (func == (wxObjectEventFunction)NULL)) &&
++            ((entry->m_fn->GetFunctorObject() == eventSink) || (eventSink == (wxEvtHandler*)NULL)) &&
+             ((entry->m_callbackUserData == userData) || (userData == (wxObject*)NULL)))
+         {
+             if (entry->m_callbackUserData)
+@@ -1453,6 +1457,43 @@
+     return false;
+ }
+ 
++bool wxEvtHandler::Disconnect(wxEventConnection conn)
++{
++    // make sure it is ours
++    if(conn.GetEventHandler() != this)
++    {
++        return false;
++    }
++
++    // make sure it is active
++    wxEventFunctor* functor = conn.GetFunctor();
++    if(functor == NULL)
++    {
++        return false;
++    }
++
++    // Find it
++    // We can't just use the generic disconnect because it checks
++    // the m_id
++    wxList::compatibility_iterator node = m_dynamicEvents->GetFirst();
++    while(node)
++    {
++        wxDynamicEventTableEntry* entry = (wxDynamicEventTableEntry*)node->GetData();
++
++        if(entry->m_fn == functor)
++        {
++            if(entry->m_callbackUserData)
++                delete entry->m_callbackUserData;
++            m_dynamicEvents->Erase(node);
++            delete entry;
++            return true;
++        }
++        node = node->GetNext();
++    }
++    return false;
++
++}
++
+ bool wxEvtHandler::SearchDynamicEventTable( wxEvent& event )
+ {
+     wxCHECK_MSG( m_dynamicEvents, false,
+Index: src/common/appbase.cpp
+===================================================================
+--- src/common/appbase.cpp	(revision 55693)
++++ src/common/appbase.cpp	(working copy)
+@@ -404,11 +404,11 @@
+ 
+ void
+ wxAppConsoleBase::HandleEvent(wxEvtHandler *handler,
+-                              wxEventFunction func,
++                              wxEventFunctor* func,
+                               wxEvent& event) const
+ {
+     // by default, simply call the handler
+-    (handler->*func)(event);
++    func->Relay(handler, event);
+ }
+ 
+ void wxAppConsoleBase::OnUnhandledException()
+Index: setup.h.in
+===================================================================
+--- setup.h.in	(revision 55693)
++++ setup.h.in	(working copy)
+@@ -554,7 +554,9 @@
+ #define wxUSE_THEME_MONO    0
+ #define wxUSE_THEME_WIN32   0
+ 
++#define wxUSE_MODERN_EVENTS 0
+ 
++
+ /* --- end common options --- */
+ 
+ /*
+@@ -635,6 +637,11 @@
+ #undef HAVE_STATIC_CAST
+ 
+ /*
++ * Define if your compiler supports dynamic_cast<>()
++ */
++#undef HAVE_DYNAMIC_CAST
++
++/*
+  * Define if your compiler has C99 va_copy
+  */
+ #undef HAVE_VA_COPY
+Index: include/wx/app.h
+===================================================================
+--- include/wx/app.h	(revision 55693)
++++ include/wx/app.h	(working copy)
+@@ -227,7 +227,7 @@
+     // event handler, it would lead to an extra (useless) virtual function call
+     // if the exceptions were not used, so it doesn't even exist in that case
+     virtual void HandleEvent(wxEvtHandler *handler,
+-                             wxEventFunction func,
++                             wxEventFunctor* func,
+                              wxEvent& event) const;
+ 
+     // Called when an unhandled C++ exception occurs inside OnRun(): note that
+Index: include/wx/event.h
+===================================================================
+--- include/wx/event.h	(revision 55693)
++++ include/wx/event.h	(working copy)
+@@ -25,12 +25,14 @@
+ #include "wx/dynarray.h"
+ #include "wx/thread.h"
+ #include "wx/tracker.h"
++#include "wx/weakref.h"
+ 
+ // ----------------------------------------------------------------------------
+ // forward declarations
+ // ----------------------------------------------------------------------------
+ 
+ class WXDLLIMPEXP_FWD_BASE wxList;
++class WXDLLIMPEXP_FWD_BASE wxEvent;
+ #if wxUSE_GUI
+     class WXDLLIMPEXP_FWD_CORE wxDC;
+     class WXDLLIMPEXP_FWD_CORE wxMenu;
+@@ -58,6 +60,7 @@
+ class WXDLLIMPEXP_FWD_BASE wxMSVC_FWD_MULTIPLE_BASES wxEvtHandler;
+ class wxEventConnectionRef;
+ 
++
+ // ----------------------------------------------------------------------------
+ // Event types
+ // ----------------------------------------------------------------------------
+@@ -71,7 +74,9 @@
+ #define wxStaticCastEvent(type, val) wx_static_cast(type, val)
+ 
+ #define DECLARE_EVENT_TABLE_ENTRY(type, winid, idLast, fn, obj) \
+-    wxEventTableEntry(type, winid, idLast, fn, obj)
++    wxEventTableEntry(type, winid, idLast, wxNewEventFunctor(type, fn), obj)
++#define DECLARE_EVENT_TABLE_TERMINATOR() \
++    wxEventTableEntry(wxEVT_NULL, 0, 0, 0, 0)
+ 
+ // obsolete event declaration/definition macros, we don't need them any longer
+ // but we keep them for compatibility as it doesn't cost us anything anyhow
+@@ -89,6 +94,325 @@
+ // generate a new unique event type
+ extern WXDLLIMPEXP_BASE wxEventType wxNewEventType();
+ 
++// macros to create an event type depending on if modern events are used or not
++#if wxUSE_MODERN_EVENTS
++    #define wxDECLARE_EVENT(expdecl, name, type) extern const expdecl wxTypedEventType<type> name;
++    #define wxDEFINE_EVENT(name, type) const wxTypedEventType<type> name(wxNewEventType());
++#else
++    #define wxDECLARE_EVENT(expdecl, name, type) extern const expdecl wxEventType name;
++    #define wxDEFINE_EVENT(name, type) const wxEventType name = wxNewEventType();
++#endif
++
++
++// template which associates the correct event object with the event type
++#if wxUSE_MODERN_EVENTS
++template <typename Event >
++class WXDLLIMPEXP_BASE wxTypedEventType
++{
++public:
++    typedef Event CorrespondingEvent;
++
++    wxTypedEventType(wxEventType type)
++    {
++        m_type = type;
++    }
++
++    // used for static event tables
++    operator const wxEventType&() const
++    {
++        return m_type;
++    }
++
++private:
++    wxEventType m_type;
++};
++
++typedef wxTypedEventType<wxEvent> wxTypedEvent;
++
++#endif // wxUSE_MODERN_EVENTS
++
++// These are needed for the functor definitions
++typedef void (wxEvtHandler::*wxEventFunction)(wxEvent&);
++
++// We had some trouble (specifically with eVC for ARM WinCE build) with using
++// wxEventFunction in the past so we had introduced wxObjectEventFunction which
++// used to be a typedef for a member of wxObject and not wxEvtHandler to work
++// around this but as eVC is not really supported any longer we now only keep
++// this for backwards compatibility and, despite its name, this is a typedef
++// for wxEvtHandler member now -- but if we have the same problem with another
++// compiler we can restore its old definition for it.
++typedef wxEventFunction wxObjectEventFunction;
++
++
++// the functors which will be stored in the static/dynamic tables
++class WXDLLIMPEXP_BASE wxEventFunctor : public wxTrackable
++{
++public:
++    virtual ~wxEventFunctor()
++    {
++    }
++
++    virtual void Relay(wxEvtHandler*, wxEvent&) = 0;
++    virtual wxEvtHandler* GetFunctorObject()
++    {
++        return NULL;
++    }
++    virtual wxObjectEventFunction GetFunctorMethod()
++    {
++        return (wxObjectEventFunction)NULL;
++    }
++};
++
++#if wxUSE_MODERN_EVENTS
++template < typename EventType >
++class WXDLLIMPEXP_BASE wxEventFunctorFunction : public wxEventFunctor
++{
++public:
++    typedef EventType TypedEventType;
++    typedef typename EventType::CorrespondingEvent CorrespondingEvent;
++
++    wxEventFunctorFunction( void ( *handler )( CorrespondingEvent & ))
++    {
++        m_handler = handler;
++    }
++
++    virtual void Relay( wxEvtHandler* WXUNUSED(handler), wxEvent &event )
++    {
++        // Protect against wrong event i.e. wxMouseEvent evt(wxEVT_PAINT):
++        wxASSERT( wx_dynamic_cast( CorrespondingEvent *, &event ) != NULL );
++
++        // Will throw a std::bad_cast exception in release build:
++        ( *m_handler )( wx_dynamic_cast( CorrespondingEvent &, event ));
++    }
++
++private:
++    void ( *m_handler )( CorrespondingEvent & );
++};
++
++
++template < typename EventType, typename Class, typename Derived >
++class WXDLLIMPEXP_BASE wxEventFunctorMethod : public wxEventFunctor
++{
++public:
++    typedef EventType TypedEventType;
++    typedef typename EventType::CorrespondingEvent CorrespondingEvent;
++
++    wxEventFunctorMethod( void ( Class::*method )( CorrespondingEvent & ), Derived *handler )
++    {
++        m_handler = handler;
++        m_method =  method;
++    }
++
++    virtual void Relay( wxEvtHandler* handler, wxEvent &event )
++    {
++        // Compile-time type check 1: This requires Derived to derive from or be of the same type as Class
++        Class *realHandler = m_handler;
++    
++        if( m_handler == NULL )
++        {
++            // Verify that the handler does indeed derive from the class containing the handler method
++
++            realHandler = wx_dynamic_cast( Class *, handler );
++            wxASSERT( realHandler != NULL );
++        }
++
++        // Protect against wrong event i.e. wxMouseEvent evt(wxEVT_PAINT):
++        wxASSERT( wx_dynamic_cast( CorrespondingEvent *, &event ) != NULL );
++
++        // Will throw a std::bad_cast exception in release build:
++        ( realHandler->*m_method )( wx_dynamic_cast( CorrespondingEvent &, event ));
++    }
++
++    virtual wxEvtHandler* GetFunctorObject( )
++    {
++        // This makes sure Derived derives from wxEvtHandler
++        // (it is still possible and even ok if Class does not
++        // derive from wxEvtHandler.  In this cass Derived would
++        // end up using multiple inheritance:
++        // class Derived : public wxEvtHandler, public Class { }
++        // where Class contains the method to call, but
++        // wxEvtHandler contains the wxTrackable and code for
++        // weak ref support
++        return m_handler;
++    }
++
++    virtual wxObjectEventFunction GetFunctorMethod( )
++    {
++        return (wxObjectEventFunction)m_method;
++    }
++
++private:
++    Derived *m_handler;
++    void ( Class::*m_method )( CorrespondingEvent & );
++};
++
++
++template < typename EventType, typename Functor >
++class WXDLLIMPEXP_BASE wxEventFunctorAdapter : public wxEventFunctor
++{
++public:
++    typedef EventType TypedEventType;
++    typedef typename EventType::CorrespondingEvent CorrespondingEvent;
++
++    wxEventFunctorAdapter( Functor &functor )
++    {
++        m_functor = functor;
++    }
++
++    virtual void Relay( wxEvtHandler* WXUNUSED(handler), wxEvent &event )
++    {
++        // Protect against wrong event i.e. wxMouseEvent evt(wxEVT_PAINT):
++        wxASSERT( wx_dynamic_cast( CorrespondingEvent *, &event ) != NULL );
++
++        // Will throw a std::bad_cast exception in release build:
++        m_functor( wx_dynamic_cast( CorrespondingEvent &, event ));
++    }
++private:
++    Functor m_functor;
++};
++
++#else // !wxUSE_MODERN_EVENTS
++
++// A plain method functor
++class WXDLLIMPEXP_BASE wxEventFunctorMethod : public wxEventFunctor
++{
++public:
++    wxEventFunctorMethod( wxObjectEventFunction method, wxEvtHandler *handler )
++    {
++        m_handler = handler;
++        m_method =  method;
++    }
++
++    virtual void Relay( wxEvtHandler* handler, wxEvent &event )
++    {
++        wxEvtHandler* realHandler = m_handler;
++    
++        if( m_handler == NULL )
++        {
++            realHandler = handler;
++        }
++
++        ( realHandler->*m_method )( event );
++    }
++
++    virtual wxEvtHandler* GetFunctorObject( )
++    {
++        return m_handler;
++    }
++
++    virtual wxObjectEventFunction GetFunctorMethod( )
++    {
++        return m_method;
++    }
++
++private:
++    wxEvtHandler *m_handler;
++    wxObjectEventFunction m_method;
++};
++
++#endif // wxUSE_MODERN_EVENT/!wxUSE_MODERN_EVENTS
++
++
++// Helpers to create the functors
++
++#if wxUSE_MODERN_EVENTS
++// Create a functor for the legacy events:
++
++inline wxEventFunctor *wxNewEventFunctor( wxEventType, void ( *function )( wxEvent & ))
++{
++    return ( new wxEventFunctorFunction< wxTypedEvent >( function ));
++}
++
++inline wxEventFunctor *wxNewEventFunctor( wxEventType, wxObjectEventFunction method, wxEvtHandler *handler = NULL )
++{
++    return ( new wxEventFunctorMethod< wxTypedEvent, wxEvtHandler, wxEvtHandler >( method, handler ));
++}
++
++// Create a functor for the correctly typed events:
++
++template < typename EventType, typename Event >
++inline wxEventFunctorFunction< EventType > *wxNewEventFunctor( const EventType &, void ( *function )( Event ))
++{
++    return ( new wxEventFunctorFunction< EventType >( function ));
++}
++
++template < typename EventType, typename Class, typename Event >
++inline wxEventFunctorMethod<EventType, Class, Class > *wxNewEventFunctor( const EventType &, void ( Class::*method )( Event ) )
++{
++    return ( new wxEventFunctorMethod< EventType, Class, Class >( method, NULL ));
++}
++
++template < typename EventType, typename Class, typename Event, typename Derived >
++inline wxEventFunctorMethod< EventType, Class, Derived > *wxNewEventFunctor( const EventType &, void ( Class::*method )( Event ), Derived *handler )
++{
++    return ( new wxEventFunctorMethod< EventType, Class, Derived >( method, handler ));
++}
++
++template < typename EventType, typename Functor >
++inline wxEventFunctorAdapter< EventType, Functor > *wxNewEventFunctor( const EventType &, Functor &functor )
++{
++    return ( new wxEventFunctorAdapter< EventType, Functor >( functor ));
++}
++
++#else // !wxUSE_MODERN_EVENTS
++inline wxEventFunctor* wxNewEventFunctor(wxEventType, wxObjectEventFunction method, wxEvtHandler* handler)
++{
++    return new wxEventFunctorMethod(method, handler);
++}
++#endif // wxUSE_MODERN_EVENTS/!wxUSE_MODERN_EVENTS
++
++// An event connection
++class wxEventConnection
++{
++public:
++    wxEventConnection()
++    {
++    }
++
++    wxEventConnection(const wxEventConnection& copy) :
++        m_handler(copy.m_handler), m_functor(copy.m_functor)
++    {
++    }
++
++    wxEventConnection(wxEvtHandler* handler, wxEventFunctor* functor) :
++        m_handler(handler), m_functor(functor)
++    {
++    }
++
++    // implicit destructor ok
++    
++    wxEventConnection& operator=(const wxEventConnection& rhs)
++    {
++        if(this != &rhs)
++        {
++            m_handler = rhs.m_handler;
++            m_functor = rhs.m_functor;
++        }
++        return *this;
++    }
++
++    // information
++    wxEvtHandler* GetEventHandler()
++    {
++        return m_handler.get();
++    }
++
++    wxEventFunctor* GetFunctor()
++    {
++        return m_functor.get();
++    }
++
++    bool IsConnected() const
++    {
++        return (m_handler.get() != NULL && m_functor.get() != NULL);
++    }
++
++    void Disconnect();
++private:
++    wxWeakRef<wxEvtHandler> m_handler;
++    wxWeakRef<wxEventFunctor> m_functor;
++};
++
+ // many, but not all, standard event types
+ 
+     // some generic events
+@@ -2124,17 +2448,7 @@
+ // event handler and related classes
+ // ============================================================================
+ 
+-typedef void (wxEvtHandler::*wxEventFunction)(wxEvent&);
+ 
+-// We had some trouble (specifically with eVC for ARM WinCE build) with using
+-// wxEventFunction in the past so we had introduced wxObjectEventFunction which
+-// used to be a typedef for a member of wxObject and not wxEvtHandler to work
+-// around this but as eVC is not really supported any longer we now only keep
+-// this for backwards compatibility and, despite its name, this is a typedef
+-// for wxEvtHandler member now -- but if we have the same problem with another
+-// compiler we can restore its old definition for it.
+-typedef wxEventFunction wxObjectEventFunction;
+-
+ // struct containing the members common to static and dynamic event tables
+ // entries
+ struct WXDLLIMPEXP_BASE wxEventTableEntryBase
+@@ -2144,7 +2458,7 @@
+ 
+ public:
+     wxEventTableEntryBase(int winid, int idLast,
+-                          wxObjectEventFunction fn, wxObject *data)
++                          wxEventFunctor* fn, wxObject *data)
+         : m_id(winid),
+           m_lastId(idLast),
+           m_fn(fn),
+@@ -2156,15 +2470,23 @@
+           m_lastId(event.m_lastId),
+           m_fn(event.m_fn),
+           m_callbackUserData(event.m_callbackUserData)
+-    { }
++    {
++        // Don't allow the destruction of 'event' to delete the functor
++        (const_cast<wxEventTableEntryBase&>(event)).m_fn = NULL;
++    }
+ 
++    ~wxEventTableEntryBase()
++    {
++        wxDELETE(m_fn);
++    }
++
+     // the range of ids for this entry: if m_lastId == wxID_ANY, the range
+     // consists only of m_id, otherwise it is m_id..m_lastId inclusive
+     int m_id,
+         m_lastId;
+ 
+     // function to call: not wxEventFunction, because of dependency problems
+-    wxObjectEventFunction m_fn;
++    wxEventFunctor* m_fn;
+ 
+     // arbitrary user data asosciated with the callback
+     wxObject* m_callbackUserData;
+@@ -2174,7 +2496,7 @@
+ struct WXDLLIMPEXP_BASE wxEventTableEntry : public wxEventTableEntryBase
+ {
+     wxEventTableEntry(const int& evType, int winid, int idLast,
+-                      wxObjectEventFunction fn, wxObject *data)
++                      wxEventFunctor* fn, wxObject *data)
+         : wxEventTableEntryBase(winid, idLast, fn, data),
+         m_eventType(evType)
+     { }
+@@ -2195,10 +2517,10 @@
+ struct WXDLLIMPEXP_BASE wxDynamicEventTableEntry : public wxEventTableEntryBase
+ {
+     wxDynamicEventTableEntry(int evType, int winid, int idLast,
+-                             wxObjectEventFunction fn, wxObject *data, wxEvtHandler* eventSink)
++                             wxEventFunctor* fn, wxObject *data)
+         : wxEventTableEntryBase(winid, idLast, fn, data),
+           m_eventType(evType),
+-          m_eventSink(eventSink)
++          m_eventSink(fn->GetFunctorObject())
+     { }
+ 
+     // not a reference here as we can't keep a reference to a temporary int
+@@ -2345,28 +2667,60 @@
+ 
+     // Dynamic association of a member function handler with the event handler,
+     // winid and event type
+-    void Connect(int winid,
++    wxEventConnection Connect(int winid,
+                  int lastId,
+                  int eventType,
+                  wxObjectEventFunction func,
+                  wxObject *userData = (wxObject *) NULL,
+-                 wxEvtHandler *eventSink = (wxEvtHandler *) NULL);
++                 wxEvtHandler *eventSink = (wxEvtHandler *) NULL)
++    {
++        wxEventFunctor* functor = wxNewEventFunctor(eventType, func, eventSink);
+ 
++        // Create the event table entry and add it
++        wxDynamicEventTableEntry *entry =
++            new wxDynamicEventTableEntry(eventType, winid, lastId, functor, userData);
++
++        Connect(entry);
++
++        return wxEventConnection(this, functor);
++    }
++
+     // Convenience function: take just one id
+-    void Connect(int winid,
++    wxEventConnection Connect(int winid,
+                  int eventType,
+                  wxObjectEventFunction func,
+                  wxObject *userData = (wxObject *) NULL,
+                  wxEvtHandler *eventSink = (wxEvtHandler *) NULL)
+-        { Connect(winid, wxID_ANY, eventType, func, userData, eventSink); }
++        { return Connect(winid, wxID_ANY, eventType, func, userData, eventSink); }
+ 
+     // Even more convenient: without id (same as using id of wxID_ANY)
+-    void Connect(int eventType,
++    wxEventConnection Connect(int eventType,
+                  wxObjectEventFunction func,
+                  wxObject *userData = (wxObject *) NULL,
+                  wxEvtHandler *eventSink = (wxEvtHandler *) NULL)
+-        { Connect(wxID_ANY, wxID_ANY, eventType, func, userData, eventSink); }
++        { return Connect(wxID_ANY, wxID_ANY, eventType, func, userData, eventSink); }
+ 
++    #if wxUSE_MODERN_EVENTS
++    // Templated event connection used by wxConnect
++    // order of parameters may need changing to be more convenient
++    // This makes sure the functor type matches the event type
++    template <typename Functor>
++    wxEventConnection Connect(int winid, int lastId,
++                              const typename Functor::TypedEventType& eventType,
++                              Functor* functor, wxObject* userData)
++    {
++        wxDynamicEventTableEntry* entry =
++            new wxDynamicEventTableEntry(eventType, winid, lastId, functor, userData);
++
++        Connect(entry);
++
++        return wxEventConnection(this, functor);
++    }
++    #endif // wxUSE_MODERN_EVENTS
++
++    // This should be private, it simply connects the entry
++    void Connect(wxDynamicEventTableEntry* entry);
++
+     bool Disconnect(int winid,
+                     int lastId,
+                     wxEventType eventType,
+@@ -2387,6 +2741,9 @@
+                     wxEvtHandler *eventSink = (wxEvtHandler *) NULL)
+         { return Disconnect(wxID_ANY, eventType, func, userData, eventSink); }
+ 
++    // New disconnect
++    bool Disconnect(wxEventConnection conn);
++
+     wxList* GetDynamicEventTable() const { return m_dynamicEvents ; }
+ 
+     // User data can be associated with each wxEvtHandler
+@@ -2487,6 +2844,176 @@
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxEvtHandler)
+ };
+ 
++
++#if wxUSE_MODERN_EVENTS
++// Global wxConnect
++
++// Legacy with sender and optional reciever
++inline wxEventConnection wxConnect(wxEvtHandler* sender,
++                            int winid, int lastId,
++                            wxEventType eventType,
++                            void (wxEvtHandler::*method)(wxEvent&),
++                            wxObject* userData = (wxObject*)NULL,
++                            wxEvtHandler* reciever = (wxEvtHandler*)NULL)
++{
++    return sender->Connect(winid, lastId, eventType, method, userData, reciever);
++}
++
++inline wxEventConnection wxConnect(wxEvtHandler* sender,
++                            int winid,
++                            wxEventType eventType,
++                            void (wxEvtHandler::*method)(wxEvent&),
++                            wxObject* userData = (wxObject*)NULL,
++                            wxEvtHandler* reciever = (wxEvtHandler*)NULL)
++{
++    return sender->Connect(winid, eventType, method, userData, reciever);
++}
++
++inline wxEventConnection wxConnect(wxEvtHandler* sender,
++                            wxEventType eventType,
++                            void (wxEvtHandler::*method)(wxEvent&),
++                            wxObject* userData = (wxObject*)NULL,
++                            wxEvtHandler* reciever = (wxEvtHandler*)NULL)
++{
++    return sender->Connect(eventType, method, userData, reciever);
++}
++
++// Modern to function
++template <typename Sender, typename EventType, typename Event>
++inline wxEventConnection wxConnect(Sender* sender,
++                            int winid, int lastId,
++                            const EventType& eventType,
++                            void (*function)(Event))
++{
++    return sender->Connect(winid, lastId, eventType,
++                           wxNewEventFunctor(eventType, function), NULL);
++}
++
++template <typename Sender, typename EventType, typename Event>
++inline wxEventConnection wxConnect(Sender* sender,
++                            int winid,
++                            const EventType& eventType,
++                            void (*function)(Event))
++{
++    return sender->Connect(winid, wxID_ANY, eventType,
++                           wxNewEventFunctor(eventType, function), NULL);
++}
++
++template <typename Sender, typename EventType, typename Event>
++inline wxEventConnection wxConnect(Sender* sender,
++                            const EventType& eventType,
++                            void (*function)(Event))
++{
++    return sender->Connect(wxID_ANY, wxID_ANY, eventType,
++                           wxNewEventFunctor(eventType, function), NULL);
++}
++
++// Modern to method
++template <typename Sender, typename EventType, typename Class, typename Event>
++inline wxEventConnection wxConnect(Sender* sender,
++                            int winid, int lastId,
++                            const EventType& eventType,
++                            void (Class::*method)(Event))
++{
++    return sender->Connect(winid, lastId, eventType,
++                           wxNewEventFunctor(eventType, method, sender),
++                           NULL);
++}
++
++template <typename Sender, typename EventType, typename Class, typename Event>
++inline wxEventConnection wxConnect(Sender* sender,
++                            int winid,
++                            const EventType& eventType,
++                            void (Class::*method)(Event))
++{
++    return sender->Connect(winid, wxID_ANY, eventType,
++                           wxNewEventFunctor(eventType, method, sender),
++                           NULL);
++}
++
++template <typename Sender, typename EventType, typename Class, typename Event>
++inline wxEventConnection wxConnect(Sender* sender,
++                            const EventType& eventType,
++                            void (Class::*method)(Event))
++{
++    return sender->Connect(wxID_ANY, wxID_ANY, eventType,
++                           wxNewEventFunctor(eventType, method, sender),
++                           NULL);
++}
++
++// Modern to method with receiver
++template <typename Sender, typename EventType, typename Class, typename Event, typename Derived>
++inline wxEventConnection wxConnect(Sender* sender,
++                            int winid, int lastId,
++                            const EventType& eventType,
++                            void (Class::*method)(Event),
++                            Derived* reciever)
++{
++    return sender->Connect(winid, lastId, eventType,
++                           wxNewEventFunctor(eventType, method, reciever),
++                           NULL);
++}
++
++template <typename Sender, typename EventType, typename Class, typename Event, typename Derived>
++inline wxEventConnection wxConnect(Sender* sender,
++                            int winid,
++                            const EventType& eventType,
++                            void (Class::*method)(Event),
++                            Derived* reciever)
++{
++    return sender->Connect(winid, wxID_ANY, eventType,
++                           wxNewEventFunctor(eventType, method, reciever),
++                           NULL);
++}
++
++template <typename Sender, typename EventType, typename Class, typename Event, typename Derived>
++inline wxEventConnection wxConnect(Sender* sender,
++                            const EventType& eventType,
++                            void (Class::*method)(Event),
++                            Derived* reciever)
++{
++    return sender->Connect(wxID_ANY, wxID_ANY, eventType,
++                           wxNewEventFunctor(eventType, method, reciever),
++                           NULL);
++}
++
++// Functor adapters
++template <typename Sender, typename EventType, typename Functor>
++inline wxEventConnection wxConnect(Sender* sender,
++                            int winid, int lastId,
++                            const EventType& eventType,
++                            Functor& functor)
++{
++    return sender->Connect(winid, lastId, eventType,
++                           wxNewEvtFunctor(eventType, functor), NULL);
++}
++
++template <typename Sender, typename EventType, typename Functor>
++inline wxEventConnection wxConnect(Sender* sender,
++                            int winid,
++                            const EventType& eventType,
++                            Functor& functor)
++{
++    return sender->Connect(winid, wxID_ANY, eventType,
++                           wxNewEvtFunctor(eventType, functor), NULL);
++}
++
++template <typename Sender, typename EventType, typename Functor>
++inline wxEventConnection wxConnect(Sender* sender,
++                            const EventType& eventType,
++                            Functor& functor)
++{
++    return sender->Connect(wxID_ANY, wxID_ANY, eventType,
++                           wxNewEvtFunctor(eventType, functor), NULL);
++}
++
++// The above do not take a userdata object.  If that is desired it seems
++// to cause problems trying to add an extra optional argument userdata=NULL
++// with template matching so the above would need to be copied with support
++// for the userdata.
++
++#endif // wxUSE_MODERN_EVENTS
++
+ // ----------------------------------------------------------------------------
+ // wxEventConnectionRef represents all connections between two event handlers
+ // and enables automatic disconnect when an event handler sink goes out of
+@@ -2836,7 +3363,7 @@
+     template<typename T1, typename T2, typename T3, typename T4, typename T5, typename T6, typename T7, typename T8> \
+     const wxEventTableEntry theClass<T1, T2, T3, T4, T5, T6, T7, T8>::sm_eventTableEntries[] = { \
+ 
+-#define END_EVENT_TABLE() DECLARE_EVENT_TABLE_ENTRY( wxEVT_NULL, 0, 0, 0, 0 ) };
++#define END_EVENT_TABLE() DECLARE_EVENT_TABLE_TERMINATOR() };
+ 
+ /*
+  * Event table macros
+Index: include/wx/defs.h
+===================================================================
+--- include/wx/defs.h	(revision 55693)
++++ include/wx/defs.h	(working copy)
+@@ -340,6 +340,14 @@
+     #define wx_reinterpret_cast(t, x) ((t)(x))
+ #endif
+ 
++// Need configure.ac to check for this and maybe also
++// support disabling it if desired
++#ifdef HAVE_DYNAMIC_CAST
++    #define wx_dynamic_cast(t, x) dynamic_cast<t>(x)
++#else
++    #define wx_dynamic_cast wx_static_cast
++#endif
++
+ /*
+    This one is a wx invention: like static cast but used when we intentionally
+    truncate from a larger to smaller type, static_cast<> can't be used for it
+Index: samples/minimal/minimal.cpp
+===================================================================
+--- samples/minimal/minimal.cpp	(revision 55693)
++++ samples/minimal/minimal.cpp	(working copy)
+@@ -41,6 +41,27 @@
+ #endif
+ 
+ // ----------------------------------------------------------------------------
++// Custom events
++// ----------------------------------------------------------------------------
++class MyEvent;
++const wxTypedEventType<MyEvent> MY_EVENT(wxNewEventType());
++
++class MyEvent : public wxEvent
++{
++public:
++    // Implicit dtor/copy/assign are fine as we contain no extra data
++    MyEvent(int id, wxEventType type) : wxEvent(id, type) { }
++    
++protected:
++    wxEvent* Clone() const
++    {
++        return new MyEvent(*this);
++    }
++};
++
++#define EVT_TEST(id, func) DECLARE_EVENT_TABLE_ENTRY(MY_EVENT, id, wxID_ANY, func, 0),
++
++// ----------------------------------------------------------------------------
+ // private classes
+ // ----------------------------------------------------------------------------
+ 
+@@ -68,11 +89,29 @@
+     void OnQuit(wxCommandEvent& event);
+     void OnAbout(wxCommandEvent& event);
+ 
++    void OnTest1(wxCommandEvent& event);
++    void OnTest2(wxCommandEvent& event);
++    void OnTest3(wxCommandEvent& event);
++
++    void OnMyEvent1(MyEvent& event);
++    void OnMyEvent2(MyEvent& event);
++
+ private:
++
+     // any class wishing to process wxWidgets events must use this macro
+     DECLARE_EVENT_TABLE()
+ };
+ 
++void OnMyEvent3(MyEvent& WXUNUSED(event))
++{
++    ::wxMessageBox("::OnMyEvent3");
++}
++
++void OnBadMyEvent3(wxCommandEvent& WXUNUSED(event))
++{
++    ::wxMessageBox("::OnBadMyEvent3");
++}
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -86,7 +125,16 @@
+     // it is important for the id corresponding to the "About" command to have
+     // this standard value as otherwise it won't be handled properly under Mac
+     // (where it is special and put into the "Apple" menu)
+-    Minimal_About = wxID_ABOUT
++    Minimal_About = wxID_ABOUT,
++
++    // Tests
++    Minimal_Test1 = wxID_HIGHEST + 1,
++    Minimal_Test2,
++    Minimal_Test3,
++
++    ID_TEST1,
++    ID_TEST2,
++    ID_TEST3
+ };
+ 
+ // ----------------------------------------------------------------------------
+@@ -99,6 +147,17 @@
+ BEGIN_EVENT_TABLE(MyFrame, wxFrame)
+     EVT_MENU(Minimal_Quit,  MyFrame::OnQuit)
+     EVT_MENU(Minimal_About, MyFrame::OnAbout)
++    EVT_MENU(Minimal_Test1, MyFrame::OnTest1)
++    EVT_MENU(Minimal_Test2, MyFrame::OnTest2)
++    EVT_MENU(Minimal_Test3, MyFrame::OnTest3)
++
++    EVT_TEST(ID_TEST1, MyFrame::OnMyEvent1)
++    EVT_TEST(ID_TEST2, MyFrame::OnMyEvent2)
++    EVT_TEST(ID_TEST3, OnMyEvent3)
++
++    // Fail to compile (good)
++    //EVT_TEST(ID_TEST1, MyFrame::OnTest1)
++    //EVT_TEST(ID_TEST1, OnBadMyEvent3)
+ END_EVENT_TABLE()
+ 
+ // Create a new application object: this macro will allow wxWidgets to create
+@@ -158,10 +217,18 @@
+ 
+     fileMenu->Append(Minimal_Quit, "E&xit\tAlt-X", "Quit this program");
+ 
++    // the "Test' item
++     wxMenu* testMenu = new wxMenu;
++
++     testMenu->Append(Minimal_Test1, "Test1");
++     testMenu->Append(Minimal_Test2, "Test2");
++     testMenu->Append(Minimal_Test3, "Test3");
++
+     // now append the freshly created menu to the menu bar...
+     wxMenuBar *menuBar = new wxMenuBar();
+     menuBar->Append(fileMenu, "&File");
+     menuBar->Append(helpMenu, "&Help");
++    menuBar->Append(testMenu, "&Test");
+ 
+     // ... and attach this menu bar to the frame
+     SetMenuBar(menuBar);
+@@ -198,3 +265,42 @@
+                  wxOK | wxICON_INFORMATION,
+                  this);
+ }
++
++void MyFrame::OnTest1(wxCommandEvent& WXUNUSED(event))
++{
++    MyEvent evt(ID_TEST1, MY_EVENT);
++    ProcessEvent(evt);
++
++    ::wxMessageBox("Connecting ::OnMyEvent3");
++    wxEventConnection conn = wxConnect(this, ID_TEST1, MY_EVENT, &OnMyEvent3);
++    ProcessEvent(evt);
++    ::wxMessageBox("Disconnecting ::OnMyEvent3");
++    conn.Disconnect();
++    ProcessEvent(evt);
++
++    // Fail to compile (good)
++    // wxConnect(this, ID_TEST1, MY_EVENT, &OnBadMyEvent3);
++}
++
++void MyFrame::OnTest2(wxCommandEvent& WXUNUSED(event))
++{
++    MyEvent evt(ID_TEST2, MY_EVENT);
++    ProcessEvent(evt);
++}
++
++void MyFrame::OnTest3(wxCommandEvent& WXUNUSED(event))
++{
++    MyEvent evt(ID_TEST3, MY_EVENT);
++    ProcessEvent(evt);
++}
++
++void MyFrame::OnMyEvent1(MyEvent& WXUNUSED(event))
++{
++    ::wxMessageBox("MyFrame::OnMyEvent1");
++}
++
++void MyFrame::OnMyEvent2(MyEvent& WXUNUSED(event))
++{
++    ::wxMessageBox("MyFrame::OnMyEvent2");
++}
++

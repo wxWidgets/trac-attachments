@@ -1,0 +1,433 @@
+Index: src/common/protocol.cpp
+===================================================================
+--- src/common/protocol.cpp	(revision 59369)
++++ src/common/protocol.cpp	(working copy)
+@@ -19,6 +19,7 @@
+ #if wxUSE_PROTOCOL
+ 
+ #include "wx/protocol/protocol.h"
++#include "wx/protocol/log.h"
+ 
+ #ifndef WX_PRECOMP
+     #include "wx/module.h"
+@@ -64,6 +65,7 @@
+ #endif
+ {
+     m_lastError = wxPROTO_NOERR;
++    m_log = NULL;
+     SetDefaultTimeout(60);      // default timeout is 60 seconds
+ }
+ 
+@@ -95,6 +97,10 @@
+ #endif
+ }
+ 
++wxProtocol::~wxProtocol()
++{
++    delete m_log;
++}
+ 
+ // ----------------------------------------------------------------------------
+ // Read a line from socket
+@@ -179,4 +185,31 @@
+ 
+ #endif // wxUSE_SOCKETS
+ 
++// ----------------------------------------------------------------------------
++// logging
++// ----------------------------------------------------------------------------
++
++void wxProtocol::SetLog(wxProtocolLog *log)
++{
++    delete m_log;
++    m_log = log;
++}
++
++void wxProtocol::LogRequest(const wxString& str)
++{
++    if ( m_log )
++        m_log->LogRequest(str);
++}
++
++void wxProtocol::LogResponse(const wxString& str)
++{
++    if ( m_log )
++        m_log->LogResponse(str);
++}
++
++void wxProtocolLog::DoLogString(const wxString& WXUNUSED_UNLESS_DEBUG(str))
++{
++    wxLogTrace(m_traceMask, "%s", str);
++}
++
+ #endif // wxUSE_PROTOCOL
+Index: src/common/ftp.cpp
+===================================================================
+--- src/common/ftp.cpp	(revision 59369)
++++ src/common/ftp.cpp	(working copy)
+@@ -257,7 +257,7 @@
+         cmd = command;
+     }
+ 
+-    wxLogTrace(FTP_TRACE_MASK, _T("==> %s"), cmd.c_str());
++    LogRequest(cmd);
+ #endif // __WXDEBUG__
+ 
+     m_lastError = wxPROTO_NOERR;
+@@ -301,6 +301,8 @@
+             return 0;
+         }
+ 
++        LogResponse(line);
++
+         if ( !m_lastResult.empty() )
+         {
+             // separate from last line
+@@ -317,11 +319,6 @@
+             {
+                 badReply = true;
+             }
+-            else
+-            {
+-                wxLogTrace(FTP_TRACE_MASK, _T("<== %s %s"),
+-                           code.c_str(), line.c_str());
+-            }
+         }
+         else // line has at least 4 chars
+         {
+@@ -331,8 +328,6 @@
+             if ( firstLine )
+             {
+                 code = wxString(line, LEN_CODE);
+-                wxLogTrace(FTP_TRACE_MASK, _T("<== %s %s"),
+-                           code.c_str(), line.c_str() + LEN_CODE + 1);
+ 
+                 switch ( chMarker )
+                 {
+@@ -357,16 +352,7 @@
+                     {
+                         endOfReply = true;
+                     }
+-
+-                    wxLogTrace(FTP_TRACE_MASK, _T("<== %s %s"),
+-                               code.c_str(), line.c_str() + LEN_CODE + 1);
+                 }
+-                else
+-                {
+-                    // just part of reply
+-                    wxLogTrace(FTP_TRACE_MASK, _T("<== %s %s"),
+-                               code.c_str(), line.c_str());
+-                }
+             }
+         }
+     }
+@@ -1008,8 +994,7 @@
+                                           &filesize) != 9 )
+                             {
+                                 // Hmm... Invalid response
+-                                wxLogTrace(FTP_TRACE_MASK,
+-                                           _T("Invalid LIST response"));
++                                wxLogDebug(wxT("Invalid LIST response"));
+                             }
+                         }
+                         else // Windows-style response (?)
+@@ -1019,8 +1004,7 @@
+                                           &filesize) != 4 )
+                             {
+                                 // something bad happened..?
+-                                wxLogTrace(FTP_TRACE_MASK,
+-                                           _T("Invalid or unknown LIST response"));
++                                wxLogDebug(wxT("Invalid or unknown LIST response"));
+                             }
+                         }
+                     }
+Index: include/wx/protocol/protocol.h
+===================================================================
+--- include/wx/protocol/protocol.h	(revision 59369)
++++ include/wx/protocol/protocol.h	(working copy)
+@@ -24,6 +24,8 @@
+     #include "wx/socket.h"
+ #endif
+ 
++class WXDLLIMPEXP_FWD_NET wxProtocolLog;
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -55,6 +57,7 @@
+ {
+ public:
+     wxProtocol();
++    virtual ~wxProtocol();
+ 
+ #if wxUSE_SOCKETS
+     bool Reconnect();
+@@ -89,6 +92,30 @@
+         { SetDefaultTimeout(seconds); }
+ 
+ 
++    // logging support: each wxProtocol object may have the associated logger
++    // (by default there is none) which is used to log network requests and
++    // responses
++
++    // set the logger, deleting the old one and taking ownership of this one
++    void SetLog(wxProtocolLog *log);
++
++    // return the current logger, may be NULL
++    wxProtocolLog *GetLog() const { return m_log; }
++
++    // detach the existing logger without deleting it, the caller is
++    // responsible for deleting the returned pointer if it's non-NULL
++    wxProtocolLog *DetachLog()
++    {
++        wxProtocolLog * const log = m_log;
++        m_log = NULL;
++        return log;
++    }
++
++    // these functions forward to the same functions with the same names in
++    // wxProtocolLog if we have a valid logger and do nothing otherwise
++    void LogRequest(const wxString& str);
++    void LogResponse(const wxString& str);
++
+ protected:
+     // the timeout associated with the protocol:
+     wxUint32        m_uiDefaultTimeout;
+@@ -100,6 +127,8 @@
+     wxProtocolError m_lastError;
+ 
+ private:
++    wxProtocolLog *m_log;
++
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxProtocol)
+ };
+ 
+Index: include/wx/protocol/log.h
+===================================================================
+--- include/wx/protocol/log.h	(revision 0)
++++ include/wx/protocol/log.h	(revision 0)
+@@ -0,0 +1,55 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/protocol/log.h
++// Purpose:     wxProtocolLog class for logging network exchanges
++// Author:      Troelsk, Vadim Zeitlin
++// Created:     2009-03-06
++// RCS-ID:      $Id$
++// Copyright:   (c) 2009 Vadim Zeitlin <vadim@wxwidgets.org>
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_PROTOCOL_LOG_H_
++#define _WX_PROTOCOL_LOG_H_
++
++#include "wx/string.h"
++
++// ----------------------------------------------------------------------------
++// wxProtocolLog: simple class for logging network requests and responses
++// ----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_NET wxProtocolLog
++{
++public:
++    // Create object doing the logging using wxLogTrace() with the specified
++    // trace mask.
++    wxProtocolLog(const wxString& traceMask)
++        : m_traceMask(traceMask)
++    {
++    }
++
++    // Virtual dtor for the base class
++    virtual ~wxProtocolLog() { }
++
++    // Called by wxProtocol-derived classes to actually log something
++    virtual void LogRequest(const wxString& str)
++    {
++        DoLogString("==> " + str);
++    }
++
++    virtual void LogResponse(const wxString& str)
++    {
++        DoLogString("<== " + str);
++    }
++
++protected:
++    // Can be overridden by the derived classes.
++    virtual void DoLogString(const wxString& str);
++
++private:
++    const wxString m_traceMask;
++
++    wxDECLARE_NO_COPY_CLASS(wxProtocolLog);
++};
++
++#endif // _WX_PROTOCOL_LOG_H_
++
+
+Property changes on: include/wx/protocol/log.h
+___________________________________________________________________
+Added: svn:keywords
+   + Id
+Added: svn:eol-style
+   + native
+
+Index: build/bakefiles/files.bkl
+===================================================================
+--- build/bakefiles/files.bkl	(revision 59369)
++++ build/bakefiles/files.bkl	(working copy)
+@@ -580,6 +580,7 @@
+     wx/protocol/file.h
+     wx/protocol/ftp.h
+     wx/protocol/http.h
++    wx/protocol/log.h
+     wx/protocol/protocol.h
+     wx/sckaddr.h
+     wx/sckipc.h
+Index: interface/wx/protocol/protocol.h
+===================================================================
+--- interface/wx/protocol/protocol.h	(revision 59369)
++++ interface/wx/protocol/protocol.h	(working copy)
+@@ -107,5 +107,50 @@
+         @see wxSocketBase::SetTimeout
+     */
+     void SetDefaultTimeout(wxUint32 Value);
++
++    /**
++        @name Logging support.
++
++        Each wxProtocol object may have the associated logger (by default there
++        is none) which is used to log network requests and responses.
++
++        @see wxProtocolLog
++    */
++    //@{
++
++    /**
++        Set the logger, deleting the old one and taking ownership of this one.
++
++        @param log
++            New logger allocated on the heap or @NULL.
++     */
++    void SetLog(wxProtocolLog *log);
++
++    /**
++        Return the current logger, may be @NULL.
++     */
++    wxProtocolLog *GetLog() const { return m_log; }
++
++    /**
++        Detach the existing logger without deleting it.
++        
++        The caller is responsible for deleting the returned pointer if it's
++        non-@c NULL.
++     */
++    wxProtocolLog *DetachLog();
++
++    /**
++        Call wxProtocolLog::LogRequest() if we have a valid logger or do
++        nothing otherwise.
++     */
++    void LogRequest(const wxString& str);
++
++    /**
++        Call wxProtocolLog::LogResponse() if we have a valid logger or do
++        nothing otherwise.
++     */
++    void LogResponse(const wxString& str);
++
++    //@}
+ };
+ 
+Index: interface/wx/protocol/log.h
+===================================================================
+--- interface/wx/protocol/log.h	(revision 0)
++++ interface/wx/protocol/log.h	(revision 0)
+@@ -0,0 +1,61 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/protocol/log.h
++// Purpose:     interface of wxProtocolLog
++// Author:      Vadim Zeitlin
++// Created:     2009-03-06
++// RCS-ID:      $Id$
++// Copyright:   (c) 2009 Vadim Zeitlin <vadim@wxwidgets.org>
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++/**
++    Class allowing to log network operations performed by wxProtocol.
++
++    @library{wxnet}
++    @category{net}
++
++    @see wxProtocol
++*/
++class wxProtocolLog
++{
++public:
++    /**
++        Create object doing the logging using wxLogTrace() with the specified
++        trace mask.
++
++        If you override DoLogString() in your class the @a traceMask may be
++        left empty but it must have a valid value if you rely on the default
++        DoLogString() implementation.
++     */
++    wxProtocolLog(const wxString& traceMask);
++
++    /**
++        Called by wxProtocol-derived objects to log strings sent to the server.
++
++        Default implementation prepends a client-to-server marker to @a str and
++        calls DoLogString().
++     */
++    virtual void LogRequest(const wxString& str);
++
++    /**
++        Called by wxProtocol-derived objects to log strings received from the
++        server.
++
++        Default implementation prepends a server-to-client marker to @a str and
++        calls DoLogString().
++     */
++    virtual void LogResponse(const wxString& str);
++
++protected:
++    /**
++        Log the given string.
++
++        This function is called from LogRequest() and LogResponse() and by
++        default uses wxLogTrace() with the trace mask specified in the
++        constructor but can be overridden to do something different by the
++        derived classes.
++     */
++    virtual void DoLogString(const wxString& str);
++};
++
++
+
+Property changes on: interface/wx/protocol/log.h
+___________________________________________________________________
+Added: svn:keywords
+   + Id
+Added: svn:eol-style
+   + native
+
+Index: samples/console/console.cpp
+===================================================================
+--- samples/console/console.cpp	(revision 59369)
++++ samples/console/console.cpp	(working copy)
+@@ -2455,6 +2455,7 @@
+ #ifdef TEST_FTP
+ 
+ #include "wx/protocol/ftp.h"
++#include "wx/protocol/log.h"
+ 
+ #define FTP_ANONYMOUS
+ 
+@@ -4403,6 +4404,7 @@
+     // wxFTP cannot be a static variable as its ctor needs to access
+     // wxWidgets internals after it has been initialized
+     ftp = new wxFTP;
++    ftp->SetLog(new wxProtocolLog(FTP_TRACE_MASK));
+ 
+     if ( TestFtpConnect() )
+     {

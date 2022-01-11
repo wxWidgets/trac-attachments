@@ -1,0 +1,424 @@
+Index: include/wx/msw/bitmap.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/msw/bitmap.h,v
+retrieving revision 1.28
+diff -b -u -2 -r1.28 bitmap.h
+--- include/wx/msw/bitmap.h	2003/01/02 23:46:08	1.28
++++ include/wx/msw/bitmap.h	2003/01/17 01:51:52
+@@ -100,10 +100,19 @@
+ 
+     // If depth is omitted, will create a bitmap compatible with the display
++    // If wxUSE_DIB_FOR_BITMAP is enabled, a DIB will be created if the
++    // bitmap would exceed 16MB on Win95/98/Me.
+     wxBitmap(int width, int height, int depth = -1);
+ 
++    // Create bitmap compatible with dc
++    wxBitmap(int width, int height, const wxDC& dc);
++
+ #if wxUSE_IMAGE
+-    // Convert from wxImage:
++    // Convert from wxImage
+     wxBitmap(const wxImage& image, int depth = -1)
+         { (void)CreateFromImage(image, depth); }
++
++    // Convert from wxImage - create bitmap compatible with dc
++    wxBitmap(const wxImage& image, const wxDC& dc)
++        { (void)CreateFromImage(image, dc); }
+ #endif // wxUSE_IMAGE
+ 
+@@ -149,4 +158,5 @@
+ 
+     virtual bool Create(int width, int height, int depth = -1);
++    virtual bool Create(int width, int height, const wxDC& dc);
+     virtual bool Create(void *data, long type, int width, int height, int depth = 1);
+     virtual bool LoadFile(const wxString& name, long type = wxBITMAP_TYPE_BMP_RESOURCE);
+@@ -218,11 +228,20 @@
+ 
+ #if wxUSE_IMAGE
++#if wxUSE_DIB_FOR_BITMAP
++    // creates and fills in a DIB from image
++    bool CreateDIBFromImage(const wxImage& image);
++#endif // wxUSE_DIB_FOR_BITMAP
+     // creates the bitmap from wxImage, supposed to be called from ctor
+     bool CreateFromImage(const wxImage& image, int depth);
++    // creates the bitmap from wxImage, supposed to be called from ctor
++    bool CreateFromImage(const wxImage& image, const wxDC& dc);
++    // creates a bitmap compatible to dc from an image, called the above
++    // two methods for default handling.
++    bool CreateFromImage(const wxImage& image, int depth, WXHDC hdc);
+ #endif // wxUSE_IMAGE
+ 
+ #if wxUSE_DIB_FOR_BITMAP
+     void *CreateDIB(int width, int height, int depth);
+-    void CopyDIBLine(void* src, void* dest, int count) const;
++    bool ShouldCreateDIB(int w, int h, int d) const;
+ #endif
+ 
+Index: src/msw/bitmap.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/bitmap.cpp,v
+retrieving revision 1.79
+diff -b -u -2 -r1.79 bitmap.cpp
+--- src/msw/bitmap.cpp	2003/01/02 23:28:56	1.79
++++ src/msw/bitmap.cpp	2003/01/17 01:51:52
+@@ -319,5 +319,5 @@
+     wxCHECK_MSG( img.Ok(), FALSE, wxT("invalid bitmap data") )
+ 
+-    *this = wxBitmap(img);
++    *this = wxBitmap(img, -1);	// use -1 to force compatible bitmap
+     return TRUE;
+ #else
+@@ -333,4 +333,11 @@
+ }
+ 
++wxBitmap::wxBitmap(int w, int h, const wxDC& dc)
++{
++    Init();
++
++    (void)Create(w, h, dc);
++}
++
+ wxBitmap::wxBitmap(void *data, long type, int width, int height, int depth)
+ {
+@@ -354,5 +361,5 @@
+ 
+ #if wxUSE_DIB_FOR_BITMAP
+-    if ( w && h && d >= 16 )
++    if ( d >= 16 || ShouldCreateDIB(w, h, wxDisplayDepth()) )
+     {
+         if ( !CreateDIB(w, h, d) )
+@@ -399,4 +406,37 @@
+ }
+ 
++bool wxBitmap::Create(int w, int h, const wxDC& dc)
++{
++    UnRef();
++
++    m_refData = new wxBitmapRefData;
++
++    GetBitmapData()->m_width = w;
++    GetBitmapData()->m_height = h;
++    GetBitmapData()->m_depth = dc.GetDepth();
++
++    HBITMAP hbmp;
++    hbmp = ::CreateCompatibleBitmap((HDC)dc.GetHDC(), w, h);
++    if ( !hbmp )
++    {
++#if wxUSE_DIB_FOR_BITMAP
++        // If we failed to create a DDB, try making a DIB
++        if ( !CreateDIB(w, h, dc.GetDepth()) )
++           return FALSE;
++#else  // wxUSE_DIB_FOR_BITMAP
++        wxLogLastError(wxT("CreateCompatibleBitmap"));
++#endif // wxUSE_DIB_FOR_BITMAP
++    }
++    GetBitmapData()->m_depth = dc.GetDepth();
++
++    SetHBITMAP((WXHBITMAP)hbmp);
++
++#if WXWIN_COMPATIBILITY_2
++    GetBitmapData()->m_ok = hbmp != 0;
++#endif // WXWIN_COMPATIBILITY_2
++
++    return Ok();
++}
++
+ #if wxUSE_DIB_FOR_BITMAP
+ 
+@@ -467,4 +507,18 @@
+ }
+ 
++bool
++wxBitmap::ShouldCreateDIB(int w, int h, int d) const
++{
++    int
++        major,
++        minor;
++
++    wxGetOsVersion(&major, &minor);
++
++    //  Use DIB if OS < NT && size > 16MB
++    return (major < 5 && (((w * (d / 8) + sizeof(DWORD) - 1) / sizeof(DWORD) *
++            sizeof(DWORD)) * h > (16 * 1024 * 1024)));
++}
++
+ #endif // wxUSE_DIB_FOR_BITMAP
+ 
+@@ -475,6 +529,83 @@
+ #if wxUSE_IMAGE
+ 
++#if wxUSE_DIB_FOR_BITMAP
++bool wxBitmap::CreateDIBFromImage(const wxImage& image)
++{
++    int h = image.GetHeight();
++    int w = image.GetWidth();
++    unsigned char *dibBits = (unsigned char*)CreateDIB(w, h, 24);
++    if ( !dibBits )
++        return FALSE;
++
++    // DIBs are stored in bottom to top order so we need to copy bits line by
++    // line and starting from the end
++    const int srcBytesPerLine = w * 3;
++    const int dstBytesPerLine = (srcBytesPerLine + sizeof(DWORD) - 1) /
++                                 sizeof(DWORD) * sizeof(DWORD);
++    const unsigned char *src = image.GetData() + ((h - 1) * srcBytesPerLine);
++    for ( int i = 0; i < h; i++ )
++    {
++        // copy one DIB line
++        int x = w;
++        const unsigned char *rgbBits = src;
++        while ( x-- )
++        {
++            // also, the order of RGB is inversed for DIBs
++            *dibBits++ = rgbBits[2];
++            *dibBits++ = rgbBits[1];
++            *dibBits++ = rgbBits[0];
++
++            rgbBits += 3;
++        }
++
++        // pass to the next line
++        src -= srcBytesPerLine;
++        dibBits += dstBytesPerLine - srcBytesPerLine;
++    }
++
++    if ( image.HasMask() )
++    {
++        SetMask(new wxMask(*this, wxColour(image.GetMaskRed(),
++                                           image.GetMaskGreen(),
++                                           image.GetMaskBlue())));
++    }
++
++    return TRUE;
++}
++#endif // wxUSE_DIB_FOR_BITMAP
++
+ bool wxBitmap::CreateFromImage( const wxImage& image, int depth )
+ {
++    wxCHECK_MSG( image.Ok(), FALSE, wxT("invalid image") )
++
++    m_refData = new wxBitmapRefData();
++
++#if wxUSE_DIB_FOR_BITMAP
++    if( depth >= 16 || ShouldCreateDIB(image.GetWidth(), image.GetHeight(), wxDisplayDepth()) )
++        return CreateDIBFromImage(image);
++#endif // wxUSE_DIB_FOR_BITMAP
++
++    HDC hdc = ::GetDC(NULL);
++    bool retVal = CreateFromImage( image, depth, (WXHDC)hdc );
++    ::ReleaseDC(NULL, hdc);
++    return retVal;
++}
++
++bool wxBitmap::CreateFromImage( const wxImage& image, const wxDC& dc )
++{
++    wxCHECK_MSG( image.Ok(), FALSE, wxT("invalid image") )
++
++    m_refData = new wxBitmapRefData();
++
++#if wxUSE_DIB_FOR_BITMAP
++    if( ShouldCreateDIB(image.GetWidth(), image.GetHeight(), wxDisplayDepth()) )
++        return CreateDIBFromImage(image);
++#endif // wxUSE_DIB_FOR_BITMAP
++
++    return CreateFromImage( image, -1, dc.GetHDC() );
++}
++
++bool wxBitmap::CreateFromImage( const wxImage& image, int depth, WXHDC hdc )
++{
+ #ifdef __WXMICROWIN__
+ 
+@@ -483,11 +614,9 @@
+ #define USE_MASKS 0
+ 
+-    m_refData = new wxBitmapRefData();
+-
+     // Initial attempt at a simple-minded implementation.
+     // The bitmap will always be created at the screen depth,
+     // so the 'depth' argument is ignored.
+ 
+-    HDC hScreenDC = ::GetDC(NULL);
++    HDC hScreenDC = (HDC)dc;
+     int screenDepth = ::GetDeviceCaps(hScreenDC, BITSPIXEL);
+ 
+@@ -509,5 +638,4 @@
+ 
+     HBITMAP hOldBitmap = ::SelectObject(hMemDC, hBitmap);
+-    ::ReleaseDC(NULL, hScreenDC);
+ 
+     // created an mono-bitmap for the possible mask
+@@ -596,48 +724,4 @@
+ 
+ #else // !__WXMICROWIN__
+-    wxCHECK_MSG( image.Ok(), FALSE, wxT("invalid image") )
+-
+-    m_refData = new wxBitmapRefData();
+-
+-#if wxUSE_DIB_FOR_BITMAP
+-    int h = image.GetHeight();
+-    int w = image.GetWidth();
+-    unsigned char *dibBits = (unsigned char*)CreateDIB(w, h, 24);
+-    if ( !dibBits )
+-        return FALSE;
+-
+-    // DIBs are stored in bottom to top order so we need to copy bits line by
+-    // line and starting from the end
+-    const int srcBytesPerLine = w * 3;
+-    const int dstBytesPerLine = (srcBytesPerLine + sizeof(DWORD) - 1) /
+-                                    sizeof(DWORD) * sizeof(DWORD);
+-    const unsigned char *src = image.GetData() + ((h - 1) * srcBytesPerLine);
+-    for ( int i = 0; i < h; i++ )
+-    {
+-        // copy one DIB line
+-        int x = w;
+-        const unsigned char *rgbBits = src;
+-        while ( x-- )
+-        {
+-            // also, the order of RGB is inversed for DIBs
+-            *dibBits++ = rgbBits[2];
+-            *dibBits++ = rgbBits[1];
+-            *dibBits++ = rgbBits[0];
+-
+-            rgbBits += 3;
+-        }
+-
+-        // pass to the next line
+-        src -= srcBytesPerLine;
+-        dibBits += dstBytesPerLine - srcBytesPerLine;
+-    }
+-
+-    if ( image.HasMask() )
+-    {
+-        SetMask(new wxMask(*this, wxColour(image.GetMaskRed(),
+-                                           image.GetMaskGreen(),
+-                                           image.GetMaskBlue())));
+-    }
+-#else // wxUSE_DIB_FOR_BITMAP
+     // sizeLimit is the MS upper limit for the DIB size
+ #ifdef  WIN32
+@@ -716,8 +800,7 @@
+ 
+     // create and set the device-dependent bitmap
+-    HDC hdc = ::GetDC(NULL);
+-    HDC memdc = ::CreateCompatibleDC( hdc );
++    HDC memdc = ::CreateCompatibleDC( (HDC)hdc );
+     HBITMAP hbitmap;
+-    hbitmap = ::CreateCompatibleBitmap( hdc, width, bmpHeight );
++    hbitmap = ::CreateCompatibleBitmap( (HDC)hdc, width, bmpHeight );
+     ::SelectObject( memdc, hbitmap);
+ 
+@@ -855,8 +938,6 @@
+     // free allocated resources
+     ::DeleteDC( memdc );
+-    ::ReleaseDC(NULL, hdc);
+     free(lpDIBh);
+     free(lpBits);
+-#endif // wxUSE_DIB_FOR_BITMAP
+ 
+ #if WXWIN_COMPATIBILITY_2
+Index: src/msw/dc.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/dc.cpp,v
+retrieving revision 1.131
+diff -b -u -2 -r1.131 dc.cpp
+--- src/msw/dc.cpp	2003/01/02 23:25:17	1.131
++++ src/msw/dc.cpp	2003/01/17 01:51:53
+@@ -1007,4 +1007,43 @@
+     else // no mask, just use BitBlt()
+     {
++#if wxUSE_DIB_FOR_BITMAP
++        if(bmp.GetHFileMap() &&
++           ::GetDeviceCaps(GetHdc(), RASTERCAPS) & RC_STRETCHDIB )
++        {
++            DIBSECTION dib;
++            if( ::GetObject(GetHbitmapOf(bmp),
++                            sizeof(dib),
++                            &dib) == sizeof(dib) )
++            {
++                StretchBltModeChanger changeMode(GetHdc(), COLORONCOLOR);
++
++                if ( ::StretchDIBits(GetHdc(),
++                                     x, y,
++                                     width, height,
++                                     0, 0,
++                                     width, height,
++                                     dib.dsBm.bmBits,
++                                     (LPBITMAPINFO)&dib.dsBmih,
++                                     DIB_RGB_COLORS,
++                                     SRCCOPY
++                                     ) == (int)GDI_ERROR )
++                {
++                    wxLogLastError(wxT("StretchDIBits"));
++                }
++            }
++            else
++            {
++                wxLogLastError(wxT("GetObject"));
++            }
++        }
++        else
++        {
++#endif // wxUSE_DIB_FOR_BITMAP
++#ifdef __WIN32__
++        //  This is needed in case Windows needs to handle scaling
++        //  itself.
++        StretchBltModeChanger changeMode(GetHdc(), COLORONCOLOR);
++#endif // __WIN32__
++
+         HDC cdc = GetHdc();
+         HDC memdc = ::CreateCompatibleDC( cdc );
+@@ -1046,5 +1085,8 @@
+         ::SetTextColor(GetHdc(), old_textground);
+         ::SetBkColor(GetHdc(), old_background);
++#if wxUSE_DIB_FOR_BITMAP
+     }
++#endif
++    }
+ }
+ 
+@@ -1821,4 +1863,8 @@
+     {
+ #ifdef __WIN32__
++        //  This is needed in case Windows needs to handle scaling
++        //  itself.
++        StretchBltModeChanger changeMode(GetHdc(), COLORONCOLOR);
++
+         // we want the part of the image corresponding to the mask to be
+         // transparent, so use "DSTCOPY" ROP for the mask points (the usual
+@@ -1931,21 +1977,9 @@
+     }
+     else // no mask, just BitBlt() it
+-    {
+-        // use StretchBlt() if available
+-        if ( ::GetDeviceCaps(GetHdc(), RASTERCAPS) & RC_STRETCHBLT )
+         {
++        //  This is needed in case Windows needs to handle scaling
++        //  itself.
+             StretchBltModeChanger changeMode(GetHdc(), COLORONCOLOR);
+ 
+-            success = ::StretchBlt
+-                        (
+-                            GetHdc(),
+-                            xdest, ydest, width, height,
+-                            GetHdcOf(*source),
+-                            xsrc, ysrc, width, height,
+-                            dwRop
+-                        ) != 0;
+-        }
+-        else
+-        {
+             success = ::BitBlt
+                         (
+@@ -1957,9 +1991,8 @@
+                             dwRop
+                         ) != 0;
+-        }
+ 
+         if ( !success )
+         {
+-            wxLogLastError(wxT("BitBlt/StretchBlt"));
++            wxLogLastError(wxT("BitBlt"));
+         }
+     }
+
+ 	  	 

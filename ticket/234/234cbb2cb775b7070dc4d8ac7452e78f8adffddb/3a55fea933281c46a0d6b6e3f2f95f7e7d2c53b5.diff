@@ -1,0 +1,231 @@
+--- wxrc.cpp	2008-06-26 14:19:41.000000000 +0200
++++ wxrc.cpp	2008-06-26 18:23:38.000000000 +0200
+@@ -40,13 +40,15 @@
+ class XRCWidgetData
+ {
+ public:
+-    XRCWidgetData(const wxString& vname,const wxString& vclass)
+-        : m_class(vclass), m_name(vname)  {}
++    XRCWidgetData(const wxString& vname,const wxString& vclass, const wxString& vsubClass)
++        : m_class(vclass), m_name(vname), m_subClass(vsubClass)  {}
+     const wxString& GetName() const { return m_name; }
+     const wxString& GetClass() const { return m_class; }
++    const wxString& GetRealClass() const { if(m_subClass.IsEmpty()) return GetClass(); else return m_subClass; }
+ private:
+     wxString m_class;
+     wxString m_name;
++    wxString m_subClass;
+ };
+ 
+ #include "wx/arrimpl.cpp"
+@@ -55,7 +57,7 @@
+ 
+ class XRCWndClassData
+ {
+-private:
++protected:
+     wxString m_className;
+     wxString m_parentClassName;
+     StringSet m_ancestorClassNames;
+@@ -65,6 +67,7 @@
+     {
+         wxString classValue;
+         wxString nameValue;
++        wxString subClassValue;
+         wxXmlNode* children;
+         while (node)
+         {
+@@ -72,7 +75,8 @@
+                 && node->GetPropVal(_T("class"),&classValue)
+                 && node->GetPropVal(_T("name"),&nameValue))
+             {
+-                m_wdata.Add(XRCWidgetData(nameValue,classValue));
++                node->GetPropVal(_T("subclass"),&subClassValue);
++                m_wdata.Add(XRCWidgetData(nameValue,classValue, subClassValue));
+             }
+             children = node->GetChildren();
+             if (children)
+@@ -204,7 +208,55 @@
+ };
+ WX_DECLARE_OBJARRAY(XRCWndClassData,ArrayOfXRCWndClassData);
+ WX_DEFINE_OBJARRAY(ArrayOfXRCWndClassData)
++WX_DECLARE_STRING_HASH_MAP( wxString, HashOfXRCWndClassData );
+ 
++class XRCWndSubClassData : public XRCWndClassData
++{
++  protected:
++    wxString m_subClassName;
++  public:
++  XRCWndSubClassData(const wxString& className, const wxString& parentClassName, const wxString& subClassName, const wxXmlNode* node) :
++    XRCWndClassData(className, parentClassName, node), m_subClassName(subClassName) {}
++
++  void GenerateHeaderCode(wxFFile& file)
++  {
++    file.Write(_T("class ") + m_subClassName + _T("Base : public ") + m_parentClassName + _T(" {\n  protected:\n"));
++    size_t i;
++    for(i = 0; i<m_wdata.Count();++i)
++    {
++      const XRCWidgetData& w = m_wdata.Item(i);
++      if( !IsRealClass(w.GetClass()) ) continue;
++      if( w.GetName().Length() == 0 ) continue;
++      file.Write( _T("    wxLoadingXrcWindowPtrTemplate<") + w.GetClass() + _T(",")+ m_parentClassName + _T("> m_") + w.GetName() + _T(";\n"));
++    }
++     file.Write(_T("  public:\n  ")
++               + m_subClassName
++               + _T("Base ()"));
++    for(i = 0; i<m_wdata.Count();++i)
++    {
++      if(i == 0)
++      {
++        file.Write(_T(" :\n"));
++      }
++      const XRCWidgetData& w = m_wdata.Item(i);
++      if( !IsRealClass(w.GetClass()) ) continue;
++      if( w.GetName().Length() == 0 ) continue;
++      file.Write(
++            _T("    m_")
++            + w.GetName()
++            + _T("(this, wxString(\"")
++            + w.GetName()
++            + _T("\"))")
++            );
++      if(m_wdata.Count() -1 != i)
++        file.Write(_T(",\n"));
++     }
++    file.Write(_T(" {}\n"));
++    file.Write(_T("};\n"));
++  }
++};
++WX_DECLARE_OBJARRAY(XRCWndSubClassData,ArrayOfXRCWndSubClassData);
++WX_DEFINE_OBJARRAY(ArrayOfXRCWndSubClassData)
+ 
+ class XmlResApp : public wxAppConsole
+ {
+@@ -216,6 +268,7 @@
+ private:
+     void ParseParams(const wxCmdLineParser& cmdline);
+     void CompileRes();
++    void BrowseXmlNodeForSubClass(wxXmlNode* node);
+     wxArrayString PrepareTempFiles();
+     void FindFilesInXML(wxXmlNode *node, wxArrayString& flist, const wxString& inputPath);
+ 
+@@ -234,9 +287,12 @@
+     wxArrayString parFiles;
+     int retCode;
+ 
++    HashOfXRCWndClassData hXRCWndClassData;
+     ArrayOfXRCWndClassData aXRCWndClassData;
+-        bool flagH;
+-        void GenCPPHeader();
++    ArrayOfXRCWndSubClassData aXRCWndSubClassData;
++    bool flagH;
++    bool flagS;
++    void GenCPPHeader();
+ };
+ 
+ IMPLEMENT_APP_CONSOLE(XmlResApp)
+@@ -249,6 +305,7 @@
+               wxCMD_LINE_VAL_NONE, wxCMD_LINE_OPTION_HELP },
+         { wxCMD_LINE_SWITCH, _T("v"), _T("verbose"), _T("be verbose"), (wxCmdLineParamType)0, 0 },
+         { wxCMD_LINE_SWITCH, _T("e"), _T("extra-cpp-code"),  _T("output C++ header file with XRC derived classes"), (wxCmdLineParamType)0, 0 },
++        { wxCMD_LINE_SWITCH, _T("s"), _T("extra-cpp-code-with-subclass"),  _T("output C++ header file with XRC derived classes and in cases of Subclass a subclassBase"), (wxCmdLineParamType)0, 0 },
+         { wxCMD_LINE_SWITCH, _T("c"), _T("cpp-code"),  _T("output C++ source rather than .rsc file"), (wxCmdLineParamType)0, 0 },
+         { wxCMD_LINE_SWITCH, _T("p"), _T("python-code"),  _T("output wxPython source rather than .rsc file"), (wxCmdLineParamType)0, 0 },
+         { wxCMD_LINE_SWITCH, _T("g"), _T("gettext"),  _T("output list of translatable strings (to stdout or file if -o used)"), (wxCmdLineParamType)0, 0 },
+@@ -292,7 +349,8 @@
+     flagVerbose = cmdline.Found(_T("v"));
+     flagCPP = cmdline.Found(_T("c"));
+     flagPython = cmdline.Found(_T("p"));
+-    flagH = flagCPP && cmdline.Found(_T("e"));
++    flagS = flagCPP && cmdline.Found(_T("s"));
++    flagH = flagS || (flagCPP && cmdline.Found(_T("e")));
+ 
+ 
+     if (!cmdline.Found(_T("o"), &parOutput))
+@@ -361,6 +419,34 @@
+     DeleteTempFiles(files);
+ }
+ 
++void XmlResApp::BrowseXmlNodeForSubClass(wxXmlNode* node)
++{
++    wxString classValue;
++    wxString nameValue;
++    wxString subClassValue;
++    wxXmlNode* children;
++    while (node)
++    {
++        if (node->GetName() == _T("object")
++          && node->GetPropVal(_T("class"),&classValue)
++          && node->GetPropVal(_T("name"),&nameValue)
++          && node->GetPropVal(_T("subclass"), &subClassValue))
++        {
++            if(hXRCWndClassData.find(subClassValue) == hXRCWndClassData.end())
++            {
++                hXRCWndClassData[subClassValue] = wxString::Format("class %s;\n", subClassValue.c_str());
++                aXRCWndSubClassData.Add(
++                        XRCWndSubClassData(nameValue,classValue,subClassValue,node)
++                        );
++                ;
++            }
++        }
++        children = node->GetChildren();
++        if (children)
++                BrowseXmlNodeForSubClass(children);
++        node = node->GetNext();
++    }
++}
+ 
+ wxString XmlResApp::GetInternalFileName(const wxString& name, const wxArrayString& flist)
+ {
+@@ -419,6 +505,10 @@
+                       aXRCWndClassData.Add(
+                         XRCWndClassData(nameValue,classValue,node)
+                       );
++                      if(flagS)
++                      {
++                          BrowseXmlNodeForSubClass(node);
++                      }
+                     }
+                     node = node -> GetNext();
+             }
+@@ -701,9 +791,40 @@
+ _T("#ifndef __")  + fileSpec + _T("_h__\n")
+ _T("#define __")  + fileSpec + _T("_h__\n")
+ );
++    if(flagS)
++    {
++      file.Write(
++          _T("#ifndef __loading_xrc_window_ptr_template__\n")
++          _T("#define __loading_xrc_window_ptr_template__\n")
++          _T("template<class OBJ_CLASS, class PARENT_CLASS>\n")
++          _T("class wxLoadingXrcWindowPtrTemplate {\n")
++          _T("private:\n")
++          _T("  mutable OBJ_CLASS * m_pointee;\n")
++          _T("  PARENT_CLASS * m_parent;\n")
++          _T("  wxString m_xrcName;\n")
++          _T("  inline void LoadPointee() const { if(!m_pointee) m_pointee = (OBJ_CLASS*)m_parent->FindWindow(XRCID(m_xrcName)); wxASSERT_MSG(m_pointee != NULL, wxT(\"Not able to load the pointee (window probably not yet created)\")); }\n")
++          _T("  wxLoadingXrcWindowPtrTemplate(const wxLoadingXrcWindowPtrTemplate&);\n")
++          _T("  wxLoadingXrcWindowPtrTemplate operator=(const wxLoadingXrcWindowPtrTemplate&);\n")
++          _T("public:\n")
++          _T("  wxLoadingXrcWindowPtrTemplate(PARENT_CLASS * parent, const wxString& xrcName) : m_pointee(NULL), m_parent(parent), m_xrcName(xrcName){}\n")
++          _T("  OBJ_CLASS * operator->() { LoadPointee(); return m_pointee; }\n")
++          _T("  const OBJ_CLASS * operator->() const { LoadPointee(); return m_pointee; }\n")
++          _T("  bool operator==(void* pointer) const { LoadPointee(); return m_pointee == pointer; }\n")
++          _T("  OBJ_CLASS * Get() { LoadPointee(); return m_pointee; }\n")
++          _T("};\n")
++          _T("#endif\n")
++          );
++    }
++    for(HashOfXRCWndClassData::iterator it = hXRCWndClassData.begin(); it != hXRCWndClassData.end();++it){
++          file.Write(it->second);
++    }
++    hXRCWndClassData.clear();
+     for(size_t i=0;i<aXRCWndClassData.Count();++i){
+                 aXRCWndClassData.Item(i).GenerateHeaderCode(file);
+     }
++    for(size_t i=0;i<aXRCWndSubClassData.Count();++i){
++                aXRCWndSubClassData.Item(i).GenerateHeaderCode(file);
++    }
+     file.Write(
+                 _T("\nvoid \n")
+                 + parFuncname

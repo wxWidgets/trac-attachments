@@ -1,0 +1,313 @@
+Index: include/wx/docview.h
+===================================================================
+--- include/wx/docview.h	(revision 72995)
++++ include/wx/docview.h	(working copy)
+@@ -60,6 +60,10 @@
+ 
+ #define wxMAX_FILE_HISTORY 9
+ 
++typedef wxVector<wxDocument*> wxDocVector;
++typedef wxVector<wxView*> wxViewVector;
++typedef wxVector<wxDocTemplate*> wxDocTemplateVector;
++
+ class WXDLLIMPEXP_CORE wxDocument : public wxEvtHandler
+ {
+ public:
+@@ -140,8 +144,11 @@
+ 
+     virtual bool AddView(wxView *view);
+     virtual bool RemoveView(wxView *view);
++
++    wxViewVector GetViewVector() const { return m_documentViews.AsSafeVector<wxView>(); }
+     wxList& GetViews() { return m_documentViews; }
+     const wxList& GetViews() const { return m_documentViews; }
++
+     wxView *GetFirstView() const;
+ 
+     virtual void UpdateAllViews(wxView *sender = NULL, wxObject *hint = NULL);
+@@ -455,6 +462,8 @@
+     virtual void ActivateView(wxView *view, bool activate = true);
+     virtual wxView *GetCurrentView() const { return m_currentView; }
+ 
++    wxDocVector GetDocumentVector() const { return m_docs.AsSafeVector<wxDocument>(); }
++    wxDocTemplateVector GetTemplateVector() const { return m_templates.AsSafeVector<wxDocTemplate>(); }
+     wxList& GetDocuments() { return m_docs; }
+     wxList& GetTemplates() { return m_templates; }
+ 
+Index: include/wx/list.h
+===================================================================
+--- include/wx/list.h	(revision 72995)
++++ include/wx/list.h	(working copy)
+@@ -32,6 +32,7 @@
+ #include "wx/defs.h"
+ #include "wx/object.h"
+ #include "wx/string.h"
++#include "wx/vector.h"
+ 
+ #if wxUSE_STD_CONTAINERS
+     #include "wx/beforestd.h"
+@@ -1215,6 +1216,34 @@
+     // compatibility methods
+     void Sort(wxSortCompareFunction compfunc) { wxListBase::Sort(compfunc); }
+ #endif // !wxUSE_STD_CONTAINERS
++
++    template<typename T_PTR> // T_PTR is a pointer
++    wxVector<T_PTR> AsVector() const
++    {
++        wxVector<T_PTR> vector;
++        size_t i = 0;
++
++        vector.resize(size());
++        for (const_iterator it = begin(); it != end(); it++)
++        {
++            vector[i++] = (T_PTR)*it; // no type check
++        }
++        return vector;
++    }
++
++    template<typename T> // T is a class name
++    wxVector<T*> AsSafeVector() const // using wxRTTI
++    {
++        wxVector<T*> vector;
++        size_t i = 0;
++
++        vector.resize(size());
++        for (const_iterator it = begin(); it != end(); it++)
++        {
++            vector[i++] = wxStaticCast(*it, T); // takes a literal class name
++        }
++        return vector;
++    }
+ };
+ 
+ #if !wxUSE_STD_CONTAINERS
+Index: include/wx/vector.h
+===================================================================
+--- include/wx/vector.h	(revision 72995)
++++ include/wx/vector.h	(working copy)
+@@ -28,7 +28,6 @@
+ 
+ #else // !wxUSE_STD_CONTAINERS
+ 
+-#include "wx/utils.h"
+ #include "wx/scopeguard.h"
+ #include "wx/meta/movable.h"
+ #include "wx/meta/if.h"
+Index: samples/docview/docview.cpp
+===================================================================
+--- samples/docview/docview.cpp	(revision 72995)
++++ samples/docview/docview.cpp	(working copy)
+@@ -290,7 +290,7 @@
+         menubar->Append(edit, wxGetStockLabel(wxID_EDIT));
+ 
+     wxMenu *help= new wxMenu;
+-    help->Append(wxID_ABOUT);
++    help->Append(wxID_ABOUT, wxGetStockLabel(wxID_ABOUT) + "\tShift+F1");
+     menubar->Append(help, wxGetStockLabel(wxID_HELP));
+ 
+     frame->SetMenuBar(menubar);
+@@ -385,16 +385,18 @@
+         default:
+             wxFAIL_MSG( "unknown mode ");
+     }
++    const wxDocVector docList = wxDocManager::GetDocumentManager()->GetDocumentVector();
+ 
+     wxLogMessage
+     (
+         "This is the wxWidgets Document/View Sample\n"
+         "running in %s mode.\n"
++        "%d open documents.\n"
+         "\n"
+         "Authors: Julian Smart, Vadim Zeitlin\n"
+         "\n"
+         "Usage: docview [--{mdi,sdi,single}]",
+-        modeName
++        modeName,
++        (int)docList.size()
+     );
+ }
+-
+Index: src/common/docview.cpp
+===================================================================
+--- src/common/docview.cpp	(revision 72995)
++++ src/common/docview.cpp	(working copy)
+@@ -76,8 +76,6 @@
+     #include "wx/wfstream.h"
+ #endif
+ 
+-typedef wxVector<wxDocTemplate *> wxDocTemplates;
+-
+ // ----------------------------------------------------------------------------
+ // wxWidgets macros
+ // ----------------------------------------------------------------------------
+@@ -212,10 +210,10 @@
+     wxDocManager* manager = GetDocumentManager();
+ 
+     // first check if all views agree to be closed
+-    const wxList::iterator end = m_documentViews.end();
+-    for ( wxList::iterator i = m_documentViews.begin(); i != end; ++i )
++    wxViewVector views = GetViewVector();
++    for ( wxViewVector::const_iterator it = views.begin(); it != views.end(); it++ )
+     {
+-        wxView *view = (wxView *)*i;
++        wxView *view = *it;
+         if ( !view->Close() )
+             return false;
+     }
+@@ -326,11 +324,10 @@
+     // classes, whose filters may also be used.
+     if (docTemplate->GetViewClassInfo() && docTemplate->GetDocClassInfo())
+     {
+-        wxList::compatibility_iterator
+-            node = docTemplate->GetDocumentManager()->GetTemplates().GetFirst();
+-        while (node)
++        wxDocTemplateVector templates = docTemplate->GetDocumentManager()->GetTemplateVector();
++        for ( wxDocTemplateVector::const_iterator it = templates.begin(); it != templates.end(); it++ )
+         {
+-            wxDocTemplate *t = (wxDocTemplate*) node->GetData();
++            wxDocTemplate *t = *it;
+ 
+             if (t->IsVisible() && t != docTemplate &&
+                 t->GetViewClassInfo() == docTemplate->GetViewClassInfo() &&
+@@ -344,8 +341,6 @@
+                        << wxT(" (") << t->GetFileFilter() << wxT(") |")
+                        << t->GetFileFilter();
+             }
+-
+-            node = node->GetNext();
+         }
+     }
+ #else
+@@ -591,24 +586,22 @@
+ 
+ void wxDocument::UpdateAllViews(wxView *sender, wxObject *hint)
+ {
+-    wxList::compatibility_iterator node = m_documentViews.GetFirst();
+-    while (node)
++    wxViewVector views = GetViewVector();
++    for ( wxViewVector::const_iterator it = views.begin(); it != views.end(); it++ )
+     {
+-        wxView *view = (wxView *)node->GetData();
++        wxView *view = *it;
+         if (view != sender)
+             view->OnUpdate(sender, hint);
+-        node = node->GetNext();
+     }
+ }
+ 
+ void wxDocument::NotifyClosing()
+ {
+-    wxList::compatibility_iterator node = m_documentViews.GetFirst();
+-    while (node)
++    wxViewVector views = GetViewVector();
++    for ( wxViewVector::const_iterator it = views.begin(); it != views.end(); it++ )
+     {
+-        wxView *view = (wxView *)node->GetData();
++        wxView *view = *it;
+         view->OnClosingDocument();
+-        node = node->GetNext();
+     }
+ }
+ 
+@@ -623,12 +616,11 @@
+     if ( notifyViews )
+     {
+         // Notify the views that the filename has changed
+-        wxList::compatibility_iterator node = m_documentViews.GetFirst();
+-        while (node)
++        wxViewVector views = GetViewVector();
++        for ( wxViewVector::const_iterator it = views.begin(); it != views.end(); it++ )
+         {
+-            wxView *view = (wxView *)node->GetData();
++            wxView *view = *it;
+             view->OnChangeFilename();
+-            node = node->GetNext();
+         }
+     }
+ }
+@@ -1384,21 +1376,21 @@
+ {
+ 
+ // helper function: return only the visible templates
+-wxDocTemplates GetVisibleTemplates(const wxList& allTemplates)
++wxDocTemplateVector GetVisibleTemplates(const wxDocManager& docManager)
+ {
++    const wxDocTemplateVector allTemplates = docManager.GetTemplateVector();
++    wxDocTemplateVector templates;
++
+     // select only the visible templates
+-    const size_t totalNumTemplates = allTemplates.GetCount();
+-    wxDocTemplates templates;
++    const size_t totalNumTemplates = allTemplates.size();
+     if ( totalNumTemplates )
+     {
+-        templates.reserve(totalNumTemplates);
+-
+-        for ( wxList::const_iterator i = allTemplates.begin(),
+-                                   end = allTemplates.end();
++        for ( wxDocTemplateVector::const_iterator i = allTemplates.begin(),
++                                                end = allTemplates.end();
+               i != end;
+               ++i )
+         {
+-            wxDocTemplate * const temp = (wxDocTemplate *)*i;
++            wxDocTemplate * const temp = *i;
+             if ( temp->IsVisible() )
+                 templates.push_back(temp);
+         }
+@@ -1425,7 +1417,7 @@
+     // this ought to be const but SelectDocumentType/Path() are not
+     // const-correct and can't be changed as, being virtual, this risks
+     // breaking user code overriding them
+-    wxDocTemplates templates(GetVisibleTemplates(m_templates));
++    wxDocTemplateVector templates(GetVisibleTemplates(*this));
+     const size_t numTemplates = templates.size();
+     if ( !numTemplates )
+     {
+@@ -1467,9 +1459,10 @@
+     if ( !path.empty() )
+     {
+         const wxFileName fn(path);
+-        for ( wxList::const_iterator i = m_docs.begin(); i != m_docs.end(); ++i )
++        wxDocVector views = GetDocumentVector();
++        for ( wxDocVector::const_iterator it = views.begin(); it != views.end(); it++ )
+         {
+-            wxDocument * const doc = (wxDocument*)*i;
++            wxDocument * const doc = *it;
+ 
+             if ( fn == doc->GetFilename() )
+             {
+@@ -1532,7 +1525,7 @@
+ 
+ wxView *wxDocManager::CreateView(wxDocument *doc, long flags)
+ {
+-    wxDocTemplates templates(GetVisibleTemplates(m_templates));
++    wxDocTemplateVector templates(GetVisibleTemplates(*this));
+     const size_t numTemplates = templates.size();
+ 
+     if ( numTemplates == 0 )
+@@ -1963,16 +1956,14 @@
+ 
+ wxDocTemplate* wxDocManager::FindTemplate(const wxClassInfo* classinfo)
+ {
+-   for ( wxList::compatibility_iterator node = m_templates.GetFirst();
+-         node;
+-         node = node->GetNext() )
+-   {
+-      wxDocTemplate* t = wxStaticCast(node->GetData(), wxDocTemplate);
+-      if ( t->GetDocClassInfo() == classinfo )
+-         return t;
+-   }
+-
+-   return NULL;
++    wxDocTemplateVector templates = GetTemplateVector();
++    for ( wxDocTemplateVector::const_iterator it = templates.begin(); it != templates.end(); it++ )
++    {
++        wxDocTemplate* t = *it;
++        if ( t->GetDocClassInfo() == classinfo )
++            return t;
++    }
++    return NULL;
+ }
+ 
+ // Add and remove a document from the manager's list

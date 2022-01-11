@@ -1,0 +1,243 @@
+--- include/wx/generic/gridctrl.h.ori	2013-06-13 22:56:22.266326016 +0200
++++ include/wx/generic/gridctrl.h	2013-06-13 23:01:25.342310292 +0200
+@@ -248,6 +248,17 @@
+                                 const wxGridCellAttr& attr,
+                                 const wxRect& rect,
+                                 int row, int col);
++    void WrapLine( wxDC& dc,
++                  const wxString& line,
++                  const wxCoord max_x,
++                  wxArrayString& storage);
++    wxCoord WrapWord( wxDC& dc,
++                      const wxString& word,
++                      const wxCoord max_x,
++                      wxArrayString& storage,
++                      wxString& linebuffer,
++                      bool isLastWord);
++                  
+ 
+ };
+ 
+--- src/generic/gridctrl.cpp.ori	2013-06-10 14:53:57.246793275 +0200
++++ src/generic/gridctrl.cpp	2013-06-14 19:02:09.525757677 +0200
+@@ -301,52 +301,169 @@
+     dc.SetFont(attr.GetFont());
+ 
+     //Taken from wxGrid again!
+-    wxCoord x = 0, y = 0, curr_x = 0;
++    wxCoord x = 0, y = 0;
+     wxCoord max_x = rect.GetWidth();
+ 
+     dc.SetFont(attr.GetFont());
+-    wxStringTokenizer tk(data , wxT(" \n\t\r"));
++    
++    bool tooWide = false;
++    
++    wxStringTokenizer tkzToLine(data , wxT("\n\r"), wxTOKEN_RET_EMPTY );
+     wxString thisline = wxEmptyString;
+-
+-    while ( tk.HasMoreTokens() )
++    
++    // For each line
++    while ( tkzToLine.HasMoreTokens() )
+     {
+-        wxString tok = tk.GetNextToken();
+-        //FIXME: this causes us to print an extra unnecessary
+-        //       space at the end of the line. But it
+-        //       is invisible , simplifies the size calculation
+-        //       and ensures tokens are separated in the display
+-        tok += wxT(" ");
++        wxString tokLine = tkzToLine.GetNextToken();
++        dc.GetTextExtent(tokLine, &x, &y);
++        tooWide = ( x > max_x);
++        if (!tooWide)
++        {
++            // Line fits, it is stored
++            lines.Add(tokLine);
++            thisline = wxEmptyString;
++        }
++        else
++        {
++            // Line does not fit
++            WrapLine(dc, tokLine, max_x, lines);
++        }
++    }
++    //Add last line
++    if (thisline != wxEmptyString) lines.Add( wxString(thisline) );
++        
++    return lines;
++}
+ 
+-        dc.GetTextExtent(tok, &x, &y);
+-        if ( curr_x + x > max_x)
++void
++wxGridCellAutoWrapStringRenderer::WrapLine( wxDC& dc,
++                                            const wxString& line,
++                                            const wxCoord max_x,
++                                            wxArrayString& storage)
++{
++    /* Helper function to GetTextLines, not intended for direct usage
++     * Does not prepare device context
++     * Expects a line whose width is > max_x
++     */
++    wxCoord x = 0, y = 0, curr_x = 0;
++    bool tooWide = false;
++    wxString linebuffer = wxEmptyString;
++    
++    // For each word
++    wxStringTokenizer tkzToWord(line , wxT(" \t"), wxTOKEN_RET_DELIMS);
++    while (tkzToWord.HasMoreTokens())
++    {
++        wxString tokWord = tkzToWord.GetNextToken();
++        dc.GetTextExtent(tokWord, &x, &y);
++        tooWide = ( curr_x + x > max_x);
++        if (!tooWide)
+         {
+-            if ( curr_x == 0 )
++            // Word fits : build the line
++            linebuffer += tokWord;
++            curr_x += x;
++            if (!tkzToWord.HasMoreTokens())
+             {
+-                // this means that a single token is wider than the maximal
+-                // width -- still use it as is as we need to show at least the
+-                // part of it which fits
+-                lines.Add(tok);
++                // Last word reached : store the line
++                storage.Add(linebuffer);
++                linebuffer = wxEmptyString;
++                curr_x = 0;
+             }
+-            else
++        } 
++        else
++        {
++            // Word does not fit at curr_x
++            // Check whether the word is itself wider that available width
++            tooWide = ( x > max_x);
++            if (!tooWide)
+             {
+-                lines.Add(thisline);
+-                thisline = tok;
++                // Word can fit in available width : store line and start a new line
++                storage.Add(linebuffer);
++                linebuffer = tokWord;
+                 curr_x = x;
++                if (!tkzToWord.HasMoreTokens()) 
++                {
++                    // Last word reached : store the line
++                    storage.Add(linebuffer);
++                    linebuffer = wxEmptyString;
++                    curr_x = 0;
++                }
++            }
++            else
++            {
++                // Word cannot fit in available width : store built line
++                if (linebuffer != wxEmptyString)
++                {
++                    storage.Add(linebuffer);
++                    linebuffer = wxEmptyString;
++                    curr_x = 0;
++                }
++                // and wrap the word
++                curr_x = WrapWord(dc, tokWord, max_x, storage, linebuffer, !tkzToWord.HasMoreTokens());
+             }
+         }
++    }
++}
++
++
++wxCoord
++wxGridCellAutoWrapStringRenderer::WrapWord( wxDC& dc,
++                                            const wxString& word,
++                                            const wxCoord max_x,
++                                            wxArrayString& storage,
++                                            wxString& linebuffer,
++                                            bool isLastWord)
++{
++    /* Helper function to WrapLine, not intended for direct usage
++     * Does not prepare device context
++     * If word is not the last word in the line, linebuffer will contain text not in storage
++     * Expects a word whose width is > max_x
++     */
++    wxCoord x = 0, y = 0, curr_x = 0;
++    bool tooWide = false;
++    
++    int nb = word.Len();
++    wxString partialWord = wxEmptyString;
++    int from = 0, count = 0;
++    for (int i = 0; i < nb; i++)
++    {
++        count++;
++        partialWord = word.Mid(from, count);
++        dc.GetTextExtent(partialWord, &x, &y);
++        tooWide = ( curr_x + x > max_x);
++        if (tooWide)
++        {
++            // Built line fills available space : store the line
++            // without the last character, which is beyond max_x
++            storage.Add(partialWord.Left(partialWord.Len() - 1));
++            // and continue with the rest of the word
++            // Start at the next step of the loop
++            from = i;
++            // but decrement the loop counter to fetch the dropped character
++            i--;
++            count = 0;
++            curr_x = 0;
++        }
+         else
+         {
+-            thisline+= tok;
+-            curr_x += x;
++            // until the last character
++            if (i == (nb - 1))
++            {
++                // used in WrapLine
++                linebuffer =  partialWord;
++                // returned and used in WrapLine
++                curr_x = x;
++                if (isLastWord)
++                {
++                    storage.Add(linebuffer);
++                    curr_x = 0;
++                    linebuffer = wxEmptyString;
++                }
++            }
+         }
+     }
+-    //Add last line
+-    lines.Add( wxString(thisline) );
+-
+-    return lines;
++    return curr_x;
+ }
+ 
+-
+ wxSize
+ wxGridCellAutoWrapStringRenderer::GetBestSize(wxGrid& grid,
+                                               wxGridCellAttr& attr,
+--- samples/grid/griddemo.cpp.ori	2013-06-14 19:34:40.118656474 +0200
++++ samples/grid/griddemo.cpp	2013-06-14 19:35:31.153653826 +0200
+@@ -449,6 +449,21 @@
+     grid->SetReadOnly( 0, 3 );
+ 
+     grid->SetCellValue( 0, 4, wxT("Can veto edit this cell") );
++    
++    grid->SetColSize(10, 150);
++    wxString longtext = wxT("abcdefghijklmnopqrstuvwxyz0123456789àéèîôü\n\n");
++    longtext += wxT("With tabs :\n");
++    longtext += wxT("Home,\t\thome\t\t\tagain\n");
++    longtext += wxT("Long word at start :\n");
++    longtext += wxT("ILikeToBeHereWhen I can\n");
++    longtext += wxT("Long word in the middle :\n");
++    longtext += wxT("When IComeHome,ColdAnd tired\n");
++    longtext += wxT("Long last word :\n");
++    longtext += wxT("It's GoodToWarmMyBonesBesideTheFire");
++    grid->SetCellValue( 0, 10, longtext );
++    grid->SetCellRenderer(0 , 10, new wxGridCellAutoWrapStringRenderer);
++    grid->SetCellEditor( 0,  10 , new wxGridCellAutoWrapStringEditor);
++    grid->SetCellValue( 0, 11, wxT("K1 cell editor blocker") );
+ 
+     grid->SetCellValue( 0, 5, wxT("Press\nCtrl+arrow\nto skip over\ncells") );
+ 

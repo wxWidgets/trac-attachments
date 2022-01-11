@@ -1,0 +1,304 @@
+Index: wxWidgets/2.8.0/src/common/fileconf.cpp
+===================================================================
+--- wxWidgets/2.8.0/src/common/fileconf.cpp	(revision 2376)
++++ wxWidgets/2.8.0/src/common/fileconf.cpp	(working copy)
+@@ -42,9 +42,12 @@
+ #include  "wx/fileconf.h"
+ #include  "wx/filefn.h"
+ 
++// Use standard paths and standard filename/dir functions
++#include  "wx/stdpaths.h"
++#include  "wx/filename.h"
++
+ #if defined(__WXMAC__)
+     #include  "wx/mac/private.h"  // includes mac headers
+-    #include  "wx/filename.h"     // for MacSetTypeAndCreator
+ #endif
+ 
+ #if defined(__WXMSW__)
+@@ -260,78 +263,24 @@
+ // ----------------------------------------------------------------------------
+ // static functions
+ // ----------------------------------------------------------------------------
+-wxString wxFileConfig::GetGlobalDir()
++wxString wxFileConfig::GetGlobalDir(bool use_subdir = false)
+ {
+-  wxString strDir;
+-
+-#ifdef __VMS__ // Note if __VMS is defined __UNIX is also defined
+-    strDir = wxT("sys$manager:");
+-#elif defined(__WXMAC__)
+-    strDir = wxMacFindFolder(  (short) kOnSystemDisk, kPreferencesFolderType, kDontCreateFolder ) ;
+-#elif defined( __UNIX__ )
+-    strDir = wxT("/etc/");
+-#elif defined(__OS2__)
+-    ULONG aulSysInfo[QSV_MAX] = {0};
+-    UINT drive;
+-    APIRET rc;
+-
+-    rc = DosQuerySysInfo( 1L, QSV_MAX, (PVOID)aulSysInfo, sizeof(ULONG)*QSV_MAX);
+-    if (rc == 0)
+-    {
+-        drive = aulSysInfo[QSV_BOOT_DRIVE - 1];
+-        strDir.Printf(wxT("%c:\\OS2\\"), 'A'+drive-1);
+-    }
+-#elif defined(__WXSTUBS__)
+-    wxFAIL_MSG( wxT("TODO") );
+-#elif defined(__DOS__)
+-    // There's no such thing as global cfg dir in MS-DOS, let's return
+-    // current directory (FIXME_MGL?)
+-    strDir = wxT(".\\");
+-#elif defined(__WXWINCE__)
+-    strDir = wxT("\\Windows\\");
+-#else // Windows
+-
+-    wxChar szWinDir[MAX_PATH];
+-    ::GetWindowsDirectory(szWinDir, MAX_PATH);
+-
+-    strDir = szWinDir;
+-    strDir << wxT('\\');
+-#endif // Unix/Windows
+-
+-    return strDir;
++    return wxStandardPaths::Get()->GetConfigDir();
+ }
+ 
+-wxString wxFileConfig::GetLocalDir()
++wxString wxFileConfig::GetLocalDir(bool use_subdir = false)
+ {
+-    wxString strDir;
+-
+-#if defined(__WXMAC__) || defined(__DOS__)
+-    // no local dir concept on Mac OS 9 or MS-DOS
+-    strDir << GetGlobalDir() ;
+-#else
+-    wxGetHomeDir(&strDir);
+-
+-    #ifdef  __UNIX__
+-        if (
+-            (strDir.Last() != wxT('/'))
+-        #ifdef __VMS
+-            && (strDir.Last() != wxT(']'))
+-        #endif
+-            )
+-            strDir << wxT('/');
+-    #else
+-        if (strDir.Last() != wxT('\\'))
+-            strDir << wxT('\\');
+-    #endif
++#if defined(__UNIX__) && !defined(__VMS)
++    if(use_subdir)
++        return wxStandardPaths::Get()->GetUserDataDir();
++    else
+ #endif
+-
+-    return strDir;
++        return wxStandardPaths::Get()->GetUserConfigDir();
+ }
+ 
+-wxString wxFileConfig::GetGlobalFileName(const wxChar *szFile)
++wxString wxFileConfig::GetGlobalFileName(const wxChar *szFile, bool use_subdir = false)
+ {
+-    wxString str = GetGlobalDir();
+-    str << szFile;
++    wxString str(szFile);
+ 
+     if ( wxStrchr(szFile, wxT('.')) == NULL )
+ #if defined( __WXMAC__ )
+@@ -345,17 +294,11 @@
+     return str;
+ }
+ 
+-wxString wxFileConfig::GetLocalFileName(const wxChar *szFile)
++wxString wxFileConfig::GetLocalFileName(const wxChar *szFile, bool use_subdir = false)
+ {
+-#ifdef __VMS__
+-    // On VMS I saw the problem that the home directory was appended
+-    // twice for the configuration file. Does that also happen for
+-    // other platforms?
+-    wxString str = wxT( '.' );
+-#else
+-    wxString str = GetLocalDir();
+-#endif
++    wxString str(szFile);
+ 
++    // GB: FIXME should __VMS be stil excluded?
+ #if defined( __UNIX__ ) && !defined( __VMS ) && !defined( __WXMAC__ )
+     str << wxT('.');
+ #endif
+@@ -389,9 +332,9 @@
+     // It's not an error if (one of the) file(s) doesn't exist.
+ 
+     // parse the global file
+-    if ( !m_strGlobalFile.empty() && wxFile::Exists(m_strGlobalFile) )
++    if ( m_fnGlobalFile.FileExists() )
+     {
+-        wxTextFile fileGlobal(m_strGlobalFile);
++        wxTextFile fileGlobal(m_fnGlobalFile);
+ 
+         if ( fileGlobal.Open(*m_conv/*ignored in ANSI build*/) )
+         {
+@@ -400,14 +343,14 @@
+         }
+         else
+         {
+-            wxLogWarning(_("can't open global configuration file '%s'."), m_strGlobalFile.c_str());
++            wxLogWarning(_("can't open global configuration file '%s'."), m_fnGlobalFile.GetFullPath().c_str());
+         }
+     }
+ 
+     // parse the local file
+-    if ( !m_strLocalFile.empty() && wxFile::Exists(m_strLocalFile) )
++    if ( m_fnLocalFile.FileExists() )
+     {
+-        wxTextFile fileLocal(m_strLocalFile);
++        wxTextFile fileLocal(m_fnLocalFile);
+         if ( fileLocal.Open(*m_conv/*ignored in ANSI build*/) )
+         {
+             Parse(fileLocal, true /* local */);
+@@ -415,7 +358,7 @@
+         }
+         else
+         {
+-            wxLogWarning(_("can't open user configuration file '%s'."),  m_strLocalFile.c_str() );
++            wxLogWarning(_("can't open user configuration file '%s'."),  m_fnLocalFile.GetFullPath().c_str() );
+         }
+     }
+ 
+@@ -430,40 +373,38 @@
+             : wxConfigBase(::GetAppName(appName), vendorName,
+                            strLocal, strGlobal,
+                            style),
+-              m_strLocalFile(strLocal), m_strGlobalFile(strGlobal),
++              m_fnLocalFile(fnLocal), m_fnGlobalFile(fnGlobal),
+               m_conv(conv.Clone())
+ {
++    bool use_subdir = ((style & wxCONFIG_USE_SUBDIR) != 0);
++
+     // Make up names for files if empty
+-    if ( m_strLocalFile.empty() && (style & wxCONFIG_USE_LOCAL_FILE) )
+-        m_strLocalFile = GetLocalFileName(GetAppName());
++    if ( m_fnLocalFile.GetFullName().Empty() && (style & wxCONFIG_USE_LOCAL_FILE) )
++        m_fnLocalFile.SetFullName(GetLocalFileName(GetAppName(), use_subdir));
+ 
+-    if ( m_strGlobalFile.empty() && (style & wxCONFIG_USE_GLOBAL_FILE) )
+-        m_strGlobalFile = GetGlobalFileName(GetAppName());
++    if ( m_fnGlobalFile.GetFullPath().Empty() && (style & wxCONFIG_USE_GLOBAL_FILE) )
++        m_fnGlobalFile.SetFullName(GetGlobalFileName(GetAppName(), use_subdir));
+ 
+     // Check if styles are not supplied, but filenames are, in which case
+     // add the correct styles.
+-    if ( !m_strLocalFile.empty() )
++    if ( !m_fnLocalFile.GetFullPath().Empty() )
+         SetStyle(GetStyle() | wxCONFIG_USE_LOCAL_FILE);
+ 
+-    if ( !m_strGlobalFile.empty() )
++    if ( !m_fnGlobalFile.GetFullPath().Empty() )
+         SetStyle(GetStyle() | wxCONFIG_USE_GLOBAL_FILE);
+ 
+     // if the path is not absolute, prepend the standard directory to it
+     // UNLESS wxCONFIG_USE_RELATIVE_PATH style is set
+     if ( !(style & wxCONFIG_USE_RELATIVE_PATH) )
+     {
+-        if ( !m_strLocalFile.empty() && !wxIsAbsolutePath(m_strLocalFile) )
++        if ( !m_fnLocalFile.GetFullPath().Empty() && !m_fnLocalFile.IsAbsolute() )
+         {
+-            const wxString strLocalOrig = m_strLocalFile;
+-            m_strLocalFile = GetLocalDir();
+-            m_strLocalFile << strLocalOrig;
++            m_fnLocalFile.MakeAbsolute(GetLocalDir(use_subdir));
+         }
+ 
+-        if ( !m_strGlobalFile.empty() && !wxIsAbsolutePath(m_strGlobalFile) )
++        if ( !m_fnLocalFile.GetFullPath().Empty() && !m_fnGlobbalFile.IsAbsolute() )
+         {
+-            const wxString strGlobalOrig = m_strGlobalFile;
+-            m_strGlobalFile = GetGlobalDir();
+-            m_strGlobalFile << strGlobalOrig;
++            m_fnGlobalFile.MakeAbsolute(GetGlobalDir(use_subdir));
+         }
+     }
+ 
+@@ -1026,13 +967,13 @@
+ 
+ bool wxFileConfig::Flush(bool /* bCurrentOnly */)
+ {
+-  if ( !IsDirty() || !m_strLocalFile )
++  if ( !IsDirty() || !m_fnLocalFile.GetFullPath() )
+     return true;
+ 
+   // set the umask if needed
+   wxCHANGE_UMASK(m_umask);
+ 
+-  wxTempFile file(m_strLocalFile);
++  wxTempFile file(m_fnLocalFile);
+ 
+   if ( !file.IsOpened() )
+   {
+@@ -1062,7 +1003,7 @@
+   ResetDirty();
+ 
+ #if defined(__WXMAC__)
+-  wxFileName(m_strLocalFile).MacSetTypeAndCreator('TEXT', 'ttxt');
++  m_fnLocalFile.MacSetTypeAndCreator('TEXT', 'ttxt');
+ #endif // __WXMAC__
+ 
+   return true;
+@@ -1188,12 +1129,12 @@
+ {
+   CleanUp();
+ 
+-  if ( !m_strLocalFile.empty() )
++  if ( !m_fnLocalFile.GetFullPath().Empty() )
+   {
+-      if ( wxFile::Exists(m_strLocalFile) && wxRemove(m_strLocalFile) == -1 )
++      if ( m_fnLocalFile.FileExists() && wxRemove(m_fnLocalFile.GetFullPath()) == -1 )
+       {
+           wxLogSysError(_("can't delete user configuration file '%s'"),
+-                        m_strLocalFile.c_str());
++                        m_fnLocalFile.GetFullPath().c_str());
+           return false;
+       }
+   }
+Index: wxWidgets/2.8.0/include/wx/confbase.h
+===================================================================
+--- wxWidgets/2.8.0/include/wx/confbase.h	(revision 2376)
++++ wxWidgets/2.8.0/include/wx/confbase.h	(working copy)
+@@ -56,7 +56,8 @@
+     wxCONFIG_USE_LOCAL_FILE = 1,
+     wxCONFIG_USE_GLOBAL_FILE = 2,
+     wxCONFIG_USE_RELATIVE_PATH = 4,
+-    wxCONFIG_USE_NO_ESCAPE_CHARACTERS = 8
++    wxCONFIG_USE_NO_ESCAPE_CHARACTERS = 8,
++    wxCONFIG_USE_SUBDIR = 16
+ };
+ 
+ // ----------------------------------------------------------------------------
+Index: wxWidgets/2.8.0/include/wx/fileconf.h
+===================================================================
+--- wxWidgets/2.8.0/include/wx/fileconf.h	(revision 2363)
++++ wxWidgets/2.8.0/include/wx/fileconf.h	(working copy)
+@@ -189,8 +189,8 @@
+ 
+ private:
+   // GetXXXFileName helpers: return ('/' terminated) directory names
+-  static wxString GetGlobalDir();
+-  static wxString GetLocalDir();
++  static wxString GetGlobalDir(bool use_subdir = false);
++  static wxString GetLocalDir(bool use_subdir = false);
+ 
+   // common part of all ctors (assumes that m_str{Local|Global}File are already
+   // initialized
+@@ -220,8 +220,8 @@
+   wxFileConfigLineList *m_linesHead,    // head of the linked list
+                        *m_linesTail;    // tail
+ 
+-  wxString    m_strLocalFile,           // local  file name passed to ctor
+-              m_strGlobalFile;          // global
++  wxFileName  m_fnLocalFile,            // local  file name passed to ctor
++              m_fnGlobalFile;           // global
+   wxString    m_strPath;                // current path (not '/' terminated)
+ 
+   wxFileConfigGroup *m_pRootGroup,      // the top (unnamed) group
+
+ 	  	 

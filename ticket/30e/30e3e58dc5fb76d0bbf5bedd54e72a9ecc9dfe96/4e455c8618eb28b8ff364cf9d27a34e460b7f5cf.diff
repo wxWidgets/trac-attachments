@@ -1,0 +1,626 @@
+commit a9a5f1b422a45a54866f7c38087bd0e6a15bdd96
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Sat May 8 13:13:39 2010 +0200
+
+    Implement access to 64/32 bit registry from 32/64 bit code.
+    
+    Use KEY_WOW64_32KEY/KEY_WOW64_64KEY to allow explicitly selecting the registry
+    view to use under WOW64.
+    
+    Closes #10792.
+
+diff --git a/docs/changes.txt b/docs/changes.txt
+index 8aecf87..e40cbb1 100644
+--- a/docs/changes.txt
++++ b/docs/changes.txt
+@@ -548,6 +548,7 @@ MSW:
+ - Fix sending of wxEVT_COMMAND_LIST_COL_DRAGGING events in wxListCtrl.
+ - Allow putting the UAC symbol on buttons (Chris Spencer).
+ - Fix wxTaskBarIcon for older Windows systems (Daniel Wyatt).
++- Allow accessing 64/32 bit registry from 32/64 bit code (Rickard Westerlund).
+ 
+ i18n:
+ 
+diff --git a/include/wx/msw/registry.h b/include/wx/msw/registry.h
+index 654290e..d7b4e85 100644
+--- a/include/wx/msw/registry.h
++++ b/include/wx/msw/registry.h
+@@ -66,6 +66,22 @@ public:
+       Write     // read and write
+   };
+ 
++  // different registry views supported under WOW64
++  enum RegView
++  {
++      // 32 bit registry for 32 bit applications, 64 bit registry
++      // for 64 bit ones
++      RegView_Default,
++
++      // can be used in 64 bit apps to access 32 bit registry,
++      // has no effect (i.e. treated as default) in 32 bit apps
++      RegView_32,
++
++      // can be used in 32 bit apps to access 64 bit registry,
++      // has no effect (i.e. treated as default) in 64 bit apps
++      RegView_64
++  };
++
+   // information about standard (predefined) registry keys
+     // number of standard keys
+   static const size_t nStdKeys;
+@@ -82,11 +98,13 @@ public:
+ 
+   // ctors
+     // root key is set to HKCR (the only root key under Win16)
+-  wxRegKey();
++  wxRegKey(RegView regView = RegView_Default);
+     // strKey is the full name of the key (i.e. starting with HKEY_xxx...)
+-  wxRegKey(const wxString& strKey);
++  wxRegKey(const wxString& strKey, RegView regView = RegView_Default);
+     // strKey is the name of key under (standard key) keyParent
+-  wxRegKey(StdKey keyParent, const wxString& strKey);
++  wxRegKey(StdKey keyParent,
++           const wxString& strKey,
++           RegView regView = RegView_Default);
+     // strKey is the name of key under (previously created) keyParent
+   wxRegKey(const wxRegKey& keyParent, const wxString& strKey);
+     // dtor closes the key
+@@ -105,6 +123,8 @@ public:
+   // get infomation about the key
+     // get the (full) key name. Abbreviate std root keys if bShortPrefix.
+   wxString GetName(bool bShortPrefix = true) const;
++    // retrieves the registry view used by this key
++  RegView GetView() const { return m_regView; }
+     // return true if the key exists
+   bool  Exists() const;
+     // get the info about key (any number of these pointers may be NULL)
+@@ -216,6 +236,10 @@ public:
+   // for wxRegConfig usage only: preallocate some memory for the name
+   void ReserveMemoryForName(size_t bytes) { m_strKey.reserve(bytes); }
+ 
++  // return the access rights which can be used with MSW registry functions for
++  // opening the key in the specified mode
++  static long GetMSWAccess(AccessMode mode, RegView view);
++
+ private:
+   // common part of all ctors
+   void Init()
+@@ -234,13 +258,13 @@ private:
+   // given name
+   wxString FormatValue(const wxString& name) const;
+ 
++  WXHKEY       m_hKey,           // our handle
++               m_hRootKey;       // handle of the top key (i.e. StdKey)
++  wxString     m_strKey;         // key name (relative to m_hRootKey)
++  RegView      m_regView;        // which view to select under WOW64
+ 
+-  WXHKEY      m_hKey,           // our handle
+-              m_hRootKey;       // handle of the top key (i.e. StdKey)
+-  wxString    m_strKey;         // key name (relative to m_hRootKey)
+-
+-  AccessMode  m_mode;           // valid only if key is opened
+-  long        m_dwLastError;    // last error (0 if none)
++  AccessMode   m_mode;           // valid only if key is opened
++  long         m_dwLastError;    // last error (0 if none)
+ 
+ 
+   wxDECLARE_NO_COPY_CLASS(wxRegKey);
+diff --git a/interface/wx/msw/registry.h b/interface/wx/msw/registry.h
+index 5fd4be2..46e2211 100644
+--- a/interface/wx/msw/registry.h
++++ b/interface/wx/msw/registry.h
+@@ -71,20 +71,25 @@ class wxRegKey
+ public:
+     /**
+         Default constructor, initializes to @c HKEY_CLASSES_ROOT.
++
++        The @a regView parameter is new since wxWidgets 2.9.1.
+     */
+-    wxRegKey();
++    wxRegKey(RegView regView = RegView_Default);
+     /**
+         The constructor to set the full name of the key.
++
++        The @a regView parameter is new since wxWidgets 2.9.1.
+     */
+-    wxRegKey(const wxString& strKey);
++    wxRegKey(const wxString& strKey, RegView regView = RegView_Default);
+     /**
+         The constructor to set the full name of the key using one of the
+         standard keys, that is, HKCR, HKCU, HKLM, HKUSR, HKPD, HKCC or HKDD.
++        The regView parameter is new since wxWidgets 2.9.1
+     */
+-    wxRegKey(StdKey keyParent, const wxString& strKey);
++    wxRegKey(StdKey keyParent, const wxString& strKey, RegView regView = RegView_Default);
+     /**
+         The constructor to set the full name of the key under a previously created
+-        parent.
++        parent. The registry view is inherited from the parent.
+     */
+     wxRegKey(const wxRegKey& keyParent, const wxString& strKey);
+ 
+@@ -133,6 +138,33 @@ public:
+     };
+ 
+     /**
++        Used to determine how the registry will be viewed, either as
++        32-bit or 64-bit.
++
++        @since 2.9.1
++    */
++    enum RegView
++    {
++        /**
++            Uses 32-bit registry for 32-bit applications and
++            64-bit registry for 64-bit ones.
++        */
++        RegView_Default,
++
++        /**
++            Can be used in 64-bit apps to access the 32-bit registry,
++            has no effect (i.e. treated as default) in 32-bit apps.
++        */
++        RegView_32,
++
++        /**
++            Can be used in 32-bit apps to access the 64-bit registry,
++            has no effect (i.e. treated as default) in 64-bit apps.
++        */
++        RegView_64
++    };
++
++    /**
+         Closes the key.
+     */
+     void Close();
+@@ -225,6 +257,15 @@ public:
+     wxString GetName(bool bShortPrefix = true) const;
+ 
+     /**
++        Retrieves the registry view used by this key.
++
++        @since 2.9.1
++
++        @return The registry view given at the object's construction.
++    */
++    RegView GetView() const { return m_regView; }
++
++    /**
+         Gets the next key. Returns @true if successful.
+     */
+     bool GetNextKey(wxString& strKeyName, long& lIndex) const;
+diff --git a/samples/regtest/regtest.cpp b/samples/regtest/regtest.cpp
+index a763a65..6113205 100644
+--- a/samples/regtest/regtest.cpp
++++ b/samples/regtest/regtest.cpp
+@@ -102,6 +102,7 @@ public:
+     void CreateNewKey(const wxString& strName);
+     void CreateNewTextValue(const wxString& strName);
+     void CreateNewBinaryValue(const wxString& strName);
++    void SetRegistryView(wxRegKey::RegView regView);
+ 
+     // information
+     bool IsKeySelected() const;
+@@ -119,6 +120,7 @@ private:
+         TreeChildren  m_aChildren;  // array of subkeys/values
+         bool          m_bKey;       // key or value?
+         wxRegKey     *m_pKey;       // only may be !NULL if m_bKey == true
++        wxRegKey::RegView m_regView; // How to view the registry.
+ 
+         // trivial accessors
+         wxTreeItemId  Id()     const { return m_id;              }
+@@ -135,6 +137,7 @@ private:
+         bool DeleteChild(TreeNode *child);
+         void DestroyChildren();
+         const wxChar *FullName() const;
++        void SetRegistryView(wxRegKey::RegView regView);
+ 
+         // get the associated key: make sure the pointer is !NULL
+         wxRegKey& Key() { if ( !m_pKey ) OnExpand(); return *m_pKey; }
+@@ -155,6 +158,8 @@ private:
+ 
+     wxString     m_nameOld;           // the initial value of item being renamed
+ 
++    wxRegKey::RegView m_regView; // Registry view to use for keys.
++
+     TreeNode *GetNode(const wxTreeEvent& event)
+         { return (TreeNode *)GetItemData(event.GetItem()); }
+ 
+@@ -163,7 +168,8 @@ public:
+     TreeNode *InsertNewTreeNode(TreeNode *pParent,
+         const wxString& strName,
+         int idImage = RegImageList::ClosedKey,
+-        const wxString *pstrValue = NULL);
++        const wxString *pstrValue = NULL,
++        wxRegKey::RegView regView = wxRegKey::RegView_Default);
+ 
+     // add standard registry keys
+     void AddStdKeys();
+@@ -203,6 +209,8 @@ public:
+ 
+     void OnInfo     (wxCommandEvent& event);
+ 
++    void OnViewChange (wxCommandEvent& event);
++
+     DECLARE_EVENT_TABLE()
+ 
+ private:
+@@ -232,6 +240,10 @@ enum
+     Menu_NewBinary,
+     Menu_Delete,
+     Menu_Info,
++    Menu_View,
++    Menu_ViewDefault,
++    Menu_View32,
++    Menu_View64,
+ 
+     Ctrl_RegTree  = 200
+ };
+@@ -241,19 +253,22 @@ enum
+ // ----------------------------------------------------------------------------
+ 
+ BEGIN_EVENT_TABLE(RegFrame, wxFrame)
+-    EVT_MENU(Menu_Test,     RegFrame::OnTest)
+-    EVT_MENU(Menu_About,    RegFrame::OnAbout)
+-    EVT_MENU(Menu_Quit,     RegFrame::OnQuit)
+-    EVT_MENU(Menu_GoTo,     RegFrame::OnGoTo)
+-    EVT_MENU(Menu_Expand,   RegFrame::OnExpand)
+-    EVT_MENU(Menu_Collapse, RegFrame::OnCollapse)
+-    EVT_MENU(Menu_Toggle,   RegFrame::OnToggle)
+-    EVT_MENU(Menu_Refresh,  RegFrame::OnRefresh)
+-    EVT_MENU(Menu_Delete,   RegFrame::OnDelete)
+-    EVT_MENU(Menu_NewKey,   RegFrame::OnNewKey)
+-    EVT_MENU(Menu_NewText,  RegFrame::OnNewText)
+-    EVT_MENU(Menu_NewBinary,RegFrame::OnNewBinary)
+-    EVT_MENU(Menu_Info,     RegFrame::OnInfo)
++    EVT_MENU(Menu_Test,        RegFrame::OnTest)
++    EVT_MENU(Menu_About,       RegFrame::OnAbout)
++    EVT_MENU(Menu_Quit,        RegFrame::OnQuit)
++    EVT_MENU(Menu_GoTo,        RegFrame::OnGoTo)
++    EVT_MENU(Menu_Expand,      RegFrame::OnExpand)
++    EVT_MENU(Menu_Collapse,    RegFrame::OnCollapse)
++    EVT_MENU(Menu_Toggle,      RegFrame::OnToggle)
++    EVT_MENU(Menu_Refresh,     RegFrame::OnRefresh)
++    EVT_MENU(Menu_Delete,      RegFrame::OnDelete)
++    EVT_MENU(Menu_NewKey,      RegFrame::OnNewKey)
++    EVT_MENU(Menu_NewText,     RegFrame::OnNewText)
++    EVT_MENU(Menu_NewBinary,   RegFrame::OnNewBinary)
++    EVT_MENU(Menu_Info,        RegFrame::OnInfo)
++    EVT_MENU(Menu_ViewDefault, RegFrame::OnViewChange)
++    EVT_MENU(Menu_View32,      RegFrame::OnViewChange)
++    EVT_MENU(Menu_View64,      RegFrame::OnViewChange)
+ END_EVENT_TABLE()
+ 
+ #if DO_REGTEST
+@@ -295,6 +310,20 @@ wxMenu *CreateRegistryMenu()
+     pMenuNew->Append(Menu_NewText,   wxT("&Text value"),   wxT("Create a new text value"));
+     pMenuNew->Append(Menu_NewBinary, wxT("&Binary value"), wxT("Create a new binary value"));
+ 
++    wxMenu *pMenuView = new wxMenu;
++    pMenuView->AppendRadioItem(
++        Menu_ViewDefault,
++        wxT("&Default"),
++        wxT("Default registry view for the program environment."));
++    pMenuView->AppendRadioItem(
++        Menu_View32,
++        wxT("32-bit Registry"),
++        wxT("View 32-bit registry."));
++    pMenuView->AppendRadioItem(
++        Menu_View64,
++        wxT("64-bit Registry"),
++        wxT("View 64-bit registry."));
++
+     wxMenu *pMenuReg = new wxMenu;
+     pMenuReg->Append(Menu_New, wxT("&New"), pMenuNew);
+     pMenuReg->Append(Menu_Delete,   wxT("&Delete..."), wxT("Delete selected key/value"));
+@@ -305,6 +334,7 @@ wxMenu *CreateRegistryMenu()
+     pMenuReg->Append(Menu_Toggle,   wxT("&Toggle"),    wxT("Toggle current key"));
+     pMenuReg->AppendSeparator();
+     pMenuReg->Append(Menu_Refresh,  wxT("&Refresh"),   wxT("Refresh the subtree"));
++    pMenuReg->Append(Menu_View,     wxT("&View"),      pMenuView);
+     pMenuReg->AppendSeparator();
+     pMenuReg->Append(Menu_Info,     wxT("&Properties"),wxT("Information about current selection"));
+ 
+@@ -496,6 +526,33 @@ void RegFrame::OnInfo(wxCommandEvent& WXUNUSED(event))
+ #endif
+ }
+ 
++void RegFrame::OnViewChange (wxCommandEvent& event)
++{
++#if DO_REGTEST
++    wxRegKey::RegView view;
++    switch ( event.GetId() )
++    {
++        case Menu_ViewDefault:
++            view = wxRegKey::RegView_Default;
++            break;
++
++        case Menu_View32:
++            view = wxRegKey::RegView_32;
++            break;
++
++        case Menu_View64:
++            view = wxRegKey::RegView_64;
++            break;
++
++        default:
++            wxFAIL_MSG("Unexpected event source for view change.");
++            return;
++    }
++
++    m_treeCtrl->SetRegistryView(view);
++#endif
++}
++
+ // ----------------------------------------------------------------------------
+ // RegImageList
+ // ----------------------------------------------------------------------------
+@@ -517,10 +574,12 @@ RegImageList::RegImageList() : wxImageList(16, 16, true)
+ // ----------------------------------------------------------------------------
+ 
+ // create a new tree item and insert it into the tree
+-RegTreeCtrl::TreeNode *RegTreeCtrl::InsertNewTreeNode(TreeNode *pParent,
+-                                                      const wxString& strName,
+-                                                      int idImage,
+-                                                      const wxString *pstrValue)
++RegTreeCtrl::TreeNode *RegTreeCtrl::InsertNewTreeNode(
++    TreeNode *pParent,
++    const wxString& strName,
++    int idImage,
++    const wxString *pstrValue,
++    wxRegKey::RegView regView)
+ {
+     // create new item & insert it
+     TreeNode *pNewNode = new TreeNode;
+@@ -529,6 +588,7 @@ RegTreeCtrl::TreeNode *RegTreeCtrl::InsertNewTreeNode(TreeNode *pParent,
+     pNewNode->m_strName = strName;
+     pNewNode->m_bKey    = pstrValue == NULL;
+     pNewNode->m_pKey    = NULL;
++    pNewNode->m_regView = regView;
+     if (pParent)
+     {
+         pNewNode->m_id  = AppendItem(pParent->Id(),
+@@ -574,6 +634,7 @@ RegTreeCtrl::RegTreeCtrl(wxWindow *parent, wxWindowID id)
+     // init members
+     m_draggedItem = NULL;
+     m_restoreStatus = false;
++    m_regView = wxRegKey::RegView_Default;
+ 
+     // create the image list
+     // ---------------------
+@@ -582,7 +643,13 @@ RegTreeCtrl::RegTreeCtrl(wxWindow *parent, wxWindowID id)
+ 
+     // create root keys
+     // ----------------
+-    m_pRoot = InsertNewTreeNode(NULL, wxT("Registry Root"), RegImageList::Root);
++    m_pRoot =
++        InsertNewTreeNode(
++            NULL,
++            wxT("Registry Root"),
++            RegImageList::Root,
++            NULL,
++            m_regView);
+ 
+     // create popup menu
+     // -----------------
+@@ -600,7 +667,12 @@ void RegTreeCtrl::AddStdKeys()
+ {
+     for ( unsigned int ui = 0; ui < wxRegKey::nStdKeys; ui++ )
+     {
+-        InsertNewTreeNode(m_pRoot, wxRegKey::GetStdKeyName(ui));
++        InsertNewTreeNode(
++            m_pRoot,
++            wxRegKey::GetStdKeyName(ui),
++            RegImageList::ClosedKey,
++            NULL,
++            m_regView);
+     }
+ }
+ 
+@@ -930,7 +1002,7 @@ bool RegTreeCtrl::TreeNode::OnExpand()
+     if ( Parent()->IsRoot() )
+     {
+         // we're a standard key
+-        m_pKey = new wxRegKey(m_strName);
++        m_pKey = new wxRegKey(m_strName, m_regView);
+     }
+     else
+     {
+@@ -967,7 +1039,12 @@ bool RegTreeCtrl::TreeNode::OnExpand()
+     bCont = m_pKey->GetFirstKey(str, l);
+     while ( bCont )
+     {
+-        m_pTree->InsertNewTreeNode(this, str, RegImageList::ClosedKey);
++        m_pTree->InsertNewTreeNode(
++            this,
++            str,
++            RegImageList::ClosedKey,
++            NULL,
++            m_regView);
+         bCont = m_pKey->GetNextKey(str, l);
+ 
+         // we have at least this key...
+@@ -1018,7 +1095,7 @@ bool RegTreeCtrl::TreeNode::OnExpand()
+             icon = RegImageList::BinaryValue;
+         }
+ 
+-        m_pTree->InsertNewTreeNode(this, str, icon, &strItem);
++        m_pTree->InsertNewTreeNode(this, str, icon, &strItem, m_regView);
+         bCont = m_pKey->GetNextValue(str, l);
+ 
+         // we have at least this value...
+@@ -1134,6 +1211,16 @@ const wxChar *RegTreeCtrl::TreeNode::FullName() const
+     }
+ }
+ 
++void RegTreeCtrl::TreeNode::SetRegistryView(wxRegKey::RegView regView)
++{
++    m_regView = regView;
++
++    // Update children with new view.
++    size_t nCount = m_aChildren.GetCount();
++    for (size_t n = 0; n < nCount; n++)
++        m_aChildren[n]->SetRegistryView(regView);
++}
++
+ // ----------------------------------------------------------------------------
+ // operations on RegTreeCtrl
+ // ----------------------------------------------------------------------------
+@@ -1288,6 +1375,13 @@ void RegTreeCtrl::CreateNewBinaryValue(const wxString& strName)
+         pCurrent->Refresh();
+ }
+ 
++void RegTreeCtrl::SetRegistryView(wxRegKey::RegView regView)
++{
++    m_regView = regView;
++    m_pRoot->SetRegistryView(regView);
++    m_pRoot->Refresh();
++};
++
+ void RegTreeCtrl::ShowProperties()
+ {
+     wxTreeItemId lCurrent = GetSelection();
+diff --git a/src/msw/registry.cpp b/src/msw/registry.cpp
+index 57eea64..f47f76c 100644
+--- a/src/msw/registry.cpp
++++ b/src/msw/registry.cpp
+@@ -114,7 +114,10 @@ aStdKeys[] =
+ static inline void RemoveTrailingSeparator(wxString& str);
+ 
+ // returns true if given registry key exists
+-static bool KeyExists(WXHKEY hRootKey, const wxString& szKey);
++static bool KeyExists(
++        WXHKEY hRootKey,
++        const wxString& szKey,
++        wxRegKey::RegView regView = wxRegKey::RegView_Default);
+ 
+ // combines value and key name
+ static wxString GetFullName(const wxRegKey *pKey);
+@@ -179,6 +182,40 @@ wxRegKey::StdKey wxRegKey::ExtractKeyName(wxString& strKey)
+   return (StdKey)ui;
+ }
+ 
++/* static */
++long wxRegKey::GetMSWAccess(AccessMode mode, RegView regView)
++{
++    long sam = mode == Read ? KEY_READ : KEY_ALL_ACCESS;
++
++    switch ( regView )
++    {
++        case RegView_32:
++#ifdef __WIN64__
++            sam |= KEY_WOW64_32KEY;
++#endif // Win64
++            break;
++
++        case RegView_64:
++#ifndef __WIN64__
++            // we can only access 64 bit registry under 64 bit platforms
++            if ( wxIsPlatform64Bit() )
++                sam |= KEY_WOW64_64KEY;
++#endif // Win32
++            break;
++
++        default:
++            wxFAIL_MSG("Unknown registry view.");
++            // fall through
++
++        case RegView_Default:
++            // Use default registry view for the current application,
++            // i.e. 32 bits for 32 bit ones and 64 bits for 64 bit apps
++            ;
++    }
++
++    return sam;
++}
++
+ wxRegKey::StdKey wxRegKey::GetStdKeyFromHkey(WXHKEY hkey)
+ {
+   for ( size_t ui = 0; ui < nStdKeys; ui++ ) {
+@@ -195,14 +232,15 @@ wxRegKey::StdKey wxRegKey::GetStdKeyFromHkey(WXHKEY hkey)
+ // ctors and dtor
+ // ----------------------------------------------------------------------------
+ 
+-wxRegKey::wxRegKey()
++wxRegKey::wxRegKey(RegView regView) : m_regView(regView)
+ {
+   m_hRootKey = (WXHKEY) aStdKeys[HKCR].hkey;
+ 
+   Init();
+ }
+ 
+-wxRegKey::wxRegKey(const wxString& strKey) : m_strKey(strKey)
++wxRegKey::wxRegKey(const wxString& strKey, RegView regView)
++        : m_strKey(strKey), m_regView(regView)
+ {
+   m_hRootKey  = (WXHKEY) aStdKeys[ExtractKeyName(m_strKey)].hkey;
+ 
+@@ -210,7 +248,10 @@ wxRegKey::wxRegKey(const wxString& strKey) : m_strKey(strKey)
+ }
+ 
+ // parent is a predefined (and preopened) key
+-wxRegKey::wxRegKey(StdKey keyParent, const wxString& strKey) : m_strKey(strKey)
++wxRegKey::wxRegKey(StdKey keyParent,
++                   const wxString& strKey,
++                   RegView regView)
++        : m_strKey(strKey), m_regView(regView)
+ {
+   RemoveTrailingSeparator(m_strKey);
+   m_hRootKey  = (WXHKEY) aStdKeys[keyParent].hkey;
+@@ -220,7 +261,7 @@ wxRegKey::wxRegKey(StdKey keyParent, const wxString& strKey) : m_strKey(strKey)
+ 
+ // parent is a normal regkey
+ wxRegKey::wxRegKey(const wxRegKey& keyParent, const wxString& strKey)
+-        : m_strKey(keyParent.m_strKey)
++        : m_strKey(keyParent.m_strKey), m_regView(keyParent.GetView())
+ {
+   // combine our name with parent's to get the full name
+   if ( !m_strKey.empty() &&
+@@ -316,7 +357,7 @@ void wxRegKey::SetHkey(WXHKEY hKey)
+ bool wxRegKey::Exists() const
+ {
+   // opened key has to exist, try to open it if not done yet
+-  return IsOpened() ? true : KeyExists(m_hRootKey, m_strKey.wx_str());
++  return IsOpened() ? true : KeyExists(m_hRootKey, m_strKey.wx_str(), m_regView);
+ }
+ 
+ // returns the full name of the key (prefix is abbreviated if bShortPrefix)
+@@ -399,7 +440,7 @@ bool wxRegKey::Open(AccessMode mode)
+                         (HKEY) m_hRootKey,
+                         m_strKey.t_str(),
+                         RESERVED,
+-                        mode == Read ? KEY_READ : KEY_ALL_ACCESS,
++                        GetMSWAccess(mode, m_regView),
+                         &tmpKey
+                     );
+ 
+@@ -803,7 +844,7 @@ bool wxRegKey::HasSubKey(const wxString& szKey) const
+   if ( !CONST_CAST Open(Read) )
+     return false;
+ 
+-  return KeyExists(m_hKey, szKey);
++  return KeyExists(m_hKey, szKey, m_regView);
+ }
+ 
+ wxRegKey::ValueType wxRegKey::GetValueType(const wxString& szValue) const
+@@ -1410,7 +1451,9 @@ bool wxRegKey::DoExport(wxOutputStream& ostr) const
+ // implementation of global private functions
+ // ============================================================================
+ 
+-bool KeyExists(WXHKEY hRootKey, const wxString& szKey)
++bool KeyExists(WXHKEY hRootKey,
++               const wxString& szKey,
++               wxRegKey::RegView regView)
+ {
+     // don't close this key itself for the case of empty szKey!
+     if ( szKey.empty() )
+@@ -1422,7 +1465,8 @@ bool KeyExists(WXHKEY hRootKey, const wxString& szKey)
+             (HKEY)hRootKey,
+             szKey.t_str(),
+             RESERVED,
+-            KEY_READ,        // we might not have enough rights for rw access
++            // we might not have enough rights for rw access
++            wxRegKey::GetMSWAccess(wxRegKey::Read, regView),
+             &hkeyDummy
+          ) == ERROR_SUCCESS )
+     {

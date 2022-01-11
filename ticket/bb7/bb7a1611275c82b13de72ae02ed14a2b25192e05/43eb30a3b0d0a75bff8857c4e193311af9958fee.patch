@@ -1,0 +1,239 @@
+--- D:\Development\libs\wxWidgets-2.6.0-nomod\src\msw\choice.cpp	Sun Apr 10 22:55:06 2005
++++ D:\Development\libs\wxWidgets-2.6.0\src\msw\choice.cpp	Thu Jun 02 14:42:03 2005
+@@ -40,6 +40,10 @@
+ 
+ #include "wx/msw/private.h"
+ 
++// include <commctrl.h> "properly"
++#include "wx/msw/wrapcctl.h"
++#include "wx/dynlib.h"
++
+ #if wxUSE_EXTENDED_RTTI
+ WX_DEFINE_FLAGS( wxChoiceStyle )
+ 
+@@ -102,6 +106,12 @@
+ // implementation
+ // ============================================================================
+ 
++void wxChoice::Init()
++{
++    m_imageList = NULL;
++    m_ownsImageList = false;
++}
++
+ // ----------------------------------------------------------------------------
+ // creation
+ // ----------------------------------------------------------------------------
+@@ -127,6 +137,9 @@
+                          validator, name);
+ }
+ 
++// Store COMBOBOXEX state -1: uninitialized, 0 unsupported, 1 initialized
++static int s_comboBoxExInit = -1;
++
+ bool wxChoice::CreateAndInit(wxWindow *parent,
+                              wxWindowID id,
+                              const wxPoint& pos,
+@@ -136,15 +149,38 @@
+                              const wxValidator& validator,
+                              const wxString& name)
+ {
++    // Init combobox ex classes
++    if ( s_comboBoxExInit == -1 )
++    {
++        if ( wxApp::GetComCtl32Version() < 470 )
++            s_comboBoxExInit = 0;
++        else
++        {
++            INITCOMMONCONTROLSEX icex;
++            icex.dwSize = sizeof(icex);
++            icex.dwICC = ICC_USEREX_CLASSES;
++
++            wxDynamicLibrary dllComCtl32(_T("comctl32.dll"), wxDL_VERBATIM);
++
++            typedef BOOL (WINAPI *ICCEx_t)(INITCOMMONCONTROLSEX *);
++            wxDYNLIB_FUNCTION( ICCEx_t, InitCommonControlsEx, dllComCtl32 );
++
++            if ( pfnInitCommonControlsEx )
++                (*pfnInitCommonControlsEx)(&icex);
++
++            s_comboBoxExInit = 1;
++        }
++    }
++
+     // initialize wxControl
+     if ( !CreateControl(parent, id, pos, size, style, validator, name) )
+         return false;
+ 
+-    // now create the real HWND
+-    if ( !MSWCreateControl(wxT("COMBOBOX"), wxEmptyString, pos, size) )
++    // now create the real HWND depending if we can use COMBOBOXEX class or not
++    if ( s_comboBoxExInit && !MSWCreateControl(WC_COMBOBOXEX, wxEmptyString, pos, size)
++        || !s_comboBoxExInit && !MSWCreateControl(wxT("COMBOBOX"), wxEmptyString, pos, size) )
+         return false;
+ 
+-
+     // choice/combobox normally has "white" (depends on colour scheme, of
+     // course) background rather than inheriting the parent's background
+     SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+@@ -214,6 +250,8 @@
+ 
+ wxChoice::~wxChoice()
+ {
++    if (m_ownsImageList) delete m_imageList;
++
+     Free();
+ }
+ 
+@@ -223,6 +261,9 @@
+ 
+ int wxChoice::DoAppend(const wxString& item)
+ {
++	if( s_comboBoxExInit )
++		return InsertItem(item, -1, -1);
++
+     int n = (int)SendMessage(GetHwnd(), CB_ADDSTRING, 0, (LPARAM)item.c_str());
+     if ( n == CB_ERR )
+     {
+@@ -241,6 +282,9 @@
+ 
+ int wxChoice::DoInsert(const wxString& item, int pos)
+ {
++	if( s_comboBoxExInit )
++		return InsertItem(item, pos, -1);
++
+     wxCHECK_MSG(!(GetWindowStyle() & wxCB_SORT), -1, wxT("can't insert into sorted list"));
+     wxCHECK_MSG((pos>=0) && (pos<=GetCount()), -1, wxT("invalid index"));
+ 
+@@ -258,6 +302,32 @@
+     return n;
+ }
+ 
++int wxChoice::InsertItem(const wxString& item, int pos, int imageIndex, int indent, long param)
++{
++    wxCHECK_MSG(!((GetWindowStyle() & wxCB_SORT) && pos > -1), -1, wxT("can't insert into sorted list"));
++    wxCHECK_MSG((pos>=-1) && (pos<=GetCount()), -1, wxT("invalid index"));
++
++	COMBOBOXEXITEM cbei = {(imageIndex > -1 ? CBEIF_IMAGE | CBEIF_SELECTEDIMAGE : 0) | CBEIF_INDENT | CBEIF_TEXT | CBEIF_LPARAM, pos, (LPTSTR)item.c_str(), -1, imageIndex, imageIndex, 0, indent, (LPARAM)param};
++
++    int n = (int)SendMessage(GetHwnd(), CBEM_INSERTITEM, 0, (LPARAM)&cbei);
++    if ( n == CB_ERR )
++    {
++        wxLogLastError(wxT("SendMessage(CB_INSERTSTRING)"));
++    }
++    else // ok
++    {
++        if ( !IsFrozen() )
++            UpdateVisibleHeight();
++    }
++
++    return n;
++}
++
++int wxChoice::AddItem(const wxString& item, int imageIndex, int indent, long param)
++{
++    return InsertItem(item, -1, imageIndex, indent, param);
++}
++
+ void wxChoice::Delete(int n)
+ {
+     wxCHECK_RET( n < GetCount(), wxT("invalid item index in wxChoice::Delete") );
+@@ -522,6 +592,12 @@
+         }
+     }
+ 
++	// We need to resize child combo box is comboboex is used
++	if( s_comboBoxExInit )
++        ::SetWindowPos((HWND)SendMessage(GetHwnd(), CBEM_GETCOMBOCONTROL, 0, 0),
++            NULL, 0, 0, width, height,
++            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOREDRAW |
++            SWP_NOZORDER | SWP_NOMOVE);
+     wxControl::DoSetSize(x, y, width, height, sizeFlags);
+ 
+     // I'm commenting this out since the code appears to make choices
+@@ -640,6 +716,28 @@
+         return MSWControlColorDisabled(hDC);
+ 
+     return wxChoiceBase::MSWControlColor(hDC, hWnd);
++}
++
++void wxChoice::SetImageList(wxImageList *imageList)
++{
++    if (m_ownsImageList)
++        delete m_imageList;
++
++    m_imageList = imageList;
++    ::SendMessage(GetHwndOf(this), CBEM_SETIMAGELIST, 0,
++        imageList ? (LPARAM)imageList->GetHIMAGELIST() : 0);
++    m_ownsImageList = false;
++}
++
++void wxChoice::AssignImageList(wxImageList *imageList)
++{
++    SetImageList(imageList);
++    m_ownsImageList = true;
++}
++
++wxImageList *wxChoice::GetImageList() const
++{
++    return m_imageList;
+ }
+ 
+ #endif // wxUSE_CHOICE && !(__SMARTPHONE__ && __WXWINCE__)
+--- D:\Development\libs\wxWidgets-2.6.0-nomod\include\wx\msw\choice.h	Sun Apr 10 22:55:12 2005
++++ D:\Development\libs\wxWidgets-2.6.0\include\wx\msw\choice.h	Thu Jun 02 14:14:56 2005
+@@ -16,15 +16,17 @@
+     #pragma interface "choice.h"
+ #endif
+ 
++// fwd decl
++class  WXDLLEXPORT wxImageList;
++
+ // ----------------------------------------------------------------------------
+ // Choice item
+ // ----------------------------------------------------------------------------
+-
+ class WXDLLEXPORT wxChoice : public wxChoiceBase
+ {
+ public:
+     // ctors
+-    wxChoice() { }
++    wxChoice() { Init(); }
+     virtual ~wxChoice();
+ 
+     wxChoice(wxWindow *parent,
+@@ -86,6 +88,17 @@
+     WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam);
+     virtual WXHBRUSH MSWControlColor(WXHDC hDC, WXHWND hWnd);
+ 
++    // image list: these functions allow to associate an image list with
++    // the control and retrieve it. Note that the control does _not_ delete
++    // the associated image list when it's deleted in order to allow image
++    // lists to be shared between different controls.
++    virtual wxImageList *GetImageList() const;
++    virtual void SetImageList(wxImageList *imageList);
++    virtual void AssignImageList(wxImageList *imageList);
++    virtual int InsertItem(const wxString& item, int pos, int imageIndex, int indent = 0, long param = 0);
++    virtual int AddItem(const wxString& item, int imageIndex, int indent = 0, long param = 0);
++
++
+ protected:
+     virtual void DoMoveWindow(int x, int y, int width, int height);
+     virtual void DoSetItemClientData( int n, void* clientData );
+@@ -120,7 +133,14 @@
+     // free all memory we have (used by Clear() and dtor)
+     void Free();
+ 
++    wxImageList *m_imageList; // images for combo elements
++    bool         m_ownsImageList;
++
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxChoice)
++
++private:
++    // the common part of all ctors
++    void Init();
+ };
+ 
+ #endif // _WX_CHOICE_H_
+
+ 	  	 

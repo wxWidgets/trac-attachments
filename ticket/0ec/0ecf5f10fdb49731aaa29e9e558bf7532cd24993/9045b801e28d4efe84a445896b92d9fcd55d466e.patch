@@ -1,0 +1,706 @@
+Index: samples/minimal/minimal.cpp
+===================================================================
+--- samples/minimal/minimal.cpp	(revision 62679)
++++ samples/minimal/minimal.cpp	(working copy)
+@@ -40,10 +40,655 @@
+     #include "../sample.xpm"
+ #endif
+ 
++
+ // ----------------------------------------------------------------------------
+ // private classes
+ // ----------------------------------------------------------------------------
+ 
++class SplitterHint;
++
++//-----------------------------------------------------------------------------
++template <typename T> 
++T clamp(T const& v, T const& minimum, T const& maximum)
++{
++    if (v <= minimum) {
++        return minimum;
++    }
++    if (v >= maximum) {
++        return maximum;
++    }
++    return v;
++}
++
++//-----------------------------------------------------------------------------
++template <typename T> 
++T const& maximum(T const& a, T const& b) {
++    return (a > b) ? a : b;
++}
++
++//-----------------------------------------------------------------------------
++wxSize CombinedSize(wxSize const& a, wxSize const& b)
++{
++    return wxSize(maximum(a.x, b.x), maximum(a.y, b.y));
++}
++
++//-----------------------------------------------------------------------------
++enum SplitDirection
++{
++	SplitHorizontal = 0,
++	SplitVertical
++};
++
++//-----------------------------------------------------------------------------
++class Splitter : public wxPanel
++{
++public:
++	typedef wxPanel   super;
++	typedef Splitter  self;
++
++	Splitter(wxWindow* parent, int style = 0);
++	
++	void split(wxWindow* a, wxWindow* b, SplitDirection direction);
++	void setSplitPosition(int a, int b = -1);
++	void getSplitPosition(int* a, int* b);
++	void setMinPaneSize(int size);
++
++	void updateMinSize();
++	void sizeWindows();
++	void setUpdateSizesWhenDragging(bool update);
++
++	wxWindow* getWindowA() const { return window_a_; }
++	wxWindow* getWindowB() const { return window_b_; }
++
++	void replaceWindow(wxWindow* win, wxWindow* with);
++
++	void showOnly(wxWindow* child);
++	void showBothWindows();
++	bool isSplit() const;
++
++	void showSplitBorder(bool show);
++	bool isShowSplitBorder() const { return show_split_border_; }
++
++    virtual wxSize DoGetBestSize() const;
++
++private:
++	void onSize(wxSizeEvent& e);
++	void onSashMouseDown(wxMouseEvent& e);
++	void onSashMouseUp(wxMouseEvent& e);
++	void onSashMouseMove(wxMouseEvent& e);
++	void onSashCaptureLost(wxMouseCaptureLostEvent& e);
++	void constrain(int& a, int& b);
++	void paintBorderSash(wxPaintEvent& e);
++	
++	void showSashHint();
++	void hideSashHint();
++	
++	wxWindow* window_a_;
++	wxWindow* window_b_;
++	wxWindow* show_only_;
++
++	wxPanel* sash_;
++	SplitDirection direction_;
++	int min_pane_size_;
++	int size_a_;
++	int size_b_;
++	int splitter_size_;
++	int available_;
++	wxPoint drag_start_;
++	int drag_sash_start_;
++	bool update_sizes_when_dragging_;
++	SplitterHint* splitter_hint_;
++
++	bool show_split_border_;
++};
++
++
++//-----------------------------------------------------------------------------
++//! \brief Floating hint frame for sash drag operations.
++//!
++class SplitterHint : public wxFrame
++{
++public:
++	SplitterHint(wxWindow* parent, wxRect rect);
++	virtual bool Show(bool show = true);
++};
++
++//-----------------------------------------------------------------------------
++SplitterHint::SplitterHint(wxWindow* parent, wxRect rect)
++: wxFrame(
++	parent,
++	wxID_ANY,
++	_T(""),
++	rect.GetPosition(),
++	rect.GetSize(),
++	wxFRAME_FLOAT_ON_PARENT | wxFRAME_NO_TASKBAR | wxBORDER_NONE | wxFRAME_TOOL_WINDOW,
++	_T("SplitterHint")
++) {
++	SetBackgroundColour(*wxBLACK);
++	if (CanSetTransparent()) {
++		SetTransparent(0xFF * 0.5);
++	}
++}
++
++//-----------------------------------------------------------------------------
++// Override to prevent the sash frame from being activated when shown.
++// This is to prevent the main application window title bar from greying out.
++//
++bool 
++SplitterHint::Show(bool show)
++{
++	// MSW specific
++#ifndef __WXMSW__
++	return wxFrame::Show(show);
++#else
++	if (show) {
++		DoShowWindow(SW_SHOWNA);
++	}
++	else {
++		DoShowWindow(SW_HIDE);
++	}
++	return true;
++#endif
++}
++
++//=============================================================================
++// Functions
++//=============================================================================
++
++//-----------------------------------------------------------------------------
++Splitter::Splitter(wxWindow* parent, int style)
++: wxPanel(parent, style)
++, window_a_(0)
++, window_b_(0)
++, show_only_(0)
++, direction_(SplitHorizontal)
++, min_pane_size_(24)
++, size_a_(-1)
++, size_b_(-1)
++, splitter_size_(5)
++, available_(0)
++, drag_sash_start_(0)
++, update_sizes_when_dragging_(false)
++, splitter_hint_(0)
++, show_split_border_(false)
++{
++	Connect(wxEVT_SIZE, wxSizeEventHandler(self::onSize));
++	sash_ = new wxPanel(this);
++	sash_->Connect(wxEVT_LEFT_DOWN, wxMouseEventHandler(self::onSashMouseDown), NULL, this);
++	sash_->Connect(wxEVT_LEFT_UP, wxMouseEventHandler(self::onSashMouseUp), NULL, this);
++	sash_->Connect(wxEVT_MOTION, wxMouseEventHandler(self::onSashMouseMove), NULL, this);
++	sash_->Connect(wxEVT_MOUSE_CAPTURE_LOST, wxMouseCaptureLostEventHandler(self::onSashCaptureLost), NULL, this);
++	
++	sash_->Connect(wxEVT_PAINT, wxPaintEventHandler(self::paintBorderSash), NULL, this);
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::onSize(wxSizeEvent& e)
++{
++	e.Skip();
++	sizeWindows();
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::split(wxWindow* a, wxWindow* b, SplitDirection direction)
++{
++	window_a_  = a;
++	window_b_  = b;
++	direction_ = direction;
++	if (direction_ == SplitHorizontal) {
++		sash_->SetCursor(wxCURSOR_SIZENS);
++	}
++	else {
++		sash_->SetCursor(wxCURSOR_SIZEWE);
++	}
++	updateMinSize();
++	sizeWindows();
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::setSplitPosition(int a, int b)
++{
++	size_a_ = a;
++	size_b_ = b;
++	updateMinSize();
++	sizeWindows();
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::getSplitPosition(int* a, int* b)
++{
++	if (a) {
++		*a = size_a_;
++	}
++	if (b) {
++		*b = size_b_;
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::setMinPaneSize(int size)
++{
++	min_pane_size_ = size;
++	updateMinSize();
++	sizeWindows();
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::updateMinSize()
++{
++	if (!window_a_ || !window_b_) {
++		return;
++	}
++	wxSize min_size;
++	wxSize size_a = window_a_->GetMinSize();
++	wxSize size_b = window_b_->GetMinSize();
++	if (direction_ == SplitHorizontal) {
++		min_size.x = maximum(size_a.x, size_b.x);
++		min_size.y = size_a.y + size_b.y + splitter_size_;
++	}
++	else {
++		min_size.y = maximum(size_a.y, size_b.y);
++		min_size.x = size_a.x + size_b.x + splitter_size_;
++	}
++	SetMinSize(min_size);
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::constrain(int& a, int& b)
++{
++	wxASSERT(a > -1);
++	wxASSERT(b > -1);
++
++	wxSize size_a = window_a_->GetMinSize();
++	wxSize size_b = window_b_->GetMinSize();
++	if (direction_ == SplitHorizontal) {
++		b = maximum(b, size_b.y);
++		b = maximum(b, min_pane_size_);
++		a = available_ - b;
++		a = maximum(a, size_a.y);
++		a = maximum(a, min_pane_size_);
++		b = available_ - a;
++	}
++	else {
++		b = maximum(b, size_b.x);
++		b = maximum(b, min_pane_size_);
++		a = available_ - b;
++		a = maximum(a, size_a.x);
++		a = maximum(a, min_pane_size_);
++		b = available_ - a;
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::sizeWindows()
++{
++	if (!window_a_ || !window_b_) {
++		return;
++	}
++
++	if (show_only_) {
++	}
++
++	wxSize size = GetClientSize();
++	wxRect sa;
++	wxRect sb;
++
++	if (show_only_) {
++		show_only_->SetSize(0, 0, size.x, size.y);
++		return;
++	}
++
++	double pos = 0.5;
++	if (direction_ == SplitHorizontal) {
++		available_ = size.y;
++	}
++	else {
++		available_ = size.x;
++	}
++	available_ -= splitter_size_;
++	if (available_ < 2) {
++		available_ = 2;
++	}
++
++	if (size_a_ > -1) {
++		if (size_b_ > -1) {
++			pos = double(size_a_) / (size_a_ + size_b_);
++		}
++		else {
++			pos = double(size_a_) / available_;
++		}
++	}
++	else {
++		if (size_b_ > -1) {
++			pos = 1.0 - (double(size_b_) / available_);
++		}
++		else {
++			pos = 0.5;
++		}
++	}
++	pos = clamp(pos, 0.0, 1.0);
++
++	int a = pos * available_;
++	int b = available_ - a;
++	constrain(a, b);
++
++	if (direction_ == SplitHorizontal) {
++		sa.width = size.x;
++		sb.width = size.x;
++		sa.x = 0;
++		sb.x = 0;
++		sa.y = 0;
++		sa.height = a;
++		sb.y = sa.height + splitter_size_;
++		sb.height = b;
++		sash_->SetSize(0, sa.height, sa.width, splitter_size_);
++	}
++	else {
++		sa.height = size.y;
++		sb.height = size.y;
++		sa.y = 0;
++		sb.y = 0;
++		sa.x = 0;
++		sa.width = a;
++		sb.x = sa.width + splitter_size_;
++		sb.width = b;
++		sash_->SetSize(sa.width, 0, splitter_size_, sa.height);
++	}
++
++	window_a_->SetSize(sa);
++	window_b_->SetSize(sb);
++
++	window_a_->Refresh();
++	window_b_->Refresh();
++	window_a_->Update();
++	window_b_->Update();
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::onSashMouseDown(wxMouseEvent& e)
++{
++	if (GetCapture() != sash_) {
++		sash_->CaptureMouse();
++		drag_start_ = sash_->ClientToScreen(e.GetPosition());
++		if (direction_ == SplitHorizontal) {
++			drag_sash_start_ = sash_->GetPosition().y;
++		}
++		else {
++			drag_sash_start_ = sash_->GetPosition().x;
++		}
++		showSashHint();
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::onSashMouseUp(wxMouseEvent&)
++{
++	if (GetCapture() == sash_) {
++		sash_->ReleaseMouse();
++		hideSashHint();
++		sizeWindows();
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::onSashMouseMove(wxMouseEvent& e)
++{
++	if (GetCapture() == sash_) {
++		// handle drag
++		wxPoint pos = sash_->ClientToScreen(e.GetPosition());
++		int sash_pos;
++		if (direction_ == SplitHorizontal) {
++			int delta = pos.y - drag_start_.y;
++			sash_pos = drag_sash_start_ + delta;
++		}
++		else {
++			int delta = pos.x - drag_start_.x;
++			sash_pos = drag_sash_start_ + delta;
++		}
++	
++		// TODO Need to clip the positions
++		if (size_a_ > -1) {
++			size_a_ = sash_pos;
++			if (size_b_ > -1) {
++				size_b_ = available_ - size_a_;
++			}
++		}
++		else {
++			if (size_b_ > -1) {
++				size_b_ = available_ - sash_pos;
++			}
++			else {
++				size_a_ = sash_pos;
++				size_b_ = available_ - sash_pos;
++			}
++		}
++
++		if (update_sizes_when_dragging_) {
++			sizeWindows();
++		}
++		else {
++			showSashHint();
++		}
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::onSashCaptureLost(wxMouseCaptureLostEvent&)
++{
++	hideSashHint();
++	sizeWindows();
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::showSashHint()
++{
++	if (!update_sizes_when_dragging_) {
++		wxRect rect;
++		wxRect this_rect = GetScreenRect();
++
++		if ((size_a_ < 0) && (size_b_ < 0)) {
++			rect = sash_->GetScreenRect();
++		}
++		else {		
++			if (direction_ == SplitHorizontal) {
++				rect.x = this_rect.x;
++				rect.width = this_rect.width;
++				rect.height = splitter_size_;
++				if (size_a_ > -1) {
++					rect.y = size_a_;
++				}
++				else {
++					rect.y = available_ - size_b_;
++				}
++				int a = rect.y;
++				a = clamp(a, 0, available_);
++				int b = available_ - a;
++				constrain(a, b);
++				rect.y = a + this_rect.y;
++			}
++			else {
++				rect.y = this_rect.y;
++				rect.height = this_rect.height;
++				rect.width = splitter_size_;
++				if (size_a_ > -1) {
++					rect.x = size_a_;
++				}
++				else {
++					rect.x = available_ - size_b_;
++				}
++				int a = rect.x;
++				a = clamp(a, 0, available_);
++				int b = available_ - a;
++				constrain(a, b);
++				rect.x = a + this_rect.x;
++			}
++		}
++
++		if (!splitter_hint_) {
++			splitter_hint_ = new SplitterHint(this, rect);
++			splitter_hint_->Show();
++		}
++		else {
++			splitter_hint_->SetSize(rect);
++		}
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::hideSashHint()
++{
++	if (splitter_hint_) {
++		splitter_hint_->Destroy();
++		splitter_hint_ = 0;
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::replaceWindow(wxWindow* win, wxWindow* with)
++{
++	if (show_only_ == win) {
++		show_only_ = with;
++	}
++	if (window_a_ == win) {
++		split(with, window_b_, direction_);
++	}
++	else if (window_b_ == win) {
++		split(window_a_, with, direction_);
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::showOnly(wxWindow* child)
++{
++	if (child == NULL) {
++		show_only_ = NULL;
++	}
++	else if ((child == window_a_) || (child == window_b_)) {
++		show_only_ = child;
++	}
++	else {
++		wxASSERT(false);
++	}
++	sizeWindows();
++	if (show_only_) {
++		if (show_only_ == window_a_) {
++			if (window_b_) window_b_->Hide();
++		}
++		else {
++			if (window_a_) window_a_->Hide();
++		}
++		if (sash_) sash_->Hide();
++	}
++	else {
++		if (window_a_) window_a_->Show();
++		if (window_b_) window_b_->Show();
++		if (window_a_ && window_b_) {
++			if (sash_) sash_->Show();
++		}
++		sizeWindows();
++	}
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::showBothWindows()
++{
++	showOnly(NULL);
++}
++
++//-----------------------------------------------------------------------------
++bool
++Splitter::isSplit() const
++{
++	return !show_only_ && window_a_ && window_b_;
++}
++
++//-----------------------------------------------------------------------------
++void 
++Splitter::showSplitBorder(bool show)
++{
++	show_split_border_ = show;
++}
++
++//-----------------------------------------------------------------------------
++void
++Splitter::paintBorderSash(wxPaintEvent& e)
++{
++	if (!show_split_border_) {
++		e.Skip();
++	}
++	else {
++		wxPaintDC dc(sash_);
++		wxRect r = sash_->GetClientRect();
++
++		if (direction_ == SplitVertical)
++		{
++			r.Inflate(0, 1);
++		}
++		else {
++			r.Inflate(1, 0);
++		}
++		dc.SetBrush(*wxTRANSPARENT_BRUSH);
++		dc.SetPen(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNSHADOW));
++		dc.DrawRectangle(r);
++	}
++}
++
++//-----------------------------------------------------------------------------
++wxSize 
++Splitter::DoGetBestSize() const
++{
++    return wxPanel::DoGetBestSize();
++#if 0
++	wxSize size_a(0, 0); 
++	wxSize size_b(0, 0);
++	wxSize size(0, 0);
++    if (window_a_) {
++        window_a_->GetBestSize();
++    }
++    if (window_b_) {
++        window_b_->GetBestSize();
++    }
++
++    size = CombinedSize(size_a, size_b);
++
++    if (window_a_ && window_b_) {
++	    if (direction_ == SplitHorizontal) {
++            size.y = size_a.y + size_b.y + splitter_size_;
++	    }
++	    else {
++            size.x = size_a.x + size_b.x + splitter_size_;
++	    }
++    }
++
++    if (direction_ == SplitHorizontal) {
++        size.IncTo(wxSize(min_pane_size_, 0));
++    }
++    else {
++        size.IncTo(wxSize(0, min_pane_size_));
++    }
++    size.IncTo(GetMinSize());
++    return size;
++#endif
++}
++
++
+ // Define a new application type, each program should derive a class from wxApp
+ class MyApp : public wxApp
+ {
+@@ -172,6 +817,45 @@
+     CreateStatusBar(2);
+     SetStatusText("Welcome to wxWidgets!");
+ #endif // wxUSE_STATUSBAR
++
++
++
++    // Create and lay some stuff out to demonstrate sizer problems.
++
++    static int const border = 5;
++
++    wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
++
++    wxPanel*   main_panel = new wxPanel(this, wxID_ANY);
++    Splitter*  splitter   = new Splitter(main_panel);
++    wxListBox* left_list  = new wxListBox(splitter, wxID_ANY);
++    wxListBox* right_list = new wxListBox(splitter, wxID_ANY);
++    wxButton*  ok         = new wxButton(main_panel, wxID_OK);
++    wxButton*  cancel     = new wxButton(main_panel, wxID_CANCEL);
++
++    splitter->split(left_list, right_list, SplitVertical);
++
++    wxBoxSizer* panel_sizer  = new wxBoxSizer(wxVERTICAL);
++    wxBoxSizer* button_sizer = new wxBoxSizer(wxHORIZONTAL);
++
++    button_sizer->AddStretchSpacer();
++    button_sizer->Add(ok, 0, wxALIGN_CENTER_VERTICAL);
++    button_sizer->AddSpacer(border);
++    button_sizer->Add(cancel, 0, wxALIGN_CENTER_VERTICAL);
++
++    panel_sizer->Add(splitter, 1, wxEXPAND);
++    panel_sizer->AddSpacer(border);
++    panel_sizer->Add(button_sizer, 0, wxEXPAND);
++
++    sizer->Add(panel_sizer, 1, wxEXPAND | wxALL, border);
++    main_panel->SetSizer(sizer);
++
++    wxBoxSizer* frame_sizer = new wxBoxSizer(wxVERTICAL);
++    frame_sizer->Add(main_panel, 1, wxEXPAND);
++
++    SetSizer(frame_sizer);
++    Fit();
++    frame_sizer->SetSizeHints(this);
+ }
+ 
+ 

@@ -1,0 +1,422 @@
+diff -rU2 wxWidgets.orig/include/wx/msw/statbox.h wxWidgets/include/wx/msw/statbox.h
+--- wxWidgets.orig/include/wx/msw/statbox.h	2005-04-19 07:09:13.000000000 +1000
++++ wxWidgets/include/wx/msw/statbox.h	2005-05-03 03:20:05.053124320 +1000
+@@ -57,13 +57,9 @@
+     virtual WXHRGN MSWGetRegionWithoutChildren();
+ 
+-    // remove the parts which are painted by static box itself from the given
+-    // region which is embedded in a rectangle (0, 0)-(w, h)
+-    virtual void MSWGetRegionWithoutSelf(WXHRGN hrgn, int w, int h);
+-
+-    // paint the given rectangle with our background brush/colour
+-    void PaintBackground(wxDC& dc, const struct tagRECT& rc);
+-    // paint the foreground of the static box
+-    virtual void PaintForeground(wxDC& dc, const struct tagRECT& rc);
++    // send events to parent window and this window to simulate transparency
++    void MSWSendEraseEvents(wxDC& dc);
++    void MSWSendPaintEvents(wxDC& dc, WXHRGN hrgn);
+ 
++    void OnEraseBackground(wxEraseEvent& event);
+     void OnPaint(wxPaintEvent& event);
+ #endif // !__WXWINCE__
+diff -rU2 wxWidgets.orig/include/wx/msw/window.h wxWidgets/include/wx/msw/window.h
+--- wxWidgets.orig/include/wx/msw/window.h	2005-05-01 02:12:35.000000000 +1000
++++ wxWidgets/include/wx/msw/window.h	2005-05-03 03:20:46.680795952 +1000
+@@ -293,5 +293,5 @@
+     bool HandleDestroy();
+ 
+-    bool HandlePaint();
++    bool HandlePaint(WXHRGN hrgn = NULL);
+     bool HandlePrintClient(WXHDC hDC);
+     bool HandleEraseBkgnd(WXHDC hDC);
+diff -rU2 wxWidgets.orig/src/msw/statbox.cpp wxWidgets/src/msw/statbox.cpp
+--- wxWidgets.orig/src/msw/statbox.cpp	2005-05-01 02:13:31.000000000 +1000
++++ wxWidgets/src/msw/statbox.cpp	2005-05-03 03:20:20.764735792 +1000
+@@ -41,5 +41,4 @@
+ #include "wx/image.h"
+ #include "wx/dcmemory.h"
+-#include "wx/sysopt.h"
+ 
+ #include "wx/msw/private.h"
+@@ -124,9 +123,4 @@
+         return false;
+ 
+-#ifndef __WXWINCE__
+-    if (!wxSystemOptions::IsFalse(wxT("msw.staticbox.optimized-paint")))
+-        Connect(wxEVT_PAINT, wxPaintEventHandler(wxStaticBox::OnPaint));
+-#endif // !__WXWINCE__
+-
+     return true;
+ }
+@@ -146,10 +140,5 @@
+ 
+     if ( exstyle )
+-    {
+-        if (wxSystemOptions::IsFalse(wxT("msw.staticbox.optimized-paint")))
+-            *exstyle = WS_EX_TRANSPARENT;
+-        else
+-            *exstyle = 0;
+-    }
++        *exstyle = 0;
+ 
+     return styleWin | BS_GROUPBOX;
+@@ -183,24 +172,65 @@
+ WXLRESULT wxStaticBox::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam)
+ {
+-    if ( nMsg == WM_NCHITTEST )
++    switch ( nMsg )
+     {
+-        // This code breaks some other processing such as enter/leave tracking
+-        // so it's off by default.
++        case WM_NCHITTEST:
++            {
++                // This code breaks some other processing such as enter/leave
++                // tracking so it's off by default.
+ 
+-        static int s_useHTClient = -1;
+-        if (s_useHTClient == -1)
+-            s_useHTClient = wxSystemOptions::GetOptionInt(wxT("msw.staticbox.htclient"));
+-        if (s_useHTClient == 1)
+-        {
+-            int xPos = GET_X_LPARAM(lParam);
+-            int yPos = GET_Y_LPARAM(lParam);
++                static int s_useHTClient = -1;
++                if (s_useHTClient == -1)
++                    s_useHTClient = wxSystemOptions::GetOptionInt(wxT("msw.staticbox.htclient"));
++                if (s_useHTClient == 1)
++                {
++                    int xPos = GET_X_LPARAM(lParam);
++                    int yPos = GET_Y_LPARAM(lParam);
++
++                    ScreenToClient(&xPos, &yPos);
++
++                    // Make sure you can drag by the top of the groupbox, but
++                    // let other (enclosed) controls get mouse events also
++                    if ( yPos < 10 )
++                        return (long)HTCLIENT;
++                }
++            }
++            break;
+ 
+-            ScreenToClient(&xPos, &yPos);
++        case WM_ERASEBKGND:
++            // we send wxEraseEvents in WM_PAINT to use double buffer
++            return TRUE;
+ 
+-            // Make sure you can drag by the top of the groupbox, but let
+-            // other (enclosed) controls get mouse events also
+-            if ( yPos < 10 )
+-                return (long)HTCLIENT;
+-        }
++        case WM_PAINT:
++            {
++                RECT rc;
++                ::GetClientRect(GetHwnd(), &rc);
++
++                // setup a memory DC to draw into
++                wxMemoryDC memDC;
++                wxBitmap bitmap(rc.right, rc.bottom);
++                memDC.SelectObject(bitmap);
++
++                // create the update region excluding box children
++                AutoHRGN hrgn((HRGN)MSWGetRegionWithoutChildren());
++
++		// send events
++                MSWSendEraseEvents(memDC);
++		// this will modify hrgn to be in this client coords
++                MSWSendPaintEvents(memDC, hrgn);
++
++                // get (paint) hdc and clip to region
++                PAINTSTRUCT ps;
++                HDC hdc = ::BeginPaint(GetHwnd(), &ps);
++                HDCClipper clipToBg(hdc, hrgn);
++
++                // blit memDC to (paint) hdc
++                wxDCTemp dctmp(hdc);
++                dctmp.Blit(0, 0, rc.right, rc.bottom, &memDC, 0, 0);
++                dctmp.SelectOldObjects(hdc);
++
++                ::EndPaint(GetHwnd(), &ps);
++
++                return 0;
++            }
+     }
+ 
+@@ -220,39 +250,4 @@
+  */
+ 
+-// MSWGetRegionWithoutSelf helper: removes the given rectangle from region
+-static inline void
+-SubtractRectFromRgn(HRGN hrgn, int left, int top, int right, int bottom)
+-{
+-    AutoHRGN hrgnRect(::CreateRectRgn(left, top, right, bottom));
+-    if ( !hrgnRect )
+-    {
+-        wxLogLastError(_T("CreateRectRgn()"));
+-        return;
+-    }
+-
+-    ::CombineRgn(hrgn, hrgn, hrgnRect, RGN_DIFF);
+-}
+-
+-void wxStaticBox::MSWGetRegionWithoutSelf(WXHRGN hRgn, int w, int h)
+-{
+-    HRGN hrgn = (HRGN)hRgn;
+-
+-    // remove the area occupied by the static box borders from the region
+-    int borderTop, border;
+-    GetBordersForSizer(&borderTop, &border);
+-
+-    // top
+-    SubtractRectFromRgn(hrgn, 0, 0, w, borderTop);
+-
+-    // bottom
+-    SubtractRectFromRgn(hrgn, 0, h - border, w, h);
+-
+-    // left
+-    SubtractRectFromRgn(hrgn, 0, 0, border, h);
+-
+-    // right
+-    SubtractRectFromRgn(hrgn, w - border, 0, w, h);
+-}
+-
+ WXHRGN wxStaticBox::MSWGetRegionWithoutChildren()
+ {
+@@ -271,5 +266,5 @@
+             continue;
+         }
+-        
++
+         LONG style = ::GetWindowLong(child, GWL_STYLE);
+         wxString str(wxGetWindowClass(child));
+@@ -283,5 +278,5 @@
+             continue;
+         }
+-        
++
+         ::GetWindowRect(child, &rc);
+         if ( ::RectInRegion(hrgn, &rc) )
+@@ -293,5 +288,5 @@
+                 style &= ~WS_CLIPSIBLINGS;
+                 ::SetWindowLong(child, GWL_STYLE, style);
+-                
++
+                 // MSDN: "If you have changed certain window data using
+                 // SetWindowLong, you must call SetWindowPos to have the
+@@ -310,8 +305,68 @@
+ }
+ 
+-// helper for OnPaint(): really erase the background, i.e. do it even if we
+-// don't have any non default brush for doing it (DoEraseBackground() doesn't
+-// do anything in such case)
+-void wxStaticBox::PaintBackground(wxDC& dc, const RECT& rc)
++void wxStaticBox::MSWSendEraseEvents(wxDC& dc)
++{
++    wxWindow *parent = GetParent();
++    POINT pt;
++    pt.x = pt.y = 0;
++
++    // send erase event
++    wxEraseEvent eraseEvent(m_windowId, &dc);
++    eraseEvent.SetEventObject(this);
++    if ( !GetEventHandler()->ProcessEvent(eraseEvent) )
++        OnEraseBackground(eraseEvent);
++
++    // offset dc to parent
++    ::MapWindowPoints(GetHwnd(), GetHwndOf(parent), &pt, 1);
++    ::OffsetWindowOrgEx(GetHdcOf(dc), pt.x, pt.y, &pt);
++    // send erase event to parent
++    wxEraseEvent eraseEvent2(parent->GetId(), &dc);
++    eraseEvent2.SetEventObject(parent);
++    parent->GetEventHandler()->ProcessEvent(eraseEvent2);
++    // reset dc offset
++    ::SetWindowOrgEx(GetHdcOf(dc), pt.x, pt.y, NULL);
++}
++
++void wxStaticBox::MSWSendPaintEvents(wxDC& dc, WXHRGN hrgn)
++{
++    wxWindow *parent = GetParent();
++    RECT rc;
++
++    // use limited scope for wxPaintDCEx here
++    {
++        // make all wxPaintDCs use dc's HDC
++        wxPaintDCEx paintDC(parent, dc.GetHDC());
++        POINT pt;
++        pt.x = pt.y = 0;
++
++        // offset dc to parent
++        ::MapWindowPoints(GetHwnd(), GetHwndOf(parent), &pt, 1);
++        ::OffsetWindowOrgEx(GetHdcOf(dc), pt.x, pt.y, &pt);
++        // offset hrgn to parent client coords
++        ::GetWindowRect(GetHwndOf(parent), &rc);
++        ::OffsetRgn((HRGN)hrgn, -rc.left, -rc.top);
++        // send paint event to parent
++        parent->HandlePaint(hrgn);
++        // reset dc offset
++        ::SetWindowOrgEx(GetHdcOf(dc), pt.x, pt.y, NULL);
++        // reset hrgn offset
++        ::OffsetRgn((HRGN)hrgn, rc.left, rc.top);
++    }
++
++    // make all wxPaintDCs use dc's HDC
++    wxPaintDCEx paintDC(this, dc.GetHDC());
++
++    // offset hrgn to this client coords
++    ::GetWindowRect(GetHwnd(), &rc);
++    ::OffsetRgn((HRGN)hrgn, -rc.left, -rc.top);
++    // send paint event
++    if ( !HandlePaint(hrgn) )
++        MSWDefWindowProc(WM_PAINT, (WPARAM)GetHdcOf(dc), 0);
++    // don't reset hrgn here as it's used for clipping
++}
++
++// really erase the background, i.e. do it even if we don't have any non default
++// brush for doing it (DoEraseBackground() doesn't do anything in such case)
++void wxStaticBox::OnEraseBackground(wxEraseEvent& event)
+ {
+     // note that we do not use the box background colour here, it shouldn't
+@@ -324,5 +379,6 @@
+     //     see http://groups.google.com/groups?selm=4252E932.3080801%40able.es
+     wxWindow *parent = GetParent();
+-    HBRUSH hbr = (HBRUSH)parent->MSWGetBgBrush(dc.GetHDC(), GetHWND());
++    WXHDC hdc = event.GetDC()->GetHDC();
++    HBRUSH hbr = (HBRUSH)parent->MSWGetBgBrush(hdc, GetHWND());
+ 
+     // if there is no special brush for painting this control, just use the
+@@ -335,9 +391,11 @@
+     }
+ 
+-    ::FillRect(GetHdcOf(dc), &rc, hbr);
++    wxFillRect(GetHwnd(), (HDC)hdc, hbr);
+ }
+ 
+-void wxStaticBox::PaintForeground(wxDC& dc, const RECT& WXUNUSED(rc))
++void wxStaticBox::OnPaint(wxPaintEvent& WXUNUSED(event))
+ {
++    wxPaintDC dc(this);
++
+     // NB: neither setting the text colour nor transparent background mode
+     //     doesn't change anything: the static box def window proc still
+@@ -347,55 +405,4 @@
+ }
+ 
+-void wxStaticBox::OnPaint(wxPaintEvent& WXUNUSED(event))
+-{
+-    RECT rc;
+-    ::GetClientRect(GetHwnd(), &rc);
+-
+-    // draw the entire box in a memory DC
+-    wxMemoryDC memdc;
+-    wxBitmap bitmap(rc.right, rc.bottom);
+-    memdc.SelectObject(bitmap);
+-
+-    PaintBackground(memdc, rc);
+-    PaintForeground(memdc, rc);
+-
+-    // now only blit the static box border itself, not the interior, to avoid
+-    // flicker when background is drawn below
+-    //
+-    // note that it seems to be faster to do 4 small blits here and then paint
+-    // directly into wxPaintDC than painting background in wxMemoryDC and then
+-    // blitting everything at once to wxPaintDC, this is why we do it like this
+-    wxPaintDC dc(this);
+-    int borderTop, border;
+-    GetBordersForSizer(&borderTop, &border);
+-
+-    // top
+-    dc.Blit(border, 0, rc.right - border, borderTop,
+-            &memdc, border, 0);
+-    // bottom
+-    dc.Blit(border, rc.bottom - border, rc.right - border, rc.bottom,
+-            &memdc, border, rc.bottom - border);
+-    // left
+-    dc.Blit(0, 0, border, rc.bottom,
+-            &memdc, 0, 0);
+-    // right
+-    dc.Blit(rc.right - border, 0, rc.right, rc.bottom,
+-            &memdc, rc.right - border, 0);
+-
+-
+-    // create the region excluding box children
+-    AutoHRGN hrgn((HRGN)MSWGetRegionWithoutChildren());
+-    RECT rcWin;
+-    ::GetWindowRect(GetHwnd(), &rcWin);
+-    ::OffsetRgn(hrgn, -rcWin.left, -rcWin.top);
+-
+-    // and also the box itself
+-    MSWGetRegionWithoutSelf((WXHRGN) hrgn, rc.right, rc.bottom);
+-    HDCClipper clipToBg(GetHdcOf(dc), hrgn);
+-
+-    // paint the inside of the box (excluding box itself and child controls)
+-    PaintBackground(dc, rc);
+-}
+-
+ #endif // !__WXWINCE__
+ 
+diff -rU2 wxWidgets.orig/src/msw/window.cpp wxWidgets/src/msw/window.cpp
+--- wxWidgets.orig/src/msw/window.cpp	2005-05-03 02:58:48.000000000 +1000
++++ wxWidgets/src/msw/window.cpp	2005-05-03 03:22:16.955072176 +1000
+@@ -1556,5 +1556,5 @@
+ #else
+     HDWP hdwp = 0;
+-#endif    
++#endif
+ 
+     wxMoveWindowDeferred(hdwp, this, GetHwnd(), x, y, width, height);
+@@ -3512,5 +3512,5 @@
+ #else
+     if ( !::GetCursorPos(&pt) )
+-#endif        
++#endif
+     {
+         wxLogLastError(wxT("GetCursorPos"));
+@@ -3918,13 +3918,18 @@
+ // ---------------------------------------------------------------------------
+ 
+-bool wxWindowMSW::HandlePaint()
++bool wxWindowMSW::HandlePaint(WXHRGN hrgn)
+ {
+-    HRGN hRegion = ::CreateRectRgn(0, 0, 0, 0); // Dummy call to get a handle
+-    if ( !hRegion )
+-        wxLogLastError(wxT("CreateRectRgn"));
+-    if ( ::GetUpdateRgn(GetHwnd(), hRegion, FALSE) == ERROR )
+-        wxLogLastError(wxT("GetUpdateRgn"));
++    if ( hrgn )
++        m_updateRegion = wxRegion(hrgn);
++    else
++    {
++        HRGN hRegion = ::CreateRectRgn(0, 0, 0, 0); // Dummy call to get a handle
++        if ( !hRegion )
++            wxLogLastError(wxT("CreateRectRgn"));
++        if ( ::GetUpdateRgn(GetHwnd(), hRegion, FALSE) == ERROR )
++            wxLogLastError(wxT("GetUpdateRgn"));
+ 
+-    m_updateRegion = wxRegion((WXHRGN) hRegion);
++        m_updateRegion = wxRegion((WXHRGN) hRegion);
++    }
+ 
+     wxPaintEvent event(m_windowId);
+@@ -4145,5 +4150,5 @@
+     }
+ 
+-    // Protect against valid m_hDWP being overwritten    
++    // Protect against valid m_hDWP being overwritten
+     bool useDefer = false;
+ 
+@@ -4151,5 +4156,5 @@
+     {
+         if (!m_hDWP)
+-        {        
++        {
+             m_hDWP = (WXHANDLE)::BeginDeferWindowPos(numChildren);
+             if ( !m_hDWP )
+@@ -4204,5 +4209,5 @@
+         HDWP hDWP = (HDWP)m_hDWP;
+         m_hDWP = NULL;
+-        
++
+         // do put all child controls in place at once
+         if ( !::EndDeferWindowPos(hDWP) )
+
+ 	  	 

@@ -1,0 +1,306 @@
+diff -rbu2 wx-2.3.3-original/docview.cpp wx-2.3.3-major/docview.cpp
+--- wx-2.3.3-original/docview.cpp	Sun Sep 15 20:19:48 2002
++++ wx-2.3.3-major/docview.cpp	Sun Oct 13 18:51:22 2002
+@@ -31,4 +31,17 @@
+ #if wxUSE_DOC_VIEW_ARCHITECTURE
+ 
++// wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS handles filesextensions entered by the user that 
++// are not specified in the document templates. The correct extensions are known by the 
++// FileHistory and also saved in the Registry/Config File. If 0, files with non-standard
++// extensions are not added to the FileHistory.
++#define wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS 1
++
++// 0 for wxGTK, because in wxGTK, wxFileSelectorEx() in SelectDocumentPath() doesn't 
++// return the document template chosen by the user. - TODO: what about the other OS?
++#if defined( __WXGTK__ )
++#undef wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++#define wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS 0
++#endif
++
+ #ifndef WX_PRECOMP
+     #include "wx/string.h"
+@@ -97,4 +110,8 @@
+ 
+ static inline wxString FindExtension(const wxChar *path);
++#if wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++static wxString DeleteExtras(const wxString &historyEntry);
++#endif // wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++static wxWindow* wxFindSuitableParent(void);
+ 
+ // ----------------------------------------------------------------------------
+@@ -122,4 +139,23 @@
+ }
+ 
++#if wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++static wxString DeleteExtras(const wxString &historyEntry)
++{
++    wxString fileName(historyEntry);
++    int iPos;
++
++    if ((iPos = historyEntry.find(wxT('*'))) >= 0)
++    {
++        fileName.erase(iPos);
++    }
++    return fileName;
++}
++#define DELETEEXTRAS( f ) DeleteExtras( f )
++#define DELETEEXTRAS_STR( f ) DeleteExtras( f ).c_str()
++#else // !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++#define DELETEEXTRAS( f ) f
++#define DELETEEXTRAS_STR( f ) f
++#endif // wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS / !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++
+ // ----------------------------------------------------------------------------
+ // Definition of wxDocument
+@@ -270,6 +306,4 @@
+     SetTitle(wxFileNameFromPath(fileName));
+ 
+-    GetDocumentManager()->AddFileToHistory(fileName);
+-
+     // Notify the views that the filename has changed
+     wxNode *node = m_documentViews.First();
+@@ -281,5 +315,40 @@
+     }
+ 
+-    return OnSaveDocument(m_documentFile);
++    if ( OnSaveDocument(m_documentFile) == FALSE )
++    {
++      // Files that were not saved correctly are not added to the FileHistory.
++      return FALSE;
++    }
++
++#if wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++    wxString historyEntry( fileName );
++    if ( !(docTemplate->FileMatchesTemplate(fileName)))
++    {
++        // If the user uses another extension than specified in the document template, we add
++        // an asterisk and the default extension to the filename. This has two effects:
++        // 1. The asterisk shows that the string cannot be a correct filename and that the filename
++        //    doesn't use the usual default extension.
++        // 2. Since every document template has a unique default extension, the added default
++        //    extension helps us to find the corresponding document template.
++        historyEntry.append(wxT("*"));
++        historyEntry.append(docTemplate->GetDefaultExtension());
++    }
++    GetDocumentManager()->AddFileToHistory(historyEntry);
++#else // !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++    // A file that doesn't use the default extension of its document template cannot be opened 
++    // via the FileHistory, so we do not add it.
++    if (docTemplate->FileMatchesTemplate(fileName))
++    {
++      GetDocumentManager()->AddFileToHistory(fileName);
++    }
++#if defined( __WXGTK__ ) // TODO: and other OS?
++    else // The user will probably not be able to open the file again, so
++         // we warn about the wrong file-extension.
++    {
++      wxMessageBox(_("The file was saved with an unsupported extension!"));
++    }
++#endif // __WXGTK__
++#endif // wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS / !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++    return TRUE;
+ }
+ 
+@@ -1125,8 +1194,49 @@
+         path2 = path;
+ 
++#if wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++    wxString filename(path2);
++
+     if (flags & wxDOC_SILENT)
++    {
++        int iPos;
++        if ((iPos=path2.find(wxT('*'))) >= 0)
++        {
++            // The asterisk shows us that the default extension was added to the path.
++            filename.assign(DeleteExtras(path2));
++            // We can find the document template by checking the default extensions.
++            wxString testFilename(path2);
++            testFilename.replace(iPos,1,1,wxT('.')); // replace the '*' in the teststring
++            temp = FindTemplateForPath(testFilename);
++        }
++        else
++        {
+         temp = FindTemplateForPath(path2);
++        }
++        if ( !temp )
++        {
++            (void)wxMessageBox(_("Cannot open files with unknown file format."), _("Sorry"), 
++                               wxOK | wxICON_EXCLAMATION, wxFindSuitableParent());
++        }
++    }
++    else
++    {
++        temp = SelectDocumentPath(templates, n, path2, flags);
++        filename.assign(path2);
++    }
++#else // !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++    if (flags & wxDOC_SILENT)
++    {
++        temp = FindTemplateForPath(path2);
++        if ( !temp )
++        {
++            // Since we do not add files with non-default extensions to the FileHistory this 
++            // can only happen if the application changes the allowed templates in runtime.
++            (void)wxMessageBox(_("Cannot open files with unknown file format."), _("Sorry"), 
++                               wxOK | wxICON_EXCLAMATION, wxFindSuitableParent());
++        }
++    }
+     else
+         temp = SelectDocumentPath(templates, n, path2, flags);
++#endif // wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS / !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
+ 
+     delete[] templates;
+@@ -1134,10 +1244,18 @@
+     if (temp)
+     {
++#if wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++        wxDocument *newDoc = temp->CreateDocument(filename, flags);
++#else // !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
+         wxDocument *newDoc = temp->CreateDocument(path2, flags);
++#endif // wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS / !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
+         if (newDoc)
+         {
+             newDoc->SetDocumentName(temp->GetDocumentName());
+             newDoc->SetDocumentTemplate(temp);
++#if wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++            if (!newDoc->OnOpenDocument(filename))
++#else // !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
+             if (!newDoc->OnOpenDocument(path2))
++#endif // wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS / !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
+             {
+                 newDoc->DeleteAllViews();
+@@ -1145,5 +1263,14 @@
+                 return (wxDocument *) NULL;
+             }
++#if wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
+             AddFileToHistory(path2);
++#else // !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
++            // A file that doesn't use the default extension of its document template cannot be opened 
++            // via the FileHistory, so we do not add it.
++            if (temp->FileMatchesTemplate(path2)) // always true in wxGTK
++            {
++                AddFileToHistory(path2);
++            }
++#endif // wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS / !wxUSE_DOC_VIEW_USERDEFINED_EXTENSIONS
+         }
+         return newDoc;
+@@ -1409,5 +1536,5 @@
+                                         &FilterIndex,
+                                         descrBuf,
+-                                        0,
++                                        wxHIDE_READONLY, // we can't retrieve the value checked by the user
+                                         parent);
+ 
+@@ -1439,4 +1566,9 @@
+         if ( !theTemplate )
+             theTemplate = FindTemplateForPath(path);
++        if ( !theTemplate )
++        {
++            (void)wxMessageBox(_("Cannot open files with unknown file format."), _("Sorry"), 
++                               wxOK | wxICON_EXCLAMATION, parent);
++        }
+     }
+     else
+@@ -1790,8 +1922,12 @@
+     {
+         // verify that the file exists before doing anything else
+-        if ( wxFile::Exists(filename) )
++        if ( wxFile::Exists(DELETEEXTRAS(filename)) )
+         {
+             // try to open it
+-            (void)m_docManager->CreateDocument(filename, wxDOC_SILENT);
++            if( !(m_docManager->CreateDocument(filename, wxDOC_SILENT)) )
++            {
++                // remove the file from the MRU list. The user should already be notified.
++                m_docManager->RemoveFileFromHistory(n);
++            }
+         }
+         else
+@@ -1802,5 +1938,5 @@
+ 
+             wxLogError(_("The file '%s' doesn't exist and couldn't be opened.\nIt has been removed from the most recently used files list."),
+-                       filename.c_str());
++                       DELETEEXTRAS_STR(filename.c_str()));
+         }
+     }
+@@ -1923,5 +2059,14 @@
+     for (i = 0; i < m_fileHistoryN; i++)
+     {
+-        if ( m_fileHistory[i] && (file == m_fileHistory[i]) )
++#if defined( __WXMSW__ ) // TODO: any other OS with case insensitive file names?
++        wxString testString( m_fileHistory[i] );
++        if (      m_fileHistory[i] 
++              && ( DELETEEXTRAS(file.Lower()) == DELETEEXTRAS(testString.Lower()) ) 
++           )
++#else
++        if (      m_fileHistory[i] 
++              && ( DELETEEXTRAS(file) == DELETEEXTRAS(m_fileHistory[i]) )
++           )
++#endif
+         {
+             // we do have it, move it to the top of the history
+@@ -1964,5 +2109,5 @@
+     // this is the directory of the last opened file
+     wxString pathCurrent;
+-    wxSplitPath( m_fileHistory[0], &pathCurrent, NULL, NULL );
++    wxSplitPath( DELETEEXTRAS(m_fileHistory[0]), &pathCurrent, NULL, NULL );
+     for (i = 0; i < m_fileHistoryN; i++)
+     {
+@@ -1972,5 +2117,5 @@
+             // path
+             wxString pathInMenu, path, filename, ext;
+-            wxSplitPath( m_fileHistory[i], &path, &filename, &ext );
++            wxSplitPath( DELETEEXTRAS(m_fileHistory[i]), &path, &filename, &ext );
+             if ( path == pathCurrent )
+             {
+@@ -1982,5 +2127,5 @@
+             {
+                 // absolute path; could also set relative path
+-                pathInMenu = m_fileHistory[i];
++                pathInMenu = DELETEEXTRAS(m_fileHistory[i]);
+             }
+ 
+@@ -2022,5 +2167,5 @@
+         for ( j = i; j < m_fileHistoryN - 1; j++ )
+         {
+-            buf.Printf(s_MRUEntryFormat, j + 1, m_fileHistory[j]);
++            buf.Printf(s_MRUEntryFormat, j + 1, DELETEEXTRAS_STR(m_fileHistory[j]));
+             menu->SetLabel(wxID_FILE1 + j, buf);
+         }
+@@ -2085,5 +2230,5 @@
+     buf.Printf(wxT("file%d"), m_fileHistoryN+1);
+     wxString historyFile;
+-    while ((m_fileHistoryN <= m_fileMaxFiles) && config.Read(buf, &historyFile) && (historyFile != wxT("")))
++    while ((m_fileHistoryN < m_fileMaxFiles) && config.Read(buf, &historyFile) && (historyFile != wxT("")))
+     {
+         m_fileHistory[m_fileHistoryN] = copystring((const wxChar*) historyFile);
+@@ -2098,9 +2243,10 @@
+ {
+     int i;
+-    for (i = 0; i < m_fileHistoryN; i++)
++    wxString empty(wxT(""));
++    for (i = 0; i < m_fileMaxFiles; i++)
+     {
+         wxString buf;
+         buf.Printf(wxT("file%d"), i+1);
+-        config.Write(buf, wxString(m_fileHistory[i]));
++        config.Write(buf, i < m_fileHistoryN ? wxString(m_fileHistory[i]) : empty);
+     }
+ }
+@@ -2122,5 +2268,5 @@
+                 {
+                     wxString buf;
+-                    buf.Printf(s_MRUEntryFormat, i+1, m_fileHistory[i]);
++                    buf.Printf(s_MRUEntryFormat, i+1, DELETEEXTRAS_STR(m_fileHistory[i]));
+                     menu->Append(wxID_FILE1+i, buf);
+                 }
+@@ -2142,5 +2288,5 @@
+             {
+                 wxString buf;
+-                buf.Printf(s_MRUEntryFormat, i+1, m_fileHistory[i]);
++                buf.Printf(s_MRUEntryFormat, i+1, DELETEEXTRAS_STR(m_fileHistory[i]));
+                 menu->Append(wxID_FILE1+i, buf);
+             }
+
+ 	  	 

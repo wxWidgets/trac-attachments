@@ -1,0 +1,789 @@
+Index: samples/opengl/cube/cube.cpp
+===================================================================
+--- samples/opengl/cube/cube.cpp	(revision 51456)
++++ samples/opengl/cube/cube.cpp	(working copy)
+@@ -46,7 +46,7 @@
+ {
+     GLenum errLast = GL_NO_ERROR;
+ 
+-    for ( ;; )
++    while (true)
+     {
+         GLenum err = glGetError();
+         if ( err == GL_NO_ERROR )
+@@ -119,40 +119,6 @@
+ // ============================================================================
+ 
+ // ----------------------------------------------------------------------------
+-// MyApp: the application object
+-// ----------------------------------------------------------------------------
+-
+-IMPLEMENT_APP(MyApp)
+-
+-bool MyApp::OnInit()
+-{
+-    if ( !wxApp::OnInit() )
+-        return false;
+-
+-    // Create the main window
+-    new MyFrame();
+-
+-    return true;
+-}
+-
+-int MyApp::OnExit()
+-{
+-    delete m_glContext;
+-
+-    return wxApp::OnExit();
+-}
+-
+-TestGLContext& MyApp::GetContext(wxGLCanvas *canvas)
+-{
+-    if ( !m_glContext )
+-        m_glContext = new TestGLContext(canvas);
+-    else
+-        m_glContext->SetCurrent(*canvas);
+-
+-    return *m_glContext;
+-}
+-
+-// ----------------------------------------------------------------------------
+ // TestGLContext
+ // ----------------------------------------------------------------------------
+ 
+@@ -167,7 +133,7 @@
+     glEnable(GL_LIGHT0);
+     glEnable(GL_TEXTURE_2D);
+ 
+-    // add slightly more light, the default lightning is rather dark
++    // add slightly more light, the default lighting is rather dark
+     GLfloat ambient[] = { 0.5, 0.5, 0.5, 0.5 };
+     glLightfv(GL_LIGHT0, GL_AMBIENT, ambient);
+ 
+@@ -272,19 +238,58 @@
+     CheckGLError();
+ }
+ 
++
+ // ----------------------------------------------------------------------------
++// MyApp: the application object
++// ----------------------------------------------------------------------------
++
++IMPLEMENT_APP(MyApp)
++
++bool MyApp::OnInit()
++{
++    if ( !wxApp::OnInit() )
++        return false;
++
++    // Create the main window.
++    MyFrame* frame=new MyFrame();
++
++    // Create the OpenGL context on the basis of the first window.
++    // Subsequently created windows (via the "New" menu) will all share the same context.
++    m_glContext=new TestGLContext(frame->GetCanvas());
++
++    // Application init successful.
++    return true;
++}
++
++int MyApp::OnExit()
++{
++    delete m_glContext;
++
++    return wxApp::OnExit();
++}
++
++TestGLContext& MyApp::GetContext()
++{
++    wxASSERT(m_glContext!=NULL);
++
++    return *m_glContext;
++}
++
++
++// ----------------------------------------------------------------------------
+ // TestGLCanvas
+ // ----------------------------------------------------------------------------
+ 
+ BEGIN_EVENT_TABLE(TestGLCanvas, wxGLCanvas)
+-    EVT_SIZE(TestGLCanvas::OnSize)
+     EVT_PAINT(TestGLCanvas::OnPaint)
+-
+     EVT_KEY_DOWN(TestGLCanvas::OnKeyDown)
+ END_EVENT_TABLE()
+ 
+ TestGLCanvas::TestGLCanvas(wxWindow *parent)
+-            : wxGLCanvas(parent, wxID_ANY, NULL /* attribs */)
++    // With perspective OpenGL graphics, the wxFULL_REPAINT_ON_RESIZE style flag should always be set,
++    // because even making the canvas smaller should be followed by a paint event that updates the
++    // entire canvas with new viewport settings.
++    : wxGLCanvas(parent, wxID_ANY, NULL /* attribs */, wxDefaultPosition, wxDefaultSize, wxFULL_REPAINT_ON_RESIZE)
+ {
+     m_xangle =
+     m_yangle = 30;
+@@ -292,27 +297,25 @@
+ 
+ void TestGLCanvas::OnPaint(wxPaintEvent& WXUNUSED(event))
+ {
++    // This is required even though dc is not used otherwise.
+     wxPaintDC dc(this);
+ 
+-    wxGetApp().GetContext(this).DrawRotatedCube(m_xangle, m_yangle);
++    wxGetApp().GetContext().SetCurrent(*this);
+ 
+-    SwapBuffers();
+-}
+ 
+-void TestGLCanvas::OnSize(wxSizeEvent& event)
+-{
+-    // don't prevent default processing from taking place
+-    event.Skip();
++    // Set the OpenGL viewport according to the client size of this canvas.
++    // This is done here rather than in a wxSizeEvent handler because our
++    // OpenGL rendering context (and thus viewport setting) is used with multiple canvases:
++    // If we updated the viewport in the wxSizeEvent handler, changing the size of one canvas
++    // causes a viewport setting that is wrong when next another canvas is repainted.
++    const wxSize ClientSize=GetClientSize();
+ 
+-    if ( !IsShownOnScreen() )
+-        return;
++    glViewport(0, 0, ClientSize.x, ClientSize.y);
+ 
+-    // set GL viewport (not called by wxGLCanvas::OnSize on all platforms...)
+-    int w, h;
+-    GetClientSize(&w, &h);
+ 
+-    wxGetApp().GetContext(this);
+-    glViewport(0, 0, w, h);
++    // Render the graphics and swap the buffers.
++    wxGetApp().GetContext().DrawRotatedCube(m_xangle, m_yangle);
++    SwapBuffers();
+ }
+ 
+ void TestGLCanvas::OnKeyDown( wxKeyEvent& event )
+@@ -355,6 +358,7 @@
+     Refresh(false);
+ }
+ 
++
+ // ----------------------------------------------------------------------------
+ // MyFrame: main application window
+ // ----------------------------------------------------------------------------
+@@ -365,9 +369,10 @@
+ END_EVENT_TABLE()
+ 
+ MyFrame::MyFrame()
+-       : wxFrame(NULL, wxID_ANY, _T("wxWidgets OpenGL Cube Sample"))
++       : wxFrame(NULL, wxID_ANY, _T("wxWidgets OpenGL Cube Sample")),
++         m_glCanvas(NULL)
+ {
+-    new TestGLCanvas(this);
++    m_glCanvas=new TestGLCanvas(this);
+ 
+     SetIcon(wxICON(sample));
+ 
+@@ -397,4 +402,3 @@
+ {
+     (void) new MyFrame();
+ }
+-
+Index: samples/opengl/cube/cube.h
+===================================================================
+--- samples/opengl/cube/cube.h	(revision 51456)
++++ samples/opengl/cube/cube.h	(working copy)
+@@ -14,6 +14,7 @@
+ 
+ #include "wx/glcanvas.h"
+ 
++
+ // the rendering context used by all GL canvases
+ class TestGLContext : public wxGLContext
+ {
+@@ -28,14 +29,15 @@
+     GLuint m_textures[6];
+ };
+ 
++
+ // Define a new application type
+-class MyApp: public wxApp
++class MyApp : public wxApp
+ {
+ public:
+     MyApp() { m_glContext = NULL; }
+ 
+-    // get the context we use creating it on demand (and set it as current)
+-    TestGLContext& GetContext(wxGLCanvas *canvas);
++    // Returns the context that we commonly use for all frames.
++    TestGLContext& GetContext();
+ 
+     // virtual wxApp methods
+     virtual bool OnInit();
+@@ -46,21 +48,7 @@
+     TestGLContext *m_glContext;
+ };
+ 
+-// Define a new frame type
+-class MyFrame: public wxFrame
+-{
+-public:
+-    MyFrame();
+ 
+-private:
+-    void OnClose(wxCommandEvent& event);
+-    void OnNewWindow(wxCommandEvent& event);
+-    void OnDefRotateLeftKey(wxCommandEvent& event);
+-    void OnDefRotateRightKey(wxCommandEvent& event);
+-
+-    DECLARE_EVENT_TABLE()
+-};
+-
+ class TestGLCanvas : public wxGLCanvas
+ {
+ public:
+@@ -68,7 +56,6 @@
+ 
+ private:
+     void OnPaint(wxPaintEvent& event);
+-    void OnSize(wxSizeEvent& event);
+     void OnKeyDown(wxKeyEvent& event);
+ 
+     // angles of rotation around x- and y- axis
+@@ -78,5 +65,23 @@
+     DECLARE_EVENT_TABLE()
+ };
+ 
++
++// Define a new frame type
++class MyFrame : public wxFrame
++{
++public:
++    MyFrame();
++
++    // Returns the OpenGL canvas of this frame.
++    TestGLCanvas* GetCanvas() { return m_glCanvas; }
++
++private:
++    void OnClose(wxCommandEvent& event);
++    void OnNewWindow(wxCommandEvent& event);
++
++    TestGLCanvas* m_glCanvas;
++
++    DECLARE_EVENT_TABLE()
++};
++
+ #endif // _WX_CUBE_H_
+-
+Index: samples/opengl/isosurf/isosurf.cpp
+===================================================================
+--- samples/opengl/isosurf/isosurf.cpp	(revision 51456)
++++ samples/opengl/isosurf/isosurf.cpp	(working copy)
+@@ -47,8 +47,9 @@
+ #undef GL_EXT_vertex_array
+ #endif
+ 
+-#include "isosurf.h"
++#include <fstream>
+ 
++#include "isosurf.h"
+ #include "../../sample.xpm"
+ 
+ // The following part is taken largely unchanged from the original C Version
+@@ -72,31 +73,24 @@
+ static GLfloat yrot;
+ 
+ 
+-static void read_surface( const wxChar *filename )
++static void read_surface(const wxChar *filename)
+ {
+-    FILE *f = wxFopen(filename,_T("r"));
+-    if (!f)
++    std::ifstream inFile(filename);
++    numverts=0;
++
++    if (!inFile)
+     {
+-        wxString msg = _T("Couldn't read ");
+-        msg += filename;
+-        wxMessageBox(msg);
++        wxMessageBox(wxString("Couldn't read ")+filename);
+         return;
+     }
+ 
+-    numverts = 0;
+-    while (!feof(f) && numverts<MAXVERTS)
++    while ((inFile >> verts[numverts][0] >> verts[numverts][1] >> verts[numverts][2]
++                   >> norms[numverts][0] >> norms[numverts][1] >> norms[numverts][2]) && numverts<MAXVERTS)
+     {
+-        fscanf( f, "%f %f %f  %f %f %f",
+-            &verts[numverts][0], &verts[numverts][1], &verts[numverts][2],
+-            &norms[numverts][0], &norms[numverts][1], &norms[numverts][2] );
+         numverts++;
+     }
+ 
+-    numverts--;
+-
+     wxPrintf(_T("%d vertices, %d triangles\n"), numverts, numverts-2);
+-
+-    fclose(f);
+ }
+ 
+ 
+@@ -134,7 +128,7 @@
+ 
+     glPopMatrix();
+ 
+-    glFlush();
++    glFlush();      // Not strictly necessary here - buffer swapping below implies glFlush().
+ }
+ 
+ 
+@@ -238,8 +232,6 @@
+     return GL_TRUE;
+ }
+ 
+-// The following part was written for wxWidgets 1.66
+-MyFrame *frame = NULL;
+ 
+ IMPLEMENT_APP(MyApp)
+ 
+@@ -252,17 +244,38 @@
+     Args(argc, argv);
+ 
+     // Create the main frame window
+-    frame = new MyFrame(NULL, wxT("wxWidgets OpenGL Isosurf Sample"),
++    new MyFrame(NULL, wxT("wxWidgets OpenGL Isosurf Sample"),
+         wxDefaultPosition, wxDefaultSize);
+ 
++    read_surface( _T("isosurf.dat") );
++
++    Init();
++
++    return true;
++}
++
++BEGIN_EVENT_TABLE(MyFrame, wxFrame)
++    EVT_MENU(wxID_EXIT, MyFrame::OnExit)
++END_EVENT_TABLE()
++
++// My frame constructor
++MyFrame::MyFrame(wxFrame *frame, const wxString& title, const wxPoint& pos,
++    const wxSize& size, long style)
++    : wxFrame(frame, wxID_ANY, title, pos, size, style),
++      m_canvas(NULL)
++{
++    SetIcon(wxICON(sample));
++
++
+     // Make a menubar
+     wxMenu *fileMenu = new wxMenu;
+ 
+     fileMenu->Append(wxID_EXIT, _T("E&xit"));
+     wxMenuBar *menuBar = new wxMenuBar;
+     menuBar->Append(fileMenu, _T("&File"));
+-    frame->SetMenuBar(menuBar);
++    SetMenuBar(menuBar);
+ 
++
+   // Make a TestGLCanvas
+ 
+   // JACS
+@@ -288,33 +301,13 @@
+         doubleBuffer = GL_FALSE;
+     }
+ 
+-    frame->m_canvas = new TestGLCanvas(frame, wxID_ANY, wxDefaultPosition,
+-        wxDefaultSize, 0, _T("TestGLCanvas"), gl_attrib );
++    // Show the frame
++    Show(true);
+ 
+-  // Show the frame
+-    frame->Show(true);
+-
+-    frame->m_canvas->SetCurrent();
+-    read_surface( _T("isosurf.dat") );
+-
+-    Init();
+-
+-    return true;
++    m_canvas = new TestGLCanvas(this, wxID_ANY, wxDefaultPosition,
++        GetClientSize(), 0, _T("TestGLCanvas"), gl_attrib );
+ }
+ 
+-BEGIN_EVENT_TABLE(MyFrame, wxFrame)
+-    EVT_MENU(wxID_EXIT, MyFrame::OnExit)
+-END_EVENT_TABLE()
+-
+-// My frame constructor
+-MyFrame::MyFrame(wxFrame *frame, const wxString& title, const wxPoint& pos,
+-    const wxSize& size, long style)
+-    : wxFrame(frame, wxID_ANY, title, pos, size, style)
+-{
+-    m_canvas = NULL;
+-    SetIcon(wxICON(sample));
+-}
+-
+ MyFrame::~MyFrame()
+ {
+     delete m_canvas;
+@@ -342,10 +335,11 @@
+ TestGLCanvas::TestGLCanvas(wxWindow *parent, wxWindowID id,
+     const wxPoint& pos, const wxSize& size, long style,
+     const wxString& name, int* gl_attrib)
+-    : wxGLCanvas(parent, id, pos, size, style|wxFULL_REPAINT_ON_RESIZE, name, gl_attrib)
++    : wxGLCanvas(parent, id, gl_attrib, pos, size, style|wxFULL_REPAINT_ON_RESIZE, name),
++      m_glRC(NULL)
+ {
+-    parent->Show(true);
+-    SetCurrent();
++    m_glRC=new wxGLContext(this);   // Explicitly create a new rendering context instance for this canvas.
++    SetCurrent(*m_glRC);            // Make the new context current (activate it for use) with this canvas.
+ 
+     /* Make sure server supports the vertex array extension */
+     char* extensions = (char *) glGetString( GL_EXTENSIONS );
+@@ -355,6 +349,10 @@
+     }
+ }
+ 
++TestGLCanvas::~TestGLCanvas()
++{
++    delete m_glRC;
++}
+ 
+ void TestGLCanvas::OnPaint( wxPaintEvent& WXUNUSED(event) )
+ {
+@@ -362,31 +360,24 @@
+     // OnPaint handlers must always create a wxPaintDC.
+     wxPaintDC dc(this);
+ 
+-#ifndef __WXMOTIF__
+-    if (!GetContext()) return;
+-#endif
++    // This is normally only necessary if there is more than one wxGLCanvas
++    // or more than one wxGLContext in the application.
++    SetCurrent(*m_glRC);
+ 
+-    SetCurrent();
+-
+     draw1();
+     SwapBuffers();
+ }
+ 
+ void TestGLCanvas::OnSize(wxSizeEvent& event)
+ {
+-    // this is also necessary to update the context on some platforms
+-    wxGLCanvas::OnSize(event);
++    // This is normally only necessary if there is more than one wxGLCanvas
++    // or more than one wxGLContext in the application.
++    SetCurrent(*m_glRC);
+ 
+-    // set GL viewport (not called by wxGLCanvas::OnSize on all platforms...)
+-    int w, h;
+-    GetClientSize(&w, &h);
+-#ifndef __WXMOTIF__
+-    if (GetContext())
+-#endif
+-    {
+-        SetCurrent();
+-        glViewport(0, 0, (GLint) w, (GLint) h);
+-    }
++    // It's up to the application code to update the OpenGL viewport settings.
++    // This is OK here only because there is only one canvas that uses the context.
++    // See the cube sample for that case that multiple canvases are made current with one context.
++    glViewport(0, 0, event.GetSize().x, event.GetSize().y);
+ }
+ 
+ void TestGLCanvas::OnChar(wxKeyEvent& event)
+@@ -450,6 +441,9 @@
+     static int dragging = 0;
+     static float last_x, last_y;
+ 
++    // Allow default processing to happen, or else the canvas cannot gain focus (for key events).
++    event.Skip();
++
+     //printf("%f %f %d\n", event.GetX(), event.GetY(), (int)event.LeftIsDown());
+     if(event.LeftIsDown())
+     {
+@@ -468,7 +462,6 @@
+     }
+     else
+         dragging = 0;
+-
+ }
+ 
+ void TestGLCanvas::OnEraseBackground( wxEraseEvent& WXUNUSED(event) )
+Index: samples/opengl/isosurf/isosurf.h
+===================================================================
+--- samples/opengl/isosurf/isosurf.h	(revision 51456)
++++ samples/opengl/isosurf/isosurf.h	(working copy)
+@@ -19,7 +19,6 @@
+     bool OnInit();
+ };
+ 
+-#if wxUSE_GLCANVAS
+ 
+ class TestGLCanvas: public wxGLCanvas
+ {
+@@ -29,7 +28,7 @@
+         const wxSize& size = wxDefaultSize, long style = 0,
+         const wxString& name = _T("TestGLCanvas"), int *gl_attrib = NULL);
+ 
+-   ~TestGLCanvas(){};
++   ~TestGLCanvas();
+ 
+     void OnPaint(wxPaintEvent& event);
+     void OnSize(wxSizeEvent& event);
+@@ -37,12 +36,18 @@
+     void OnChar(wxKeyEvent& event);
+     void OnMouseEvent(wxMouseEvent& event);
+ 
++
++private:
++
++    TestGLCanvas(const TestGLCanvas&);      ///< Use of the Copy    Constructor is not allowed (because we cannot copy   the m_glRC).
++    void operator = (const TestGLCanvas&);  ///< Use of the Assignment Operator is not allowed (because we cannot assign the m_glRC).
++
++    wxGLContext* m_glRC;    ///< The OpenGL rendering context.
++
+     DECLARE_EVENT_TABLE()
+ };
+ 
+-#endif // #if wxUSE_GLCANVAS
+ 
+-
+ class MyFrame: public wxFrame
+ {
+ public:
+@@ -51,9 +56,7 @@
+ 
+     virtual ~MyFrame();
+ 
+-#if wxUSE_GLCANVAS
+     TestGLCanvas *m_canvas;
+-#endif
+ 
+ private :
+ 
+Index: samples/opengl/penguin/dxfrenderer.cpp
+===================================================================
+--- samples/opengl/penguin/dxfrenderer.cpp	(revision 51456)
++++ samples/opengl/penguin/dxfrenderer.cpp	(working copy)
+@@ -33,6 +33,8 @@
+     #include <GL/glu.h>
+ #endif
+ 
++#include <sstream>
++
+ #include "dxfrenderer.h"
+ 
+ #include "wx/listimpl.cpp"
+@@ -435,6 +437,22 @@
+     return false;
+ }
+ 
++// This method is used instead of numStr.ToDouble(d) because the latter
++// (wxString::ToDouble()) takes the systems proper locale into account,
++// whereas the implementation below works with the default locale.
++// (Converting numbers that are formatted in the default locale can fail
++//  with system locales that use e.g. the comma as the decimal separator.)
++static double ToDouble(const wxString& numStr)
++{
++    double             d;
++    std::string        numStr_(numStr.c_str());
++    std::istringstream iss(numStr_);
++
++    iss >> d;
++
++    return d;
++}
++
+ // parse entities section: save 3DFACE and LINE entities
+ bool DXFRenderer::ParseEntities(wxInputStream& stream)
+ {
+@@ -490,8 +508,8 @@
+             state = 2;
+         else if (state > 0)
+         {
+-            double d;
+-            line2.ToDouble(&d);
++            const double d=ToDouble(line2);
++
+             if (line1 == wxT("10"))
+                 v[0].x = d;
+             else if (line1 == wxT("20"))
+Index: samples/opengl/penguin/penguin.cpp
+===================================================================
+--- samples/opengl/penguin/penguin.cpp	(revision 51456)
++++ samples/opengl/penguin/penguin.cpp	(working copy)
+@@ -94,8 +94,10 @@
+     menuBar->Append(helpMenu, wxT("&Help"));
+     SetMenuBar(menuBar);
+ 
++    Show(true);
++
+     m_canvas = new TestGLCanvas(this, wxID_ANY, wxDefaultPosition,
+-        wxSize(300, 300), wxSUNKEN_BORDER);
++        GetClientSize(), wxSUNKEN_BORDER);
+ }
+ 
+ // File|Open... command
+@@ -141,8 +143,12 @@
+ 
+ TestGLCanvas::TestGLCanvas(wxWindow *parent, wxWindowID id,
+     const wxPoint& pos, const wxSize& size, long style, const wxString& name)
+-    : wxGLCanvas(parent, id, pos, size, style|wxFULL_REPAINT_ON_RESIZE, name)
++    : wxGLCanvas(parent, id, NULL, pos, size, style|wxFULL_REPAINT_ON_RESIZE, name),
++      m_glRC(NULL)
+ {
++    m_glRC=new wxGLContext(this);   // Explicitly create a new rendering context instance for this canvas.
++    SetCurrent(*m_glRC);            // Make the new context current (activate it for use) with this canvas.
++
+     m_gldata.initialized = false;
+ 
+     // initialize view matrix
+@@ -154,6 +160,7 @@
+ 
+ TestGLCanvas::~TestGLCanvas()
+ {
++    delete m_glRC;
+ }
+ 
+ void TestGLCanvas::OnPaint( wxPaintEvent& WXUNUSED(event) )
+@@ -161,12 +168,8 @@
+     // must always be here
+     wxPaintDC dc(this);
+ 
+-#ifndef __WXMOTIF__
+-    if (!GetContext()) return;
+-#endif
++    SetCurrent(*m_glRC);
+ 
+-    SetCurrent();
+-
+     // Initialize OpenGL
+     if (!m_gldata.initialized)
+     {
+@@ -195,11 +198,11 @@
+     SwapBuffers();
+ }
+ 
+-void TestGLCanvas::OnSize(wxSizeEvent& event)
++void TestGLCanvas::OnSize(wxSizeEvent& WXUNUSED(event))
+ {
+-    // this is also necessary to update the context on some platforms
+-    wxGLCanvas::OnSize(event);
+-    // Reset the OpenGL view aspect
++    // Reset the OpenGL view aspect.
++    // This is OK only because there is only one canvas that uses the context.
++    // See the cube sample for that case that multiple canvases are made current with one context.
+     ResetProjectionMode();
+ }
+ 
+@@ -293,18 +296,21 @@
+ 
+ void TestGLCanvas::ResetProjectionMode()
+ {
++    // This is normally only necessary if there is more than one wxGLCanvas
++    // or more than one wxGLContext in the application.
++    SetCurrent(*m_glRC);
++
+     int w, h;
+     GetClientSize(&w, &h);
+-#ifndef __WXMOTIF__
+-    if ( GetContext() )
+-#endif
+-    {
+-        SetCurrent();
+-        glViewport(0, 0, (GLint) w, (GLint) h);
+-        glMatrixMode(GL_PROJECTION);
+-        glLoadIdentity();
+-        gluPerspective(45.0f, (GLfloat)w/h, 1.0, 100.0);
+-        glMatrixMode(GL_MODELVIEW);
+-        glLoadIdentity();
+-    }
++
++    // It's up to the application code to update the OpenGL viewport settings.
++    // In order to avoid extensive context switching, consider doing this in
++    // OnPaint() rather than here, though.
++    glViewport(0, 0, (GLint) w, (GLint) h);
++
++    glMatrixMode(GL_PROJECTION);
++    glLoadIdentity();
++    gluPerspective(45.0f, (GLfloat)w/h, 1.0, 100.0);
++    glMatrixMode(GL_MODELVIEW);
++    glLoadIdentity();
+ }
+Index: samples/opengl/penguin/penguin.h
+===================================================================
+--- samples/opengl/penguin/penguin.h	(revision 51456)
++++ samples/opengl/penguin/penguin.h	(working copy)
+@@ -31,6 +31,7 @@
+ 
+ #include "dxfrenderer.h"
+ 
++
+ // OpenGL view data
+ struct GLData
+ {
+@@ -40,6 +41,7 @@
+     float zoom;                 // field of view in degrees
+ };
+ 
++
+ // Define a new application type
+ class MyApp: public wxApp
+ {
+@@ -47,9 +49,11 @@
+     bool OnInit();
+ };
+ 
++
+ // Define a new frame type
+ class TestGLCanvas;
+ 
++
+ class MyFrame: public wxFrame
+ {
+ public:
+@@ -60,18 +64,15 @@
+     void OnMenuFileExit(wxCommandEvent& event);
+     void OnMenuHelpAbout(wxCommandEvent& event);
+ 
+-#if wxUSE_GLCANVAS
+     void SetCanvas( TestGLCanvas *canvas ) { m_canvas = canvas; }
+     TestGLCanvas *GetCanvas() { return m_canvas; }
+ 
+ private:
+     TestGLCanvas *m_canvas;
+-#endif
+ 
+     DECLARE_EVENT_TABLE()
+ };
+ 
+-#if wxUSE_GLCANVAS
+ 
+ class TestGLCanvas: public wxGLCanvas
+ {
+@@ -95,13 +96,14 @@
+     void InitGL();
+     void ResetProjectionMode();
+ 
+-    GLData m_gldata;
+-    DXFRenderer m_renderer;
++    TestGLCanvas(const TestGLCanvas&);      ///< Use of the Copy    Constructor is not allowed (because we cannot copy   the m_glRC).
++    void operator = (const TestGLCanvas&);  ///< Use of the Assignment Operator is not allowed (because we cannot assign the m_glRC).
+ 
++    wxGLContext* m_glRC;        ///< The OpenGL rendering context.
++    GLData       m_gldata;
++    DXFRenderer  m_renderer;
++
+     DECLARE_EVENT_TABLE()
+ };
+ 
+-#endif // #if wxUSE_GLCANVAS
+-
+ #endif // #ifndef _WX_PENGUIN_H_
+-
+
+ 	  	 

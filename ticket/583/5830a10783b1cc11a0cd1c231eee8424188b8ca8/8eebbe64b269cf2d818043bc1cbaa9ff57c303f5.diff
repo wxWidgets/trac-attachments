@@ -1,0 +1,391 @@
+Index: src/common/wxchar.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/wxchar.cpp,v
+retrieving revision 1.79
+diff -u -3 -r1.79 wxchar.cpp
+--- src/common/wxchar.cpp	2004/03/20 13:44:06	1.79
++++ src/common/wxchar.cpp	2004/04/17 20:40:47
+@@ -198,10 +198,12 @@
+                 }
+ 
+ #define APPEND_CH(ch) \
+-                if ( lenCur == lenMax ) \
+-                    return -1; \
+-                \
+-                buf[lenCur++] = ch
++                { \
++                    if ( lenCur == lenMax ) \
++                        return -1; \
++                    \
++                    buf[lenCur++] = ch; \
++                }
+ 
+ #define APPEND_STR(s) \
+                 { \
+@@ -419,46 +421,71 @@
+ 
+                     case wxT('c'):
+                         {
+-                            wxChar val = va_arg(argptr, int);
+-                            // we don't need to honor padding here, do we?
++                            int val = va_arg(argptr, int);
++#if wxUSE_UNICODE
++                            if (ilen == -1)
++                            {
++                                const char buf[2] = { val, 0 };
++                                val = wxString(buf, wxConvLibc)[0u];
++                            }
++#elif wxUSE_WCHAR_T
++                            if (ilen == 1)
++                            {
++                                const wchar_t buf[2] = { val, 0 };
++                                val = wxString(buf, wxConvLibc)[0u];
++                            }
++#endif
++                            size_t i;
++
++                            if (!adj_left)
++                                for (i = 1; i < min_width; i++)
++                                    APPEND_CH(_T(' '));
++
+                             APPEND_CH(val);
+ 
++                            if (adj_left)
++                                for (i = 1; i < min_width; i++)
++                                    APPEND_CH(_T(' '));
++
+                             done = TRUE;
+                         }
+                         break;
+ 
+                     case wxT('s'):
+-                        if (ilen == -1)
+                         {
+-                            // wx extension: we'll let %hs mean non-Unicode
+-                            // strings
+-                            char *val = va_arg(argptr, char *);
++                            const wxChar *val = NULL;
+ #if wxUSE_UNICODE
+-                            // ASCII->Unicode constructor handles max_width
+-                            // right
+-                            wxString s(val, wxConvLibc, max_width);
+-#else
+-                            size_t len = wxSTRING_MAXLEN;
+-                            if (val)
++                            wxString s;
++
++                            if (ilen == -1)
+                             {
+-                                for ( len = 0;
+-                                      val[len] && (len < max_width);
+-                                      len++ )
+-                                    ;
++                                // wx extension: we'll let %hs mean non-Unicode
++                                // strings
++                                char *v = va_arg(argptr, char *);
++
++                                if (v)
++                                    val = s = wxString(v, wxConvLibc);
+                             }
+                             else
+-                                val = wxT("(null)");
+-                            wxString s(val, len);
++#elif wxUSE_WCHAR_T
++                            wxString s;
++
++                            if (ilen == 1)
++                            {
++                                // %ls means Unicode strings
++                                wchar_t *v = va_arg(argptr, wchar_t *);
++
++                                if (v)
++                                    val = s = wxString(v, wxConvLibc);
++                            }
++                            else
+ #endif
+-                            if (s.Len() < min_width)
+-                                s.Pad(min_width - s.Len(), wxT(' '), adj_left);
++                            {
++                                val = va_arg(argptr, wxChar *);
++                            }
+ 
+-                            APPEND_STR(s);
+-                        }
+-                        else
+-                        {
+-                            wxChar *val = va_arg(argptr, wxChar *);
+-                            size_t len = wxSTRING_MAXLEN;
++                            size_t len = 0;
++
+                             if (val)
+                             {
+                                 for ( len = 0;
+@@ -466,16 +493,32 @@
+                                       len++ )
+                                     ;
+                             }
+-                            else
++                            else if (max_width >= 6)
++                            {
+                                 val = wxT("(null)");
++                                len = 6;
++                            }
++                            else
++                            {
++                                val = wxT("");
++                                len = 0;
++                            }
++
++                            size_t i;
+ 
+-                            wxString s(val, len);
+-                            if (s.Len() < min_width)
+-                                s.Pad(min_width - s.Len(), wxT(' '), adj_left);
++                            if (!adj_left)
++                                for (i = len; i < min_width; i++)
++                                    APPEND_CH(_T(' '));
++
++                            for (i = 0; i < len; i++)
++                                APPEND_CH(val[i]);
++
++                            if (adj_left)
++                                for (i = len; i < min_width; i++)
++                                    APPEND_CH(_T(' '));
+ 
+-                            APPEND_STR(s);
++                            done = TRUE;
+                         }
+-                        done = TRUE;
+                         break;
+ 
+                     case wxT('n'):
+Index: tests/formatconverter/formatconverter.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/tests/formatconverter/formatconverter.cpp,v
+retrieving revision 1.1
+diff -u -3 -r1.1 formatconverter.cpp
+--- tests/formatconverter/formatconverter.cpp	2004/03/06 11:23:42	1.1
++++ tests/formatconverter/formatconverter.cpp	2004/04/17 20:40:48
+@@ -35,11 +35,6 @@
+ //  CPPUNIT_ASSERT(wxString::Format(_T("%hs"), "test") == _T("test"));
+ //
+ 
+-#if defined(__GNUG__) && !defined(__APPLE__)
+-    #pragma implementation
+-    #pragma interface
+-#endif
+-
+ // For compilers that support precompilation, includes "wx/wx.h".
+ #include "wx/wxprec.h"
+ 
+@@ -95,7 +90,6 @@
+ #endif
+     CPPUNIT_TEST_SUITE_END();
+ 
+-private:
+     void format_d();
+     void format_hd();
+     void format_ld();
+@@ -126,6 +120,12 @@
+     doTest(_T("d"), _T("d"));
+ #endif
+     CPPUNIT_ASSERT(wxString::Format(_T("%d"), 255) == _T("255"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%05d"), 255) == _T("00255"));
++    CPPUNIT_ASSERT(wxString::Format(_T("% 5d"), 255) == _T("  255"));
++    CPPUNIT_ASSERT(wxString::Format(_T("% 5d"), -255) == _T(" -255"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%-5d"), -255) == _T("-255 "));
++    CPPUNIT_ASSERT(wxString::Format(_T("%+5d"), 255) == _T(" +255"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%*d"), 5, 255) == _T("  255"));
+ }
+ 
+ void FormatConverterTestCase::format_hd()
+@@ -151,7 +151,11 @@
+ #ifdef CAN_TEST
+     doTest(_T("s"), _T("ls"));
+ #endif
+-    CPPUNIT_ASSERT(wxString::Format(_T("%s"), _T("test")) == _T("test"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%s!"), _T("test")) == _T("test!"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%6s!"), _T("test")) == _T("  test!"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%-6s!"), _T("test")) == _T("test  !"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%.6s!"), _T("test")) == _T("test!"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%6.4s!"), _T("testing")) == _T("  test!"));
+ }
+ 
+ void FormatConverterTestCase::format_hs()
+@@ -159,7 +163,11 @@
+ #ifdef CAN_TEST
+     doTest(_T("hs"), _T("hs"));
+ #endif
+-    CPPUNIT_ASSERT(wxString::Format(_T("%hs"), "test") == _T("test"));
++    CPPUNIT_ASSERT(wxString::Format(wxString(_T("%hs!")), "test") == _T("test!"));
++    CPPUNIT_ASSERT(wxString::Format(wxString(_T("%6hs!")), "test") == _T("  test!"));
++    CPPUNIT_ASSERT(wxString::Format(wxString(_T("%-6hs!")), "test") == _T("test  !"));
++    CPPUNIT_ASSERT(wxString::Format(wxString(_T("%.6hs!")), "test") == _T("test!"));
++    CPPUNIT_ASSERT(wxString::Format(wxString(_T("%6.4hs!")), "testing") == _T("  test!"));
+ }
+ 
+ void FormatConverterTestCase::format_ls()
+@@ -167,7 +175,11 @@
+ #ifdef CAN_TEST
+     doTest(_T("ls"), _T("ls"));
+ #endif
+-    CPPUNIT_ASSERT(wxString::Format(_T("%ls"), L"test") == _T("test"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%ls!"), L"test") == _T("test!"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%6ls!"), L"test") == _T("  test!"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%-6ls!"), L"test") == _T("test  !"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%.6ls!"), L"test") == _T("test!"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%6.4ls!"), L"testing") == _T("  test!"));
+ }
+ 
+ void FormatConverterTestCase::format_c()
+@@ -176,6 +188,8 @@
+     doTest(_T("c"), _T("lc"));
+ #endif
+     CPPUNIT_ASSERT(wxString::Format(_T("%c"), _T('x')) == _T("x"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%2c"), _T('x')) == _T(" x"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%-2c"), _T('x')) == _T("x "));
+ }
+ 
+ void FormatConverterTestCase::format_hc()
+@@ -183,7 +197,9 @@
+ #ifdef CAN_TEST
+     doTest(_T("hc"), _T("hc"));
+ #endif
+-    CPPUNIT_ASSERT(wxString::Format(_T("%hc"), 'x') == _T("x"));
++    CPPUNIT_ASSERT(wxString::Format(wxString(_T("%hc")), 'x') == _T("x"));
++    CPPUNIT_ASSERT(wxString::Format(wxString(_T("%2hc")), 'x') == _T(" x"));
++    CPPUNIT_ASSERT(wxString::Format(wxString(_T("%-2hc")), 'x') == _T("x "));
+ }
+ 
+ void FormatConverterTestCase::format_lc()
+@@ -192,6 +208,8 @@
+     doTest(_T("lc"), _T("lc"));
+ #endif
+     CPPUNIT_ASSERT(wxString::Format(_T("%lc"), L'x') == _T("x"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%2lc"), L'x') == _T(" x"));
++    CPPUNIT_ASSERT(wxString::Format(_T("%-2lc"), L'x') == _T("x "));
+ }
+ 
+ #ifdef CAN_TEST
+Index: tests/test.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/tests/test.cpp,v
+retrieving revision 1.2
+diff -u -3 -r1.2 test.cpp
+--- tests/test.cpp	2004/04/01 11:51:09	1.2
++++ tests/test.cpp	2004/04/17 20:40:48
+@@ -45,7 +45,7 @@
+     int  OnRun();
+ 
+ private:
+-    void List(Test *test, int depth = 0) const;
++    void List(Test *test, const string& parent = "") const;
+ 
+     // command lines options/parameters
+     bool m_list;
+@@ -56,7 +56,8 @@
+ IMPLEMENT_APP_CONSOLE(TestApp)
+ 
+ TestApp::TestApp()
+-  : m_list(false)
++  : m_list(false),
++    m_longlist(false)
+ {
+ }
+ 
+@@ -137,12 +138,25 @@
+ 
+ // List the tests
+ //
+-void TestApp::List(Test *test, int depth /*=0*/) const
++void TestApp::List(Test *test, const string& parent /*=""*/) const
+ {
+     TestSuite *suite = dynamic_cast<TestSuite*>(test);
++    string name;
+ 
+-    if (suite || m_longlist)
+-        cout << string(depth * 2, ' ') << test->getName() << "\n";
++    if (suite || m_longlist) {
++        // take the last component of the name and append to the parent
++        name = test->getName();
++        string::size_type i = name.find_last_of(".:");
++        name = parent + "." + (i != string::npos ? name.substr(i + 1) : name);
++
++        // drop the 1st component from the display and indent
++        if (parent != "") {
++            string::size_type j = i = name.find('.', 1);
++            while ((j = name.find('.', j + 1)) != string::npos)
++                cout << "  ";
++            cout << "  " << name.substr(i + 1) << "\n";
++        }
++    }
+ 
+     if (suite) {
+         typedef const vector<Test*> Tests;
+@@ -151,6 +165,6 @@
+         Tests& tests = suite->getTests();
+ 
+         for (Iter it = tests.begin(); it != tests.end(); ++it)
+-            List(*it, depth + 1);
++            List(*it, name);
+     }
+ }
+Index: docs/tech/tn0017.txt
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/tech/tn0017.txt,v
+retrieving revision 1.3
+diff -u -3 -r1.3 tn0017.txt
+--- docs/tech/tn0017.txt	2004/04/11 19:32:52	1.3
++++ docs/tech/tn0017.txt	2004/04/17 20:40:49
+@@ -59,7 +59,7 @@
+ 
+ 3. Run the test program with no arguments to run the default set of tests
+    (which are all those registered with CPPUNIT_TEST_SUITE_REGISTRATION).
+-   Or to list the tests without running them:
++   Or to list the test suites without running them:
+       test -l
+ 
+ 4. Tests that have been registered under a name using
+@@ -67,7 +67,7 @@
+    example:
+       test MBConvTestCase
+    or to list the tests:
+-      test -l MBConvTestCase
++      test -L MBConvTestCase
+ 
+ 
+ IV. Notes
+@@ -76,11 +76,26 @@
+ 1. You can register your tests (or a subset of them) just under a name, and not
+    in the unnamed registry if you don't want them to be executed by default.
+ 
+-2. If you are going to register your tests both in the unnamed registry and
+-   under a name, then use the name that the tests have in the 'test -l'
+-   listing (which is often the name of the TestCase class). Then the top
+-   level names in a 'test -l' listing can be a hint as to the name those
+-   tests have been registered under.
++2. If you are going to register your tests both in the unnamed registry
++   and under a name, then use the name that the tests have in the 'test -l'
++   listing.
++
++3. Tests which fail can be temporarily registered under "fixme" while the
++   problems they expose are fixed, instead of the unnamed registry. That
++   way they can easily be run, but they do not make regression testing with
++   the default suite more difficult. E.g.:
++
++    // register in the unnamed registry so that these tests are run by default
++    //CPPUNIT_TEST_SUITE_REGISTRATION(wxRegExTestCase);
++    CPPUNIT_TEST_SUITE_NAMED_REGISTRATION(wxRegExTestCase, "fixme");
++
++    // also include in it's own registry so that these tests can be run alone
++    CPPUNIT_TEST_SUITE_NAMED_REGISTRATION(wxRegExTestCase, "wxRegExTestCase");
++
++4. Tests which take a long time to execute can be registered under "advanced"
++   instead of the unnamed registry. The default suite should execute reasonably
++   quickly. To run the default and advanced tests together:
++    test "" advanced
+ 
+ 
+ === EOF ===
+
+ 	  	 

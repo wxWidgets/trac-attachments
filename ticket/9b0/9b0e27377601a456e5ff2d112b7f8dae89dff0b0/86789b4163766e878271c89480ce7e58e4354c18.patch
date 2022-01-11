@@ -1,0 +1,172 @@
+Index: src/msw/ole/automtn.cpp
+===================================================================
+--- src/msw/ole/automtn.cpp	(revision 71572)
++++ src/msw/ole/automtn.cpp	(working copy)
+@@ -56,6 +56,8 @@
+ 
+ #if wxUSE_OLE_AUTOMATION
+ 
++#include <wx/vector.h>
++
+ // Report an OLE error when calling the specified method to the user via wxLog.
+ static void
+ ShowException(const wxString& member,
+@@ -79,9 +81,22 @@
+     }
+ }
+ 
++namespace {
++
++struct wxOleVariantArg : public VARIANTARG
++{
++    wxOleVariantArg()  { VariantInit(this);  }    
++    ~wxOleVariantArg() { VariantClear(this); }
++};
++
++} // unnamed namespace
++
++
+ #define INVOKEARG(i) (args ? args[i] : *(ptrArgs[i]))
+ 
+ // For Put/Get, no named arguments are allowed.
++// WARNING: if args contain IDispatches, their reference count will be decreased 
++// by one after Invoke() returns!
+ bool wxAutomationObject::Invoke(const wxString& member, int action,
+         wxVariant& retValue, int noArgs, wxVariant args[], const wxVariant* ptrArgs[]) const
+ {
+@@ -100,23 +115,23 @@
+         return obj.Invoke(rest, action, retValue, noArgs, args, ptrArgs);
+     }
+ 
+-    VARIANTARG vReturn;
+-    VariantInit(& vReturn);
++    wxOleVariantArg vReturn;
++    wxOleVariantArg* vReturnPtr = & vReturn;
+ 
+-    VARIANTARG* vReturnPtr = & vReturn;
+-
+     // Find number of names args
+     int namedArgCount = 0;
+     int i;
+     for (i = 0; i < noArgs; i++)
++    {
+         if ( !INVOKEARG(i).GetName().empty() )
+         {
+             namedArgCount ++;
+         }
++    }
+ 
+     int namedArgStringCount = namedArgCount + 1;
+-    BSTR* argNames = new BSTR[namedArgStringCount];
+-    argNames[0] = wxConvertStringToOle(member);
++    wxVector<wxBasicString> argNames(namedArgStringCount, wxString());
++    argNames[0] = member;
+ 
+     // Note that arguments are specified in reverse order
+     // (all totally logical; hey, we're dealing with OLE here.)
+@@ -126,13 +141,13 @@
+     {
+         if ( !INVOKEARG(i).GetName().empty() )
+         {
+-            argNames[(namedArgCount-j)] = wxConvertStringToOle(INVOKEARG(i).GetName());
++            argNames[(namedArgCount-j)] = INVOKEARG(i).GetName();
+             j ++;
+         }
+     }
+ 
+     // + 1 for the member name, + 1 again in case we're a 'put'
+-    DISPID* dispIds = new DISPID[namedArgCount + 2];
++    wxVector<DISPID> dispIds(namedArgCount + 2);
+ 
+     HRESULT hr;
+     DISPPARAMS dispparams;
+@@ -140,13 +155,11 @@
+ 
+     // Get the IDs for the member and its arguments.  GetIDsOfNames expects the
+     // member name as the first name, followed by argument names (if any).
+-    hr = ((IDispatch*)m_dispatchPtr)->GetIDsOfNames(IID_NULL, argNames,
+-                                1 + namedArgCount, LOCALE_SYSTEM_DEFAULT, dispIds);
++    hr = ((IDispatch*)m_dispatchPtr)->GetIDsOfNames(IID_NULL, (BSTR*)argNames.begin(),
++                                1 + namedArgCount, LOCALE_SYSTEM_DEFAULT, dispIds.begin());
+     if (FAILED(hr))
+     {
+         ShowException(member, hr);
+-        delete[] argNames;
+-        delete[] dispIds;
+         return false;
+     }
+ 
+@@ -160,21 +173,21 @@
+     }
+ 
+     // Convert the wxVariants to VARIANTARGs
+-    VARIANTARG* oleArgs = new VARIANTARG[noArgs];
++    wxVector<wxOleVariantArg> oleArgs(noArgs);
++    int failedConversions = 0;
+     for (i = 0; i < noArgs; i++)
+     {
+         // Again, reverse args
+         if (!wxConvertVariantToOle(INVOKEARG((noArgs-1) - i), oleArgs[i]))
+-        {
+-            delete[] argNames;
+-            delete[] dispIds;
+-            delete[] oleArgs;
+-            return false;
+-        }
++            failedConversions++;
+     }
++    // TODO: explain that because of consistent behaviour regarding relasing IDispatches
++    // passed in args all args have to cleared and thus converted
++    if (failedConversions > 0)
++        return false;
+ 
+-    dispparams.rgdispidNamedArgs = dispIds + 1;
+-    dispparams.rgvarg = oleArgs;
++    dispparams.rgdispidNamedArgs = dispIds.begin() + 1;
++    dispparams.rgvarg = oleArgs.begin();
+     dispparams.cArgs = noArgs;
+     dispparams.cNamedArgs = namedArgCount;
+ 
+@@ -184,17 +197,6 @@
+     hr = ((IDispatch*)m_dispatchPtr)->Invoke(dispIds[0], IID_NULL, LOCALE_SYSTEM_DEFAULT,
+                         (WORD)action, &dispparams, vReturnPtr, &excep, &uiArgErr);
+ 
+-    for (i = 0; i < namedArgStringCount; i++)
+-    {
+-        SysFreeString(argNames[i]);
+-    }
+-    delete[] argNames;
+-    delete[] dispIds;
+-
+-    for (i = 0; i < noArgs; i++)
+-        VariantClear(& oleArgs[i]) ;
+-    delete[] oleArgs;
+-
+     if (FAILED(hr))
+     {
+         // display the exception information if appropriate:
+@@ -205,8 +207,6 @@
+         SysFreeString(excep.bstrDescription);
+         SysFreeString(excep.bstrHelpFile);
+ 
+-        if (vReturnPtr)
+-            VariantClear(vReturnPtr);
+         return false;
+     }
+     else
+@@ -214,13 +214,13 @@
+         if (vReturnPtr)
+         {
+             // Convert result to wxVariant form
+-            wxConvertOleToVariant(vReturn, retValue);
++            if (!wxConvertOleToVariant(vReturn, retValue))
++                return false;
+             // Mustn't release the dispatch pointer
+             if (vReturn.vt == VT_DISPATCH)
+             {
+                 vReturn.pdispVal = NULL;
+             }
+-            VariantClear(& vReturn);
+         }
+     }
+     return true;

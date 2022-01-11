@@ -1,0 +1,289 @@
+Index: include/wx/msw/menu.h
+===================================================================
+--- include/wx/msw/menu.h	(wersja 62703)
++++ include/wx/msw/menu.h	(kopia robocza)
+@@ -91,6 +91,25 @@
+     wxAcceleratorTable *CreateAccelTable() const;
+ #endif // wxUSE_ACCEL
+ 
++#if wxUSE_OWNER_DRAWN
++
++    int GetMaxAccelWidth()
++    {
++        if (m_maxAccelWidth == -1)
++            CalculateMaxAccelWidth();
++        return m_maxAccelWidth;
++    }
++
++    void ResetMaxAccelWidth()
++    {
++        m_maxAccelWidth = -1;
++    }
++
++private:
++    void CalculateMaxAccelWidth();
++
++#endif // wxUSE_OWNER_DRAWN
++
+ protected:
+     virtual wxMenuItem* DoAppend(wxMenuItem *item);
+     virtual wxMenuItem* DoInsert(size_t pos, wxMenuItem *item);
+@@ -126,6 +145,9 @@
+ 
+     // the max width of menu items bitmaps
+     int m_maxBitmapWidth;
++
++    // the max width of menu items accels
++    int m_maxAccelWidth;
+ #endif // wxUSE_OWNER_DRAWN
+ 
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxMenu)
+Index: include/wx/msw/menuitem.h
+===================================================================
+--- include/wx/msw/menuitem.h	(wersja 62703)
++++ include/wx/msw/menuitem.h	(kopia robocza)
+@@ -107,6 +107,7 @@
+     const wxBitmap& GetDisabledBitmap() const
+         { return m_bmpDisabled; }
+ 
++    int MeasureAccelWidth() const;
+ 
+     // override wxOwnerDrawn base class virtuals
+     virtual wxString GetName() const;
+Index: src/msw/menu.cpp
+===================================================================
+--- src/msw/menu.cpp	(wersja 62703)
++++ src/msw/menu.cpp	(kopia robocza)
+@@ -271,6 +271,7 @@
+ #if wxUSE_OWNER_DRAWN
+     m_ownerDrawn = false;
+     m_maxBitmapWidth = 0;
++    m_maxAccelWidth = -1;
+ #endif // wxUSE_OWNER_DRAWN
+ 
+     // create the menu
+@@ -389,6 +390,8 @@
+         {
+             GetMenuBar()->RebuildAccelTable();
+         }
++
++        ResetMaxAccelWidth();
+     }
+     //else: it is a separator, they can't have accels, nothing to do
+ }
+@@ -658,6 +661,8 @@
+ 
+                 // set menu as ownerdrawn
+                 m_ownerDrawn = true;
++
++                ResetMaxAccelWidth();
+             }
+             // only update our margin for equals alignment to other item
+             else if ( !updateAllMargins )
+@@ -802,6 +807,8 @@
+         delete m_accels[n];
+ 
+         m_accels.RemoveAt(n);
++
++        ResetMaxAccelWidth();
+     }
+     //else: this item doesn't have an accel, nothing to do
+ #endif // wxUSE_ACCEL
+@@ -853,6 +860,34 @@
+ #endif // wxUSE_ACCEL
+ 
+ // ---------------------------------------------------------------------------
++// ownerdrawn helpers
++// ---------------------------------------------------------------------------
++
++#if wxUSE_OWNER_DRAWN
++
++void wxMenu::CalculateMaxAccelWidth()
++{
++    wxASSERT_MSG( m_maxAccelWidth == -1, wxT("it's really needed?") );
++
++    wxMenuItemList::compatibility_iterator node = GetMenuItems().GetFirst();
++    while (node)
++    {
++        wxMenuItem* item = node->GetData();
++
++        if ( item->IsOwnerDrawn() )
++        {
++            int width = item->MeasureAccelWidth();
++            if (width > m_maxAccelWidth )
++                m_maxAccelWidth = width;
++        }
++
++        node = node->GetNext();
++    }
++}
++
++#endif // wxUSE_OWNER_DRAWN
++
++// ---------------------------------------------------------------------------
+ // set wxMenu title
+ // ---------------------------------------------------------------------------
+ 
+Index: src/msw/menuitem.cpp
+===================================================================
+--- src/msw/menuitem.cpp	(wersja 62703)
++++ src/msw/menuitem.cpp	(kopia robocza)
+@@ -211,16 +211,26 @@
+     Margins CheckMargin;        // popup check margins
+     Margins CheckBgMargin;      // popup check background margins
+ 
++    Margins ArrowMargin;        // popup submenu arrow margins
++
+     Margins SeparatorMargin;    // popup separator margins
+ 
+     SIZE CheckSize;             // popup check size metric
++    SIZE ArrowSize;             // popup submenu arrow size metric
+     SIZE SeparatorSize;         // popup separator size metric
+ 
+-    int AccelBorder;            // popup border space between
+-                                // item text and accelerator
+     int TextBorder;             // popup border space between
+                                 // item text and gutter
+ 
++    int AccelBorder;            // popup border space between
++                                // item text and accelerator
++
++    int ArrowBorder;            // popup border space between
++                                // item accelerator and submenu arrow
++
++    int Offset;                 // system added space at the end of the menu,
++                                // add this offset for remove the extra space
++
+     wxFont Font;                // default menu font
+ 
+     bool AlwaysShowCues;        // must keyboard cues always be shown?
+@@ -309,6 +319,10 @@
+                                TMT_CONTENTMARGINS, NULL,
+                                reinterpret_cast<MARGINS*>(&CheckBgMargin));
+ 
++        theme->GetThemeMargins(hTheme, NULL, MENU_POPUPSUBMENU, 0,
++                               TMT_CONTENTMARGINS, NULL,
++                               reinterpret_cast<MARGINS*>(&ArrowMargin));
++
+         theme->GetThemeMargins(hTheme, NULL, MENU_POPUPSEPARATOR, 0,
+                                TMT_SIZINGMARGINS, NULL,
+                                reinterpret_cast<MARGINS*>(&SeparatorMargin));
+@@ -316,12 +330,19 @@
+         theme->GetThemePartSize(hTheme, NULL, MENU_POPUPCHECK, 0,
+                                 NULL, TS_TRUE, &CheckSize);
+ 
++        theme->GetThemePartSize(hTheme, NULL, MENU_POPUPSUBMENU, 0,
++                                NULL, TS_TRUE, &ArrowSize);
++
+         theme->GetThemePartSize(hTheme, NULL, MENU_POPUPSEPARATOR, 0,
+                                 NULL, TS_TRUE, &SeparatorSize);
+ 
+-        theme->GetThemeInt(hTheme, MENU_POPUPBORDERS, 0, TMT_BORDERSIZE, &AccelBorder);
+         theme->GetThemeInt(hTheme, MENU_POPUPBACKGROUND, 0, TMT_BORDERSIZE, &TextBorder);
+ 
++        AccelBorder = 34;
++        ArrowBorder = 0;
++
++        Offset = -14;
++
+         wxNativeFontInfo fontInfo;
+         theme->GetThemeSysFont(hTheme, TMT_MENUFONT, &fontInfo.lf);
+         Font = wxFont(fontInfo);
+@@ -352,6 +373,10 @@
+         CheckSize.cx = ::GetSystemMetrics(SM_CXMENUCHECK);
+         CheckSize.cy = ::GetSystemMetrics(SM_CYMENUCHECK);
+ 
++        ArrowMargin = Margins();
++
++        ArrowSize = CheckSize;
++
+         // separator height with margins
+         int sepFullSize = metrics.iMenuHeight / 2;
+ 
+@@ -365,7 +390,10 @@
+ 
+         TextBorder = 0;
+         AccelBorder = 8;
++        ArrowBorder = 6;
+ 
++        Offset = -12;
++
+         Font = wxFont(wxNativeFontInfo(metrics.lfMenuFont));
+ 
+         Theme = false;
+@@ -683,6 +711,21 @@
+ 
+ #if wxUSE_OWNER_DRAWN
+ 
++int wxMenuItem::MeasureAccelWidth() const
++{
++    wxString accel = GetItemLabel().AfterFirst(wxT('\t'));
++
++    wxMemoryDC dc;
++    wxFont font;
++    GetFontToUse(font);
++    dc.SetFont(font);
++
++    wxCoord w;
++    dc.GetTextExtent(accel, &w, NULL);
++
++    return w;
++}
++
+ wxString wxMenuItem::GetName() const
+ {
+     return GetItemLabelText();
+@@ -706,11 +749,8 @@
+             return true;
+         }
+ 
+-        wxString str = GetItemLabel();
++        wxString str = GetName();
+ 
+-        // text and accel separator char removal
+-        str.Replace(wxT('\t'), wxEmptyString);
+-
+         wxMemoryDC dc;
+         wxFont font;
+         GetFontToUse(font);
+@@ -719,12 +759,15 @@
+         wxCoord w, h;
+         dc.GetTextExtent(str, &w, &h);
+ 
+-        *width = w + data->TextBorder + data->AccelBorder;
++        *width = data->TextBorder + w + data->AccelBorder;
+         *height = h;
+ 
+-        // system added space at the end of the menu for the submenu expansion
+-        // arrow, but we must add a 4-pixel separator for better apperance
+-        *width += 4;
++        w = m_parentMenu->GetMaxAccelWidth();
++        if ( w > 0 )
++            *width += w + data->ArrowBorder;
++
++        *width += data->Offset;
++        *width += data->ArrowMargin.left + data->ArrowSize.cx + data->ArrowMargin.right;
+     }
+     else // don't draw the text, just the bitmap (if any)
+     {
+@@ -941,10 +984,17 @@
+                  (stat & wxODDisabled) && !(stat & wxODSelected) )
+                 flags |= DSS_DISABLED;
+ 
+-            // right align accel string with right edge of menu
+-            // (offset by the margin width)
++            int x = rcText.right - data->ArrowMargin.left
++                                 - data->ArrowSize.cx
++                                 - data->ArrowMargin.right
++                                 - data->ArrowBorder;
+ 
+-            int x = rcText.right - 16 - accelSize.cx;
++            // right align accel on FullTheme menu, left otherwise
++            if ( data->MenuLayout() == MenuDrawData::FullTheme)
++                x -= accelSize.cx;
++            else
++                x -= m_parentMenu->GetMaxAccelWidth();
++
+             int y = rcText.top + (rcText.bottom - rcText.top - accelSize.cy) / 2;
+ 
+             ::DrawState(hdc, NULL, NULL, (LPARAM)accel.wx_str(),

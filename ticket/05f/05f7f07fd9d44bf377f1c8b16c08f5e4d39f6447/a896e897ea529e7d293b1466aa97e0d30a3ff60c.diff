@@ -1,0 +1,178 @@
+commit b8691609d530ecdc9bdbd6ccac53541027e33f48
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Sun Oct 2 13:00:24 2011 +0200
+
+    Implement wxStackWalker for wxMSW under x86-64.
+    
+    Use 64 bit debug help functions instead of 32 bit ones and add code for
+    dealing with x86-64 stack frames.
+
+diff --git a/docs/changes.txt b/docs/changes.txt
+index 207808e..8ddff30 100644
+--- a/docs/changes.txt
++++ b/docs/changes.txt
+@@ -491,6 +491,7 @@ MSW:
+ - Added wxTopLevelWindow::MSWGetSystemMenu().
+ - Multiline text controls no longer select all content when gaining focus from
+   the keyboard.
++- Implement wxStackWalker for x86-64 (Artur Bać).
+ 
+ 
+ 2.9.2: (released 2011-07-05)
+diff --git a/include/wx/msw/chkconf.h b/include/wx/msw/chkconf.h
+index 90518a7..03672e9 100644
+--- a/include/wx/msw/chkconf.h
++++ b/include/wx/msw/chkconf.h
+@@ -224,11 +224,6 @@
+  */
+ #ifdef __WIN64__
+ #   if wxUSE_STACKWALKER
+-        /* this is not currently supported under Win64, volunteers needed to
+-           make it work */
+-#       undef wxUSE_STACKWALKER
+-#       define wxUSE_STACKWALKER 0
+-
+ #       undef wxUSE_CRASHREPORT
+ #       define wxUSE_CRASHREPORT 0
+ #   endif
+diff --git a/include/wx/msw/debughlp.h b/include/wx/msw/debughlp.h
+index 7277681..cdfaae6 100644
+--- a/include/wx/msw/debughlp.h
++++ b/include/wx/msw/debughlp.h
+@@ -146,9 +146,9 @@ class wxDbgHelpDLL
+                                        PGET_MODULE_BASE_ROUTINE,
+                                        PTRANSLATE_ADDRESS_ROUTINE);
+     typedef BOOL (WINAPI *SymFromAddr_t)(HANDLE, DWORD64, PDWORD64, PSYMBOL_INFO);
+-    typedef LPVOID (WINAPI *SymFunctionTableAccess_t)(HANDLE, DWORD);
+-    typedef DWORD (WINAPI *SymGetModuleBase_t)(HANDLE, DWORD);
+-    typedef BOOL (WINAPI *SymGetLineFromAddr_t)(HANDLE, DWORD,
++    typedef LPVOID (WINAPI *SymFunctionTableAccess_t)(HANDLE, DWORD_PTR);
++    typedef DWORD_PTR (WINAPI *SymGetModuleBase_t)(HANDLE, DWORD_PTR);
++    typedef BOOL (WINAPI *SymGetLineFromAddr_t)(HANDLE, DWORD_PTR,
+                                                 PDWORD, PIMAGEHLP_LINE);
+     typedef BOOL (WINAPI *SymSetContext_t)(HANDLE, PIMAGEHLP_STACK_FRAME,
+                                            PIMAGEHLP_CONTEXT);
+@@ -164,23 +164,44 @@ class wxDbgHelpDLL
+                                                CONST PMINIDUMP_USER_STREAM_INFORMATION,
+                                                CONST PMINIDUMP_CALLBACK_INFORMATION);
+ 
++    // The macro called by wxDO_FOR_ALL_SYM_FUNCS() below takes 2 arguments:
++    // the name of the function in the program code, which never has "64"
++    // suffix, and the name of the function in the DLL which can have "64"
++    // suffix in some cases. These 2 helper macros call the macro with the
++    // correct arguments in both cases.
++    #define wxSYM_CALL(what, name)  what(name, name)
++#if defined(_M_AMD64)
++    #define wxSYM_CALL_64(what, name)  what(name, name ## 64)
++
++    // Also undo all the "helpful" definitions done by imagehlp.h that map 32
++    // bit functions to 64 bit ones, we don't need this as we do it ourselves.
++    #undef StackWalk
++    #undef SymFunctionTableAccess
++    #undef SymGetModuleBase
++    #undef SymGetLineFromAddr
++    #undef EnumerateLoadedModules
++#else
++    #define wxSYM_CALL_64(what, name)  what(name, name)
++#endif
++
+     #define wxDO_FOR_ALL_SYM_FUNCS(what)                                      \
+-        what(SymGetOptions);                                                  \
+-        what(SymSetOptions);                                                  \
+-        what(SymInitialize);                                                  \
+-        what(StackWalk);                                                      \
+-        what(SymFromAddr);                                                    \
+-        what(SymFunctionTableAccess);                                         \
+-        what(SymGetModuleBase);                                               \
+-        what(SymGetLineFromAddr);                                             \
+-        what(SymSetContext);                                                  \
+-        what(SymEnumSymbols);                                                 \
+-        what(SymGetTypeInfo);                                                 \
+-        what(SymCleanup);                                                     \
+-        what(EnumerateLoadedModules);                                         \
+-        what(MiniDumpWriteDump)
+-
+-    #define wxDECLARE_SYM_FUNCTION(func) static func ## _t func
++        wxSYM_CALL_64(what, StackWalk);                                       \
++        wxSYM_CALL_64(what, SymFunctionTableAccess);                          \
++        wxSYM_CALL_64(what, SymGetModuleBase);                                \
++        wxSYM_CALL_64(what, SymGetLineFromAddr);                              \
++        wxSYM_CALL_64(what, EnumerateLoadedModules);                          \
++                                                                              \
++        wxSYM_CALL(what, SymGetOptions);                                      \
++        wxSYM_CALL(what, SymSetOptions);                                      \
++        wxSYM_CALL(what, SymInitialize);                                      \
++        wxSYM_CALL(what, SymFromAddr);                                        \
++        wxSYM_CALL(what, SymSetContext);                                      \
++        wxSYM_CALL(what, SymEnumSymbols);                                     \
++        wxSYM_CALL(what, SymGetTypeInfo);                                     \
++        wxSYM_CALL(what, SymCleanup);                                         \
++        wxSYM_CALL(what, MiniDumpWriteDump)
++
++    #define wxDECLARE_SYM_FUNCTION(func, name) static func ## _t func
+ 
+     wxDO_FOR_ALL_SYM_FUNCS(wxDECLARE_SYM_FUNCTION);
+ 
+diff --git a/src/msw/debughlp.cpp b/src/msw/debughlp.cpp
+index eb0445d..9643ae9 100644
+--- a/src/msw/debughlp.cpp
++++ b/src/msw/debughlp.cpp
+@@ -50,7 +50,8 @@
+ // static members
+ // ----------------------------------------------------------------------------
+ 
+-#define DEFINE_SYM_FUNCTION(func) wxDbgHelpDLL::func ## _t wxDbgHelpDLL::func = 0
++#define DEFINE_SYM_FUNCTION(func, name) \
++    wxDbgHelpDLL::func ## _t wxDbgHelpDLL::func = 0
+ 
+ wxDO_FOR_ALL_SYM_FUNCS(DEFINE_SYM_FUNCTION);
+ 
+@@ -64,12 +65,12 @@
+ 
+ static bool BindDbgHelpFunctions(const wxDynamicLibrary& dllDbgHelp)
+ {
+-    #define LOAD_SYM_FUNCTION(name)                                           \
+-        wxDbgHelpDLL::name = (wxDbgHelpDLL::name ## _t)                       \
+-                                dllDbgHelp.GetSymbol(wxT(#name));              \
+-        if ( !wxDbgHelpDLL::name )                                            \
++    #define LOAD_SYM_FUNCTION(func, name)                                     \
++        wxDbgHelpDLL::func = (wxDbgHelpDLL::func ## _t)                       \
++            dllDbgHelp.GetSymbol(wxT(#name));                                 \
++        if ( !wxDbgHelpDLL::func )                                            \
+         {                                                                     \
+-            gs_errMsg += wxT("Function ") wxT(#name) wxT("() not found.\n");     \
++            gs_errMsg += wxT("Function ") wxT(#name) wxT("() not found.\n");  \
+             return false;                                                     \
+         }
+ 
+diff --git a/src/msw/stackwalk.cpp b/src/msw/stackwalk.cpp
+index 0002154..9ff630a 100644
+--- a/src/msw/stackwalk.cpp
++++ b/src/msw/stackwalk.cpp
+@@ -2,7 +2,7 @@
+ // Name:        src/msw/stackwalk.cpp
+ // Purpose:     wxStackWalker implementation for Win32
+ // Author:      Vadim Zeitlin
+-// Modified by:
++// Modified by: Artur Bac 2010-10-01 AMD64 Port
+ // Created:     2005-01-08
+ // RCS-ID:      $Id$
+ // Copyright:   (c) 2003-2005 Vadim Zeitlin <vadim@wxwindows.org>
+@@ -253,7 +253,16 @@ void wxStackWalker::WalkFrom(const CONTEXT *pCtx, size_t skip, size_t maxDepth)
+     STACKFRAME sf;
+     wxZeroMemory(sf);
+ 
+-#ifdef _M_IX86
++#if defined(_M_AMD64)
++    sf.AddrPC.Offset       = ctx.Rip;
++    sf.AddrPC.Mode         = AddrModeFlat;
++    sf.AddrStack.Offset    = ctx.Rsp;
++    sf.AddrStack.Mode      = AddrModeFlat;
++    sf.AddrFrame.Offset    = ctx.Rbp;
++    sf.AddrFrame.Mode      = AddrModeFlat;
++
++    dwMachineType = IMAGE_FILE_MACHINE_AMD64;
++#elif  defined(_M_IX86)
+     sf.AddrPC.Offset       = ctx.Eip;
+     sf.AddrPC.Mode         = AddrModeFlat;
+     sf.AddrStack.Offset    = ctx.Esp;

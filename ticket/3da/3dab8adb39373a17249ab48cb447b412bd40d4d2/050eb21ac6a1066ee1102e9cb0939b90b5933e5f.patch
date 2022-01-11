@@ -1,0 +1,512 @@
+diff --git a/include/wx/msw/missing.h b/include/wx/msw/missing.h
+index 7f381bb898..660c134423 100644
+--- a/include/wx/msw/missing.h
++++ b/include/wx/msw/missing.h
+@@ -30,6 +30,10 @@
+     #define WM_DPICHANGED       0x02E0
+ #endif
+ 
++#ifndef WM_GETDPISCALEDSIZE
++    #define WM_GETDPISCALEDSIZE 0x2E4
++#endif
++
+ #ifndef DT_HIDEPREFIX
+     #define DT_HIDEPREFIX 0x00100000
+ #endif
+diff --git a/include/wx/msw/private.h b/include/wx/msw/private.h
+index 9dc7357958..885ed5bf98 100644
+--- a/include/wx/msw/private.h
++++ b/include/wx/msw/private.h
+@@ -308,6 +308,10 @@ extern bool wxSystemParametersInfo(UINT uiAction, UINT uiParam,
+                                    PVOID pvParam, UINT fWinIni,
+                                    const wxWindow* win);
+ 
++extern bool wxAdjustWindowRectExForDpi(LPRECT lpRect, DWORD dwStyle,
++                                       BOOL bMenu, DWORD dwExStyle,
++                                       UINT dpi);
++
+ #if wxUSE_OWNER_DRAWN
+ 
+ // Draw the bitmap in specified state (this is used by owner drawn controls)
+diff --git a/include/wx/msw/toplevel.h b/include/wx/msw/toplevel.h
+index d32764bb1f..b35b259594 100644
+--- a/include/wx/msw/toplevel.h
++++ b/include/wx/msw/toplevel.h
+@@ -166,6 +166,12 @@ protected:
+                                           int& x, int& y,
+                                           int& w, int& h) const wxOVERRIDE;
+ 
++    // Helper for PrepareForDPIChange
++    wxSize GetMinClientSize() const;
++
++    // WM_GETDPISCALEDSIZE handler
++    bool PrepareForDPIChange(const wxSize& newDPI, wxSize& newSize);
++
+     // WM_DPICHANGED handler.
+     bool HandleDPIChange(const wxSize& newDPI, const wxRect& newRect);
+ 
+diff --git a/include/wx/msw/window.h b/include/wx/msw/window.h
+index 47203237f1..915ac7669a 100644
+--- a/include/wx/msw/window.h
++++ b/include/wx/msw/window.h
+@@ -591,12 +591,19 @@ public:
+     // window to avoid focusing an unset radio button when regaining focus.
+     virtual void WXSetPendingFocus(wxWindow* WXUNUSED(win)) {}
+ 
++    // Called from WM_GETDPISCALEDSIZE handler for all windows to let them
++    // re-calculate the size of the window when the DPI is going to change.
++    void MSWPrepareForDPIChange(const wxSize& oldDPI, const wxSize& newDPI);
++
+     // Called from WM_DPICHANGED handler for all windows to let them update
+     // any sizes and fonts used internally when the DPI changes and generate
+     // wxDPIChangedEvent to let the user code do the same thing as well.
+     void MSWUpdateOnDPIChange(const wxSize& oldDPI, const wxSize& newDPI);
+ 
+ protected:
++    void SetDPIOverride(const wxSize& newDPI);
++    void ClearDPIOverride();
++
+     // Called from MSWUpdateOnDPIChange() specifically to update the control
+     // font, as this may need to be done differently for some specific native
+     // controls. The default version updates m_font of this window.
+@@ -795,6 +802,12 @@ protected:
+ #endif // wxUSE_DEFERRED_SIZING
+ 
+ private:
++    // When preparing for a DPI change we want to use the new DPI to calculate
++    // sizes. Set the m_overrideDPI to force GetDPI() to return the value
++    // stored in m_overrideDPIValue;
++    bool    m_overrideDPI;
++    wxSize  m_overrideDPIValue;
++
+     wxDECLARE_DYNAMIC_CLASS(wxWindowMSW);
+     wxDECLARE_NO_COPY_CLASS(wxWindowMSW);
+     wxDECLARE_EVENT_TABLE();
+diff --git a/src/msw/toplevel.cpp b/src/msw/toplevel.cpp
+index 2ede920e8b..59b08a221b 100644
+--- a/src/msw/toplevel.cpp
++++ b/src/msw/toplevel.cpp
+@@ -35,6 +35,8 @@
+     #include "wx/menu.h"
+     #include "wx/containr.h"        // wxSetFocusToChild()
+     #include "wx/module.h"
++    #include "wx/sizer.h"   // Added for GetMinClientSize()
++    #include "wx/layout.h"  // Added for GetMinClientSize()
+ #endif //WX_PRECOMP
+ 
+ #include "wx/dynlib.h"
+@@ -249,6 +251,196 @@ WXHWND wxTopLevelWindowMSW::MSWGetParent() const
+     return (WXHWND)hwndParent;
+ }
+ 
++// Helper function for PrepareForDPIChange which
++// wants to know the minimum client size for a window.
++// Taken pretty much directly from wxWindowBase::DoGetBestSize()
++// skipping adding the border size at the end
++// We can't use GetBestSize as GetClientSize() doesn't appear to
++// be returning the correct values during the window DPI update
++wxSize wxTopLevelWindowMSW::GetMinClientSize() const
++{
++   wxSize min;
++
++    if ( m_windowSizer )
++    {
++        min = m_windowSizer->GetMinSize();
++    }
++#if wxUSE_CONSTRAINTS
++    else if ( m_constraints )
++    {
++        wxConstCast(this, wxTopLevelWindowMSW)->SatisfyConstraints();
++
++        // our minimal acceptable size is such that all our windows fit inside
++        int maxX = 0,
++            maxY = 0;
++
++        for ( wxWindowList::compatibility_iterator node = GetChildren().GetFirst();
++              node;
++              node = node->GetNext() )
++        {
++            wxLayoutConstraints *c = node->GetData()->GetConstraints();
++            if ( !c )
++            {
++                // it's not normal that we have an unconstrained child, but
++                // what can we do about it?
++                continue;
++            }
++
++            int x = c->right.GetValue(),
++                y = c->bottom.GetValue();
++
++            if ( x > maxX )
++                maxX = x;
++
++            if ( y > maxY )
++                maxY = y;
++
++            // TODO: we must calculate the overlaps somehow, otherwise we
++            //       will never return a size bigger than the current one :-(
++        }
++
++        min = wxSize(maxX, maxY);
++    }
++#endif // wxUSE_CONSTRAINTS
++    else if ( !GetChildren().empty() )
++    {
++        // our minimal acceptable size is such that all our visible child
++        // windows fit inside
++        int maxX = 0,
++            maxY = 0;
++
++        for ( wxWindowList::compatibility_iterator node = GetChildren().GetFirst();
++              node;
++              node = node->GetNext() )
++        {
++            wxWindow *win = node->GetData();
++            if ( win->IsTopLevel()
++                    || !win->IsShown()
++#if wxUSE_STATUSBAR
++                        || wxDynamicCast(win, wxStatusBar)
++#endif // wxUSE_STATUSBAR
++               )
++            {
++                // dialogs and frames lie in different top level windows -
++                // don't deal with them here; as for the status bars, they
++                // don't lie in the client area at all
++                continue;
++            }
++
++            int wx, wy, ww, wh;
++            win->GetPosition(&wx, &wy);
++
++            // if the window hadn't been positioned yet, assume that it is in
++            // the origin
++            if ( wx == wxDefaultCoord )
++                wx = 0;
++            if ( wy == wxDefaultCoord )
++                wy = 0;
++
++            win->GetSize(&ww, &wh);
++            if ( wx + ww > maxX )
++                maxX = wx + ww;
++            if ( wy + wh > maxY )
++                maxY = wy + wh;
++        }
++
++        min = wxSize(maxX, maxY);
++    }
++    else // ! has children
++    {
++        wxSize size = GetMinSize();
++        if ( !size.IsFullySpecified() )
++        {
++            // if the window doesn't define its best size we assume that it can
++            // be arbitrarily small -- usually this is not the case, of course,
++            // but we have no way to know what the limit is, it should really
++            // override DoGetBestClientSize() itself to tell us
++            size.SetDefaults(wxSize(1, 1));
++        }
++
++        // return as-is, unadjusted by the client size difference.
++        return size;
++    }
++
++    return min;
++}
++
++// At input windowSize should be the content size of the window to display, on output it
++// will be set to the size required for a window to display the content at the specified DPI.
++static bool MSWAdjustWindowRectForDPI(HWND hwnd, const wxSize& newDPI, wxSize& windowSize)
++{
++    if(!hwnd)
++    {
++        return false;
++    }
++
++    DWORD dwExStyle = ::GetWindowLong(hwnd, GWL_EXSTYLE);
++    DWORD dwStyle = ::GetWindowLong(hwnd, GWL_STYLE);
++    BOOL hasMenu = (GetMenu(hwnd) == NULL) ? FALSE : TRUE;
++
++    RECT adjustedRect;
++    wxCopyRectToRECT(windowSize, adjustedRect);
++    if( wxAdjustWindowRectExForDpi(&adjustedRect, dwStyle, hasMenu, dwExStyle, newDPI.GetWidth()) )
++    {
++        windowSize.Set(adjustedRect.right - adjustedRect.left, adjustedRect.bottom - adjustedRect.top);
++        return true;
++    }
++    return false;
++}
++
++// Called when a WM_GETDPISCALEDSIZE message is received
++// Adjusts the Window components for the new resolution and sets
++// the size if newSize to the size of the window at the new resolution.
++//
++// Note: We can't just scale the Window borders as it appears that Windows
++// doesn't scale it's border values.
++// For example GetSystemMetricsForDpi returns the following values.
++//                96dpi       144dpi         192dpi
++// SM_CYFRAME       4           5               5
++// SM_CYDLGFRAME    3           3               3
++// SM_CYCAPTION     23          34              45
++//
++bool wxTopLevelWindowMSW::PrepareForDPIChange(const wxSize& newDPI, wxSize& newSize)
++{
++   if ( !m_perMonitorDPIaware )
++    {
++        return false;
++    }
++
++    if( newDPI == m_activeDPI)
++    {
++        return false;
++    }
++
++    // Currently we only support sizer based Windows
++    if ( !GetSizer() )
++    {
++        return false;
++    }
++
++    // Determine how much the window has been expanded by the user
++    // resizing the window in relation to the minimum client size.
++    wxSize minClientSize = GetMinClientSize();
++    float expansionFactorX = (float)GetClientSize().GetWidth() / minClientSize.GetWidth();
++    float expansionFactorY = (float)GetClientSize().GetHeight() / minClientSize.GetHeight();
++
++    InvalidateBestSize();
++
++    // Change the DPI and calclate the new window size
++    SetDPIOverride(newDPI);
++    MSWPrepareForDPIChange(m_activeDPI, newDPI);
++    newSize = GetMinClientSize();
++    ClearDPIOverride();
++
++    // Restore any expansion to the window
++    newSize.Scale(expansionFactorX, expansionFactorY);
++
++    // Adjust for for window borders as calculated for the new DPI
++    MSWAdjustWindowRectForDPI(GetHwnd(), newDPI, newSize);
++
++    return true;
++}
++
+ bool wxTopLevelWindowMSW::HandleDPIChange(const wxSize& newDPI, const wxRect& newRect)
+ {
+     if ( !m_perMonitorDPIaware )
+@@ -263,7 +455,6 @@ bool wxTopLevelWindowMSW::HandleDPIChange(const wxSize& newDPI, const wxRect& ne
+     }
+ 
+     SetSize(newRect);
+-
+     Refresh();
+ 
+     return true;
+@@ -330,6 +521,21 @@ WXLRESULT wxTopLevelWindowMSW::MSWWindowProc(WXUINT message, WXWPARAM wParam, WX
+             }
+             break;
+ 
++        case WM_GETDPISCALEDSIZE:
++            {
++                SIZE* winSize = reinterpret_cast<SIZE*>(lParam);
++                wxSize newSize(winSize->cx, winSize->cy);
++                processed = PrepareForDPIChange(wxSize(wParam, wParam), newSize);
++                if(processed)
++                {
++                    winSize->cx = newSize.GetWidth();
++                    winSize->cy = newSize.GetHeight();
++                    rc = TRUE;
++                }
++                // Otherwise use default linear scaling
++            }
++            break;
++
+         case WM_DPICHANGED:
+             {
+                 const RECT* const prcNewWindow =
+diff --git a/src/msw/window.cpp b/src/msw/window.cpp
+index f207a8afd7..388a115b2f 100644
+--- a/src/msw/window.cpp
++++ b/src/msw/window.cpp
+@@ -464,6 +464,8 @@ void wxWindowMSW::Init()
+     m_xThumbSize = 0;
+     m_yThumbSize = 0;
+ 
++    m_overrideDPI = false;
++
+ #if wxUSE_DEFERRED_SIZING
+     m_hDWP = 0;
+     m_pendingPosition = wxDefaultPosition;
+@@ -4802,8 +4804,40 @@ bool wxSystemParametersInfo(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWi
+     return ::SystemParametersInfo(uiAction, uiParam, pvParam, fWinIni) == TRUE;
+ }
+ 
++/*extern*/
++bool wxAdjustWindowRectExForDpi(LPRECT lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle, UINT dpi)
++{
++#if wxUSE_DYNLIB_CLASS
++    typedef BOOL (WINAPI * AdjustWindowRectExForDpi_t)(LPRECT lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle, UINT dpi);
++    static AdjustWindowRectExForDpi_t s_pfnAdjustWindowRectExForDpi = NULL;
++    static bool s_initDone = false;
++
++    if( !s_initDone )
++    {
++        wxLoadedDLL dllUser32("user32.dll");
++        wxDL_INIT_FUNC(s_pfn, AdjustWindowRectExForDpi, dllUser32);
++        s_initDone = true;
++    }
++
++    if( s_pfnAdjustWindowRectExForDpi )
++    {
++        if ( s_pfnAdjustWindowRectExForDpi(lpRect, dwStyle, bMenu, dwExStyle, dpi ) == TRUE )
++        {
++            return true;
++        }
++    }
++#else
++    wxUnusedVar(dpi);
++#endif
++    return AdjustWindowRectEx(lpRect, dwStyle, bMenu, dwExStyle);
++}
+ wxSize wxWindowMSW::GetDPI() const
+ {
++    if(m_overrideDPI)
++    {
++        return m_overrideDPIValue;
++    }
++
+     HWND hwnd = GetHwnd();
+ 
+     if ( hwnd == NULL )
+@@ -4827,6 +4861,18 @@ wxSize wxWindowMSW::GetDPI() const
+     return dpi;
+ }
+ 
++void wxWindowMSW::SetDPIOverride(const wxSize& newDPI)
++{
++    m_overrideDPIValue = newDPI;
++    m_overrideDPI = true;
++}
++
++void wxWindowMSW::ClearDPIOverride()
++{
++    m_overrideDPI = false;
++    m_overrideDPIValue.Set(0, 0);
++}
++
+ void wxWindowMSW::MSWUpdateFontOnDPIChange(const wxSize& newDPI)
+ {
+     if ( m_font.IsOk() )
+@@ -4849,9 +4895,54 @@ static void ScaleCoordIfSet(int& coord, float scaleFactor)
+     }
+ }
+ 
++// Called from MSWUpdateonDPIChange() to recursively update the window
++// sizer and any child sizers and spacers.
++static void UpdateSizerForDPIChange(wxSizer* sizer, float scaleFactor)
++{
++    if ( !sizer )
++    {
++        return;
++    }
++
++    for ( wxSizerItemList::compatibility_iterator
++          node = sizer->GetChildren().GetFirst();
++          node;
++          node = node->GetNext() )
++    {
++        wxSizerItem* sizerItem = node->GetData();
++
++        int border = sizerItem->GetBorder();
++        ScaleCoordIfSet(border, scaleFactor);
++        sizerItem->SetBorder(border);
++
++        // Only scale sizers and spacers not windows,
++        // they will be handled in MSWUpdateOnDPIChange
++        if ( sizerItem->IsSizer() || sizerItem->IsSpacer() )
++        {
++            wxSize min = sizerItem->GetMinSize();
++            ScaleCoordIfSet(min.x, scaleFactor);
++            ScaleCoordIfSet(min.y, scaleFactor);
++            sizerItem->SetMinSize(min);
++
++            wxSize size = sizerItem->GetSize();
++            ScaleCoordIfSet(size.x, scaleFactor);
++            ScaleCoordIfSet(size.y, scaleFactor);
++            sizerItem->SetDimension(wxDefaultPosition, size);
++
++            // Update any child sizers if this is a sizer
++            if ( sizerItem->IsSizer() )
++            {
++                UpdateSizerForDPIChange(sizerItem->GetSizer(), scaleFactor);
++            }
++        }
++    }
++}
++
+ void
+-wxWindowMSW::MSWUpdateOnDPIChange(const wxSize& oldDPI, const wxSize& newDPI)
++wxWindowMSW::MSWPrepareForDPIChange(const wxSize& oldDPI, const wxSize& newDPI)
+ {
++    SetDPIOverride(newDPI);
++
+     // update min and max size if necessary
+     const float scaleFactor = (float)newDPI.y / oldDPI.y;
+ 
+@@ -4868,31 +4959,7 @@ wxWindowMSW::MSWUpdateOnDPIChange(const wxSize& oldDPI, const wxSize& newDPI)
+     // update sizers
+     if ( GetSizer() )
+     {
+-        for ( wxSizerItemList::compatibility_iterator
+-              node = GetSizer()->GetChildren().GetFirst();
+-              node;
+-              node = node->GetNext() )
+-        {
+-            wxSizerItem* sizerItem = node->GetData();
+-
+-            int border = sizerItem->GetBorder();
+-            ScaleCoordIfSet(border, scaleFactor);
+-            sizerItem->SetBorder(border);
+-
+-            // only scale sizers and spacers, not windows
+-            if ( sizerItem->IsSizer() || sizerItem->IsSpacer() )
+-            {
+-                wxSize min = sizerItem->GetMinSize();
+-                ScaleCoordIfSet(min.x, scaleFactor);
+-                ScaleCoordIfSet(min.y, scaleFactor);
+-                sizerItem->SetMinSize(min);
+-
+-                wxSize size = sizerItem->GetSize();
+-                ScaleCoordIfSet(size.x, scaleFactor);
+-                ScaleCoordIfSet(size.y, scaleFactor);
+-                sizerItem->SetDimension(wxDefaultPosition, size);
+-            }
+-        }
++        UpdateSizerForDPIChange(GetSizer(), scaleFactor);
+     }
+ 
+     // update children
+@@ -4906,10 +4973,17 @@ wxWindowMSW::MSWUpdateOnDPIChange(const wxSize& oldDPI, const wxSize& newDPI)
+         // dpi-changed event.
+         if ( childWin && !childWin->IsTopLevel() )
+         {
+-            childWin->MSWUpdateOnDPIChange(oldDPI, newDPI);
++            childWin->MSWPrepareForDPIChange(oldDPI, newDPI);
+         }
+     }
+ 
++    Fit();
++    ClearDPIOverride();
++}
++
++void
++wxWindowMSW::MSWUpdateOnDPIChange(const wxSize& oldDPI, const wxSize& newDPI)
++{
+     wxDPIChangedEvent event(oldDPI, newDPI);
+     event.SetEventObject(this);
+     HandleWindowEvent(event);
+diff --git a/src/png b/src/png
+index 8cb5f8f158..5668fc8fd6 160000
+--- a/src/png
++++ b/src/png
+@@ -1 +1 @@
+-Subproject commit 8cb5f8f1587b95a0e86fa8c2becea0cef8ee0a8b
++Subproject commit 5668fc8fd6cceb79cfd8dd3cdec24a4f998cfcea

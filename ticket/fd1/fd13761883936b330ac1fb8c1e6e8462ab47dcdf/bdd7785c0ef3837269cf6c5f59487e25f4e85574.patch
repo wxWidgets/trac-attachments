@@ -1,0 +1,875 @@
+Index: include/wx/msw/ole/dropsrc.h
+===================================================================
+--- include/wx/msw/ole/dropsrc.h	(revision 72557)
++++ include/wx/msw/ole/dropsrc.h	(working copy)
+@@ -65,6 +65,12 @@
+     // too slow). Just return false if you want default feedback.
+     virtual bool GiveFeedback(wxDragResult effect);
+ 
++    // create a drag image based on the given image.
++    void CreateDragImageFromBitmap(const wxBitmap&, const wxPoint& hotSpot, const wxColour* colourKey = NULL);
++
++    // create a drag image based on image provided by the given window.
++    void CreateDragImageFromWindow(wxWindow*);
++
+ protected:
+     void Init();
+ 
+Index: include/wx/msw/ole/droptgt.h
+===================================================================
+--- include/wx/msw/ole/droptgt.h	(revision 72557)
++++ include/wx/msw/ole/droptgt.h	(working copy)
+@@ -19,6 +19,7 @@
+ // ----------------------------------------------------------------------------
+ 
+ class  wxIDropTarget;
++struct IDropTargetHelper;
+ struct IDataObject;
+ 
+ // ----------------------------------------------------------------------------
+@@ -60,12 +61,26 @@
+     // GetData() when it's called from inside OnData()
+     void MSWSetDataSource(IDataObject *pIDataSource);
+ 
++    // drag image support
++    // default these functions takes care of all things necessary to support native drag images.
++    // Init/End DragImageSupport are called during Register/Revoke to init/end the drag image supporting objects.
++    // UpdateDragImageOnXXX functions are called on the correspondend drop target events.
++    // they are always called regardless if the data format is accepted or not.
++    // all functions are made virtual to have the ability to override the default functionality.
++    virtual void EndDragImageSupport();
++    virtual void InitDragImageSupport();
++    virtual void UpdateDragImageOnData(wxCoord x, wxCoord y, wxDragResult);
++    virtual void UpdateDragImageOnDragOver(wxCoord x, wxCoord y, wxDragResult);
++    virtual void UpdateDragImageOnEnter(wxCoord x, wxCoord y, wxDragResult);
++    virtual void UpdateDragImageOnLeave();
++
+ private:
+     // helper used by IsAcceptedData() and GetData()
+     wxDataFormat MSWGetSupportedFormat(IDataObject *pIDataSource) const;
+ 
+-    wxIDropTarget *m_pIDropTarget; // the pointer to our COM interface
+-    IDataObject   *m_pIDataSource; // the pointer to the source data object
++    wxIDropTarget     *m_pIDropTarget; // the pointer to our COM interface
++    IDataObject       *m_pIDataSource; // the pointer to the source data object
++    IDropTargetHelper *m_dropTargetHelper; // the pointer to the drop target helper
+ 
+     wxDECLARE_NO_COPY_CLASS(wxDropTarget);
+ };
+Index: interface/wx/dnd.h
+===================================================================
+--- interface/wx/dnd.h	(revision 72557)
++++ interface/wx/dnd.h	(working copy)
+@@ -45,6 +45,10 @@
+     portion of it. The normal sequence of calls is OnEnter(), OnDragOver()
+     possibly many times, OnDrop() and finally OnData().
+ 
++    There are also handler functions to support drag images. Default these 
++    functions takes care of all things necessary to support native drag images.
++    All functions are made virtual to have the ability to override the default functionality.
++
+     @library{wxcore}
+     @category{dnd}
+ 
+@@ -133,6 +137,69 @@
+     virtual void OnLeave();
+ 
+     /**
++        Initializes the objects needed for drag image support. Called when the drop target is initializing.
++
++        @since 2.9.5
++    */
++    virtual void InitDragImageSupport();
++
++    /**
++        Ends the drag image support. Called when the drop target ends its duty.
++
++        @since 2.9.5
++    */
++    virtual void EndDragImageSupport();
++
++    /**
++        Called when OnData is called regardless if the data format is accepted or not.
++
++        @param x
++            The x coordinate of the mouse.
++        @param y
++            The y coordinate of the mouse.
++        @param dragResult
++            Drag result indicating which operation will be applied.
++
++        @since 2.9.5
++    */
++    virtual void UpdateDragImageOnData(wxCoord x, wxCoord y, wxDragResult dragResult);
++     
++    /**
++        Called when OnDragOver is called regardless if the data format is accepted or not.
++
++        @param x
++            The x coordinate of the mouse.
++        @param y
++            The y coordinate of the mouse.
++        @param dragResult
++            Drag result indicating which operation can be applied.
++
++        @since 2.9.5
++    */
++    virtual void UpdateDragImageOnDragOver(wxCoord x, wxCoord y, wxDragResult);
++
++    /**
++        Called when OnEnter is called regardless if the data format is accepted or not.
++
++        @param x
++            The x coordinate of the mouse.
++        @param y
++            The y coordinate of the mouse.
++        @param dragResult
++            Drag result indicating which operation can be applied.
++
++        @since 2.9.5
++    */
++    virtual void UpdateDragImageOnEnter(wxCoord x, wxCoord y, wxDragResult);
++
++    /**
++        Called when OnLeave is called.
++
++        @since 2.9.5
++    */
++    virtual void UpdateDragImageOnLeave();
++
++    /**
+         Sets the data wxDataObject associated with the drop target and deletes
+         any previously associated data object.
+     */
+@@ -333,6 +400,31 @@
+         not delete any previously associated data.
+     */
+     void SetData(wxDataObject& data);
++
++    /**
++        Create a drag image based on the given bitmap.
++
++        @param bitmap
++            The bitmap which will be used for the drag image.
++        @param hotSpot
++            The centre of the image.
++        @param colourKey
++            All pixels in the bitmap whose color matches this colour will be treated as transparent.
++            If colourKey is NULL (default) the background color is used.
++
++        @since 2.9.5
++    */
++    void CreateDragImageFromBitmap(const wxBitmap& bitmap, const wxPoint& hotSpot, const wxColour* colourKey = NULL);
++
++    /**
++        Create a drag image based on the image provided by the given window.
++
++        @param win
++            Window which will provide the drag image.
++
++        @since 2.9.5
++    */
++    void CreateDragImageFromWindow(wxWindow* win);
+ };
+ 
+ 
+Index: samples/dnd/dnd.cpp
+===================================================================
+--- samples/dnd/dnd.cpp	(revision 72557)
++++ samples/dnd/dnd.cpp	(working copy)
+@@ -26,6 +26,7 @@
+ #include "wx/colordlg.h"
+ #include "wx/metafile.h"
+ #include "wx/dirctrl.h"
++#include "wx/graphics.h"
+ 
+ #ifndef wxHAS_IMAGES_IN_RESOURCES
+     #include "../sample.xpm"
+@@ -1225,7 +1226,7 @@
+ #if wxUSE_DRAG_AND_DROP
+     if ( !m_strText.empty() )
+     {
+-        // start drag operation
++        // create data object
+         wxTextDataObject textData(m_strText);
+         wxDropSource source(textData, this,
+                             wxDROP_ICON(dnd_copy),
+@@ -1238,6 +1239,20 @@
+         else if ( m_moveAllow )
+             flags |= wxDrag_AllowMove;
+ 
++        // create drag image
++        wxBitmap bitmap(200, 30);
++        wxMemoryDC dc;
++        dc.SelectObject(bitmap);
++        dc.Clear();
++        wxGraphicsContext* gc = wxGraphicsContext::Create(dc);
++        gc->SetFont(*wxNORMAL_FONT, *wxBLACK);
++        gc->DrawText(m_strText, 0, 0);
++        delete gc;
++        dc.SelectObject(wxNullBitmap);
++
++        source.CreateDragImageFromBitmap(bitmap, wxPoint(bitmap.GetSize().x/2, bitmap.GetSize().y/2));
++        
++        // start drag operation
+         LogDragResult(source.DoDragDrop(flags));
+     }
+ #endif // wxUSE_DRAG_AND_DROP
+@@ -1779,10 +1794,25 @@
+         return;
+     }
+ 
+-    // start drag operation
++    // create data object
+     DnDShapeDataObject shapeData(m_shape);
+     wxDropSource source(shapeData, this);
+ 
++    // create drag image
++    wxPoint pos = m_shape->GetPosition();
++    wxSize size = m_shape->GetSize();
++    int x = pos.x + size.x,
++        y = pos.y + size.y;
++    wxBitmap bitmap(x, y);
++    wxMemoryDC dc;
++    dc.SelectObject(bitmap);
++    dc.Clear();
++    m_shape->Draw(dc);
++    dc.SelectObject(wxNullBitmap);
++
++    source.CreateDragImageFromBitmap(bitmap, wxPoint(pos.x + size.x/2, pos.y + size.y/2));
++
++    // start drag operation
+     const wxChar *pc = NULL;
+     switch ( source.DoDragDrop(true) )
+     {
+Index: src/msw/ole/dataobj.cpp
+===================================================================
+--- src/msw/ole/dataobj.cpp	(revision 72557)
++++ src/msw/ole/dataobj.cpp	(working copy)
+@@ -82,6 +82,75 @@
+     return format;
+ }
+ 
++// helper function for CopyStgMedium 
++HGLOBAL GlobalClone(HGLOBAL hglobIn)
++{
++    HGLOBAL hglobOut = NULL;
++
++    LPVOID pvIn = GlobalLock(hglobIn);
++    if (pvIn) 
++    {
++        SIZE_T cb = GlobalSize(hglobIn);
++        hglobOut = GlobalAlloc(GMEM_FIXED, cb);
++        if (hglobOut) 
++        {
++            CopyMemory(hglobOut, pvIn, cb);
++        }
++        GlobalUnlock(hglobIn);
++    }
++
++    return hglobOut;
++}
++
++// copies the given STGMEDIUM structure.
++// this is an local implementation of the function with the same name in urlmon.lib
++// but to use that function would require linking with urlmon.lib and all people should update 
++// their projects when upgrading to 2.9. to avoid that we have this alternative.
++HRESULT WINAPI CopyStgMedium(const STGMEDIUM *pmediumIn, STGMEDIUM *pmediumOut)
++{
++    HRESULT hres = S_OK;
++    STGMEDIUM stgmOut = *pmediumIn;
++
++    if (pmediumIn->pUnkForRelease == NULL &&
++        !(pmediumIn->tymed & (TYMED_ISTREAM | TYMED_ISTORAGE))) 
++    {
++        /* Object needs to be cloned */
++        if (pmediumIn->tymed == TYMED_HGLOBAL) 
++        {
++            stgmOut.hGlobal = GlobalClone(pmediumIn->hGlobal);
++            if (!stgmOut.hGlobal) 
++            {
++                hres = E_OUTOFMEMORY;
++            }
++        } 
++        else 
++        {
++            hres = DV_E_TYMED; /* Don't know how to clone GDI objects */
++        }
++    }
++
++    if (SUCCEEDED(hres)) 
++    {
++        switch (stgmOut.tymed) 
++        {
++            case TYMED_ISTREAM:
++                stgmOut.pstm->AddRef();
++                break;
++            case TYMED_ISTORAGE:
++                stgmOut.pstg->AddRef();
++                break;
++        }
++        if (stgmOut.pUnkForRelease)
++        {
++            stgmOut.pUnkForRelease->AddRef();
++        }
++
++        *pmediumOut = stgmOut;
++    }
++
++    return hres;
++}
++
+ // ----------------------------------------------------------------------------
+ // wxIEnumFORMATETC interface implementation
+ // ----------------------------------------------------------------------------
+@@ -142,8 +211,124 @@
+     bool m_mustDelete;
+ 
+     wxDECLARE_NO_COPY_CLASS(wxIDataObject);
++
++    // The following code is need to be able to store system data the operating system 
++    // is using for it own purposes, eg. drag images.
++    
++    // class and typedef to store system data
++    class SystemDataEntry 
++    {
++    public:
++        // c/dtors
++        SystemDataEntry(FORMATETC *pformatetc, STGMEDIUM *pmedium): pformatetc(pformatetc), pmedium(pmedium) {}
++        ~SystemDataEntry() 
++        {
++            delete pformatetc;
++            delete pmedium;
++        }
++
++        // pointers to formatetc/medium
++        FORMATETC *pformatetc;
++        STGMEDIUM *pmedium;
++    };
++    typedef wxVector<SystemDataEntry*> SystemData;
++
++    // get system data specified by the given format
++    bool GetSystemData(const wxDataFormat&, STGMEDIUM*) const;
++
++    // determines if the data object contains system data specified by the given format.
++    bool HasSystemData(const wxDataFormat&) const;
++
++    // save system data
++    HRESULT SaveSystemData(FORMATETC*, STGMEDIUM*, BOOL fRelease);
++
++    // container for system data
++    SystemData m_systemData;
+ };
+ 
++// get system data specified by the given format
++bool
++wxIDataObject::GetSystemData(const wxDataFormat& format, 
++                                STGMEDIUM *pmedium) const
++{
++    // search format
++    for ( SystemData::const_iterator it = m_systemData.begin(); it != m_systemData.end(); ++it )
++    {
++        FORMATETC* formatEtc = (*it)->pformatetc;
++        if ( formatEtc->cfFormat == format )
++        {
++            // format found. copy and return.
++            CopyStgMedium((*it)->pmedium, pmedium);
++            return true;
++        }
++    }
++    return false;
++}
++
++// determines if the data object contains system data specified by the given format.
++bool
++wxIDataObject::HasSystemData(const wxDataFormat& format) const
++{
++    // search format
++    for ( SystemData::const_iterator it = m_systemData.begin(); it != m_systemData.end(); ++it )
++    {
++        FORMATETC* formatEtc = (*it)->pformatetc;
++        if ( formatEtc->cfFormat == format )
++        {
++            // format found
++            return true;
++        }
++    }
++    return false;
++}
++
++// save system data
++HRESULT
++wxIDataObject::SaveSystemData(FORMATETC *pformatetc,
++                                 STGMEDIUM *pmedium,
++                                 BOOL fRelease)
++{
++    // valid args?
++    if ( pformatetc == NULL || pmedium == NULL ) return E_INVALIDARG;
++
++    // remove entry if already available
++    for ( SystemData::iterator it = m_systemData.begin(); it != m_systemData.end(); ++it )
++    {
++        if ( pformatetc->tymed & (*it)->pformatetc->tymed &&
++             pformatetc->dwAspect == (*it)->pformatetc->dwAspect &&
++             pformatetc->cfFormat == (*it)->pformatetc->cfFormat )
++        {
++            delete (*it);
++            m_systemData.erase(it);
++            break;
++        }
++    }
++
++    // create new format/medium
++    FORMATETC* pnewformatEtc = new FORMATETC;
++    STGMEDIUM* pnewmedium = new STGMEDIUM;
++    if ( pnewformatEtc == NULL || pnewmedium == NULL ) return E_OUTOFMEMORY;
++
++    // clear memory
++    ZeroMemory(pnewformatEtc, sizeof(FORMATETC));
++    ZeroMemory(pnewmedium, sizeof(STGMEDIUM));
++
++    // copy format
++    *pnewformatEtc = *pformatetc;
++
++    // copy or take ownerschip of medium
++    if ( fRelease )
++        *pnewmedium = *pmedium;
++    else
++        CopyStgMedium(pmedium, pnewmedium);
++
++    // save entry
++    m_systemData.push_back(new SystemDataEntry(pnewformatEtc, pnewmedium));
++
++    //
++    return S_OK;
++}
++
+ // ============================================================================
+ // implementation
+ // ============================================================================
+@@ -289,6 +474,12 @@
+ 
+ wxIDataObject::~wxIDataObject()
+ {
++    // delete system data
++    for ( SystemData::iterator it = m_systemData.begin(); it != m_systemData.end(); ++it )
++    {
++        delete (*it);
++    }
++
+     if ( m_mustDelete )
+     {
+         delete m_pDataObject;
+@@ -310,6 +501,15 @@
+     wxDataFormat format = (wxDataFormat::NativeFormat)pformatetcIn->cfFormat;
+     format = HtmlFormatFixup(format);
+ 
++    // is this system data?
++    if ( GetSystemData(format, pmedium) )
++    {
++        // this is system data. 
++        // pmedium is already filled with corresponding data, so we're ready.
++        return S_OK;
++    }
++
++    //
+     switch ( format )
+     {
+         case wxDF_BITMAP:
+@@ -445,6 +645,18 @@
+             m_pDataObject->SetData(wxDF_ENHMETAFILE, 0, &pmedium->hEnhMetaFile);
+             break;
+ 
++        case TYMED_ISTREAM:
++        {
++            // check if this format is supported
++            wxDataFormat format = pformatetc->cfFormat;
++            if ( !m_pDataObject->IsSupported(format, wxDataObject::Set) )
++            {
++                // this is not a supported format (content data).
++                // assume it is system data and save it.  
++                return SaveSystemData(pformatetc, pmedium, fRelease);
++            }
++        }
++
+         case TYMED_MFPICT:
+             // fall through - we pass METAFILEPICT through HGLOBAL
+         case TYMED_HGLOBAL:
+@@ -453,15 +665,11 @@
+ 
+                 format = HtmlFormatFixup(format);
+ 
+-                // this is quite weird, but for file drag and drop, explorer
+-                // calls our SetData() with the formats we do *not* support!
+-                //
+-                // as we can't fix this bug in explorer (it's a bug because it
+-                // should only use formats returned by EnumFormatEtc), do the
+-                // check here
+-                if ( !m_pDataObject->IsSupported(format, wxDataObject::Set) ) {
+-                    // go away!
+-                    return DV_E_FORMATETC;
++               // check if this format is supported
++               if ( !m_pDataObject->IsSupported(format, wxDataObject::Set) ) {
++                    // this is not a supported format (content data).
++                   // assume it is system data and save it.  
++                    return SaveSystemData(pformatetc, pmedium, fRelease);
+                 }
+ 
+                 // copy data
+@@ -595,6 +803,13 @@
+         wxLogTrace(wxTRACE_OleCalls, wxT("wxIDataObject::QueryGetData: %s ok"),
+                    wxGetFormatName(format));
+     }
++    else if (HasSystemData(format))
++    {
++        wxLogTrace(wxTRACE_OleCalls, wxT("wxIDataObject::QueryGetData: %s ok (system data)"),
++                   wxGetFormatName(format));
++        // this is system data. no further checks needed.
++        return S_OK;
++    }
+     else {
+         wxLogTrace(wxTRACE_OleCalls,
+                    wxT("wxIDataObject::QueryGetData: %s unsupported"),
+@@ -640,19 +855,29 @@
+     wxDataObject::Direction dir = dwDir == DATADIR_GET ? wxDataObject::Get
+                                                        : wxDataObject::Set;
+ 
+-    ULONG nFormatCount = wx_truncate_cast(ULONG, m_pDataObject->GetFormatCount(dir));
+-    wxDataFormat format;
+-    wxDataFormat *formats;
+-    formats = nFormatCount == 1 ? &format : new wxDataFormat[nFormatCount];
++    // format count is total of user specified and system formats.
++    ULONG nFormatCount = wx_truncate_cast(ULONG, m_pDataObject->GetFormatCount(dir)) + m_systemData.size();
++
++    // fill format array with formats ...
++    wxDataFormat *formats = new wxDataFormat[nFormatCount];
++
++    // ... from content data (supported formats)
+     m_pDataObject->GetAllFormats(formats, dir);
+ 
++    // ... from system data
++    int start = nFormatCount - m_systemData.size();
++    for (size_t j=0;j<m_systemData.size();j++)
++    {
++        SystemDataEntry* entry = m_systemData[j];
++        wxDataFormat& format = formats[start + j];
++        format = entry->pformatetc->cfFormat;
++    }
++
+     wxIEnumFORMATETC *pEnum = new wxIEnumFORMATETC(formats, nFormatCount);
+     pEnum->AddRef();
+     *ppenumFormatEtc = pEnum;
+ 
+-    if ( formats != &format ) {
+-        delete [] formats;
+-    }
++    delete [] formats;
+ 
+     return S_OK;
+ }
+Index: src/msw/ole/dropsrc.cpp
+===================================================================
+--- src/msw/ole/dropsrc.cpp	(revision 72557)
++++ src/msw/ole/dropsrc.cpp	(working copy)
+@@ -41,6 +41,7 @@
+ #endif
+ 
+ #include <oleauto.h>
++#include <shlobj.h>
+ 
+ #include "wx/msw/ole/oleutils.h"
+ 
+@@ -245,4 +246,65 @@
+     }
+ }
+ 
++// Name    : wxDropSource::CreateDragImageFromWindow
++// Purpose : create drag image based on image provided by the window
++// Returns : void
++// Params  : [in] wxWindow* win - window providing the image
++void wxDropSource::CreateDragImageFromWindow(wxWindow* win)
++{
++    // valid window?
++    if ( win == NULL ) return;
++
++    // create helper
++    IDragSourceHelper* helper = NULL;
++    if ( SUCCEEDED(CoCreateInstance(CLSID_DragDropHelper, NULL, CLSCTX_INPROC_SERVER,
++                    IID_IDragSourceHelper,(void**)&helper)) ) 
++    {
++        // create drag image based on image provided by the window
++        POINT pt = {0,0};
++        helper->InitializeFromWindow(win->GetHWND(), &pt, GetDataObject()->GetInterface());
++    }
++}   
++
++// Name    : wxDropSource::CreateDragImageFromBitmap
++// Purpose : create drag image from bitmap
++// Returns : void
++// Params  : [in] const wxBitmap& bmp - bitmap of which a drag image will be created
++//           [in] const wxPoint& hotSpot - position of the cursor
++//           [in] const wxColour* colourKey - al pixels in the bitmap whose color matches 
++//                the color-key will be treated as transparent. 
++//                if colourKey is NULL (default) the background color is used.
++void wxDropSource::CreateDragImageFromBitmap(const wxBitmap& bmp, 
++                                            const wxPoint& hotSpot,
++                                            const wxColour* colourKey)
++{
++    // valid bitmap?
++    if ( !bmp.IsOk() ) return;
++
++    // create helper
++    IDragSourceHelper* helper = NULL;
++    if( SUCCEEDED(CoCreateInstance(CLSID_DragDropHelper, NULL, CLSCTX_INPROC_SERVER,
++                  IID_IDragSourceHelper,(void**)&helper)) ) 
++    {
++        // get bitmap 
++        HBITMAP hBmp = bmp.GetHBITMAP();
++
++        // set color-key
++        COLORREF crColorKey =  colourKey == NULL ? GetSysColor(COLOR_WINDOW) 
++                                : RGB(colourKey->Red(), colourKey->Green(), colourKey->Blue()); 
++
++        // fill shell drag image structure
++        SHDRAGIMAGE di;
++        di.sizeDragImage.cx = bmp.GetWidth();
++        di.sizeDragImage.cy = bmp.GetHeight();
++        di.crColorKey = crColorKey;
++        di.hbmpDragImage = hBmp;
++        di.ptOffset.x = hotSpot.x;
++        di.ptOffset.y = hotSpot.y;
++
++        // create drag image from bitmap
++        helper->InitializeFromBitmap(&di, GetDataObject()->GetInterface());
++    }
++}
++    
+ #endif  // wxUSE_OLE && wxUSE_DRAG_AND_DROP
+Index: src/msw/ole/droptgt.cpp
+===================================================================
+--- src/msw/ole/droptgt.cpp	(revision 72557)
++++ src/msw/ole/droptgt.cpp	(working copy)
+@@ -63,6 +63,7 @@
+     virtual ~wxIDropTarget();
+ 
+     // accessors for wxDropTarget
++    HWND GetHWND() const { return m_hwnd; }
+     void SetHwnd(HWND hwnd) { m_hwnd = hwnd; }
+ 
+     // IDropTarget methods
+@@ -192,13 +193,6 @@
+     }
+ #endif // 0
+ 
+-    if ( !m_pTarget->MSWIsAcceptedData(pIDataSource) ) {
+-        // we don't accept this kind of data
+-        *pdwEffect = DROPEFFECT_NONE;
+-
+-        return S_OK;
+-    }
+-
+     // for use in OnEnter and OnDrag calls
+     m_pTarget->MSWSetDataSource(pIDataSource);
+ 
+@@ -206,22 +200,36 @@
+     m_pIDataObject = pIDataSource;
+     m_pIDataObject->AddRef();
+ 
+-    // we need client coordinates to pass to wxWin functions
+-    if ( !ScreenToClient(m_hwnd, (POINT *)&pt) )
++    if ( !m_pTarget->MSWIsAcceptedData(pIDataSource) ) {
++        // we don't accept this kind of data
++        *pdwEffect = DROPEFFECT_NONE;
++    }
++    else
+     {
+-        wxLogLastError(wxT("ScreenToClient"));
++        // we need client coordinates to pass to wxWin functions
++        if ( !ScreenToClient(m_hwnd, (POINT *)&pt) )
++        {
++            wxLogLastError(wxT("ScreenToClient"));
++        }
++
++        // give some visual feedback
++        *pdwEffect = ConvertDragResultToEffect(
++            m_pTarget->OnEnter(pt.x, pt.y, ConvertDragEffectToResult(
++                GetDropEffect(grfKeyState, m_pTarget->GetDefaultAction(), *pdwEffect))
++                        )
++                     );
+     }
+ 
+-    // give some visual feedback
+-    *pdwEffect = ConvertDragResultToEffect(
+-        m_pTarget->OnEnter(pt.x, pt.y, ConvertDragEffectToResult(
+-            GetDropEffect(grfKeyState, m_pTarget->GetDefaultAction(), *pdwEffect))
+-                    )
+-                 );
++    // update drag image
++    m_pTarget->UpdateDragImageOnEnter(pt.x, pt.y, ConvertDragEffectToResult(*pdwEffect));
++    m_pTarget->UpdateDragImageOnDragOver(pt.x, pt.y, ConvertDragEffectToResult(*pdwEffect));
+ 
++    //
+     return S_OK;
+ }
+ 
++
++
+ // Name    : wxIDropTarget::DragOver
+ // Purpose : Indicates that the mouse was moved inside the window represented
+ //           by this drop target.
+@@ -262,6 +270,10 @@
+         *pdwEffect = DROPEFFECT_NONE;
+     }
+ 
++    // update drag image
++    m_pTarget->UpdateDragImageOnDragOver(pt.x, pt.y, ConvertDragEffectToResult(*pdwEffect));
++
++    //
+     return S_OK;
+ }
+ 
+@@ -279,6 +291,10 @@
+   // release the held object
+   RELEASE_AND_NULL(m_pIDataObject);
+ 
++  // update drag image
++  m_pTarget->UpdateDragImageOnLeave();
++
++  //
+   return S_OK;
+ }
+ 
+@@ -333,6 +349,10 @@
+     // release the held object
+     RELEASE_AND_NULL(m_pIDataObject);
+ 
++    // update drag image
++    m_pTarget->UpdateDragImageOnData(pt.x, pt.y, ConvertDragEffectToResult(*pdwEffect));
++
++    //
+     return S_OK;
+ }
+ 
+@@ -345,7 +365,8 @@
+ // ----------------------------------------------------------------------------
+ 
+ wxDropTarget::wxDropTarget(wxDataObject *dataObj)
+-            : wxDropTargetBase(dataObj)
++            : wxDropTargetBase(dataObj),
++              m_dropTargetHelper(NULL)
+ {
+     // create an IDropTarget implementation which will notify us about d&d
+     // operations.
+@@ -396,6 +417,9 @@
+     // we will need the window handle for coords transformation later
+     m_pIDropTarget->SetHwnd((HWND)hwnd);
+ 
++    // init drag image support
++    InitDragImageSupport();
++
+     return true;
+ #endif
+ }
+@@ -417,6 +441,10 @@
+     ::CoLockObjectExternal(m_pIDropTarget, FALSE, TRUE);
+ #endif
+ 
++    // end drag image support
++    EndDragImageSupport();
++
++    // remove window reference
+     m_pIDropTarget->SetHwnd(0);
+ #endif
+ }
+@@ -437,9 +465,6 @@
+ {
+     wxDataFormat format = MSWGetSupportedFormat(m_pIDataSource);
+     if ( format == wxDF_INVALID ) {
+-        // this is strange because IsAcceptedData() succeeded previously!
+-        wxFAIL_MSG(wxT("strange - did supported formats list change?"));
+-
+         return false;
+     }
+ 
+@@ -540,6 +565,81 @@
+ }
+ 
+ // ----------------------------------------------------------------------------
++// drag image functions
++// ----------------------------------------------------------------------------
++void
++wxDropTarget::EndDragImageSupport()
++{
++    // release drop target helper
++    if ( m_dropTargetHelper != NULL )
++    {
++        m_dropTargetHelper->Release();
++        m_dropTargetHelper = NULL;
++    }
++}
++
++void
++wxDropTarget::InitDragImageSupport()
++{
++    // init drop target helper to show shell drag images
++    CoCreateInstance(CLSID_DragDropHelper, NULL, CLSCTX_INPROC_SERVER,
++                     IID_IDropTargetHelper, (LPVOID*)&m_dropTargetHelper);
++}
++
++void 
++wxDropTarget::UpdateDragImageOnData(wxCoord x, 
++                                        wxCoord y, 
++                                        wxDragResult dragResult)
++{
++    // call corresponding event on drop target helper
++    if ( m_dropTargetHelper != NULL )
++    {
++        POINT pt = {x, y};
++        DWORD dwEffect = ConvertDragResultToEffect(dragResult);
++        m_dropTargetHelper->Drop(m_pIDataSource, &pt, dwEffect);
++    }
++}
++
++void 
++wxDropTarget::UpdateDragImageOnDragOver(wxCoord x, 
++                                        wxCoord y, 
++                                        wxDragResult dragResult)
++{
++    // call corresponding event on drop target helper
++    if ( m_dropTargetHelper != NULL )
++    {
++        POINT pt = {x, y};
++        DWORD dwEffect = ConvertDragResultToEffect(dragResult);
++        m_dropTargetHelper->DragOver(&pt, dwEffect);
++    }
++}
++
++void 
++wxDropTarget::UpdateDragImageOnEnter(wxCoord x, 
++                                        wxCoord y, 
++                                        wxDragResult dragResult)
++{
++    // call corresponding event on drop target helper
++    if ( m_dropTargetHelper != NULL )
++    {
++        POINT pt = {x, y};
++        DWORD dwEffect = ConvertDragResultToEffect(dragResult);
++        m_dropTargetHelper->DragEnter(m_pIDropTarget->GetHWND(), m_pIDataSource, &pt, dwEffect);
++    }
++}
++
++void 
++wxDropTarget::UpdateDragImageOnLeave()
++{
++    // call corresponding event on drop target helper
++    if ( m_dropTargetHelper != NULL )
++    {
++        m_dropTargetHelper->DragLeave();
++    }
++}
++
++
++// ----------------------------------------------------------------------------
+ // private functions
+ // ----------------------------------------------------------------------------
+ 

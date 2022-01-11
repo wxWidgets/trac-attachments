@@ -1,0 +1,355 @@
+Index: include/wx/generic/grid.h
+===================================================================
+--- include/wx/generic/grid.h	(revision 72613)
++++ include/wx/generic/grid.h	(working copy)
+@@ -108,6 +108,7 @@
+ class wxGridColumnOperations;
+ class wxGridDirectionOperations;
+ 
++class wxGridEvent;
+ 
+ // ----------------------------------------------------------------------------
+ // macros
+@@ -918,6 +919,14 @@
+         wxGridSelectRowsOrColumns = wxGridSelectRows | wxGridSelectColumns
+     };
+ 
++    // possible ways to handle the TAB key
++    enum wxGridTabHandlingModes
++    {
++        wxGridTabLocked           = 0,  // TAB will move to to the rightmost column, then it will not do anything
++        wxGridTabLockedWrap       = 1,  // TAB will move to to the rightmost column, then it will move to the first column of the next row
++        wxGridTabUnlocked         = 2   // TAB will move to to the rightmost column, then it will move to the next control
++    };
++
+     // creation and destruction
+     // ------------------------
+ 
+@@ -1171,6 +1180,7 @@
+     bool MoveCursorDownBlock( bool expandSelection );
+     bool MoveCursorLeftBlock( bool expandSelection );
+     bool MoveCursorRightBlock( bool expandSelection );
++    void SetTabMode( wxGridTabHandlingModes tabmode ) { m_tabHandlingMode = tabmode; }
+ 
+ 
+     // ------ label and gridline formatting
+@@ -2074,6 +2084,9 @@
+     bool       m_editable;              // applies to whole grid
+     bool       m_cellEditCtrlEnabled;   // is in-place edit currently shown?
+ 
++    // how to handle TAB keys
++    wxGridTabHandlingModes m_tabHandlingMode;
++
+     void Init();        // common part of all ctors
+     void Create();
+     void CreateColumnWindow();
+@@ -2113,7 +2126,6 @@
+     void OnChar( wxKeyEvent& );
+     void OnEraseBackground( wxEraseEvent& );
+ 
+-
+     bool SetCurrentCell( const wxGridCellCoords& coords );
+     bool SetCurrentCell( int row, int col )
+         { return SetCurrentCell( wxGridCellCoords(row, col) ); }
+@@ -2241,6 +2253,8 @@
+     void DoEndDragResizeCol(const wxMouseEvent& event);
+     void DoEndMoveCol(int pos);
+ 
++    // process a TAB keypress
++    void DoGridProcessTab( wxKeyboardState& event );
+ 
+     // common implementations of methods defined for both rows and columns
+     void DeselectLine(int line, const wxGridOperations& oper);
+@@ -2598,6 +2612,7 @@
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_GRID_CELL_BEGIN_DRAG, wxGridEvent );
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_GRID_COL_MOVE, wxGridEvent );
+ wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_GRID_COL_SORT, wxGridEvent );
++wxDECLARE_EXPORTED_EVENT( WXDLLIMPEXP_ADV, wxEVT_GRID_TABBING, wxGridEvent );
+ 
+ typedef void (wxEvtHandler::*wxGridEventFunction)(wxGridEvent&);
+ typedef void (wxEvtHandler::*wxGridSizeEventFunction)(wxGridSizeEvent&);
+@@ -2648,6 +2663,7 @@
+ #define EVT_GRID_CMD_EDITOR_HIDDEN(id, fn)       wx__DECLARE_GRIDEVT(EDITOR_HIDDEN, id, fn)
+ #define EVT_GRID_CMD_EDITOR_CREATED(id, fn)      wx__DECLARE_GRIDEDITOREVT(EDITOR_CREATED, id, fn)
+ #define EVT_GRID_CMD_CELL_BEGIN_DRAG(id, fn)     wx__DECLARE_GRIDEVT(CELL_BEGIN_DRAG, id, fn)
++#define EVT_GRID_CMD_TABBING(id, fn)             wx__DECLARE_GRIDEVT(TABBING, id, fn)
+ 
+ // same as above but for any id (exists mainly for backwards compatibility but
+ // then it's also true that you rarely have multiple grid in the same window)
+@@ -2671,6 +2687,7 @@
+ #define EVT_GRID_EDITOR_HIDDEN(fn)       EVT_GRID_CMD_EDITOR_HIDDEN(wxID_ANY, fn)
+ #define EVT_GRID_EDITOR_CREATED(fn)      EVT_GRID_CMD_EDITOR_CREATED(wxID_ANY, fn)
+ #define EVT_GRID_CELL_BEGIN_DRAG(fn)     EVT_GRID_CMD_CELL_BEGIN_DRAG(wxID_ANY, fn)
++#define EVT_GRID_TABBING(fn)             EVT_GRID_CMD_TABBING(wxID_ANY, fn)
+ 
+ // we used to have a single wxEVT_GRID_CELL_CHANGE event but it was split into
+ // wxEVT_GRID_CELL_CHANGING and CHANGED ones in wx 2.9.0, however the CHANGED
+Index: interface/wx/grid.h
+===================================================================
+--- interface/wx/grid.h	(revision 72613)
++++ interface/wx/grid.h	(working copy)
+@@ -1796,7 +1796,9 @@
+ 
+     /**
+         Different selection modes supported by the grid.
+-     */
++
++        @since 2.9.1
++    */
+     enum wxGridSelectionModes
+     {
+         /**
+@@ -1827,8 +1829,6 @@
+             wxGridSelectColumns | wxGridSelectRows @endcode this doesn't mean
+             that all the other combinations are valid -- at least currently
+             they are not.
+-
+-            @since 2.9.1
+          */
+         wxGridSelectRowsOrColumns
+     };
+@@ -1895,6 +1895,25 @@
+     };
+ 
+     /**
++        Possible ways to handle the TAB key, used by SetTabMode().
++        
++        The SHIFT-TAB key works in a similar way but it moves backwards.
++
++        @since 2.9.5
++     */
++    enum wxGridTabHandlingModes
++    {
++        /// TAB will move to to the rightmost column, then it will not do anything.
++        wxGridTabLocked           = 0,
++        
++        /// TAB will move to to the rightmost column, then it will move to the first column of the next row.
++        wxGridTabLockedWrap       = 1,
++        
++        /// TAB will move to to the rightmost column, then it will move to the next control.
++        wxGridTabUnlocked         = 2
++    };
++    
++    /**
+         @name Constructors and Initialization
+      */
+     //@{
+@@ -3447,6 +3466,27 @@
+     */
+     void SetGridCursor(const wxGridCellCoords& coords);
+ 
++    /**
++        Set the grid's behaviour when the user presses the TAB key.
++        
++        Pressing the TAB key moves the grid cursor right in the current row, if
++        there is a cell at the right.
++        
++        If there is no cell at the right the grid can behave in different ways
++        according to the value set by this function: see wxGridTabHandlingModes
++        for details.
++        
++        Pressing SHIFT-TAB works in a similar way but it moves the cursor left.
++        
++        The default value is wxGridTabLocked. When the grid is set to this default
++        value it emits a wxEVT_GRID_TABBING event when the TAB key is pressed: this
++        event can be handled to implement a custom behaviour. If the event is handled
++        the grid does not handle it to avoid double processing.
++
++        @since 2.9.5
++    */
++    void SetTabMode( wxGridTabHandlingModes tabmode );
++    
+     //@}
+ 
+ 
+@@ -4440,6 +4480,13 @@
+         and updates the column to indicate the new sort order and refreshes
+         itself.
+         This event macro corresponds to @c wxEVT_GRID_COL_SORT event type.
++    @event{EVT_GRID_TABBING(func)}
++        The user pressed the TAB key. This event can be handled to implement
++        custom behaviours. If the event is handled the grid will not handle
++        the TAB key press. This event is emitted only if the tab handling mode
++        is set to wxGridTabLocked: see wxGrid::SetTabMode().
++        Processes a @c wxEVT_GRID_TABBING event type.
++		@since 2.9.5
+     @endEventTable
+ 
+     @library{wxadv}
+Index: samples/grid/griddemo.cpp
+===================================================================
+--- samples/grid/griddemo.cpp	(revision 72613)
++++ samples/grid/griddemo.cpp	(working copy)
+@@ -1943,6 +1943,19 @@
+         event.Skip();
+     }
+ 
++    void OnGridTabbing(wxGridEvent& event)
++    {
++        // just to test, make the cursor move up and down
++        if ( event.ShiftDown() && m_grid->GetGridCursorRow() > 0 )
++        {
++            m_grid->MoveCursorUp( false );
++        }
++        if ( !event.ShiftDown() && (m_grid->GetGridCursorRow() < m_grid->GetNumberRows() - 1) )
++        {
++            m_grid->MoveCursorDown( false );
++        }
++    }
++
+     void UpdateOrderAndVisibility()
+     {
+         wxString s;
+@@ -2007,6 +2020,8 @@
+     EVT_GRID_COL_SIZE(TabularGridFrame::OnGridColSize)
+ 
+     EVT_IDLE(TabularGridFrame::OnIdle)
++
++    EVT_GRID_TABBING(TabularGridFrame::OnGridTabbing)
+ END_EVENT_TABLE()
+ 
+ TabularGridFrame::TabularGridFrame()
+@@ -2027,6 +2042,9 @@
+     m_grid->UseNativeColHeader();
+     m_grid->HideRowLabels();
+ 
++//    m_grid->SetTabMode( wxGrid::wxGridTabUnlocked );
++//    m_grid->SetTabMode( wxGrid::wxGridTabLockedWrap );
++
+     // add it and the other controls to the frame
+     wxSizer * const sizerTop = new wxBoxSizer(wxVERTICAL);
+     sizerTop->Add(m_grid, wxSizerFlags(1).Expand().Border());
+Index: src/generic/grid.cpp
+===================================================================
+--- src/generic/grid.cpp	(revision 72613)
++++ src/generic/grid.cpp	(working copy)
+@@ -155,6 +155,7 @@
+ wxDEFINE_EVENT( wxEVT_GRID_EDITOR_SHOWN, wxGridEvent );
+ wxDEFINE_EVENT( wxEVT_GRID_EDITOR_HIDDEN, wxGridEvent );
+ wxDEFINE_EVENT( wxEVT_GRID_EDITOR_CREATED, wxGridEditorCreatedEvent );
++wxDEFINE_EVENT( wxEVT_GRID_TABBING, wxGridEvent );
+ 
+ // ----------------------------------------------------------------------------
+ // private helpers
+@@ -2514,6 +2515,8 @@
+     // now anyhow, so just set the parameters directly
+     m_xScrollPixelsPerLine = GRID_SCROLL_LINE_X;
+     m_yScrollPixelsPerLine = GRID_SCROLL_LINE_Y;
++
++    m_tabHandlingMode = wxGridTabLocked;
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -4933,30 +4936,17 @@
+                 break;
+ 
+             case WXK_TAB:
+-                if (event.ShiftDown())
++                if ( m_tabHandlingMode == wxGridTabLocked )
+                 {
+-                    if ( GetGridCursorCol() > 0 )
++                    // send an event to the grid's parents for custom handling
++                    wxGridEvent gridEvt( GetId(), wxEVT_GRID_TABBING, this, GetGridCursorRow(), GetGridCursorCol(), -1, -1, false, event );
++                    if (ProcessWindowEvent(gridEvt) )
+                     {
+-                        MoveCursorLeft( false );
++                        // the event has been handled so no need for more processing
++                        break;
+                     }
+-                    else
+-                    {
+-                        // at left of grid
+-                        DisableCellEditControl();
+-                    }
+                 }
+-                else
+-                {
+-                    if ( GetGridCursorCol() < GetNumberCols() - 1 )
+-                    {
+-                        MoveCursorRight( false );
+-                    }
+-                    else
+-                    {
+-                        // at right of grid
+-                        DisableCellEditControl();
+-                    }
+-                }
++                DoGridProcessTab( event );
+                 break;
+ 
+             case WXK_HOME:
+@@ -5088,6 +5078,74 @@
+ {
+ }
+ 
++void wxGrid::DoGridProcessTab( wxKeyboardState& event )
++{
++    bool atFirstCol = (GetGridCursorCol() == 0);                    // true if we are at the first column of the grid
++    bool atLastCol = (GetGridCursorCol() == GetNumberCols() - 1);   // true if we are at the last column
++
++    // TAB processing only changes when we are at the borders of the grid
++    // let's first handle the common behaviour when we are not at the border
++    if ( (event.ShiftDown() && !atFirstCol) || (!event.ShiftDown() && !atLastCol) )
++    {
++        if ( event.ShiftDown() )
++        {
++            MoveCursorLeft( false );
++        }
++        else
++        {
++            MoveCursorRight( false );
++        }
++        return;
++    }
++
++    // here if the cursor is at the border of the grid: the bahaviour changes with the property setting
++    switch( m_tabHandlingMode )
++    {
++        case wxGridTabLocked:
++            // do nothing: the cursor does not move from the border of the grid
++            DisableCellEditControl();
++            break;
++        case wxGridTabLockedWrap:
++            // we are at the border so we move to another row
++            if ( event.ShiftDown() )
++            {
++                if ( GetGridCursorRow() > 0 )
++                {
++                    SetGridCursor( GetGridCursorRow() - 1, GetNumberCols() - 1 );
++                }
++                else
++                {
++                    DisableCellEditControl();
++                }
++            }
++            else
++            {
++                if ( GetGridCursorRow() < GetNumberRows() - 1 )
++                {
++                    SetGridCursor( GetGridCursorRow() + 1, 0 );
++                }
++                else
++                {
++                    DisableCellEditControl();
++                }
++            }
++            break;
++        case wxGridTabUnlocked:
++            // we are at the border so we move to another control
++            if ( event.ShiftDown() )
++            {
++                Navigate( wxNavigationKeyEvent::IsBackward );
++            }
++            else
++            {
++                Navigate( wxNavigationKeyEvent::IsForward );
++            }
++            break;
++        default:
++            wxFAIL;
++    }
++}
++
+ bool wxGrid::SetCurrentCell( const wxGridCellCoords& coords )
+ {
+     if ( SendEvent(wxEVT_GRID_SELECT_CELL, coords) == -1 )

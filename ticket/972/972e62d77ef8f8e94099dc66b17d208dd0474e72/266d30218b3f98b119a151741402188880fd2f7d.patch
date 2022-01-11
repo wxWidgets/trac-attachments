@@ -1,0 +1,244 @@
+Index: src/generic/graphicc.cpp
+===================================================================
+--- src/generic/graphicc.cpp	(revision 63887)
++++ src/generic/graphicc.cpp	(working copy)
+@@ -235,6 +235,10 @@
+     const double *m_lengths;
+     double *m_userLengths;
+
++    bool m_isHatch;
++    wxPenStyle m_style;
++    cairo_pattern_t* m_penPattern;
++
+     wxPen m_pen;
+
+     wxDECLARE_NO_COPY_CLASS(wxCairoPenData);
+@@ -269,6 +273,9 @@
+     double m_alpha;
+
+     cairo_pattern_t* m_brushPattern;
++
++    bool m_isHatch;
++    wxBrushStyle m_style;
+ };
+
+ class wxCairoFontData : public wxGraphicsObjectRefData
+@@ -408,12 +415,75 @@
+ };
+
+ //-----------------------------------------------------------------------------
++// cairo hatch pattern
++//-----------------------------------------------------------------------------
++
++cairo_pattern_t* CreateCairoHatchPattern(cairo_t* ctext, float red, float green, float blue, float alpha, int style)
++{
++    cairo_pattern_t* pattern;
++    cairo_t * cr;
++    cairo_surface_t *surface;
++
++    surface = cairo_surface_create_similar(cairo_get_target(ctext),CAIRO_CONTENT_COLOR_ALPHA,10,10);
++    cr = cairo_create(surface);
++    cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
++    cairo_set_line_width(cr, 1);
++    cairo_set_line_join(cr,CAIRO_LINE_JOIN_MITER);
++
++    switch (style)
++    {
++        case wxCROSS_HATCH:
++            cairo_move_to(cr, 5, 0);
++            cairo_line_to(cr, 5, 10);
++            cairo_move_to(cr, 0, 5);
++            cairo_line_to(cr, 10, 5);
++            break;
++        case wxBDIAGONAL_HATCH:
++            cairo_move_to(cr, 0, 10);
++            cairo_line_to(cr, 10, 0);
++            break;
++        case wxFDIAGONAL_HATCH:
++            cairo_move_to(cr, 0, 0);
++            cairo_line_to(cr, 10, 10);
++            break;
++        case wxCROSSDIAG_HATCH:
++            cairo_move_to(cr, 0, 0);
++            cairo_line_to(cr, 10, 10);
++            cairo_move_to(cr, 10, 0);
++            cairo_line_to(cr, 0, 10);
++            break;
++        case wxHORIZONTAL_HATCH:
++            cairo_move_to(cr, 0, 5);
++            cairo_line_to(cr, 10, 5);
++            break;
++        case wxVERTICAL_HATCH:
++            cairo_move_to(cr, 5, 0);
++            cairo_line_to(cr, 5, 10);
++            break;
++        default:
++            wxFAIL_MSG(_("Couldn't get hatch style from wxBrush."));
++    }
++
++    cairo_set_source_rgba(cr, red, green, blue, alpha);
++    cairo_stroke (cr);
++
++    cairo_destroy(cr);
++    pattern = cairo_pattern_create_for_surface (surface);
++    cairo_surface_destroy(surface);
++    cairo_pattern_set_extend (pattern, CAIRO_EXTEND_REPEAT);
++
++    return pattern;
++}
++
++//-----------------------------------------------------------------------------
+ // wxCairoPenData implementation
+ //-----------------------------------------------------------------------------
+
+ wxCairoPenData::~wxCairoPenData()
+ {
+     delete[] m_userLengths;
++    if (m_penPattern)
++        cairo_pattern_destroy(m_penPattern);
+ }
+
+ void wxCairoPenData::Init()
+@@ -422,6 +492,9 @@
+     m_userLengths = NULL;
+     m_width = 0;
+     m_count = 0;
++    m_isHatch = false;
++    m_style = wxPENSTYLE_SOLID;
++    m_penPattern = NULL;
+ }
+
+ wxCairoPenData::wxCairoPenData( wxGraphicsRenderer* renderer, const wxPen &pen )
+@@ -438,6 +511,17 @@
+     m_blue = m_pen.GetColour().Blue()/255.0;
+     m_alpha = m_pen.GetColour().Alpha()/255.0;
+
++    m_isHatch = false;
++    m_style = m_pen.GetStyle();
++
++    if (m_style == wxTRANSPARENT)
++    {
++        m_red = 0;
++        m_green = 0;
++        m_blue = 0;
++        m_alpha = 0;
++    }
++
+     switch ( m_pen.GetCap() )
+     {
+     case wxCAP_ROUND :
+@@ -494,7 +578,7 @@
+         9.0 , 6.0 , 3.0 , 3.0
+     };
+
+-    switch ( m_pen.GetStyle() )
++    switch ( m_style )
+     {
+     case wxPENSTYLE_SOLID :
+         break;
+@@ -560,35 +644,7 @@
+         if ( m_pen.GetStyle() >= wxPENSTYLE_FIRST_HATCH
+             && m_pen.GetStyle() <= wxPENSTYLE_LAST_HATCH )
+         {
+-            /*
+-            wxDELETE( m_penBrush );
+-            HatchStyle style = HatchStyleHorizontal;
+-            switch( pen.GetStyle() )
+-            {
+-            case wxPENSTYLE_BDIAGONAL_HATCH :
+-            style = HatchStyleBackwardDiagonal;
+-            break ;
+-            case wxPENSTYLE_CROSSDIAG_HATCH :
+-            style = HatchStyleDiagonalCross;
+-            break ;
+-            case wxPENSTYLE_FDIAGONAL_HATCH :
+-            style = HatchStyleForwardDiagonal;
+-            break ;
+-            case wxPENSTYLE_CROSS_HATCH :
+-            style = HatchStyleCross;
+-            break ;
+-            case wxPENSTYLE_HORIZONTAL_HATCH :
+-            style = HatchStyleHorizontal;
+-            break ;
+-            case wxPENSTYLE_VERTICAL_HATCH :
+-            style = HatchStyleVertical;
+-            break ;
+-
+-            }
+-            m_penBrush = new HatchBrush(style,Color( pen.GetColour().Alpha() , pen.GetColour().Red() ,
+-            pen.GetColour().Green() , pen.GetColour().Blue() ), Color.Transparent );
+-            m_pen->SetBrush( m_penBrush )
+-            */
++            m_isHatch = true;
+         }
+         break;
+     }
+@@ -598,8 +654,23 @@
+ {
+     cairo_t * ctext = (cairo_t*) context->GetNativeContext();
+     cairo_set_line_width(ctext,m_width);
+-    cairo_set_source_rgba(ctext,m_red,m_green, m_blue,m_alpha);
+-    cairo_set_line_cap(ctext,m_cap);
++
++    if (m_isHatch)
++    {
++        if (m_penPattern)
++            cairo_pattern_destroy(m_penPattern);
++
++        m_penPattern = CreateCairoHatchPattern(ctext, m_red, m_green, m_blue, m_alpha, m_style);
++    }
++
++    if ( m_penPattern )
++    {
++        cairo_set_source(ctext,m_penPattern);
++    }
++    else
++        cairo_set_source_rgba(ctext,m_red,m_green, m_blue,m_alpha);
++
++cairo_set_line_cap(ctext,m_cap);
+     cairo_set_line_join(ctext,m_join);
+     cairo_set_dash(ctext,(double*)m_lengths,m_count,0.0);
+ }
+@@ -623,6 +694,17 @@
+     m_green = brush.GetColour().Green()/255.0;
+     m_blue = brush.GetColour().Blue()/255.0;
+     m_alpha = brush.GetColour().Alpha()/255.0;
++
++    m_isHatch = brush.IsHatch();
++    m_style = brush.GetStyle();
++
++    if (m_style == wxTRANSPARENT)
++    {
++        m_red = 0;
++        m_green = 0;
++        m_blue = 0;
++        m_alpha = 0;
++    }
+     /*
+     if ( brush.GetStyle() == wxBRUSHSTYLE_SOLID)
+     {
+@@ -679,6 +761,15 @@
+ void wxCairoBrushData::Apply( wxGraphicsContext* context )
+ {
+     cairo_t * ctext = (cairo_t*) context->GetNativeContext();
++
++    if (m_isHatch)
++    {
++        if (m_brushPattern)
++            cairo_pattern_destroy(m_brushPattern);
++
++        m_brushPattern = CreateCairoHatchPattern(ctext, m_red, m_green, m_blue, m_alpha, m_style);
++    }
++
+     if ( m_brushPattern )
+     {
+         cairo_set_source(ctext,m_brushPattern);
+@@ -738,6 +829,8 @@
+ void wxCairoBrushData::Init()
+ {
+     m_brushPattern = NULL;
++    m_isHatch = false;
++    m_style = wxBRUSHSTYLE_SOLID;
+ }
+
+ //-----------------------------------------------------------------------------

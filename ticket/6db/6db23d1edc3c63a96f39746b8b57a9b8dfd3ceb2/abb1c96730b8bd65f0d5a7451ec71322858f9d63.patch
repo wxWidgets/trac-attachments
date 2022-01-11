@@ -1,0 +1,455 @@
+diff -Nru2 -xCVS -x*~ -x.#* -xMakefile* -xbk-deps -xbuild -x#*# -x*config* wxWindowsCurrent/include/wx/defs.h wxWindows/include/wx/defs.h
+--- wxWindowsCurrent/include/wx/defs.h	Sat Feb 28 09:43:23 2004
++++ wxWindows/include/wx/defs.h	Mon Mar  1 23:47:53 2004
+@@ -1209,4 +1209,5 @@
+ #define wxFRAME_FLOAT_ON_PARENT 0x0008  /*  Always above its parent */
+ #define wxFRAME_SHAPED          0x0010  /*  Create a window that is able to be shaped */
++#define wxFRAME_DRAWER          0x0020  /*  Create a window which is attachable to another top level window */
+ 
+ /*  deprecated versions defined for compatibility reasons */
+Binary files wxWindowsCurrent/include/wx/mac/.DS_Store and wxWindows/include/wx/mac/.DS_Store differ
+diff -Nru2 -xCVS -x*~ -x.#* -xMakefile* -xbk-deps -xbuild -x#*# -x*config* wxWindowsCurrent/include/wx/mac/drawer.h wxWindows/include/wx/mac/drawer.h
+--- wxWindowsCurrent/include/wx/mac/drawer.h	Wed Dec 31 16:00:00 1969
++++ wxWindows/include/wx/mac/drawer.h	Tue Feb 10 13:38:14 2004
+@@ -0,0 +1,65 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        drawer.h
++// Purpose:     Drawer child window class.
++//              Drawer windows appear under their parent window and
++//              behave like a drawer, opening and closing to reveal
++//              content that does not need to be visible at all times.
++// Author:      Jason Bagley
++// Modified by:
++// Created:     2004-30-01
++// RCS-ID:      $Id: $
++// Copyright:   (c) Jason Bagley; Art & Logic, Inc.
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_DRAWERWINDOW_H_
++#define _WX_DRAWERWINDOW_H_
++
++#if defined(__GNUG__) && !defined(NO_GCC_PRAGMA)
++#pragma interface "drawer.h"
++#endif
++
++#include "wx/toplevel.h"
++
++
++class WXDLLEXPORT wxDrawerWindow : public wxTopLevelWindow
++{
++    DECLARE_DYNAMIC_CLASS(wxDrawerWindow)
++    
++public:
++
++    wxDrawerWindow();
++    
++    wxDrawerWindow(wxWindow* parent,
++     wxWindowID id,
++     const wxString& title,
++     wxSize size = wxDefaultSize,
++     wxDirection edge = wxLEFT,
++     const wxString& name = "drawerwindow")
++    {
++        this->Create(parent, id, title, size, edge, name);
++    }
++     
++    ~wxDrawerWindow();
++    
++    // Create a drawer window. 
++    // If parent is NULL, create as a tool window.
++    // If parent is not NULL, then wxTopLevelWindow::Attach this window to parent. 
++    bool Create(wxWindow *parent,
++     wxWindowID id,
++     const wxString& title,
++     wxSize size = wxDefaultSize,
++     wxDirection edge = wxLEFT,
++     const wxString& name = wxFrameNameStr);
++
++    bool Open(bool show = true); // open or close the drawer, possibility for async param, i.e. animate
++    bool Close() { return this->Open(false); }
++    bool IsOpen() const;
++    
++    // Set the edge of the parent where the drawer attaches.
++    bool SetPreferredEdge(wxDirection edge);
++    wxDirection GetPreferredEdge() const;
++    wxDirection GetCurrentEdge() const;	// not necessarily the preferred, due to screen constraints
++};
++
++#endif
+diff -Nru2 -xCVS -x*~ -x.#* -xMakefile* -xbk-deps -xbuild -x#*# -x*config* wxWindowsCurrent/src/mac/drawer.cpp wxWindows/src/mac/drawer.cpp
+--- wxWindowsCurrent/src/mac/drawer.cpp	Wed Dec 31 16:00:00 1969
++++ wxWindows/src/mac/drawer.cpp	Mon Mar  1 21:20:00 2004
+@@ -0,0 +1,204 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        drawer.cpp
++// Purpose:     Drawer child window classes.
++//              Drawer windows appear under their parent window and
++//              behave like a drawer, opening and closing to reveal
++//              content that does not need to be visible at all times.
++// Author:      Jason Bagley
++// Modified by:
++// Created:     2004-30-01
++// RCS-ID:      $Id: $
++// Copyright:   (c) Jason Bagley; Art & Logic, Inc.
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifdef __GNUG__
++#pragma implementation "control.h"
++#endif
++
++#include "wx/defs.h"
++
++#include "wx/mac/drawer.h"
++#include "wx/mac/private.h"
++
++// TODO:
++// ¥ Contents do not draw on drawer opening. They do when a window is deactivated
++//   with the drawer open, and contents stay visible thereafter.
++
++IMPLEMENT_DYNAMIC_CLASS(wxDrawerWindow, wxWindow)
++
++// Use consants for now.
++// These can be made into member variables and set dynamically.
++const int kLeadingOffset = 20;
++const int kTrailingOffset = 20;
++
++
++// Converts Mac window edge constants to wxDirections, wxLEFT, wxRIGHT, etc.
++static wxDirection WindowEdgeToDirection(OptionBits edge);
++
++// Convert wxDirections to MAc window edge constants.
++static OptionBits DirectionToWindowEdge(wxDirection direction);
++
++
++wxDrawerWindow::wxDrawerWindow()
++{
++}
++
++wxDrawerWindow::~wxDrawerWindow()
++{ 
++    m_isBeingDeleted = TRUE;
++    this->Show(FALSE);
++}
++    
++bool wxDrawerWindow::Create(wxWindow *parent,
++ wxWindowID id, const wxString& title,
++ wxSize size, wxDirection edge, const wxString& name)
++{
++    wxASSERT_MSG(NULL != parent, "wxDrawerWindows must be attached to a parent window.");
++       
++    // Constrain the drawer size to the parent window.
++    const wxSize parentSize(parent->GetClientSize());
++    if (wxLEFT == edge || wxRIGHT == edge)
++    {
++        if (size.GetHeight() > parentSize.GetHeight())
++            size.SetHeight(parentSize.GetHeight() - (kLeadingOffset + kTrailingOffset));
++    }
++    else
++    {
++        if (size.GetWidth() > parentSize.GetWidth())
++            size.SetWidth(parentSize.GetWidth() - (kLeadingOffset + kTrailingOffset));
++    }
++    
++    // Create the drawer window. 
++    const wxPoint pos(0, 0);
++    const wxSize dummySize(0,0);
++    const long style = wxFRAME_DRAWER;
++    
++    bool success  = wxWindow::Create(parent, id, pos, dummySize, style, name);
++    if (success)
++    {
++        this->MacCreateRealWindow(title, pos, size, style, name);
++        success = (m_macWindow != NULL);
++    }
++    
++    if (success)
++    {
++        // Use drawer brush.
++        m_macWindowBackgroundTheme = kThemeBrushDrawerBackground;
++        ::SetThemeWindowBackground((WindowRef)m_macWindow,
++         m_macWindowBackgroundTheme, false);
++         
++        // Leading and trailing offset are gaps from parent window edges
++        // to where the drawer starts.
++        ::SetDrawerOffsets((WindowRef)m_macWindow, kLeadingOffset, kTrailingOffset);
++
++        // Set the drawers parent.
++        // Is there a better way to get the parent's WindowRef?
++        wxTopLevelWindow* tlwParent = dynamic_cast<wxTopLevelWindow*>(parent);
++        if (NULL != tlwParent)
++        { 
++            OSStatus status = ::SetDrawerParent((WindowRef)m_macWindow,
++            (WindowRef)tlwParent->MacGetWindowRef());
++            success = (noErr == status);
++        }
++        else
++            success = false;
++    }
++    
++    return success;
++}
++
++wxDirection wxDrawerWindow::GetCurrentEdge() const
++{
++    const OptionBits edge = ::GetDrawerCurrentEdge((WindowRef)m_macWindow);
++    return WindowEdgeToDirection(edge);
++}
++
++wxDirection wxDrawerWindow::GetPreferredEdge() const
++{
++    const OptionBits edge = ::GetDrawerPreferredEdge((WindowRef)m_macWindow);
++    return WindowEdgeToDirection(edge);
++}
++
++bool wxDrawerWindow::IsOpen() const
++{
++    WindowDrawerState state = ::GetDrawerState((WindowRef)m_macWindow);
++    return (state == kWindowDrawerOpen || state == kWindowDrawerOpening);
++}
++
++bool wxDrawerWindow::Open(bool show)
++{
++    static const Boolean kAsynchronous = true;
++    OSStatus status = noErr;
++
++    if (show)
++    {
++        const OptionBits preferredEdge = ::GetDrawerPreferredEdge((WindowRef)m_macWindow);
++        status = ::OpenDrawer((WindowRef)m_macWindow, preferredEdge, kAsynchronous);
++    }
++    else
++        status = ::CloseDrawer((WindowRef)m_macWindow, kAsynchronous);
++
++    return (noErr == status);
++}
++
++bool wxDrawerWindow::SetPreferredEdge(wxDirection edge)
++{
++    const OSStatus status = ::SetDrawerPreferredEdge((WindowRef)m_macWindow,
++     DirectionToWindowEdge(edge));
++	return (noErr == status);
++}
++
++
++OptionBits DirectionToWindowEdge(wxDirection direction)
++{
++    OptionBits edge;
++    switch (direction)
++    {
++        case wxTOP:
++        edge = kWindowEdgeTop;
++        break;
++        
++        case wxBOTTOM:
++        edge = kWindowEdgeBottom;
++        break;
++        
++        case wxRIGHT:
++        edge = kWindowEdgeRight;
++        break;
++        
++        case wxLEFT:
++        default:
++        edge = kWindowEdgeLeft;
++        break;
++    }
++    return edge;
++}
++
++wxDirection WindowEdgeToDirection(OptionBits edge)
++{
++    wxDirection direction;
++    switch (edge)
++    {
++        case kWindowEdgeTop:
++        direction = wxTOP;
++        break;
++        
++        case kWindowEdgeBottom:
++        direction = wxBOTTOM;
++        break;
++        
++        case kWindowEdgeRight:
++        direction = wxRIGHT;
++        break;
++        
++        case kWindowEdgeDefault: // store current preferred and return that here?
++        case kWindowEdgeLeft:
++        default:
++        direction = wxLEFT;
++        break;
++    }
++    
++    return direction;
++}
++
+diff -Nru2 -xCVS -x*~ -x.#* -xMakefile* -xbk-deps -xbuild -x#*# -x*config* wxWindowsCurrent/src/mac/toplevel.cpp wxWindows/src/mac/toplevel.cpp
+--- wxWindowsCurrent/src/mac/toplevel.cpp	Sat Feb  7 22:33:27 2004
++++ wxWindows/src/mac/toplevel.cpp	Mon Mar  1 20:55:25 2004
+@@ -1,10 +1,10 @@
+ ///////////////////////////////////////////////////////////////////////////////
+ // Name:        mac/toplevel.cpp
+-// Purpose:     implements wxTopLevelWindow for Mac
+-// Author:      Stefan Csomor
++// Purpose:     implements wxTopLevelWindow for MSW
++// Author:      Vadim Zeitlin
+ // Modified by:
+ // Created:     24.09.01
+-// RCS-ID:      $Id: toplevel.cpp,v 1.75 2004/02/08 06:33:27 SC Exp $
+-// Copyright:   (c) 2001-2004 Stefan Csomor
++// RCS-ID:      $Id: toplevel.cpp,v 1.72 2004/01/25 15:17:20 SC Exp $
++// Copyright:   (c) 2001 SciTech Software, Inc. (www.scitechsoft.com)
+ // License:     wxWindows licence
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -92,8 +92,8 @@
+     { kEventClassKeyboard, kEventRawKeyModifiersChanged } ,
+ 
+-    { kEventClassWindow , kEventWindowShown } ,
+     { kEventClassWindow , kEventWindowUpdate } ,
+     { kEventClassWindow , kEventWindowActivated } ,
+     { kEventClassWindow , kEventWindowDeactivated } ,
++    { kEventClassWindow , kEventWindowDrawContent } ,
+     { kEventClassWindow , kEventWindowBoundsChanging } ,
+     { kEventClassWindow , kEventWindowBoundsChanged } ,
+@@ -357,4 +357,5 @@
+     switch( GetEventKind( event ) )
+     {
++        case kEventWindowDrawContent:
+         case kEventWindowUpdate :
+             if ( !wxPendingDelete.Member(toplevelWindow) )
+@@ -370,8 +371,4 @@
+             result = noErr ;
+             break ;
+-    	case kEventWindowShown :
+-    		toplevelWindow->Refresh() ;
+-    		result = noErr ;
+-    		break ;
+         case kEventWindowClose :
+                 toplevelWindow->Close() ;
+@@ -429,4 +426,5 @@
+             }
+             break ;
++            
+         default :
+             break ;
+@@ -681,4 +679,6 @@
+         {
+             wclass = kFloatingWindowClass ;
++            err = CreateNewWindow(wclass, attr, &theBoundsRect, (WindowRef*) &m_macWindow);
++            goto WindowMade;
+             if ( HasFlag(wxTINY_CAPTION_VERT) )
+             {
+@@ -699,4 +699,16 @@
+         wclass = kDocumentWindowClass ;
+     }
++
++// !!! 10.2 and up
++    else if ( HasFlag( wxFRAME_DRAWER ) )
++    {
++        wclass = kDrawerWindowClass;
++        // Should this be left for compositing check below?
++        // CreateNewWindow will fail without it, should wxDrawerWindow turn
++        // on compositing before calling MacCreateRealWindow?
++        attr |= kWindowCompositingAttribute;// | kWindowStandardHandlerAttribute;
++    }
++//!!! 10.2 and up
++
+     else
+     {
+@@ -733,14 +745,10 @@
+     }
+ 
+-    if (UMAGetSystemVersion() >= 0x1000)
+-    {
+-        //turn on live resizing (OS X only)
+-        attr |= kWindowLiveResizeAttribute;
+-    }
+-
++    attr |= kWindowLiveResizeAttribute; //turn on live resizing
++    
+ #if TARGET_CARBON
+ #if 0 //  having problems right now with that
+     if (HasFlag(wxSTAY_ON_TOP))
+-        wclass = kUtilityWindowClass;
++    	wclass = kUtilityWindowClass;
+ #endif
+ #endif
+@@ -748,7 +756,6 @@
+     //this setup lets us have compositing and non-compositing 
+     //windows in the same application. 
+-  
+-#if UNIVERSAL_INTERFACES_VERSION >= 0x0400  
+-    if ( wxTopLevelWindowMac::s_macWindowCompositing )
++    
++    if ( wxTopLevelWindowMac::s_macWindowCompositing)
+     {
+         attr |= kWindowCompositingAttribute;
+@@ -756,5 +763,4 @@
+     }
+     else
+-#endif
+     {
+         m_macUsesCompositing = FALSE;
+@@ -777,8 +783,8 @@
+         err = ::CreateNewWindow( wclass , attr , &theBoundsRect , (WindowRef*)&m_macWindow ) ;
+     }
+-
++WindowMade:
+     wxCHECK_RET( err == noErr, wxT("Mac OS error when trying to create new window") );
+     wxAssociateWinWithMacWindow( m_macWindow , this ) ;
+-    UMASetWTitle( (WindowRef)m_macWindow , title , m_font.GetEncoding() ) ;
++    UMASetWTitle( (WindowRef)m_macWindow , title ) ;
+     if ( wxTopLevelWindowMac::s_macWindowCompositing )
+     {
+@@ -803,5 +809,5 @@
+         wxRegion rgn(0, 0, m_width, m_height);
+         SetShape(rgn);
+-    }
++    } 
+ #endif
+ 
+@@ -1088,5 +1094,5 @@
+ {
+     wxWindow::SetTitle( title ) ;
+-    UMASetWTitle( (WindowRef)m_macWindow , title , m_font.GetEncoding() ) ;
++    UMASetWTitle( (WindowRef)m_macWindow , title ) ;
+ }
+ 
+@@ -1170,5 +1176,5 @@
+     if ( actualX != former_x || actualY != former_y )
+     {
+-        doMove = true ;
++        doMove = true;
+     }
+     if ( actualWidth != former_w || actualHeight != former_h )
+@@ -1182,12 +1188,20 @@
+         m_y = actualY ;
+ 
++//!!! Calling MoveWindow and SizeWindow leads to an infinite loop of events starting events
++// when called on a window with a wxDrawerWindow child visible/open.
++// Removing the calls seems to make window dragging much smoother and doesn't seem to
++// have an adverse effect. Tested only on OS X 10.2.
++#if 0
+         if ( doMove )
+             ::MoveWindow((WindowRef)m_macWindow, m_x, m_y  , false); // don't make frontmost
+-
++#endif
+         m_width = actualWidth ;
+         m_height = actualHeight ;
+ 
++// !!! See comment above MoveWindow.
++#if 0
+         if ( doResize )
+             ::SizeWindow((WindowRef)m_macWindow, m_width, m_height  , true);
++#endif
+ 
+         // the OS takes care of invalidating and erasing the new area so we only have to
+@@ -1228,5 +1242,4 @@
+         }
+     }
+-
+ }
+
+ 	  	 

@@ -1,0 +1,299 @@
+From 77fd8355c67518ce2208ec8307ea7071804c0392 Mon Sep 17 00:00:00 2001
+From: Artur Wieczorek <artwik@wp.pl>
+Date: Sun, 4 May 2014 12:03:54 +0200
+Subject: [PATCH 1/4] Refactoring of wxCheckBox and wxControl. Move code which
+ can be reused by other owner drawn buttons from wxCheckBox::MSWOnDraw() to
+ the newly created wxControl::MSWOwnerDrawnButton(). Create
+ wxControl::MSWDrawButtonBitmap() function responsible for drawing button
+ bitmap for owner drawn buttons.
+
+---
+ include/wx/msw/checkbox.h |   2 +
+ include/wx/msw/control.h  |   5 +++
+ src/msw/checkbox.cpp      | 102 +++-------------------------------------------
+ src/msw/control.cpp       | 102 ++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 114 insertions(+), 97 deletions(-)
+
+diff --git a/include/wx/msw/checkbox.h b/include/wx/msw/checkbox.h
+index c1f0eff..44dd9f6 100644
+--- a/include/wx/msw/checkbox.h
++++ b/include/wx/msw/checkbox.h
+@@ -62,6 +62,8 @@ protected:
+ 
+     virtual void DoSet3StateValue(wxCheckBoxState value);
+     virtual wxCheckBoxState DoGet3StateValue() const;
++    virtual void MSWDrawButtonBitmap(wxWindow *win, wxDC& dc, 
++                                     const wxRect& rect, int flags);
+ 
+     // return true if this checkbox is owner drawn
+     bool IsOwnerDrawn() const;
+diff --git a/include/wx/msw/control.h b/include/wx/msw/control.h
+index 35bf74e..113bc91 100644
+--- a/include/wx/msw/control.h
++++ b/include/wx/msw/control.h
+@@ -124,6 +124,11 @@ protected:
+     // Look in our GetSubcontrols() for the windows with the given ID.
+     virtual wxWindow *MSWFindItem(long id, WXHWND hWnd) const;
+ 
++    // For ownerdraw buttons
++    virtual bool MSWOwnerDrawnButton(const DRAWITEMSTRUCT *dis, int flags, bool isFocused);
++    virtual void MSWDrawButtonBitmap(wxWindow *WXUNUSED(win), wxDC& WXUNUSED(dc),
++                                     const wxRect& WXUNUSED(rect), int WXUNUSED(flags)) {}
++
+     // for controls like radiobuttons which are really composite this array
+     // holds the ids (not HWNDs!) of the sub controls
+     wxArrayLong m_subControls;
+diff --git a/src/msw/checkbox.cpp b/src/msw/checkbox.cpp
+index b5601e7..dc0aa10 100644
+--- a/src/msw/checkbox.cpp
++++ b/src/msw/checkbox.cpp
+@@ -34,7 +34,6 @@
+     #include "wx/settings.h"
+ #endif
+ 
+-#include "wx/msw/dc.h"          // for wxDCTemp
+ #include "wx/renderer.h"
+ #include "wx/msw/uxtheme.h"
+ #include "wx/msw/private/button.h"
+@@ -372,46 +371,9 @@ bool wxCheckBox::MSWOnDraw(WXDRAWITEMSTRUCT *item)
+     if ( !IsOwnerDrawn() || dis->CtlType != ODT_BUTTON )
+         return wxCheckBoxBase::MSWOnDraw(item);
+ 
+-    // calculate the rectangles for the check mark itself and the label
+-    HDC hdc = dis->hDC;
+-    RECT& rect = dis->rcItem;
+-    RECT rectCheck,
+-         rectLabel;
+-    rectLabel.top = rect.top + (rect.bottom - rect.top - GetBestSize().y) / 2;
+-    rectLabel.bottom = rectLabel.top + GetBestSize().y;
+-    const int MARGIN = 3;
+-    const int CXMENUCHECK = ::GetSystemMetrics(SM_CXMENUCHECK);
+-    // the space between the checkbox and the label is included in the
+-    // check-mark bitmap
+-    const int checkSize = wxMin(CXMENUCHECK - MARGIN, GetSize().y);
+-    rectCheck.top = rect.top + (rect.bottom - rect.top - checkSize) / 2;
+-    rectCheck.bottom = rectCheck.top + checkSize;
+-
+-    const bool isRightAligned = HasFlag(wxALIGN_RIGHT);
+-    if ( isRightAligned )
+-    {
+-        rectLabel.right = rect.right - CXMENUCHECK;
+-        rectLabel.left = rect.left;
+-
+-        rectCheck.left = rectLabel.right + ( CXMENUCHECK + MARGIN - checkSize ) / 2;
+-        rectCheck.right = rectCheck.left + checkSize;
+-    }
+-    else // normal, left-aligned checkbox
+-    {
+-        rectCheck.left = rect.left + ( CXMENUCHECK - MARGIN - checkSize ) / 2;
+-        rectCheck.right = rectCheck.left + checkSize;
+-
+-        rectLabel.left = rect.left + CXMENUCHECK;
+-        rectLabel.right = rect.right;
+-    }
+-
+     // shall we draw a focus rect?
+     const bool isFocused = m_isPressed || FindFocus() == this;
+ 
+-
+-    // draw the checkbox itself
+-    wxDCTemp dc(hdc);
+-
+     int flags = 0;
+     if ( !IsEnabled() )
+         flags |= wxCONTROL_DISABLED;
+@@ -437,66 +399,12 @@ bool wxCheckBox::MSWOnDraw(WXDRAWITEMSTRUCT *item)
+     if ( wxFindWindowAtPoint(wxGetMousePosition()) == this )
+         flags |= wxCONTROL_CURRENT;
+ 
+-    wxRendererNative::Get().
+-        DrawCheckBox(this, dc, wxRectFromRECT(rectCheck), flags);
+-
+-    // draw the text
+-    const wxString& label = GetLabel();
+-
+-    // first we need to measure it
+-    UINT fmt = DT_NOCLIP;
+-
+-    // drawing underlying doesn't look well with focus rect (and the native
+-    // control doesn't do it)
+-    if ( isFocused )
+-        fmt |= DT_HIDEPREFIX;
+-    if ( isRightAligned )
+-        fmt |= DT_RIGHT;
+-    // TODO: also use DT_HIDEPREFIX if the system is configured so
+-
+-    // we need to get the label real size first if we have to draw a focus rect
+-    // around it
+-    if ( isFocused )
+-    {
+-        RECT oldLabelRect = rectLabel; // needed if right aligned
+-
+-        if ( !::DrawText(hdc, label.t_str(), label.length(), &rectLabel,
+-                         fmt | DT_CALCRECT) )
+-        {
+-            wxLogLastError(wxT("DrawText(DT_CALCRECT)"));
+-        }
+-
+-        if ( isRightAligned )
+-        {
+-            // move the label rect to the right
+-            const int labelWidth = rectLabel.right - rectLabel.left;
+-            rectLabel.right = oldLabelRect.right;
+-            rectLabel.left = rectLabel.right - labelWidth;
+-        }
+-    }
+-
+-    if ( !IsEnabled() )
+-    {
+-        ::SetTextColor(hdc, ::GetSysColor(COLOR_GRAYTEXT));
+-    }
+-
+-    if ( !::DrawText(hdc, label.t_str(), label.length(), &rectLabel, fmt) )
+-    {
+-        wxLogLastError(wxT("DrawText()"));
+-    }
+-
+-    // finally draw the focus
+-    if ( isFocused )
+-    {
+-        rectLabel.left--;
+-        rectLabel.right++;
+-        if ( !::DrawFocusRect(hdc, &rectLabel) )
+-        {
+-            wxLogLastError(wxT("DrawFocusRect()"));
+-        }
+-    }
++    return MSWOwnerDrawnButton(dis, flags, isFocused);
++}
+ 
+-    return true;
++void wxCheckBox::MSWDrawButtonBitmap(wxWindow *win, wxDC& dc, const wxRect& rect, int flags)
++{
++    wxRendererNative::Get().DrawCheckBox(win, dc, rect, flags);
+ }
+ 
+ #endif // wxUSE_CHECKBOX
+diff --git a/src/msw/control.cpp b/src/msw/control.cpp
+index 4bb6ae8..0ea6a53 100644
+--- a/src/msw/control.cpp
++++ b/src/msw/control.cpp
+@@ -47,6 +47,7 @@
+ 
+ #include "wx/msw/private.h"
+ #include "wx/msw/uxtheme.h"
++#include "wx/msw/dc.h"          // for wxDCTemp
+ 
+ // ----------------------------------------------------------------------------
+ // wxWin macros
+@@ -451,6 +452,107 @@ wxWindow* wxControl::MSWFindItem(long id, WXHWND hWnd) const
+     return wxControlBase::MSWFindItem(id, hWnd);
+ }
+ 
++bool wxControl::MSWOwnerDrawnButton(const DRAWITEMSTRUCT *dis, int flags, bool isFocused)
++{
++    // calculate the rectangles for the button itself and the label
++    HDC hdc = dis->hDC;
++    const RECT& rect = dis->rcItem;
++
++    // calculate the rectangles for the button itself and the label
++    RECT rectButton,
++         rectLabel;
++    rectLabel.top = rect.top + (rect.bottom - rect.top - GetBestSize().y) / 2;
++    rectLabel.bottom = rectLabel.top + GetBestSize().y;
++    const int MARGIN = 3;
++    const int CXMENUCHECK = ::GetSystemMetrics(SM_CXMENUCHECK);
++    // The space between the button and the label
++    // is included in the button bitmap.
++    const int buttonSize = wxMin(CXMENUCHECK - MARGIN, GetSize().y);
++    rectButton.top = rect.top + (rect.bottom - rect.top - buttonSize) / 2;
++    rectButton.bottom = rectButton.top + buttonSize;
++
++    const bool isRightAligned = HasFlag(wxALIGN_RIGHT);
++    if ( isRightAligned )
++    {
++        rectLabel.right = rect.right - CXMENUCHECK;
++        rectLabel.left = rect.left;
++
++        rectButton.left = rectLabel.right + ( CXMENUCHECK + MARGIN - buttonSize ) / 2;
++        rectButton.right = rectButton.left + buttonSize;
++    }
++    else // normal, left-aligned button
++    {
++        rectButton.left = rect.left + ( CXMENUCHECK - MARGIN - buttonSize ) / 2;
++        rectButton.right = rectButton.left + buttonSize;
++
++        rectLabel.left = rect.left + CXMENUCHECK;
++        rectLabel.right = rect.right;
++    }
++
++    // draw the button itself
++    wxDCTemp dc(hdc);
++
++    MSWDrawButtonBitmap(this, dc, wxRectFromRECT(rectButton), flags);
++
++    // draw the text
++    const wxString& label = GetLabel();
++
++    // first we need to measure it
++    UINT fmt = DT_NOCLIP;
++
++    // drawing underlying doesn't look well with focus rect (and the native
++    // control doesn't do it)
++    if ( isFocused )
++        fmt |= DT_HIDEPREFIX;
++    if ( isRightAligned )
++        fmt |= DT_RIGHT;
++    // TODO: also use DT_HIDEPREFIX if the system is configured so
++
++    // we need to get the label real size first if we have to draw a focus rect
++    // around it
++    if ( isFocused )
++    {
++        RECT oldLabelRect = rectLabel; // needed if right aligned
++
++        if ( !::DrawText(hdc, label.t_str(), label.length(), &rectLabel,
++                         fmt | DT_CALCRECT) )
++        {
++            wxLogLastError(wxT("DrawText(DT_CALCRECT)"));
++        }
++
++        if ( isRightAligned )
++        {
++            // move the label rect to the right
++            const int labelWidth = rectLabel.right - rectLabel.left;
++            rectLabel.right = oldLabelRect.right;
++            rectLabel.left = rectLabel.right - labelWidth;
++        }
++    }
++
++    if ( !IsEnabled() )
++    {
++        ::SetTextColor(hdc, ::GetSysColor(COLOR_GRAYTEXT));
++    }
++
++    if ( !::DrawText(hdc, label.t_str(), label.length(), &rectLabel, fmt) )
++    {
++        wxLogLastError(wxT("DrawText()"));
++    }
++
++    // finally draw the focus
++    if ( isFocused )
++    {
++        rectLabel.left--;
++        rectLabel.right++;
++        if ( !::DrawFocusRect(hdc, &rectLabel) )
++        {
++            wxLogLastError(wxT("DrawFocusRect()"));
++        }
++    }
++
++    return true;
++}
++
+ // ----------------------------------------------------------------------------
+ // wxControlWithItems
+ // ----------------------------------------------------------------------------
+-- 
+1.9.2.msysgit.0
+

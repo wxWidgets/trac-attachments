@@ -1,0 +1,307 @@
+Index: interface/wx/ribbon/bar.h
+===================================================================
+--- interface/wx/ribbon/bar.h	(revision 71966)
++++ interface/wx/ribbon/bar.h	(working copy)
+@@ -214,6 +214,14 @@
+     size_t GetPageCount() const;
+ 
+     /**
++        Test if the bar has pages or not.
++        Returns @true if the bar is empty, @false if not.
++
++        @since 2.9.4
++    */
++    bool IsEmpty() const;
++
++    /**
+         Dismiss the expanded panel of the currently active page.
+         
+         Calls and returns the value from wxRibbonPage::DismissExpandedPanel()
+@@ -222,6 +230,26 @@
+     bool DismissExpandedPanel();
+ 
+     /**
++        Add a page at the end of this ribbon bar.
++
++        The user must call wxRibbonBar::Realize() after one (or more) calls to
++        this function.
++
++        @since 2.9.4
++    */
++    void AddPage(wxRibbonPage *page);
++
++    /**
++        Insert a page at the specified position.
++
++        The user must call wxRibbonBar::Realize() after one (or more) calls to
++        this function.
++
++        @since 2.9.4
++    */
++	void InsertPage(size_t index, wxRibbonPage *page);
++
++    /**
+         Delete a single page from this ribbon bar.
+ 
+         The user must call wxRibbonBar::Realize() after one (or more) calls to
+@@ -239,6 +267,17 @@
+     void ClearPages();
+ 
+     /**
++        Remove a page from this ribbon bar without deleting the window.
++
++        The user must call wxRibbonBar::Realize() after one (or more) calls to
++        this function.
++
++        @since 2.9.4
++    */
++    wxRibbonPage* RemovePage(size_t n);
++
++
++    /**
+         Shows or hides the panel area of the ribbon bar.
+ 
+         If the panel area is hidden, then only the tab of the ribbon bar will
+Index: interface/wx/ribbon/page.h
+===================================================================
+--- interface/wx/ribbon/page.h	(revision 71966)
++++ interface/wx/ribbon/page.h	(working copy)
+@@ -29,6 +29,8 @@
+ 
+     /**
+         Constructs a ribbon page, which must be a child of a ribbon bar.
++        The page must be added to the bar with wxRibbonBar::AddPage or
++        wxRibbonBar::InsertPage after its creation.
+     
+         @param parent
+             Pointer to a parent wxRibbonBar (unlike most controls, a wxRibbonPage
+Index: include/wx/ribbon/bar.h
+===================================================================
+--- include/wx/ribbon/bar.h	(revision 71966)
++++ include/wx/ribbon/bar.h	(working copy)
+@@ -114,10 +114,15 @@
+     int GetActivePage() const;
+     wxRibbonPage* GetPage(int n);
+     size_t GetPageCount() const;
++    bool IsEmpty() const;
+     bool DismissExpandedPanel();
+ 
++    void AddPage(wxRibbonPage *page);
++    void InsertPage(size_t index, wxRibbonPage *page);
++
+     void DeletePage(size_t n);
+     void ClearPages();
++    wxRibbonPage* RemovePage(size_t n);
+ 
+     void ShowPanels(bool show = true);
+     void HidePanels() { ShowPanels(false); }
+@@ -137,7 +142,6 @@
+     wxRibbonPageTabInfo* HitTestTabs(wxPoint position, int* index = NULL);
+ 
+     void CommonInit(long style);
+-    void AddPage(wxRibbonPage *page);
+     void RecalculateTabSizes();
+     void RecalculateMinSize();
+     void ScrollTabBar(int npixels);
+Index: src/ribbon/bar.cpp
+===================================================================
+--- src/ribbon/bar.cpp	(revision 71966)
++++ src/ribbon/bar.cpp	(working copy)
+@@ -61,6 +61,11 @@
+ 
+ void wxRibbonBar::AddPage(wxRibbonPage *page)
+ {
++	InsertPage(GetPageCount(), page);
++}
++
++void wxRibbonBar::InsertPage(size_t index, wxRibbonPage *page)
++{
+     wxRibbonPageTabInfo info;
+ 
+     info.page = page;
+@@ -81,7 +86,7 @@
+                           &info.small_must_have_separator_width,
+                           &info.minimum_width);
+ 
+-    if(m_pages.IsEmpty())
++    if(IsEmpty())
+     {
+         m_tabs_total_width_ideal = info.ideal_width;
+         m_tabs_total_width_minimum = info.minimum_width;
+@@ -92,12 +97,12 @@
+         m_tabs_total_width_ideal += sep + info.ideal_width;
+         m_tabs_total_width_minimum += sep + info.minimum_width;
+     }
+-    m_pages.Add(info);
++    m_pages.Insert(info, index);
+ 
+     page->Hide(); // Most likely case is that this new page is not the active tab
+     page->SetArtProvider(m_art);
+ 
+-    if(m_pages.GetCount() == 1)
++    if(GetPageCount() == 1)
+     {
+         SetActivePage((size_t)0);
+     }
+@@ -281,12 +286,33 @@
+     return m_pages.GetCount();
+ }
+ 
++bool wxRibbonBar::IsEmpty() const
++{
++	return m_pages.IsEmpty();
++}
++
+ void wxRibbonBar::DeletePage(size_t n)
+ {
+-    if(n < m_pages.GetCount())
++	wxRibbonPage *page = RemovePage(n);
++	if(page!=NULL)
++	{
++        // Schedule page object for destruction and not destroying directly
++        // as this function can be called in an event handler and page functions
++        // can be called afeter removing.
++        // Like in wxRibbonButtonBar::OnMouseUp
++        if(!wxTheApp->IsScheduledForDestruction(page))
++        {
++            wxTheApp->ScheduleForDestruction(page);
++        }		
++	}
++}
++
++void wxRibbonBar::ClearPages()
++{
++    size_t i;
++    for(i=0; i<m_pages.GetCount(); i++)
+     {
+-        wxRibbonPage *page = m_pages.Item(n).page;
+-
++        wxRibbonPage *page = m_pages.Item(i).page;
+         // Schedule page object for destruction and not destroying directly
+         // as this function can be called in an event handler and page functions
+         // can be called afeter removing.
+@@ -295,7 +321,20 @@
+         {
+             wxTheApp->ScheduleForDestruction(page);
+         }
++    }
++    m_pages.Empty();
++    Realize();
++    m_current_page = -1;
++    Refresh();
++}
+ 
++wxRibbonPage* wxRibbonBar::RemovePage(size_t n)
++{
++	wxRibbonPage *page = NULL;
++    if(n < m_pages.GetCount())
++    {
++        page = m_pages.Item(n).page;
++
+         m_pages.RemoveAt(n);
+ 
+         if(m_current_page == static_cast<int>(n))
+@@ -308,10 +347,14 @@
+                 {
+                     SetActivePage(m_pages.GetCount() - 1);
+                 }
+-                else
++                else if(n > 0)
+                 {
+                     SetActivePage(n - 1);
+                 }
++				else
++				{
++                    SetActivePage((size_t)0);
++				}
+             }
+         }
+         else if(m_current_page > static_cast<int>(n))
+@@ -319,29 +362,9 @@
+             m_current_page--;
+         }
+     }
++	return page;
+ }
+ 
+-void wxRibbonBar::ClearPages()
+-{
+-    size_t i;
+-    for(i=0; i<m_pages.GetCount(); i++)
+-    {
+-        wxRibbonPage *page = m_pages.Item(i).page;
+-        // Schedule page object for destruction and not destroying directly
+-        // as this function can be called in an event handler and page functions
+-        // can be called afeter removing.
+-        // Like in wxRibbonButtonBar::OnMouseUp
+-        if(!wxTheApp->IsScheduledForDestruction(page))
+-        {
+-            wxTheApp->ScheduleForDestruction(page);
+-        }
+-    }
+-    m_pages.Empty();
+-    Realize();
+-    m_current_page = -1;
+-    Refresh();
+-}
+-
+ bool wxRibbonBar::SetActivePage(size_t page)
+ {
+     if(m_current_page == (int)page)
+Index: src/ribbon/page.cpp
+===================================================================
+--- src/ribbon/page.cpp	(revision 71966)
++++ src/ribbon/page.cpp	(working copy)
+@@ -207,8 +207,6 @@
+     m_scroll_buttons_visible = false;
+ 
+     SetBackgroundStyle(wxBG_STYLE_CUSTOM);
+-
+-    wxDynamicCast(GetParent(), wxRibbonBar)->AddPage(this);
+ }
+ 
+ void wxRibbonPage::SetArtProvider(wxRibbonArtProvider* art)
+Index: samples/ribbon/ribbondemo.cpp
+===================================================================
+--- samples/ribbon/ribbondemo.cpp	(revision 71966)
++++ samples/ribbon/ribbondemo.cpp	(working copy)
+@@ -263,6 +263,7 @@
+ 
+     {
+         wxRibbonPage* home = new wxRibbonPage(m_ribbon, wxID_ANY, wxT("Examples"), ribbon_xpm);
++		m_ribbon->AddPage(home);
+         wxRibbonPanel *toolbar_panel = new wxRibbonPanel(home, wxID_ANY, wxT("Toolbar"), 
+                                             wxNullBitmap, wxDefaultPosition, wxDefaultSize, 
+                                             wxRIBBON_PANEL_NO_AUTO_MINIMISE |
+@@ -346,6 +347,7 @@
+         m_bitmap_creation_dc.SetFont(label_font);
+ 
+         wxRibbonPage* scheme = new wxRibbonPage(m_ribbon, wxID_ANY, wxT("Appearance"), eye_xpm);
++		m_ribbon->AddPage(scheme);
+         m_ribbon->GetArtProvider()->GetColourScheme(&m_default_primary,
+             &m_default_secondary, &m_default_tertiary);
+         wxRibbonPanel *provider_panel = new wxRibbonPanel(scheme, wxID_ANY,
+@@ -366,6 +368,7 @@
+     }
+     {
+         wxRibbonPage* page = new wxRibbonPage(m_ribbon, wxID_ANY, wxT("UI Updated"), ribbon_xpm);
++		m_ribbon->AddPage(page);
+         wxRibbonPanel *panel = new wxRibbonPanel(page, wxID_ANY, wxT("Enable/Disable"), ribbon_xpm);
+         wxRibbonButtonBar *bar = new wxRibbonButtonBar(panel, wxID_ANY);
+         bar->AddButton(ID_DISABLED, wxT("Disabled"), ribbon_xpm);
+@@ -387,13 +390,14 @@
+         bar->AddButton(ID_CHANGE_TEXT2, wxT("Two"), ribbon_xpm);
+         bar->AddButton(ID_UI_CHANGE_TEXT_UPDATED, wxT("Zero"), ribbon_xpm);
+     }
+-    new wxRibbonPage(m_ribbon, wxID_ANY, wxT("Empty Page"), empty_xpm);
+     {
+         wxRibbonPage* page = new wxRibbonPage(m_ribbon, wxID_ANY, wxT("Another Page"), empty_xpm);
++		m_ribbon->AddPage(page);
+         wxRibbonPanel *panel = new wxRibbonPanel(page, wxID_ANY, wxT("Page manipulation"), ribbon_xpm);
+         wxRibbonButtonBar *bar = new wxRibbonButtonBar(panel, wxID_ANY);
+         bar->AddButton(ID_REMOVE_PAGE, wxT("Remove"), wxArtProvider::GetBitmap(wxART_DELETE, wxART_OTHER, wxSize(24, 24)));
+     }
++	m_ribbon->InsertPage(3, new wxRibbonPage(m_ribbon, wxID_ANY, wxT("Empty Page"), empty_xpm));
+ 
+     m_ribbon->Realize();
+ 

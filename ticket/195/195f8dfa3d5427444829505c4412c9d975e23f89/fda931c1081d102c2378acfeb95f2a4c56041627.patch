@@ -1,0 +1,174 @@
+Index: include/wx/msw/apptbase.h
+===================================================================
+--- include/wx/msw/apptbase.h	(revision 67101)
++++ include/wx/msw/apptbase.h	(working copy)
+@@ -40,7 +40,7 @@
+ 
+     // wait for the handle to be signaled, return WAIT_OBJECT_0 if it is or, in
+     // the GUI code, WAIT_OBJECT_0 + 1 if a Windows message arrived
+-    virtual WXDWORD WaitForThread(WXHANDLE hThread) = 0;
++    virtual WXDWORD WaitForThread(WXHANDLE hThread, int flags) = 0;
+ 
+ 
+ #ifndef __WXWINCE__
+Index: include/wx/msw/apptrait.h
+===================================================================
+--- include/wx/msw/apptrait.h	(revision 67101)
++++ include/wx/msw/apptrait.h	(working copy)
+@@ -26,7 +26,7 @@
+     virtual wxTimerImpl *CreateTimerImpl(wxTimer *timer);
+ #endif
+     virtual bool DoMessageFromThreadWait();
+-    virtual WXDWORD WaitForThread(WXHANDLE hThread);
++    virtual WXDWORD WaitForThread(WXHANDLE hThread, int flags);
+ #ifndef __WXWINCE__
+     virtual bool CanUseStderr() { return true; }
+     virtual bool WriteToStderr(const wxString& text);
+@@ -46,7 +46,7 @@
+ #endif
+     virtual bool DoMessageFromThreadWait();
+     virtual wxPortId GetToolkitVersion(int *majVer = NULL, int *minVer = NULL) const;
+-    virtual WXDWORD WaitForThread(WXHANDLE hThread);
++    virtual WXDWORD WaitForThread(WXHANDLE hThread, int flags);
+ 
+ #ifndef __WXWINCE__
+     virtual bool CanUseStderr();
+Index: include/wx/thread.h
+===================================================================
+--- include/wx/thread.h	(revision 67101)
++++ include/wx/thread.h	(working copy)
+@@ -71,6 +71,12 @@
+     wxTHREAD_JOINABLE
+ };
+ 
++enum wxThreadWait
++{
++    wxTHREAD_WAIT_BLOCK = 0,
++    wxTHREAD_WAIT_DISPATCH        // process events while waiting; MSW only
++};
++
+ // defines the interval of priority
+ enum
+ {
+@@ -516,13 +522,25 @@
+         // does it!
+         //
+         // will fill the rc pointer with the thread exit code if it's !NULL
+-    wxThreadError Delete(ExitCode *rc = NULL);
++    wxThreadError Delete(ExitCode *rc = NULL, int flags =
++#if WXWIN_COMPATIBILITY_2_8 && defined(__WXMSW__)
++        wxTHREAD_WAIT_DISPATCH
++#else
++        wxTHREAD_WAIT_BLOCK
++#endif
++        );
+ 
+         // waits for a joinable thread to finish and returns its exit code
+         //
+         // Returns (ExitCode)-1 on error (for example, if the thread is not
+         // joinable)
+-    ExitCode Wait();
++    ExitCode Wait(int flags =
++#if WXWIN_COMPATIBILITY_2_8 && defined(__WXMSW__)
++        wxTHREAD_WAIT_DISPATCH
++#else
++        wxTHREAD_WAIT_BLOCK
++#endif
++        );
+ 
+         // kills the thread without giving it any chance to clean up - should
+         // not be used under normal circumstances, use Delete() instead.
+Index: src/msw/app.cpp
+===================================================================
+--- src/msw/app.cpp	(revision 67101)
++++ src/msw/app.cpp	(working copy)
+@@ -233,14 +233,14 @@
+     return evtLoop->Dispatch();
+ }
+ 
+-DWORD wxGUIAppTraits::WaitForThread(WXHANDLE hThread)
++DWORD wxGUIAppTraits::WaitForThread(WXHANDLE hThread, int flags)
+ {
+     // We only ever dispatch messages from the main thread and, additionally,
+     // even from the main thread we shouldn't wait for the message if we don't
+     // have a running event loop as we would never remove them from the message
+     // queue then and so we would enter an infinite loop as
+     // MsgWaitForMultipleObjects() keeps returning WAIT_OBJECT_0 + 1.
+-    if ( !wxIsMainThread() || !wxEventLoop::GetActive() )
++    if ( !wxIsMainThread() || !wxEventLoop::GetActive() || flags != wxTHREAD_WAIT_DISPATCH )
+         return DoSimpleWaitForThread(hThread);
+ 
+     return ::MsgWaitForMultipleObjects
+Index: src/msw/basemsw.cpp
+===================================================================
+--- src/msw/basemsw.cpp	(revision 67101)
++++ src/msw/basemsw.cpp	(working copy)
+@@ -88,7 +88,7 @@
+ }
+ 
+ 
+-WXDWORD wxConsoleAppTraits::WaitForThread(WXHANDLE hThread)
++WXDWORD wxConsoleAppTraits::WaitForThread(WXHANDLE hThread, int WXUNUSED(flags))
+ {
+     return DoSimpleWaitForThread(hThread);
+ }
+Index: src/msw/thread.cpp
+===================================================================
+--- src/msw/thread.cpp	(revision 67101)
++++ src/msw/thread.cpp	(working copy)
+@@ -450,7 +450,8 @@
+     // (politely, this is not Kill()!) to do it
+     wxThreadError WaitForTerminate(wxCriticalSection& cs,
+                                    wxThread::ExitCode *pRc,
+-                                   wxThread *threadToDelete = NULL);
++                                   wxThread *threadToDelete = NULL,
++                                   int flags = wxTHREAD_WAIT_BLOCK);
+ 
+     // kill the thread unconditionally
+     wxThreadError Kill();
+@@ -703,7 +704,8 @@
+ wxThreadError
+ wxThreadInternal::WaitForTerminate(wxCriticalSection& cs,
+                                    wxThread::ExitCode *pRc,
+-                                   wxThread *threadToDelete)
++                                   wxThread *threadToDelete,
++                                   int flags)
+ {
+     // prevent the thread C++ object from disappearing as long as we are using
+     // it here
+@@ -792,7 +794,7 @@
+         wxAppTraits *traits = wxTheApp ? wxTheApp->GetTraits() : NULL;
+         if ( traits )
+         {
+-            result = traits->WaitForThread(m_hThread);
++            result = traits->WaitForThread(m_hThread, flags);
+         }
+         else // can't wait for the thread
+         {
+@@ -1108,7 +1110,7 @@
+ // stopping thread
+ // ---------------
+ 
+-wxThread::ExitCode wxThread::Wait()
++wxThread::ExitCode wxThread::Wait(int flags)
+ {
+     ExitCode rc = wxUIntToPtr(THREAD_ERROR_EXIT);
+ 
+@@ -1117,14 +1119,14 @@
+     wxCHECK_MSG( !IsDetached(), rc,
+                  wxT("wxThread::Wait(): can't wait for detached thread") );
+ 
+-    (void)m_internal->WaitForTerminate(m_critsect, &rc);
++    (void)m_internal->WaitForTerminate(m_critsect, &rc, NULL, flags);
+ 
+     return rc;
+ }
+ 
+-wxThreadError wxThread::Delete(ExitCode *pRc)
++wxThreadError wxThread::Delete(ExitCode *pRc, int flags)
+ {
+-    return m_internal->WaitForTerminate(m_critsect, pRc, this);
++    return m_internal->WaitForTerminate(m_critsect, pRc, this, flags);
+ }
+ 
+ wxThreadError wxThread::Kill()

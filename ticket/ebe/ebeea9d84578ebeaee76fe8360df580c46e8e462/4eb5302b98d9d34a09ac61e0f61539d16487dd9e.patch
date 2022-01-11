@@ -1,0 +1,434 @@
+Index: src/stc/PlatWX.cpp
+===================================================================
+diff --git a/trunk/src/stc/PlatWX.cpp b/trunk/src/stc/PlatWX.cpp
+--- a/trunk/src/stc/PlatWX.cpp	(revision 127035)
++++ b/trunk/src/stc/PlatWX.cpp	(working copy)
+@@ -78,83 +78,202 @@
+ namespace
+ {
+ 
+-// wxFont with ascent cached, a pointer to this type is stored in Font::fid.
+-class wxFontWithAscent : public wxFont
+-{
++// FONT implementation which can be cached for re_use
++// and with font metrics  cached
++class CachedFont : public Font {
++
++protected :
++    class FontLOG {
++
++    public :
++
++        char*           facename;
++        int             fontSize;
++        wxFontEncoding  encoding;
++        int             weight;
++        bool            italic;
++        bool            antialiased;
++        int             hashcode;
++
++        explicit FontLOG(const FontParameters& fp);
++        bool     IsSameAs(const FontLOG* other) const;
++        wxFont*  CreatFont() const;
++        ~FontLOG();
++    };
++private :
++    int                 refCounter;
++
++    CachedFont*         next;
++    wxFontMetrics*      metrics;
++    FontLOG*            fontLog;
++    static  CachedFont *first;
++    wxDECLARE_NO_COPY_CLASS(CachedFont);
++
++protected :
++
++   CachedFont();
++   ~CachedFont();
+ public:
+-    explicit wxFontWithAscent(const wxFont &font)
+-        : wxFont(font),
+-          m_ascent(0)
+-    {
+-    }
+ 
+-    static wxFontWithAscent* FromFID(FontID fid)
+-    {
+-        return static_cast<wxFontWithAscent*>(fid);
+-    }
++	static FontID  FindOrCreate(CachedFont* font, const FontParameters &fp);
++	static void    ReleaseId(CachedFont* font);
++	static void    RefrenceId(CachedFont* font) { font->refCounter++; };
+ 
+-    void SetAscent(int ascent) { m_ascent = ascent; }
+-    int GetAscent() const { return m_ascent; }
+-
+-private:
+-    int m_ascent;
++	wxFontMetrics*  GetMetrics() const { return metrics; };
++	wxFontMetrics*  SetMetrics(const wxFontMetrics& metrics_);
+ };
+ 
+-void SetAscent(Font& f, int ascent)
++CachedFont*  CachedFont::first = NULL;
++
++static wxCriticalSection cachedFontCriticalSection;
++
++CachedFont::CachedFont()
++    : Font(), refCounter(0), next(NULL), metrics(NULL), fontLog(NULL)
+ {
+-    wxFontWithAscent::FromFID(f.GetID())->SetAscent(ascent);
+ }
+ 
+-int GetAscent(Font& f)
++CachedFont::~CachedFont() {
++    //
++    if (metrics != NULL) {
++        delete metrics;
++        metrics = NULL;
++    };
++    if (fontLog != NULL) {
++        delete fontLog;
++        fontLog = NULL;
++    }
++    if (fid) {
++        delete static_cast<wxFont*>(fid);
++        fid = NULL;
++    }
++}
++
++CachedFont::FontLOG::FontLOG(const FontParameters& fp) {
++        //
++        facename = ::strdup(fp.faceName);
++        //
++        fontSize = static_cast<int>(fp.size + 0.5);
++        // The minus one is done because since Scintilla uses SC_CHARSET_DEFAULT
++        // internally and we need to have wxFONENCODING_DEFAULT == SC_SHARSET_DEFAULT
++        // so we adjust the encoding before passing it to Scintilla.
++        wxFontEncoding encoding = (wxFontEncoding)(fp.characterSet - 1);
++
++        wxFontEncodingArray ea = wxEncodingConverter::GetPlatformEquivalents(encoding, wxPLATFORM_CURRENT);
++        if (ea.GetCount())
++            encoding = ea[0];
++
++        weight = (fp.weight <= 300) ? 1 : ((fp.weight >= 700) ? 2 : 0);
++        italic  = fp.italic;
++        antialiased = (fp.extraFontFlag != 1);
++
++        hashcode =  (weight << 28) + ((encoding & 0xfff) << 16) + ((fontSize & 0xff) << 8) + static_cast<int>(facename[0]);
++        if (italic) hashcode |= 1 << 30;
++        if (antialiased) hashcode  |= 1 << 31;
++}
++
++CachedFont::FontLOG::~FontLOG() {
++    if (facename != NULL) {
++        free(facename);
++        facename = NULL;
++    }
++}
++
++bool CachedFont::FontLOG::IsSameAs(const CachedFont::FontLOG* other) const
+ {
+-    return wxFontWithAscent::FromFID(f.GetID())->GetAscent();
++    return ((hashcode == other->hashcode) &&
++            (fontSize == other->fontSize) && (::strcmp(facename, other->facename) == 0));
+ }
+ 
+-} // anonymous namespace
++wxFont* CachedFont::FontLOG::CreatFont() const {
++    wxFontInfo info =
++        wxFontInfo(fontSize).FaceName(stc2wx(facename)).Encoding(encoding).AntiAliased(antialiased).Italic(italic);
+ 
+-Font::Font() {
+-    fid = 0;
++    if (weight == 1)
++        info = info.Light();
++    else if (weight == 2) info = info.Bold();
++
++    return new wxFont(info);
+ }
+ 
+-Font::~Font() {
++FontID CachedFont::FindOrCreate(CachedFont* font, const FontParameters &fp) {
++    wxFont*  result  = NULL;
++    FontLOG* flog    = new FontLOG(fp);
++
++    wxCriticalSectionLocker locker(cachedFontCriticalSection);
++
++    if (first != NULL) {
++        for (CachedFont* cur=first; cur; cur=cur->next) {
++            if (flog->IsSameAs(cur->fontLog)) {
++                result = static_cast<wxFont*>(cur->fid);
++                (cur->refCounter)++;
++                break;
++            }
++		}
++	};
++
++	if (result == NULL) {
++        result = flog->CreatFont();
++        font->fontLog = flog;
++        font->refCounter = 1;
++        font->next = first;
++        first = font;
++    };
++
++    return result;
+ }
+ 
+-void Font::Create(const FontParameters &fp) {
+-    Release();
++void CachedFont::ReleaseId(CachedFont* font) {
++	//
++	wxCriticalSectionLocker locker(cachedFontCriticalSection);
+ 
+-    // The minus one is done because since Scintilla uses SC_CHARSET_DEFAULT
+-    // internally and we need to have wxFONENCODING_DEFAULT == SC_SHARSET_DEFAULT
+-    // so we adjust the encoding before passing it to Scintilla.  See also
+-    // wxStyledTextCtrl::StyleSetCharacterSet
+-    wxFontEncoding encoding = (wxFontEncoding)(fp.characterSet-1);
++	if (first != NULL) {
++        CachedFont** pcur=&first;
++        for (CachedFont* cur=first; cur; cur=cur->next) {
++            if (cur->fid == font->fid) {
++                (cur->refCounter)--;
++                if (cur->refCounter == 0) {
++                    *pcur = cur->next;
++                    cur->next = 0;
++                    delete cur;
++                }
++                break;
++            }
++            pcur=&cur->next;
++        }
++	}
++}
+ 
+-    wxFontEncodingArray ea = wxEncodingConverter::GetPlatformEquivalents(encoding);
+-    if (ea.GetCount())
+-        encoding = ea[0];
++wxFontMetrics* CachedFont::SetMetrics(const wxFontMetrics& metrics_) {
+ 
+-    wxFontWeight weight;
+-    if (fp.weight <= 300)
+-        weight = wxFONTWEIGHT_LIGHT;
+-    else if (fp.weight >= 700)
+-        weight = wxFONTWEIGHT_BOLD;
+-    else
+-        weight = wxFONTWEIGHT_NORMAL;
++    wxCriticalSectionLocker locker(cachedFontCriticalSection);
+ 
+-    wxFont font(fp.size,
+-        wxFONTFAMILY_DEFAULT,
+-        fp.italic ? wxFONTSTYLE_ITALIC :  wxFONTSTYLE_NORMAL,
+-        weight,
+-        false,
+-        stc2wx(fp.faceName),
+-        encoding);
+-    fid = new wxFontWithAscent(font);
++    if (metrics == NULL) metrics = new wxFontMetrics();
++
++    *metrics = metrics_;
++
++    return metrics;
+ }
+ 
++} // anonymous namespace
+ 
++Font::Font() : fid(NULL) {
++}
++
++Font::~Font() {
++}
++
++void Font::Create(const FontParameters &fp) {
++	if (fp.faceName) {
++        Release();
++		fid = CachedFont::FindOrCreate(static_cast<CachedFont*>(this), fp);
++	}
++}
++
+ void Font::Release() {
+-    if (fid)
+-        delete wxFontWithAscent::FromFID(fid);
+-    fid = 0;
++	if (fid) {
++		CachedFont::ReleaseId(static_cast<CachedFont*>(this));
++		fid = NULL;
++	}
+ }
+ 
+ //----------------------------------------------------------------------
+@@ -213,9 +332,9 @@
+ 
+     virtual void SetUnicodeMode(bool unicodeMode_) wxOVERRIDE;
+     virtual void SetDBCSMode(int codePage) wxOVERRIDE;
+-
++private :
+     void BrushColour(ColourDesired back);
+-    void SetFont(Font &font_);
++    wxFontMetrics* GetFontMetrics(Font& font) const;
+ };
+ 
+ 
+@@ -289,10 +408,23 @@
+     hdc->SetBrush(wxBrush(wxColourFromCD(back)));
+ }
+ 
+-void SurfaceImpl::SetFont(Font &font_) {
+-  if (font_.GetID()) {
+-      hdc->SetFont(*((wxFont*)font_.GetID()));
++wxFontMetrics* SurfaceImpl::GetFontMetrics(Font& font) const
++{
++    wxFontMetrics* result = static_cast<CachedFont&>(font).GetMetrics();
++    if (result == NULL) {
++        // Currently, hdc->GetFontMetrics() returns correct results only under wxMSW,
++        // in the other ports the internal leading will always be 0
++        // and the average character width will be computed as the width of the character 'x'.
++        wxFontMetrics m = hdc->GetFontMetrics();
++
++        #ifndef __WXMSW__
++        hdc->SetFont(static _cast<wxFont*>(font.GetID()));
++        m.averageWidth = hdc->GetCharWidth();
++        #endif // __WXMSW__
++        result = static_cast<CachedFont&>(font).SetMetrics(m);
+     }
++
++    return result;
+ }
+ 
+ int SurfaceImpl::LogPixelsY() {
+@@ -507,7 +639,7 @@
+ void SurfaceImpl::DrawTextNoClip(PRectangle rc, Font &font, XYPOSITION ybase,
+                                  const char *s, int len,
+                                  ColourDesired fore, ColourDesired back) {
+-    SetFont(font);
++    hdc->SetFont(*static_cast<wxFont*>(font.GetID()));
+     hdc->SetTextForeground(wxColourFromCD(fore));
+     hdc->SetTextBackground(wxColourFromCD(back));
+     FillRectangle(rc, back);
+@@ -514,13 +646,13 @@
+ 
+     // ybase is where the baseline should be, but wxWin uses the upper left
+     // corner, so I need to calculate the real position for the text...
+-    hdc->DrawText(stc2wx(s, len), rc.left, ybase - GetAscent(font));
++    hdc->DrawText(stc2wx(s, len), rc.left, ybase - Ascent(font));
+ }
+ 
+ void SurfaceImpl::DrawTextClipped(PRectangle rc, Font &font, XYPOSITION ybase,
+                                   const char *s, int len,
+                                   ColourDesired fore, ColourDesired back) {
+-    SetFont(font);
++    hdc->SetFont(*static_cast<wxFont*>(font.GetID()));
+     hdc->SetTextForeground(wxColourFromCD(fore));
+     hdc->SetTextBackground(wxColourFromCD(back));
+     FillRectangle(rc, back);
+@@ -527,7 +659,7 @@
+     hdc->SetClippingRegion(wxRectFromPRectangle(rc));
+ 
+     // see comments above
+-    hdc->DrawText(stc2wx(s, len), rc.left, ybase - GetAscent(font));
++    hdc->DrawText(stc2wx(s, len), rc.left, ybase - Ascent(font));
+     hdc->DestroyClippingRegion();
+ }
+ 
+@@ -536,13 +668,13 @@
+                                       const char *s, int len,
+                                       ColourDesired fore) {
+ 
+-    SetFont(font);
++    hdc->SetFont(*static_cast<wxFont*>(font.GetID()));
+     hdc->SetTextForeground(wxColourFromCD(fore));
+     hdc->SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
+ 
+     // ybase is where the baseline should be, but wxWin uses the upper left
+     // corner, so I need to calculate the real position for the text...
+-    hdc->DrawText(stc2wx(s, len), rc.left, ybase - GetAscent(font));
++    hdc->DrawText(stc2wx(s, len), rc.left, ybase - Ascent(font));
+ 
+     hdc->SetBackgroundMode(wxBRUSHSTYLE_SOLID);
+ }
+@@ -553,7 +685,7 @@
+     wxString   str = stc2wx(s, len);
+     wxArrayInt tpos;
+ 
+-    SetFont(font);
++    hdc->SetFont(*static_cast<wxFont*>(font.GetID()));
+ 
+     hdc->GetPartialTextExtents(str, tpos);
+ 
+@@ -594,62 +726,46 @@
+ 
+ 
+ XYPOSITION SurfaceImpl::WidthText(Font &font, const char *s, int len) {
+-    SetFont(font);
+     int w;
+     int h;
+ 
+-    hdc->GetTextExtent(stc2wx(s, len), &w, &h);
++    hdc->GetTextExtent(stc2wx(s, len), &w, &h, NULL, NULL, static_cast<wxFont*>(font.GetID()));
+     return w;
+ }
+ 
+ 
+ XYPOSITION SurfaceImpl::WidthChar(Font &font, char ch) {
+-    SetFont(font);
+     int w;
+     int h;
+     char s[2] = { ch, 0 };
+ 
+-    hdc->GetTextExtent(stc2wx(s, 1), &w, &h);
++    hdc->GetTextExtent(stc2wx(s, 1), &w, &h, NULL, NULL, static_cast<wxFont*>(font.GetID()));
+     return w;
+ }
+ 
+-#define EXTENT_TEST wxT(" `~!@#$%^&*()-_=+\\|[]{};:\"\'<,>.?/1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
++XYPOSITION SurfaceImpl::Ascent(Font &font) {
+ 
+-XYPOSITION SurfaceImpl::Ascent(Font &font) {
+-    SetFont(font);
+-    int w, h, d, e;
+-    hdc->GetTextExtent(EXTENT_TEST, &w, &h, &d, &e);
+-    const int ascent = h - d;
+-    SetAscent(font, ascent);
+-    return ascent;
++    return GetFontMetrics(font)->ascent;
+ }
+ 
+ XYPOSITION SurfaceImpl::Descent(Font &font) {
+-    SetFont(font);
+-    int w, h, d, e;
+-    hdc->GetTextExtent(EXTENT_TEST, &w, &h, &d, &e);
+-    return d;
++
++    return GetFontMetrics(font)->descent;
+ }
+ 
+-XYPOSITION SurfaceImpl::InternalLeading(Font &WXUNUSED(font)) {
+-    return 0;
++XYPOSITION SurfaceImpl::InternalLeading(Font& font) {
++
++    return GetFontMetrics(font)->internalLeading;
+ }
+ 
+ XYPOSITION SurfaceImpl::ExternalLeading(Font &font) {
+-    SetFont(font);
+-    int w, h, d, e;
+-    hdc->GetTextExtent(EXTENT_TEST, &w, &h, &d, &e);
+-    return e;
++
++    return GetFontMetrics(font)->externalLeading;
+ }
+ 
+ XYPOSITION SurfaceImpl::Height(Font &font) {
+-    SetFont(font);
+-    return hdc->GetCharHeight() + 1;
+-}
+ 
+-XYPOSITION SurfaceImpl::AverageCharWidth(Font &font) {
+-    SetFont(font);
+-    return hdc->GetCharWidth();
++    return GetFontMetrics(font)->height;
+ }
+ 
+ void SurfaceImpl::SetClip(PRectangle rc) {

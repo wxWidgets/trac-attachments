@@ -1,0 +1,143 @@
+diff --git a/src/stc/PlatWX.cpp b/src/stc/PlatWX.cpp
+index 9530470..637e5e0 100644
+--- a/src/stc/PlatWX.cpp
++++ b/src/stc/PlatWX.cpp
+@@ -75,9 +75,29 @@ wxColour wxColourFromCDandAlpha(ColourDesired& cd, int alpha) {
+ 
+ //----------------------------------------------------------------------
+ 
++namespace
++{
++
++// wxFont with ascent cached
++class wxFontWithAscent : public wxFont
++{
++    int ascent;
++
++public:
++    wxFontWithAscent(const wxFont &font) : wxFont(font), ascent(0) {}
++    virtual ~wxFontWithAscent() {}
++
++    friend int &CachedAscent(Font &font);
++};
++
++int &CachedAscent(Font &font) {
++    return static_cast<wxFontWithAscent*>(font.GetID())->ascent;
++}
++
++} // anonymous namespace
++
+ Font::Font() {
+     fid = 0;
+-    ascent = 0;
+ }
+ 
+ Font::~Font() {
+@@ -104,20 +124,20 @@ void Font::Create(const FontParameters &fp) {
+     else
+         weight = wxFONTWEIGHT_NORMAL;
+ 
+-    wxFont* font = new wxFont(fp.size,
+-                              wxFONTFAMILY_DEFAULT,
+-                              fp.italic ? wxFONTSTYLE_ITALIC :  wxFONTSTYLE_NORMAL,
+-                              weight,
+-                              false,
+-                              stc2wx(fp.faceName),
+-                              encoding);
+-    fid = font;
++    wxFont font(fp.size,
++		wxFONTFAMILY_DEFAULT,
++		fp.italic ? wxFONTSTYLE_ITALIC :  wxFONTSTYLE_NORMAL,
++		weight,
++		false,
++		stc2wx(fp.faceName),
++		encoding);
++    fid = new wxFontWithAscent(font);
+ }
+ 
+ 
+ void Font::Release() {
+     if (fid)
+-        delete (wxFont*)fid;
++        delete static_cast<wxFontWithAscent*>(fid);
+     fid = 0;
+ }
+ 
+@@ -478,7 +498,7 @@ void SurfaceImpl::DrawTextNoClip(PRectangle rc, Font &font, XYPOSITION ybase,
+ 
+     // ybase is where the baseline should be, but wxWin uses the upper left
+     // corner, so I need to calculate the real position for the text...
+-    hdc->DrawText(stc2wx(s, len), rc.left, ybase - font.ascent);
++    hdc->DrawText(stc2wx(s, len), rc.left, ybase - CachedAscent(font));
+ }
+ 
+ void SurfaceImpl::DrawTextClipped(PRectangle rc, Font &font, XYPOSITION ybase,
+@@ -491,7 +511,7 @@ void SurfaceImpl::DrawTextClipped(PRectangle rc, Font &font, XYPOSITION ybase,
+     hdc->SetClippingRegion(wxRectFromPRectangle(rc));
+ 
+     // see comments above
+-    hdc->DrawText(stc2wx(s, len), rc.left, ybase - font.ascent);
++    hdc->DrawText(stc2wx(s, len), rc.left, ybase - CachedAscent(font));
+     hdc->DestroyClippingRegion();
+ }
+ 
+@@ -506,7 +526,7 @@ void SurfaceImpl::DrawTextTransparent(PRectangle rc, Font &font, XYPOSITION ybas
+ 
+     // ybase is where the baseline should be, but wxWin uses the upper left
+     // corner, so I need to calculate the real position for the text...
+-    hdc->DrawText(stc2wx(s, len), rc.left, ybase - font.ascent);
++    hdc->DrawText(stc2wx(s, len), rc.left, ybase - CachedAscent(font));
+ 
+     hdc->SetBackgroundMode(wxBRUSHSTYLE_SOLID);
+ }
+@@ -583,8 +603,9 @@ XYPOSITION SurfaceImpl::Ascent(Font &font) {
+     SetFont(font);
+     int w, h, d, e;
+     hdc->GetTextExtent(EXTENT_TEST, &w, &h, &d, &e);
+-    font.ascent = h - d;
+-    return font.ascent;
++    int ascent = h - d;
++    CachedAscent(font) = ascent;
++    return ascent;
+ }
+ 
+ XYPOSITION SurfaceImpl::Descent(Font &font) {
+diff --git a/src/stc/scintilla/include/Platform.h b/src/stc/scintilla/include/Platform.h
+index 4bba252..7c6875e 100644
+--- a/src/stc/scintilla/include/Platform.h
++++ b/src/stc/scintilla/include/Platform.h
+@@ -266,9 +266,7 @@ struct FontParameters {
+ class Font {
+ protected:
+ 	FontID fid;
+-#if PLAT_WX
+-	int ascent;
+-#endif
++
+ 	// Private so Font objects can not be copied
+ 	Font(const Font &);
+ 	Font &operator=(const Font &);
+@@ -282,9 +280,7 @@ public:
+ 	FontID GetID() { return fid; }
+ 	// Alias another font - caller guarantees not to Release
+ 	void SetID(FontID fid_) { fid = fid_; }
+-#if PLAT_WX
+-	void SetAscent(int ascent_) { ascent = ascent_; }
+-#endif
++
+ 	friend class Surface;
+ 	friend class SurfaceImpl;
+ };
+diff --git a/src/stc/scintilla/src/Style.cxx b/src/stc/scintilla/src/Style.cxx
+index 10fc0d2..ba3f97c 100644
+--- a/src/stc/scintilla/src/Style.cxx
++++ b/src/stc/scintilla/src/Style.cxx
+@@ -163,8 +163,5 @@ void Style::ClearTo(const Style &source) {
+ 
+ void Style::Copy(Font &font_, const FontMeasurements &fm_) {
+ 	font.MakeAlias(font_);
+-#if PLAT_WX
+-	font.SetAscent(fm_.ascent);
+-#endif
+ 	(FontMeasurements &)(*this) = fm_;
+ }

@@ -1,0 +1,158 @@
+--- orig/src/gtk/app.cpp	2003-09-21 13:31:56.000000000 +0200
++++ new/src/gtk/app.cpp	2006-02-07 17:15:48.000000000 +0100
+@@ -34,6 +34,7 @@
+ 
+ #include "wx/module.h"
+ #include "wx/image.h"
++#include "wx/thread.h"
+ 
+ #ifdef __WXUNIVERSAL__
+     #include "wx/univ/theme.h"
+@@ -96,6 +97,10 @@
+ 
+ void wxapp_install_idle_handler();
+ 
++#if wxUSE_THREADS
++static wxMutex gs_idleTagsMutex;
++#endif
++
+ //-----------------------------------------------------------------------------
+ // wxExit
+ //-----------------------------------------------------------------------------
+@@ -136,14 +141,9 @@
+ 
+     wxIsInsideYield = TRUE;
+ 
+-    if (!g_isIdle)
+-    {
+-        // We need to remove idle callbacks or the loop will
+-        // never finish.
+-        gtk_idle_remove( m_idleTag );
+-        m_idleTag = 0;
+-        g_isIdle = TRUE;
+-    }
++    // We need to remove idle callbacks or the loop will
++    // never finish.
++    wxTheApp->RemoveIdleTag();
+ 
+     // disable log flushing from here because a call to wxYield() shouldn't
+     // normally result in message boxes popping up &c
+@@ -172,22 +172,16 @@
+ // wxWakeUpIdle
+ //-----------------------------------------------------------------------------
+ 
+-static bool gs_WakeUpIdle = false;
+-
+ void wxWakeUpIdle()
+ {
+-#if wxUSE_THREADS
++#if wxUSE_THREADS && !GTK_CHECK_VERSION(2,0,0)
+     if (!wxThread::IsMain())
+         wxMutexGuiEnter();
+ #endif
+ 
+-    if (g_isIdle) {
+-        gs_WakeUpIdle = true;
+-        wxapp_install_idle_handler();
+-        gs_WakeUpIdle = false;
+-    }
++    wxapp_install_idle_handler();
+ 
+-#if wxUSE_THREADS
++#if wxUSE_THREADS && !GTK_CHECK_VERSION(2,0,0)
+     if (!wxThread::IsMain())
+         wxMutexGuiLeave();
+ #endif
+@@ -213,7 +207,12 @@
+     // Sent idle event to all who request them.
+     wxTheApp->ProcessPendingEvents();
+ 
+-    g_pendingTag = 0;
++    {
++#if wxUSE_THREADS
++        wxMutexLocker lock(gs_idleTagsMutex);
++#endif
++        g_pendingTag = 0;
++    }
+ 
+     // Flush the logged messages if any.
+ #if wxUSE_LOG
+@@ -257,8 +256,13 @@
+ 
+     // Indicate that we are now in idle mode and event handlers
+     // will have to reinstall the idle handler again.
+-    g_isIdle = TRUE;
+-    wxTheApp->m_idleTag = 0;
++    {
++#if wxUSE_THREADS
++        wxMutexLocker lock(gs_idleTagsMutex);
++#endif
++        g_isIdle = TRUE;
++        wxTheApp->m_idleTag = 0;
++    }
+ 
+     // Send idle event to all who request them as long as
+     // no events have popped up in the event queue.
+@@ -366,6 +369,17 @@
+ 
+ void wxapp_install_idle_handler()
+ {
++#if wxUSE_THREADS
++    wxMutexLocker lock(gs_idleTagsMutex);
++#endif
++
++    // Don't install the handler if it's already installed. This test *MUST*
++    // be done when gs_idleTagsMutex is locked!
++    if (!g_isIdle)
++        return;
++
++    g_isIdle = FALSE;
++
+     // GD: this assert is raised when using the thread sample (which works)
+     //     so the test is probably not so easy. Can widget callbacks be 
+     //     triggered from child threads and, if so, for which widgets?
+@@ -373,8 +387,6 @@
+ 
+     wxASSERT_MSG( wxTheApp->m_idleTag == 0, wxT("attempt to install idle handler twice") );
+ 
+-    g_isIdle = FALSE;
+-
+     if (g_pendingTag == 0)
+         g_pendingTag = gtk_idle_add_priority( 900, wxapp_pending_callback, (gpointer) NULL );
+ 
+@@ -418,6 +430,7 @@
+ #endif // __WXDEBUG__
+ 
+     m_idleTag = 0;
++    g_isIdle = TRUE;
+     wxapp_install_idle_handler();
+ 
+ #if wxUSE_THREADS
+@@ -965,3 +978,15 @@
+ 
+ #endif // __WXDEBUG__
+ 
++void wxApp::RemoveIdleTag()
++{
++#if wxUSE_THREADS
++    wxMutexLocker lock(gs_idleTagsMutex);
++#endif
++    if (!g_isIdle)
++    {
++        gtk_idle_remove( wxTheApp->m_idleTag );
++        wxTheApp->m_idleTag = 0;
++        g_isIdle = TRUE;
++    }
++}
+--- orig/include/wx/gtk/app.h	2006-01-31 17:19:13.000000000 +0100
++++ new/include/wx/gtk/app.h	2006-01-31 16:35:46.000000000 +0100
+@@ -88,6 +88,7 @@
+ #endif // __WXDEBUG__
+ 
+     bool CallInternalIdle( wxWindow* win );
++    void RemoveIdleTag();
+     DECLARE_DYNAMIC_CLASS(wxApp)
+     DECLARE_EVENT_TABLE()
+ };
+
+ 	  	 

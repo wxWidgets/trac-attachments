@@ -1,0 +1,118 @@
+Index: include/wx/msw/msgdlg.h
+===================================================================
+--- include/wx/msw/msgdlg.h	(revision 50313)
++++ include/wx/msw/msgdlg.h	(working copy)
+@@ -14,20 +14,23 @@
+ 
+ class WXDLLEXPORT wxMessageDialog : public wxMessageDialogBase
+ {
++protected:
++    WXHANDLE m_hook; // HHOOK
++
+ public:
+     wxMessageDialog(wxWindow *parent,
+                     const wxString& message,
+                     const wxString& caption = wxMessageBoxCaptionStr,
+                     long style = wxOK|wxCENTRE,
+                     const wxPoint& WXUNUSED(pos) = wxDefaultPosition)
+-        : wxMessageDialogBase(parent, message, caption, style)
++        : wxMessageDialogBase(parent, message, caption, style), m_hook(NULL)
+     {
+     }
+ 
+ 
+     virtual int ShowModal();
+-
+ protected:
++    static WXLRESULT wxCALLBACK HookFunction(int code, WXWPARAM, WXLPARAM);
+     DECLARE_DYNAMIC_CLASS(wxMessageDialog)
+     DECLARE_NO_COPY_CLASS(wxMessageDialog)
+ };
+Index: samples/dialogs/dialogs.cpp
+===================================================================
+--- samples/dialogs/dialogs.cpp	(revision 50313)
++++ samples/dialogs/dialogs.cpp	(working copy)
+@@ -650,10 +650,10 @@
+ #if wxUSE_MSGDLG
+ void MyFrame::MessageBox(wxCommandEvent& WXUNUSED(event) )
+ {
+-    wxMessageDialog dialog(NULL,
++    wxMessageDialog dialog(this,
+                            _T("This is a message box\nA long, long string to test out the message box properly"),
+                            _T("Message box text"),
+-                           wxNO_DEFAULT | wxYES_NO | wxCANCEL | wxICON_INFORMATION);
++                           wxCENTER | wxNO_DEFAULT | wxYES_NO | wxCANCEL | wxICON_INFORMATION);
+ 
+     if ( dialog.SetYesNoLabels(_T("Answer &Yes"),_T("Answer &No")) )
+     {
+Index: src/msw/msgdlg.cpp
+===================================================================
+--- src/msw/msgdlg.cpp	(revision 50313)
++++ src/msw/msgdlg.cpp	(working copy)
+@@ -35,6 +35,54 @@
+ 
+ IMPLEMENT_CLASS(wxMessageDialog, wxDialog)
+ 
++// potentially one per thread 
++WX_DECLARE_HASH_MAP(unsigned long, wxMessageDialog*, wxIntegerHash, wxIntegerEqual,
++                    wxMessageDialogMap);
++
++static wxMessageDialogMap& HookMap()
++{
++    static wxMessageDialogMap s_Map;
++
++    return s_Map;
++}
++
++/*static*/ WXLRESULT wxCALLBACK wxMessageDialog::HookFunction(int code, WXWPARAM wParam, WXLPARAM lParam)
++{
++    // Find the thread-local instance of wxMessageDialog
++
++    DWORD threadid = ::GetCurrentThreadId();
++    wxMessageDialogMap::iterator node = ::HookMap().find(threadid);
++    wxCHECK_MSG( node != ::HookMap().end(), false, wxT("bogus thread id in wxMessageDialog::Hook") );
++    wxMessageDialog* wnd = node->second;
++    wxASSERT(wxIS_KIND_OF(wnd, wxMessageDialog));
++    
++    LRESULT lr = ::CallNextHookEx((HHOOK)wnd->m_hook, code, wParam, lParam);
++    
++    if ((code >= 0) && lParam)
++    {
++        const CWPRETSTRUCT* s = (CWPRETSTRUCT*)lParam;
++
++        switch (s->message)
++        {
++            case HCBT_ACTIVATE:
++                ::UnhookWindowsHookEx((HHOOK)wnd->m_hook);
++                wnd->m_hook = NULL;
++                ::HookMap().erase(threadid);
++                if (wnd->GetMessageDialogStyle() & wxCENTER)
++                {
++                    wnd->SetHWND(s->hwnd);
++                    wnd->Center(); // center on parent
++                    wnd->SetHWND(NULL);
++                }
++                // else default behaviour, center on screen
++                break;
++            default:
++                break;
++        }
++    }
++    return lr;
++}
++
+ int wxMessageDialog::ShowModal()
+ {
+     if ( !wxTheApp->GetTopWindow() )
+@@ -111,6 +159,9 @@
+ #endif // wxUSE_UNICODE
+ 
+     // do show the dialog
++    DWORD threadid = ::GetCurrentThreadId();
++    m_hook = ::SetWindowsHookEx(WH_CALLWNDPROCRET, HookFunction, NULL, threadid);
++    HookMap()[threadid] = this;
+     int msAns = MessageBox(hWnd, message.wx_str(), m_caption.wx_str(), msStyle);
+     int ans;
+     switch (msAns)
+
+ 	  	 

@@ -1,0 +1,194 @@
+Index: include/wx/docview.h
+===================================================================
+--- include/wx/docview.h	(revision 62582)
++++ include/wx/docview.h	(working copy)
+@@ -369,8 +369,11 @@
+     void OnFileRevert(wxCommandEvent& event);
+     void OnFileSave(wxCommandEvent& event);
+     void OnFileSaveAs(wxCommandEvent& event);
++#if wxUSE_PRINTING_ARCHITECTURE
+     void OnPrint(wxCommandEvent& event);
+     void OnPreview(wxCommandEvent& event);
++    void OnPageSetup(wxCommandEvent& event);
++#endif // wxUSE_PRINTING_ARCHITECTURE
+     void OnUndo(wxCommandEvent& event);
+     void OnRedo(wxCommandEvent& event);
+ 
+@@ -476,6 +479,12 @@
+     wxDEPRECATED( size_t GetNoHistoryFiles() const );
+ #endif // WXWIN_COMPATIBILITY_2_6
+ 
++#if wxUSE_PRINTING_ARCHITECTURE
++    bool PageSetupDialog(wxWindow* parent);
++    bool DoPrint(wxWindow* parent, wxPrintout*);
++    bool DoPreview(wxWindow* parent, wxPrintout *printout, wxPrintout *printoutForPrinting = (wxPrintout *) NULL);
++#endif // wxUSE_PRINTING_ARCHITECTURE
++
+ protected:
+     // hook the currently active view into event handlers chain here
+     virtual bool TryBefore(wxEvent& event);
+@@ -501,6 +510,10 @@
+     DECLARE_EVENT_TABLE()
+     DECLARE_DYNAMIC_CLASS(wxDocManager)
+     wxDECLARE_NO_COPY_CLASS(wxDocManager);
++private:
++#if wxUSE_PRINTING_ARCHITECTURE
++    wxPageSetupDialogData m_printdlgdata;
++#endif // wxUSE_PRINTING_ARCHITECTURE
+ };
+ 
+ #if WXWIN_COMPATIBILITY_2_6
+Index: interface/wx/docview.h
+===================================================================
+--- interface/wx/docview.h	(revision 62582)
++++ interface/wx/docview.h	(working copy)
+@@ -716,6 +716,27 @@
+         existing documents are closed. By default, this is 10,000.
+     */
+     int m_maxDocsOpen;
++
++    /**
++        Show the page setup dialog, using the printer settings in m_printdlgdata
++
++        @since 2.9.1
++    */
++    bool PageSetupDialog(wxWindow* parent);
++
++    /**
++        Print out something using the printer settings held by wxDocManager, in m_printdlgdata.
++
++        @since 2.9.1
++    */
++    bool DoPrint(wxWindow* parent, wxPrintout*);
++
++    /**
++        Preview something using the printer settings held by wxDocManager, in m_printdlgdata.
++
++        @since 2.9.1
++    */
++    bool DoPreview(wxWindow* parent, wxPrintout *printout, wxPrintout *printoutForPrinting = (wxPrintout *) NULL);
+ };
+ 
+ 
+Index: src/common/docview.cpp
+===================================================================
+--- src/common/docview.cpp	(revision 62582)
++++ src/common/docview.cpp	(working copy)
+@@ -897,6 +897,8 @@
+ #if wxUSE_PRINTING_ARCHITECTURE
+     EVT_MENU(wxID_PRINT, wxDocManager::OnPrint)
+     EVT_MENU(wxID_PREVIEW, wxDocManager::OnPreview)
++    EVT_MENU(wxID_PAGE_SETUP, wxDocManager::OnPageSetup)
++    EVT_MENU(wxID_PRINT_SETUP, wxDocManager::OnPageSetup)
+ 
+     EVT_UPDATE_UI(wxID_PRINT, wxDocManager::OnUpdateDisableIfNoDoc)
+     EVT_UPDATE_UI(wxID_PREVIEW, wxDocManager::OnUpdateDisableIfNoDoc)
+@@ -1080,9 +1082,61 @@
+     doc->SaveAs();
+ }
+ 
++#if wxUSE_PRINTING_ARCHITECTURE
++bool wxDocManager::PageSetupDialog(wxWindow* parent)
++{
++   wxBusyCursor wait;
++   wxPageSetupDialog dlg(parent, &m_printdlgdata);
++   bool ok = (wxID_OK == dlg.ShowModal());
++   if (ok)
++   {
++      m_printdlgdata = dlg.GetPageSetupData();
++   }
++   return ok;
++}
++
++bool wxDocManager::DoPrint(wxWindow* parent, wxPrintout* printout)
++{
++     wxPrintDialogData printDialogData(m_printdlgdata.GetPrintData());
++     wxPrinter printer (&printDialogData);
++     bool ok = printer.Print(parent, printout, true);
++     if (ok)
++     {
++        m_printdlgdata.SetPrintData(printer.GetPrintDialogData().GetPrintData());
++     }
++     return ok;
++}
++
++bool wxDocManager::DoPreview(wxWindow* parent, wxPrintout *printout, wxPrintout* printoutForPrinting)
++{
++     wxPrintDialogData printDialogData(m_printdlgdata.GetPrintData());
++     // Pass two printout objects: for preview, and possible printing.
++     wxPrintPreviewBase *preview = new wxPrintPreview(printout, printoutForPrinting, &printDialogData);
++    bool ok = preview->IsOk();
++    if (ok)
++    {
++        wxPreviewFrame *
++           frame = new wxPreviewFrame(preview, parent,
++                                    _("Print Preview"));
++        frame->Centre(wxBOTH);
++        frame->Initialize();
++        frame->Show(true);
++    }
++    else
++    {
++       delete preview;
++       wxLogError(_("Print preview creation failed."));
++    }
++    return ok;
++}
++
++void wxDocManager::OnPageSetup(wxCommandEvent&)
++{
++   PageSetupDialog(wxTheApp->GetTopWindow());
++}
++
+ void wxDocManager::OnPrint(wxCommandEvent& WXUNUSED(event))
+ {
+-#if wxUSE_PRINTING_ARCHITECTURE
+     wxView *view = GetActiveView();
+     if (!view)
+         return;
+@@ -1090,17 +1144,13 @@
+     wxPrintout *printout = view->OnCreatePrintout();
+     if (printout)
+     {
+-        wxPrinter printer;
+-        printer.Print(view->GetFrame(), printout, true);
+-
++        DoPrint(view->GetFrame(), printout);
+         delete printout;
+     }
+-#endif // wxUSE_PRINTING_ARCHITECTURE
+ }
+ 
+ void wxDocManager::OnPreview(wxCommandEvent& WXUNUSED(event))
+ {
+-#if wxUSE_PRINTING_ARCHITECTURE
+     wxBusyCursor busy;
+     wxView *view = GetActiveView();
+     if (!view)
+@@ -1110,24 +1160,10 @@
+     if (printout)
+     {
+         // Pass two printout objects: for preview, and possible printing.
+-        wxPrintPreviewBase *
+-            preview = new wxPrintPreview(printout, view->OnCreatePrintout());
+-        if ( !preview->Ok() )
+-        {
+-            delete preview;
+-            wxLogError(_("Print preview creation failed."));
+-            return;
+-        }
+-
+-        wxPreviewFrame *
+-            frame = new wxPreviewFrame(preview, wxTheApp->GetTopWindow(),
+-                                       _("Print Preview"));
+-        frame->Centre(wxBOTH);
+-        frame->Initialize();
+-        frame->Show(true);
++        DoPreview(wxTheApp->GetTopWindow(), printout, view->OnCreatePrintout());
+     }
++}
+ #endif // wxUSE_PRINTING_ARCHITECTURE
+-}
+ 
+ void wxDocManager::OnUndo(wxCommandEvent& event)
+ {

@@ -1,0 +1,125 @@
+Index: samples/opengl/penguin/penguin.cpp
+===================================================================
+--- samples/opengl/penguin/penguin.cpp	(revision 54028)
++++ samples/opengl/penguin/penguin.cpp	(working copy)
+@@ -141,13 +141,22 @@
+     EVT_MOUSE_EVENTS(TestGLCanvas::OnMouse)
+ END_EVENT_TABLE()
+ 
++// MultiSample example
++#define GL_MULTISAMPLE_ARB                0x809D
++int attribList[] = {WX_GL_RGBA, WX_GL_DOUBLEBUFFER, 
++        WX_GL_SAMPLE_BUFFERS, GL_TRUE, 
++        WX_GL_SAMPLES, 4, 
++        WX_GL_DEPTH_SIZE, 16, 
++        WX_GL_STENCIL_SIZE, 0,
++        0, 0};
++
+ TestGLCanvas::TestGLCanvas(wxWindow *parent,
+                            wxWindowID id,
+                            const wxPoint& pos,
+                            const wxSize& size,
+                            long style,
+                            const wxString& name)
+-    : wxGLCanvas(parent, id, NULL, pos, size,
++    : wxGLCanvas(parent, id, attribList, pos, size,
+                  style | wxFULL_REPAINT_ON_RESIZE, name)
+ {
+     // Explicitly create a new rendering context instance for this canvas.
+@@ -196,7 +205,9 @@
+     build_rotmatrix( m, m_gldata.quat );
+     glMultMatrixf( &m[0][0] );
+ 
++    glEnable(GL_MULTISAMPLE_ARB);
+     m_renderer.Render();
++    glDisable(GL_MULTISAMPLE_ARB);
+ 
+     // Flush
+     glFlush();
+Index: src/msw/glcanvas.cpp
+===================================================================
+--- src/msw/glcanvas.cpp	(revision 54028)
++++ src/msw/glcanvas.cpp	(working copy)
+@@ -286,6 +286,8 @@
+ // wxGLCanvas construction
+ // ----------------------------------------------------------------------------
+ 
++static int ChoosePixelFormatARB(HDC hdc, const int *attribList);
++
+ void wxGLCanvas::Init()
+ {
+ #if WXWIN_COMPATIBILITY_2_8
+@@ -356,7 +358,50 @@
+         return false;
+ 
+     if ( !DoSetup(attribList) )
++    {
++        // dirty FSAA fix
++        PIXELFORMATDESCRIPTOR pfd;
++        const int pixelFormat = ChooseMatchingPixelFormat(m_hDC, attribList, &pfd);
++        if (pixelFormat == -1)
++        {
++            wxGLContext *temp_glContext = new wxGLContext(this);
++            if (temp_glContext != NULL)
++                temp_glContext->SetCurrent(*this);
++            // Now, we have a valid handle to query for multisample support.
++            // If we find it's supported, we destroy and recreate this window, but with the new pixel format. 
++            int pixelFormat = ::ChoosePixelFormatARB(m_hDC, attribList);
++            delete temp_glContext;
++            if (pixelFormat > 0)
++            {
++                // destroy Window
++                parent->RemoveChild(this);
++                ::ReleaseDC(GetHwnd(), m_hDC);
++                m_hDC = 0;
++                HWND hwnd = GetHwnd();
++                DissociateHandle(); // will do SetHWND(0);
++                ::DestroyWindow(hwnd);
++                // recreate the window with multisample pixel format
++                if ( !wxGLModule::RegisterClasses() )
++                {
++                    wxLogError(_("Failed to register OpenGL window class."));
++                    return false;
++                }
++                if ( !CreateBase(parent, id, pos, size, style, wxDefaultValidator, name) )
++                    return false;
++                parent->AddChild(this);
++                WXDWORD exStyle = 0;
++                DWORD msflags = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
++                msflags |= MSWGetStyle(style, &exStyle);
++                if ( !MSWCreate(wxGLCanvasClassName, NULL, pos, size, msflags, exStyle) )
++                    return false;
++                m_hDC = ::GetDC(GetHwnd());
++                if ( !m_hDC )
++                    return false;
++                ::SetPixelFormat(m_hDC, pixelFormat, &pfd);
++            }
++        } else
+         return false;
++    }
+ 
+ #if wxUSE_PALETTE
+     if ( !SetupPalette(palette) )
+@@ -730,7 +775,12 @@
+             return 0;
+ 
+         case -1:
+-            return ::ChoosePixelFormatARB(hdc, attribList);
++            // dirty FSAA fix
++            {   // needed to create a valid context for FSAA
++                int validpf = ::ChoosePixelFormat(hdc, ppfd);
++                ::SetPixelFormat(hdc, validpf, ppfd);
++            }
++            return -1;
+     }
+ }
+ 
+@@ -746,6 +796,8 @@
+ {
+     PIXELFORMATDESCRIPTOR pfd;
+     const int pixelFormat = ChooseMatchingPixelFormat(m_hDC, attribList, &pfd);
++    if (pixelFormat == -1)
++        return false;
+     if ( !pixelFormat )
+     {
+         wxLogLastError(_T("ChoosePixelFormat"));

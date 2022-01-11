@@ -1,0 +1,346 @@
+Index: src/xml/xml.cpp
+===================================================================
+--- src/xml/xml.cpp	(revision 48612)
++++ src/xml/xml.cpp	(working copy)
+@@ -52,7 +52,7 @@
+                      wxXmlAttribute *attrs, wxXmlNode *next)
+     : m_type(type), m_name(name), m_content(content),
+       m_attrs(attrs), m_parent(parent),
+-      m_children(NULL), m_next(next)
++      m_children(NULL), m_next(next), m_ownerDocument(NULL)
+ {
+     if (m_parent)
+     {
+@@ -115,7 +115,7 @@
+     wxXmlNode *n = node.m_children;
+     while (n)
+     {
+-        AddChild(new wxXmlNode(*n));
++        AddChild(n->CloneNode());
+         n = n->GetNext();
+     }
+ 
+@@ -128,6 +128,17 @@
+     }
+ }
+ 
++void wxXmlNode::SetOwnerDocument(wxXmlDocument* ownerDocument)
++{
++    m_ownerDocument = ownerDocument;
++    wxXmlNode *child = GetChildren();
++    while (child)
++    {
++        child->SetOwnerDocument(ownerDocument);
++        child = child->GetNext();
++    }
++}
++
+ bool wxXmlNode::HasAttribute(const wxString& attrName) const
+ {
+     wxXmlAttribute *attr = GetAttributes();
+@@ -179,6 +190,7 @@
+     }
+     child->m_next = NULL;
+     child->m_parent = this;
++    child->SetOwnerDocument(m_ownerDocument);
+ }
+ 
+ bool wxXmlNode::InsertChild(wxXmlNode *child, wxXmlNode *before_node)
+@@ -214,6 +226,7 @@
+ 
+     child->m_parent = this;
+     child->m_next = before_node;
++    child->SetOwnerDocument(m_ownerDocument);
+     return true;
+ }
+ 
+@@ -246,6 +259,33 @@
+     }
+ }
+ 
++wxXmlNode* wxXmlNode::GetLastChild() const
++{
++    wxXmlNode* child = m_children;
++    if (child)
++    {
++        while (child->m_next)
++            child = child->m_next;
++    }
++    return child;
++}
++
++wxXmlNode* wxXmlNode::GetPreviousSibling() const
++{
++    if (!m_parent)
++        return NULL;
++    wxXmlNode* node = m_parent->m_children;
++    if (node == this || node == NULL)
++        return NULL;
++    while (node->m_next)
++    {
++        if (node->m_next == this)
++          return node;
++        node = node->m_next;
++    }
++    return NULL;
++}
++
+ void wxXmlNode::AddProperty(const wxString& name, const wxString& value)
+ {
+     AddProperty(new wxXmlAttribute(name, value, NULL));
+@@ -334,8 +374,71 @@
+     return wxIsWhiteOnly(m_content);
+ }
+ 
++wxString wxXmlNode::GetAttribute(const wxString& name)
++{
++    wxString val;
++    GetAttribute(name, &val);
++    return val;
++}
+ 
++wxString wxXmlNode::GetAttributeNS(const wxString& namespaceURI, 
++                                   const wxString& localName)
++{
++    return GetAttribute(localName);
++}
+ 
++bool wxXmlNode::SetAttribute(const wxString& name, const wxString& value)
++{
++    wxXmlAttribute *attr = GetAttributes();
++    while (attr)
++    {
++    	if (attr->GetName() == name)
++    	{
++    	  attr->SetValue(value);
++    	  return true;
++    	}
++    	attr = attr->GetNext();
++    }
++    AddProperty(name, value);
++    return true;
++}
++
++bool wxXmlNode::SetAttributeNS(const wxString& namespaceURI, 
++                               const wxString& qualifiedName, 
++                               const wxString& value)
++{
++    return SetAttribute(qualifiedName, value);
++}
++
++void wxXmlNode::RemoveAttribute(const wxString& name)
++{
++    DeleteProperty(name);
++}
++
++void wxXmlNode::RemoveAttributeNS(const wxString& namespaceURI, 
++                                  const wxString& localName)
++{
++    RemoveAttribute(localName);
++}
++
++bool wxXmlNode::HasAttributeNS(const wxString& namespaceURI, 
++                               const wxString& localName)
++{
++    return HasAttribute(localName);
++}
++
++wxXmlAttrMap wxXmlNode::GetAttributesMap() const
++{
++    wxXmlAttrMap attributes;
++    wxXmlAttribute *attr = GetAttributes();
++    while (attr)
++    {
++        attributes.Add(attr->GetName(), attr->GetValue());
++        attr = attr->GetNext();
++    }
++    return attributes;
++}
++
+ //-----------------------------------------------------------------------------
+ //  wxXmlDocument
+ //-----------------------------------------------------------------------------
+@@ -379,6 +482,26 @@
+     return *this;
+ }
+ 
++void wxXmlDocument::SetRoot(wxXmlNode *node)
++{
++    wxDELETE(m_root);
++    m_root = node;
++    if (m_root)
++          m_root->SetOwnerDocument(this);
++}
++
++wxXmlElement* wxXmlDocument::CreateElement(const wxString& tagName)
++{
++  return new wxXmlElement(wxXML_ELEMENT_NODE, tagName);
++}
++
++wxXmlElement* wxXmlDocument::CreateElementNS(const wxString& namespaceURI,
++                                               const wxString& qualifiedName)
++{
++  return CreateElement(qualifiedName);
++}
++
++
+ void wxXmlDocument::DoCopy(const wxXmlDocument& doc)
+ {
+     m_version = doc.m_version;
+Index: include/wx/xml/xml.h
+===================================================================
+--- include/wx/xml/xml.h	(revision 48612)
++++ include/wx/xml/xml.h	(working copy)
+@@ -89,6 +89,18 @@
+     #define wxXmlProperty wxXmlAttribute
+ #endif
+ 
++WX_DECLARE_STRING_HASH_MAP(wxString, wxXmlAttrMapBase);
++class wxXmlAttrMap: public wxXmlAttrMapBase
++{
++  public:
++    void Add(wxString key, wxString value) { (*this)[key] = value; }
++    void Add(const wxXmlAttrMap& value)
++    {
++      wxXmlAttrMap::const_iterator it; 
++      for(it = value.begin(); it != value.end(); ++it)
++        insert(*it);
++    }
++};
+ 
+ // Represents node in XML document. Node has name and may have content and
+ // attributes. Most common node types are wxXML_TEXT_NODE (name and attributes
+@@ -102,8 +114,8 @@
+ class WXDLLIMPEXP_XML wxXmlNode
+ {
+ public:
+-    wxXmlNode()
+-        : m_attrs(NULL), m_parent(NULL), m_children(NULL), m_next(NULL) {}
++    wxXmlNode() : m_attrs(NULL), m_parent(NULL),
++                  m_children(NULL), m_next(NULL), m_ownerDocument(NULL) {}
+     wxXmlNode(wxXmlNode *parent, wxXmlNodeType type,
+               const wxString& name, const wxString& content = wxEmptyString,
+               wxXmlAttribute *attrs = NULL, wxXmlNode *next = NULL);
+@@ -115,12 +127,18 @@
+     // On the other hand, it DOES copy children and attributes.
+     wxXmlNode(const wxXmlNode& node);
+     wxXmlNode& operator=(const wxXmlNode& node);
++    virtual wxXmlNode* CloneNode(bool deep = true) { return new wxXmlNode(*this); }
+ 
+     // user-friendly creation:
+     wxXmlNode(wxXmlNodeType type, const wxString& name,
+               const wxString& content = wxEmptyString);
+     virtual void AddChild(wxXmlNode *child);
++    inline wxXmlNode* AppendChild(wxXmlNode* child) { AddChild(child); return child; }
++	
+     virtual bool InsertChild(wxXmlNode *child, wxXmlNode *before_node);
++    inline wxXmlNode* InsertBefore(wxXmlNode *newChild, wxXmlNode *refChild)
++        { InsertChild(newChild, refChild); return newChild; }
++	
+     virtual bool RemoveChild(wxXmlNode *child);
+     virtual void AddAttribute(const wxString& name, const wxString& value)
+         { AddProperty(name, value); }
+@@ -145,12 +163,19 @@
+     wxXmlNode *GetParent() const { return m_parent; }
+     wxXmlNode *GetNext() const { return m_next; }
+     wxXmlNode *GetChildren() const { return m_children; }
++    
++    wxXmlNode* GetParentNode() const { return m_parent; }
++    wxXmlNode* GetChildNodes() const { return m_children; }
++    wxXmlNode* GetFirstChild() const { return m_children; }
++    wxXmlNode* GetLastChild() const;
++    wxXmlNode* GetPreviousSibling() const;
++    wxXmlNode* GetNextSibling() const { return m_next; }
+ 
+     wxXmlAttribute *GetAttributes() const { return m_attrs; }
+     bool GetAttribute(const wxString& attrName, wxString *value) const;
+     wxString GetAttribute(const wxString& attrName,
+                          const wxString& defaultVal) const;
+-    bool HasAttribute(const wxString& attrName) const;
++    virtual bool HasAttribute(const wxString& attrName) const;
+ 
+     void SetType(wxXmlNodeType type) { m_type = type; }
+     void SetName(const wxString& name) { m_name = name; }
+@@ -164,6 +189,26 @@
+     virtual void AddAttribute(wxXmlAttribute *attr)
+         { AddProperty(attr); }
+ 
++public: // W3C DOM Methods
++    virtual wxString GetAttribute(const wxString& name);
++    virtual wxString GetAttributeNS(const wxString& namespaceURI, 
++                                    const wxString& localName);
++    virtual bool SetAttribute(const wxString& name, const wxString& value);
++    virtual bool SetAttributeNS(const wxString& namespaceURI, 
++                                const wxString& qualifiedName, 
++                                const wxString& value);
++    virtual void RemoveAttribute(const wxString& name);
++    virtual void RemoveAttributeNS(const wxString& namespaceURI, 
++                                   const wxString& localName);
++    virtual bool HasAttributeNS(const wxString& namespaceURI, 
++                                const wxString& localName);
++    
++    virtual wxXmlAttrMap GetAttributesMap() const;
++    
++    wxXmlDocument *GetOwnerDocument() const
++        { return m_ownerDocument; }
++    void SetOwnerDocument(wxXmlDocument* ownerDocument);
++    
+ #if WXWIN_COMPATIBILITY_2_8
+     wxDEPRECATED( inline wxXmlAttribute *GetProperties() const );
+     wxDEPRECATED( inline bool GetPropVal(const wxString& propName,
+@@ -202,6 +247,7 @@
+     wxString m_content;
+     wxXmlAttribute *m_attrs;
+     wxXmlNode *m_parent, *m_children, *m_next;
++    wxXmlDocument *m_ownerDocument;
+ 
+     void DoCopy(const wxXmlNode& node);
+ };
+@@ -221,8 +267,6 @@
+     { SetAttributes(prop); }
+ #endif // WXWIN_COMPATIBILITY_2_8
+ 
+-
+-
+ // special indentation value for wxXmlDocument::Save
+ #define wxXML_NO_INDENTATION           (-1)
+ 
+@@ -233,6 +277,8 @@
+     wxXMLDOC_KEEP_WHITESPACE_NODES = 1
+ };
+ 
++typedef wxXmlNode wxXmlElement;
++typedef wxXmlAttribute wxXmlAttr;
+ 
+ // This class holds XML data/document as parsed by XML parser.
+ 
+@@ -274,7 +320,7 @@
+ 
+     // Write-access methods:
+     wxXmlNode *DetachRoot() { wxXmlNode *old=m_root; m_root=NULL; return old; }
+-    void SetRoot(wxXmlNode *node) { wxDELETE(m_root); m_root = node; }
++    void SetRoot(wxXmlNode *node);
+     void SetVersion(const wxString& version) { m_version = version; }
+     void SetFileEncoding(const wxString& encoding) { m_fileEncoding = encoding; }
+ 
+@@ -286,6 +332,18 @@
+     void SetEncoding(const wxString& enc) { m_encoding = enc; }
+ #endif
+ 
++public: // W3C DOM Methods
++    virtual wxXmlElement* CreateElement(const wxString& tagName);
++    virtual wxXmlElement* CreateElementNS(const wxString& namespaceURI,
++                                          const wxString& qualifiedName);
++
++    inline wxXmlNode* AppendChild(wxXmlNode* child)
++        { if (!m_root) SetRoot(child); return child; }
++    inline wxXmlNode* RemoveChild(wxXmlNode* child)
++        { if (m_root != child) return NULL; m_root = NULL; return child; }
++    
++    inline wxXmlNode* GetFirstChild() { return m_root; }
++
+ private:
+     wxString   m_version;
+     wxString   m_fileEncoding;
+
+ 	  	 

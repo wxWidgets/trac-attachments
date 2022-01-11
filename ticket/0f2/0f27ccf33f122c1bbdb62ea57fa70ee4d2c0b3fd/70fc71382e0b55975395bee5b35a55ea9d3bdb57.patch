@@ -1,0 +1,219 @@
+Index: include/wx/filename.h
+===================================================================
+--- include/wx/filename.h	(revision 60078)
++++ include/wx/filename.h	(working copy)
+@@ -96,8 +96,16 @@
+ // Rmdir flags
+ enum
+ {
+-    wxPATH_RMDIR_FULL       = 0x0001,  // delete with subdirectories if empty
+-    wxPATH_RMDIR_RECURSIVE  = 0x0002   // delete all recursively (dangerous!)
++    wxPATH_RMDIR_DEFAULT      = 0x0000,  // remove specified folder if it is empty
++                                         // (default CRT rmdir() behaviour)
++    wxPATH_RMDIR_FULL         = 0x0001,  // delete specified folder, with contents
++    wxPATH_RMDIR_RECURSIVE    = 0x0002,  // delete specified folder, with contents, recursively (dangerous!)
++    wxPATH_RMDIR_CONTENTSONLY = 0x0004,  // delete folder contents, not the specified folder root itself
++                                         // (may combine with wxPATH_RMDIR_RECURSIVE)
++#ifdef __WXMSW__
++    wxPATH_RMDIR_NATIVE       = 0x0008   // Use the SHFileOperation() API
++    // better name wxPATH_RMDIR_TOOLKIT?
++#endif
+ };
+ 
+ #if wxUSE_LONGLONG
+@@ -320,8 +328,8 @@
+     static bool Mkdir(const wxString &dir, int perm = wxS_DIR_DEFAULT,
+                       int flags = 0);
+ 
+-    bool Rmdir(int flags = 0);
+-    static bool Rmdir(const wxString &dir, int flags = 0);
++    bool Rmdir(int flags = wxPATH_RMDIR_DEFAULT);
++    static bool Rmdir(const wxString &dir, int flags = wxPATH_RMDIR_DEFAULT);
+ 
+     // operations on the path
+ 
+Index: interface/wx/filename.h
+===================================================================
+--- interface/wx/filename.h	(revision 60078)
++++ interface/wx/filename.h	(working copy)
+@@ -58,17 +58,35 @@
+  */
+ enum
+ {
+-    /// Delete the specified directory and its subdirectories if they are empty.
++    /**
++      Delete the specified directory, if empty
++      (default/CRT rmdir() behaviour)
++     */
++    wxPATH_RMDIR_DEFAULT = 0,
++
++    /**
++      Delete the specified directory, with contents
++     */
+     wxPATH_RMDIR_FULL = 1,
+ 
+     /**
+-      Delete the specified directory and all the files and subdirectories in it
+-      recursively.
++      Delete the specified directory and contents recursively.
+ 
+       This flag is obviously @b dangerous and should be used with care and
+       after asking the user for confirmation.
+      */
+-    wxPATH_RMDIR_RECURSIVE = 2
++    wxPATH_RMDIR_RECURSIVE = 2,
++
++    /**
++      Do not delete the specified directory itself, just the contents
++      (may combine with @c wxPATH_RMDIR_RECURSIVE)
++      */
++    wxPATH_RMDIR_CONTENTSONLY = 4,
++
++    /**
++      Use the SHFileOperation() API (MSW only)
++      */
++    wxPATH_RMDIR_NATIVE = 8
+ };
+ 
+ /**
+@@ -1002,14 +1020,12 @@
+         Deletes the specified directory from the file system.
+ 
+         @param flags
+-            Can contain one of wxPATH_RMDIR_FULL or wxPATH_RMDIR_RECURSIVE. By
+-            default contains neither so the directory will not be removed
+-            unless it is empty.
++            The default is to remove the directory only if it is empty.
+ 
+         @return Returns @true if the directory was successfully deleted, @false
+                 otherwise.
+     */
+-    bool Rmdir(int flags = 0);
++    bool Rmdir(int flags = wxPATH_RMDIR_DEFAULT);
+ 
+     /**
+         Deletes the specified directory from the file system.
+@@ -1017,14 +1033,12 @@
+         @param dir
+             The directory to delete
+         @param flags
+-            Can contain one of wxPATH_RMDIR_FULL or wxPATH_RMDIR_RECURSIVE. By
+-            default contains neither so the directory will not be removed
+-            unless it is empty.
++            The default is to remove the directory only if it is empty.
+ 
+         @return Returns @true if the directory was successfully deleted, @false
+                 otherwise.
+     */
+-    static bool Rmdir(const wxString& dir, int flags = 0);
++    static bool Rmdir(const wxString& dir, int flags = wxPATH_RMDIR_DEFAULT);
+ 
+     /**
+         Compares the filename using the rules of this platform.
+Index: src/common/filename.cpp
+===================================================================
+--- src/common/filename.cpp	(revision 60078)
++++ src/common/filename.cpp	(working copy)
+@@ -1125,11 +1125,22 @@
+ bool wxFileName::Rmdir(const wxString& dir, int flags)
+ {
+ #ifdef __WXMSW__
+-    if ( flags & wxPATH_RMDIR_RECURSIVE )
++    if (   (flags & wxPATH_RMDIR_RECURSIVE)
++        && (flags & wxPATH_RMDIR_NATIVE)
++       )
+     {
++        wxString path;
++        if (flags & wxPATH_RMDIR_CONTENTSONLY)
++        {
++            // Append wildcard
++            path = wxFileName(dir, wxALL_FILES_PATTERN).GetFullPath();
++        }
++        else
++        {
++            path = dir;
++        }
+         // SHFileOperation needs double null termination string
+         // but without separator at the end of the path
+-        wxString path(dir);
+         if ( path.Last() == wxFILE_SEP_PATH )
+             path.RemoveLast();
+         path += _T('\0');
+@@ -1145,55 +1156,46 @@
+     #endif
+ 
+         int ret = SHFileOperation(&fileop);
+-        if ( ret != 0 )
++        bool ok = (ret == 0);
++        if (!ok)
+         {
+             // SHFileOperation may return non-Win32 error codes, so the error
+             // message can be incorrect
+-            wxLogApiError(_T("SHFileOperation"), ret);
+-            return false;
++            wxLogApiError(wxT("SHFileOperation"), ret);
+         }
+-
+-        return true;
++        return ok;
+     }
+-    else if ( flags & wxPATH_RMDIR_FULL )
+-#else // !__WXMSW__
+-    if ( flags != 0 )   // wxPATH_RMDIR_FULL or wxPATH_RMDIR_RECURSIVE
+ #endif // !__WXMSW__
++    if ( flags & (wxPATH_RMDIR_FULL | wxPATH_RMDIR_RECURSIVE | wxPATH_RMDIR_CONTENTSONLY) )
+     {
+-        wxString path(dir);
+-        if ( path.Last() != wxFILE_SEP_PATH )
+-            path += wxFILE_SEP_PATH;
++        wxDir d(dir);
+ 
+-        wxDir d(path);
+-
+         if ( !d.IsOpened() )
+             return false;
+ 
+         wxString filename;
+ 
+-        // first delete all subdirectories
+-        bool cont = d.GetFirst(&filename, "", wxDIR_DIRS | wxDIR_HIDDEN);
+-        while ( cont )
++        // delete all subdirectories
++        if (d.GetFirst(&filename, wxEmptyString, wxDIR_DIRS | wxDIR_HIDDEN)) do
+         {
+-            wxFileName::Rmdir(path + filename, flags);
+-            cont = d.GetNext(&filename);
+-        }
++            if ( flags & wxPATH_RMDIR_RECURSIVE )
++            {
++               wxFileName::Rmdir(wxFileName(dir, filename).GetFullPath(), flags & ~wxPATH_RMDIR_CONTENTSONLY);
++            }
++            else
++            {
++               ::wxRmdir(dir); // hoping it is empty
++            }
++        } while (d.GetNext(&filename));
+ 
+-#ifndef __WXMSW__
+-        if ( flags & wxPATH_RMDIR_RECURSIVE )
++        // delete all files
++        if (d.GetFirst(&filename, wxEmptyString, wxDIR_FILES | wxDIR_HIDDEN)) do
+         {
+-            // delete all files too
+-            cont = d.GetFirst(&filename, "", wxDIR_FILES | wxDIR_HIDDEN);
+-            while ( cont )
+-            {
+-                ::wxRemoveFile(path + filename);
+-                cont = d.GetNext(&filename);
+-            }
+-        }
+-#endif // !__WXMSW__
++            ::wxRemoveFile(wxFileName(dir, filename).GetFullPath());
++        } while (d.GetNext(&filename));
+     }
+ 
+-    return ::wxRmdir(dir);
++    return (flags & wxPATH_RMDIR_CONTENTSONLY) || ::wxRmdir(dir);
+ }
+ 
+ // ----------------------------------------------------------------------------

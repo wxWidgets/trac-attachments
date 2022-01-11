@@ -1,0 +1,77 @@
+diff -uNr wxWidgets-trunk\src/common/dcgraph.cpp wxWidgets-work\src/common/dcgraph.cpp
+--- wxWidgets-trunk\src/common/dcgraph.cpp	2014-01-07 23:03:56.519381100 +0100
++++ wxWidgets-work\src/common/dcgraph.cpp	2014-01-12 11:50:47.888937800 +0100
+@@ -121,6 +121,73 @@
+ 
+ wxGCDC::~wxGCDC()
+ {
++    // It seems that GDI+ sets invalid values for alpha channel when a compatible bitmap (DDB) is processed.
++    // In this case we should reset alpha channel in the output bitmap.
++    HDC hdc = AcquireHDC();  // Get source DC.
++
++    HBITMAP hbmp = (HBITMAP)::GetCurrentObject(hdc, OBJ_BITMAP);  // Get bitmap selected into source DC.
++    if( hbmp )
++    {
++        BITMAP bm;
++        if( ::GetObject(hbmp, sizeof(bm), &bm) == sizeof(bm) )
++        {
++            if( !bm.bmBits && bm.bmBitsPixel == 32 )
++            {   // Input bitmap is a 32-bit DDB --> We can assume 
++                // its alpha channel is messed by GDI+ and should be reset.
++                HBITMAP hbmpNull = ::CreateBitmap(1, 1, 1, 32, NULL); // Temporary bitmap to help us unselect the real one.
++                if( hbmpNull )
++                {
++                    HBITMAP hbmpOld = (HBITMAP)::SelectObject(hdc, hbmpNull);  // Unselect the bitmap.
++                    wxASSERT_MSG(hbmpOld == hbmp, "Another bitmap selected into DC in the meantime.");
++
++                    // Allocate memory for bitmap structures.
++                    BITMAPINFO bi;
++                    ZeroMemory(&bi, sizeof(bi));
++
++                    int rowStride = ((bm.bmWidth * bm.bmBitsPixel + 31) & ~31) >> 3;
++
++                    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
++                    bi.bmiHeader.biWidth = bm.bmWidth;
++                    bi.bmiHeader.biHeight = bm.bmHeight;
++                    bi.bmiHeader.biPlanes = bm.bmPlanes;
++                    bi.bmiHeader.biBitCount = bm.bmBitsPixel;
++                    bi.bmiHeader.biSizeImage = rowStride * bm.bmHeight;
++
++                    void *pBits;  // Pointer to DIB.
++                    HBITMAP hbmpDIB = ::CreateDIBSection( NULL, // unused with DIB_RGB_COLORS
++                                                          &bi, DIB_RGB_COLORS, &pBits, NULL, 0 );
++                    wxASSERT_MSG(hbmpDIB, "CreateDIBSection() failed");
++                    if( hbmpDIB )
++                    {
++                        int lines = ::GetDIBits(hdc, hbmp, 0, bm.bmHeight, pBits, &bi, DIB_RGB_COLORS);
++                        wxASSERT_MSG(lines == bm.bmHeight, "GetDIBits() failed");
++                        if( lines == bm.bmHeight )
++                        {
++                            ::GdiFlush();
++                            RGBQUAD *pRow = reinterpret_cast<RGBQUAD*>(pBits);
++                            for(int y = 0; y < bm.bmHeight; ++y)
++                            {
++                                for(int x = 0; x < bm.bmWidth; ++x )
++                                {
++                                    pRow[x].rgbReserved = 0;  // A = 0
++                                }
++
++                                // Advance row pointer to the next row.
++                                pRow = reinterpret_cast<RGBQUAD*>(reinterpret_cast<char*>(pRow) + rowStride);
++                            }
++
++                            lines = ::SetDIBits(hdc, hbmp, 0, bm.bmHeight, pBits, &bi, DIB_RGB_COLORS);
++                            wxASSERT_MSG(lines == bm.bmHeight, "SetDIBits() failed");
++                        }
++                        ::DeleteObject(hbmpDIB);
++                    }
++                    ::SelectObject(hdc, hbmpOld);
++                }
++                ::DeleteObject(hbmpNull);
++            }
++        }
++    }
++    ReleaseHDC(hdc);
+ }
+ 
+ wxGraphicsContext* wxGCDC::GetGraphicsContext() const

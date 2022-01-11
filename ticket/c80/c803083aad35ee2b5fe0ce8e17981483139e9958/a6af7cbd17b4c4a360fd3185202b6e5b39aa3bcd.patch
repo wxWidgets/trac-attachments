@@ -1,0 +1,470 @@
+diff -r -u -p a/include/wx/ffile.h b/include/wx/ffile.h
+--- a/include/wx/ffile.h	2019-10-27 18:41:42.000000000 +0100
++++ b/include/wx/ffile.h	2020-02-21 13:04:26.179399600 +0100
+@@ -103,6 +103,64 @@ private:
+   wxString m_name;  // the name of the file (for diagnostic messages)
+ };
+ 
++// ----------------------------------------------------------------------------
++// class wxTempFFile: if you want to replace another file, create an instance
++// of wxTempFFile passing the name of the file to be replaced to the ctor. Then
++// you can write to wxTempFFile and call Commit() function to replace the old
++// file (and close this one) or call Discard() to cancel the modification. If
++// you call neither of them, dtor will call Discard().
++// ----------------------------------------------------------------------------
++
++class WXDLLIMPEXP_BASE wxTempFFile
++{
++public:
++  // ctors
++    // default
++  wxTempFFile() { }
++    // associates the temp file with the file to be replaced and opens it
++  wxTempFFile(const wxString& strName);
++
++  // open the temp file (strName is the name of file to be replaced)
++  bool Open(const wxString& strName);
++
++  // is the file opened?
++  bool IsOpened() const { return m_file.IsOpened(); }
++    // get current file length
++  wxFileOffset Length() const { return m_file.Length(); }
++    // move ptr ofs bytes related to start/current pos/end of file
++  bool Seek(wxFileOffset ofs, wxSeekMode mode = wxFromStart)
++    { return m_file.Seek(ofs, mode); }
++    // get current position in the file
++  wxFileOffset Tell() const { return m_file.Tell(); }
++
++  // I/O (both functions return true on success, false on failure)
++  bool Write(const void *p, size_t n) { return m_file.Write(p, n) == n; }
++  bool Write(const wxString& str, const wxMBConv& conv = wxMBConvUTF8())
++    { return m_file.Write(str, conv); }
++
++  // flush data: can be called before closing file to ensure that data was
++  // correctly written out
++  bool Flush() { return m_file.Flush(); }
++
++  // different ways to close the file
++    // validate changes and delete the old file of name m_strName
++  bool Commit();
++    // discard changes
++  void Discard();
++
++  // dtor calls Discard() if file is still opened
++ ~wxTempFFile();
++
++private:
++  // no copy ctor/assignment operator
++  wxTempFFile(const wxTempFFile&);
++  wxTempFFile& operator=(const wxTempFFile&);
++
++  wxString  m_strName,  // name of the file to replace in Commit()
++            m_strTemp;  // temporary file name
++  wxFFile   m_file;     // the temporary file
++};
++
+ #endif // wxUSE_FFILE
+ 
+ #endif // _WX_FFILE_H_
+diff -r -u -p a/include/wx/wfstream.h b/include/wx/wfstream.h
+--- a/include/wx/wfstream.h	2019-10-27 18:41:42.000000000 +0100
++++ b/include/wx/wfstream.h	2020-02-21 10:08:49.422894900 +0100
+@@ -114,6 +114,31 @@ private:
+     wxDECLARE_NO_COPY_CLASS(wxTempFileOutputStream);
+ };
+ 
++class WXDLLIMPEXP_BASE wxTempFFileOutputStream : public wxOutputStream
++{
++public:
++    wxTempFFileOutputStream(const wxString& fileName);
++    virtual ~wxTempFFileOutputStream();
++
++    bool Close() wxOVERRIDE { return Commit(); }
++    WXDLLIMPEXP_INLINE_BASE virtual bool Commit() { return m_file->Commit(); }
++    WXDLLIMPEXP_INLINE_BASE virtual void Discard() { m_file->Discard(); }
++
++    virtual wxFileOffset GetLength() const wxOVERRIDE { return m_file->Length(); }
++    virtual bool IsSeekable() const wxOVERRIDE { return true; }
++
++protected:
++    virtual size_t OnSysWrite(const void *buffer, size_t size) wxOVERRIDE;
++    virtual wxFileOffset OnSysSeek(wxFileOffset pos, wxSeekMode mode) wxOVERRIDE
++        { return m_file->Seek(pos, mode); }
++    virtual wxFileOffset OnSysTell() const wxOVERRIDE { return m_file->Tell(); }
++
++private:
++    wxTempFFile *m_file;
++
++    wxDECLARE_NO_COPY_CLASS(wxTempFFileOutputStream);
++};
++
+ class WXDLLIMPEXP_BASE wxFileStream : public wxFileInputStream,
+                                       public wxFileOutputStream
+ {
+diff -r -u -p a/interface/wx/ffile.h b/interface/wx/ffile.h
+--- a/interface/wx/ffile.h	2019-10-27 18:41:42.000000000 +0100
++++ b/interface/wx/ffile.h	2020-02-21 13:04:26.166637900 +0100
+@@ -1,12 +1,145 @@
+ /////////////////////////////////////////////////////////////////////////////
+ // Name:        ffile.h
+-// Purpose:     interface of wxFFile
++// Purpose:     interface of wxTempFFile, wxFFile
+ // Author:      wxWidgets team
+ // Licence:     wxWindows licence
+ /////////////////////////////////////////////////////////////////////////////
+ 
+ 
+ /**
++    @class wxTempFFile
++
++    wxTempFFile provides a relatively safe way to replace the contents of the
++    existing file. The name is explained by the fact that it may be also used as
++    just a temporary file if you don't replace the old file contents.
++
++    Usually, when a program replaces the contents of some file it first opens it for
++    writing, thus losing all of the old data and then starts recreating it.
++    This approach is not very safe because during the regeneration of the file bad
++    things may happen: the program may find that there is an internal error preventing
++    it from completing file generation, the user may interrupt it (especially if file
++    generation takes long time) and, finally, any other external interrupts (power
++    supply failure or a disk error) will leave you without either the original file
++    or the new one.
++
++    wxTempFFile addresses this problem by creating a temporary file which is meant to
++    replace the original file - but only after it is fully written. So, if the user
++    interrupts the program during the file generation, the old file won't be lost.
++    Also, if the program discovers itself that it doesn't want to replace the old
++    file there is no problem - in fact, wxTempFFile will @b not replace the old
++    file by default, you should explicitly call wxTempFFile::Commit() to do it.
++    Calling wxTempFFile::Discard() explicitly discards any modifications: it
++    closes and deletes the temporary file and leaves the original file unchanged.
++    If you call neither Commit() nor Discard(), the destructor will
++    call Discard() automatically.
++
++    To summarize: if you want to replace another file, create an instance of
++    wxTempFFile passing the name of the file to be replaced to the constructor.
++    (You may also use default constructor and pass the file name to wxTempFFile::Open.)
++    Then you can write to wxTempFFile using wxFFile-like functions and later call
++    wxTempFFile::Commit() to replace the old file (and close this one) or call
++    wxTempFFile::Discard() to cancel the modifications.
++
++    @since 3.1.4
++
++    @library{wxbase}
++    @category{file}
++*/
++class wxTempFFile
++{
++public:
++    /**
++        Associates wxTempFFile with the file to be replaced and opens it.
++
++        @warning
++        You should use IsOpened() to verify that the constructor succeeded.
++    */
++    wxTempFFile(const wxString& strName);
++
++    /**
++        Destructor calls Discard() if temporary file is still open.
++    */
++    ~wxTempFFile();
++
++    /**
++        Validate changes: deletes the old file of name m_strName and renames the new
++        file to the old name. Returns @true if both actions succeeded.
++
++        If @false is returned it may unfortunately mean two quite different things:
++        either that the old file couldn't be deleted or that the new file
++        couldn't be renamed to the old name.
++    */
++    bool Commit();
++
++    /**
++        Discard changes: the old file contents are not changed, the temporary
++        file is deleted.
++    */
++    void Discard();
++
++    /**
++        Flush the data written to the file to disk.
++
++        This simply calls wxFFile::Flush() for the underlying file and may be
++        necessary with file systems such as XFS and Ext4 under Linux. Calling
++        this function may however have serious performance implications and
++        also is not necessary with many other file systems so it is not done by
++        default -- but you can call it before calling Commit() to absolutely
++        ensure that the data was indeed written to the disk correctly.
++     */
++    bool Flush();
++
++    /**
++        Returns @true if the file was successfully opened.
++    */
++    bool IsOpened() const;
++
++    /**
++        Returns the length of the file.
++
++        Returns ::wxInvalidOffset if the length couldn't be determined.
++
++        Please also note that there is @e no guarantee that reading that many
++        bytes from the file will always succeed. While this is true for regular
++        files (unless the file size has been changed by another process in
++        between Length() and Read() calls), some special files, such as most
++        files under @c /sys or @c /proc directories under Linux, don't actually
++        contain as much data as their size indicates.
++    */
++    wxFileOffset Length() const;
++
++    /**
++        Open the temporary file, returns @true on success, @false if an error
++        occurred.
++        @a strName is the name of file to be replaced. The temporary file is always
++        created in the directory where @a strName is. In particular, if @a strName
++        doesn't include the path, it is created in the current directory and the
++        program should have write access to it for the function to succeed.
++    */
++    bool Open(const wxString& strName);
++
++    /**
++        Seeks to the specified position and returns @true on success.
++    */
++    bool Seek(wxFileOffset ofs, wxSeekMode mode = wxFromStart);
++
++    /**
++        Returns the current position.
++    */
++    wxFileOffset Tell() const;
++
++    /**
++        Writes the contents of the string to the file, returns @true on success.
++
++        The second argument is only meaningful in Unicode build of wxWidgets when
++        @a conv is used to convert @a str to multibyte representation.
++    */
++    bool Write(const wxString& str, const wxMBConv& conv = wxMBConvUTF8());
++};
++
++
++
++/**
+     @class wxFFile
+ 
+     wxFFile implements buffered file I/O.
+diff -r -u -p a/interface/wx/wfstream.h b/interface/wx/wfstream.h
+--- a/interface/wx/wfstream.h	2019-10-27 18:41:42.000000000 +0100
++++ b/interface/wx/wfstream.h	2020-02-21 11:51:09.219495800 +0100
+@@ -52,6 +52,54 @@ public:
+ 
+ 
+ /**
++    @class wxTempFFileOutputStream
++
++    wxTempFFileOutputStream is an output stream based on wxTempFFile.
++    It provides a relatively safe way to replace the contents of the
++    existing file.
++
++    @since 3.1.4
++
++    @library{wxbase}
++    @category{streams}
++
++    @see wxTempFFile
++*/
++class wxTempFFileOutputStream : public wxOutputStream
++{
++public:
++    /**
++        Associates wxTempFFileOutputStream with the file to be replaced and opens it.
++
++        @warning
++        You should use wxStreamBase::IsOk() to verify if the constructor succeeded.
++
++        Call Commit() or wxOutputStream::Close() to replace the old file and close
++        this one. Calling Discard() (or allowing the destructor to do it) will
++        discard the changes.
++    */
++    wxTempFFileOutputStream(const wxString& fileName);
++
++    /**
++        Validate changes: deletes the old file of the given name and renames the new
++        file to the old name. Returns @true if both actions succeeded.
++
++        If @false is returned it may unfortunately mean two quite different things: either that
++        either the old file couldn't be deleted or that the new file couldn't be renamed
++        to the old name.
++    */
++    virtual bool Commit();
++
++    /**
++        Discard changes: the old file contents are not changed, the temporary file is
++        deleted.
++    */
++    virtual void Discard();
++};
++
++
++
++/**
+     @class wxFFileOutputStream
+ 
+     This class represents data written to a file.
+diff -r -u -p a/src/common/ffile.cpp b/src/common/ffile.cpp
+--- a/src/common/ffile.cpp	2019-10-27 18:41:42.000000000 +0100
++++ b/src/common/ffile.cpp	2020-02-21 10:34:22.779260100 +0100
+@@ -31,10 +31,11 @@
+     #include "wx/crt.h"
+ #endif
+ 
++#include "wx/filename.h"
+ #include "wx/ffile.h"
+ 
+ // ============================================================================
+-// implementation
++// implementation of wxFFile
+ // ============================================================================
+ 
+ // ----------------------------------------------------------------------------
+@@ -296,4 +297,105 @@ bool wxFFile::Error() const
+     return ferror(m_fp) != 0;
+ }
+ 
++// ============================================================================
++// implementation of wxTempFFile
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// construction
++// ----------------------------------------------------------------------------
++
++wxTempFFile::wxTempFFile(const wxString& strName)
++{
++    Open(strName);
++}
++
++bool wxTempFFile::Open(const wxString& strName)
++{
++    // we must have an absolute filename because otherwise CreateTempFileName()
++    // would create the temp file in $TMP (i.e. the system standard location
++    // for the temp files) which might be on another volume/drive/mount and
++    // wxRename()ing it later to m_strName from Commit() would then fail
++    //
++    // with the absolute filename, the temp file is created in the same
++    // directory as this one which ensures that wxRename() may work later
++    wxFileName fn(strName);
++    if ( !fn.IsAbsolute() )
++    {
++        fn.Normalize(wxPATH_NORM_ABSOLUTE);
++    }
++
++    m_strName = fn.GetFullPath();
++
++    m_strTemp = wxFileName::CreateTempFileName(m_strName, &m_file);
++
++    if ( m_strTemp.empty() )
++    {
++        // CreateTempFileName() failed
++        return false;
++    }
++
++#ifdef __UNIX__
++    // the temp file should have the same permissions as the original one
++    mode_t mode;
++
++    wxStructStat st;
++    if ( stat( (const char*) m_strName.fn_str(), &st) == 0 )
++    {
++        mode = st.st_mode;
++    }
++    else
++    {
++        // file probably didn't exist, just give it the default mode _using_
++        // user's umask (new files creation should respect umask)
++        mode_t mask = umask(0777);
++        mode = 0666 & ~mask;
++        umask(mask);
++    }
++
++    if ( chmod( (const char*) m_strTemp.fn_str(), mode) == -1 )
++    {
++        wxLogSysError(_("Failed to set temporary file permissions"));
++    }
++#endif // Unix
++
++    return true;
++}
++
++// ----------------------------------------------------------------------------
++// destruction
++// ----------------------------------------------------------------------------
++
++wxTempFFile::~wxTempFFile()
++{
++    if ( IsOpened() )
++        Discard();
++}
++
++bool wxTempFFile::Commit()
++{
++    m_file.Close();
++
++    if ( wxFile::Exists(m_strName) && wxRemove(m_strName) != 0 ) {
++        wxLogSysError(_("can't remove file '%s'"), m_strName.c_str());
++        return false;
++    }
++
++    if ( !wxRenameFile(m_strTemp, m_strName)  ) {
++        wxLogSysError(_("can't commit changes to file '%s'"), m_strName.c_str());
++        return false;
++    }
++
++    return true;
++}
++
++void wxTempFFile::Discard()
++{
++    m_file.Close();
++    if ( wxRemove(m_strTemp) != 0 )
++    {
++        wxLogSysError(_("can't remove temporary file '%s'"), m_strTemp.c_str());
++    }
++}
++
+ #endif // wxUSE_FFILE
+diff -r -u -p a/src/common/wfstream.cpp b/src/common/wfstream.cpp
+--- a/src/common/wfstream.cpp	2019-10-27 18:41:42.000000000 +0100
++++ b/src/common/wfstream.cpp	2020-02-21 10:11:05.461881600 +0100
+@@ -215,6 +215,33 @@ size_t wxTempFileOutputStream::OnSysWrit
+ }
+ 
+ // ----------------------------------------------------------------------------
++// wxTempFFileOutputStream
++// ----------------------------------------------------------------------------
++
++wxTempFFileOutputStream::wxTempFFileOutputStream(const wxString& fileName)
++{
++    m_file = new wxTempFFile(fileName);
++
++    if (!m_file->IsOpened())
++        m_lasterror = wxSTREAM_WRITE_ERROR;
++}
++
++wxTempFFileOutputStream::~wxTempFFileOutputStream()
++{
++    if (m_file->IsOpened())
++        Discard();
++    delete m_file;
++}
++
++size_t wxTempFFileOutputStream::OnSysWrite(const void *buffer, size_t size)
++{
++    if (IsOk() && m_file->Write(buffer, size))
++        return size;
++    m_lasterror = wxSTREAM_WRITE_ERROR;
++    return 0;
++}
++
++// ----------------------------------------------------------------------------
+ // wxFileStream
+ // ----------------------------------------------------------------------------
+ 

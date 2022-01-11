@@ -1,0 +1,941 @@
+Index: include/wx/gsocket.h
+===================================================================
+--- include/wx/gsocket.h	(revision 48212)
++++ include/wx/gsocket.h	(working copy)
+@@ -162,8 +162,25 @@
+ unsigned long GAddress_INET_GetHostAddress(GAddress *address);
+ unsigned short GAddress_INET_GetPort(GAddress *address);
+ 
+-/* TODO: Define specific parts (INET6, UNIX) */
++#if defined(wxUSE_IPV6) && wxUSE_IPV6
+ 
++GSocketError GAddress_INET6_SetHostName(GAddress *address, const char *hostname);
++GSocketError GAddress_INET6_SetAnyAddress(GAddress *address);
++GSocketError GAddress_INET6_SetHostAddress(GAddress *address,
++                                          struct in6_addr hostaddr);
++GSocketError GAddress_INET6_SetPortName(GAddress *address, const char *port,
++                                       const char *protocol);
++GSocketError GAddress_INET6_SetPort(GAddress *address, unsigned short port);
++
++GSocketError GAddress_INET6_GetHostName(GAddress *address, char *hostname,
++                                       size_t sbuf);
++GSocketError GAddress_INET6_GetHostAddress(GAddress *address,struct in6_addr *hostaddr);
++unsigned short GAddress_INET6_GetPort(GAddress *address);
++
++#endif
++
++/* TODO: Define specific parts (UNIX) */
++
+ GSocketError GAddress_UNIX_SetPath(GAddress *address, const char *path);
+ GSocketError GAddress_UNIX_GetPath(GAddress *address, char *path, size_t sbuf);
+ 
+Index: include/wx/msw/wrapwin.h
+===================================================================
+--- include/wx/msw/wrapwin.h	(revision 48212)
++++ include/wx/msw/wrapwin.h	(working copy)
+@@ -48,6 +48,10 @@
+ #undef __WINDOWS__
+ #endif
+ 
++/* for IPv6 support, required to inlcude winsock2.h before winsock.h, and windows.h include winsock.h. */
++#if _WIN32_WINNT >= 0x0501
++#include <winsock2.h>
++#endif
+ #include <windows.h>
+ 
+ #if defined(__WXWINCE__) && !defined(__WINDOWS__)
+@@ -97,3 +101,4 @@
+ 
+ #endif // _WX_WRAPWIN_H_
+ 
++
+Index: include/wx/sckaddr.h
+===================================================================
+--- include/wx/sckaddr.h	(revision 48212)
++++ include/wx/sckaddr.h	(working copy)
+@@ -118,13 +118,10 @@
+ 
+ #if wxUSE_IPV6
+ 
+-// Experimental Only:
+-//
+-// IPV6 has not yet been implemented in socket layer
+ class WXDLLIMPEXP_NET wxIPV6address : public wxIPaddress {
+   DECLARE_DYNAMIC_CLASS(wxIPV6address)
+ private:
+-  struct sockaddr_in6 *m_addr;
++  wxString m_origHostname;
+ public:
+   wxIPV6address();
+   wxIPV6address(const wxIPV6address& other);
+@@ -134,7 +131,7 @@
+   //
+   //                          hostname
+   //                          3ffe:ffff:0100:f101:0210:a4ff:fee3:9566
+-  // compact (base85)         Itu&-ZQ82s>J%s99FJXT
++  // compact (base85)         Itu&-ZQ82s>J%s99FJXT (depends on platform api)
+   // compressed format        ::1
+   // ipv4 mapped              ::ffff:1.2.3.4
+   virtual bool Hostname(const wxString& name);
+Index: include/wx/setup_inc.h
+===================================================================
+--- include/wx/setup_inc.h	(revision 48212)
++++ include/wx/setup_inc.h	(working copy)
+@@ -430,6 +430,9 @@
+ // Set to 1 to use socket classes
+ #define wxUSE_SOCKETS       1
+ 
++// Set to 1 to use ipv6 socket classes (requires wxUSE_SOCKETS)
++#define wxUSE_IPV6       0
++
+ // Set to 1 to enable virtual file systems (required by wxHTML)
+ #define wxUSE_FILESYSTEM    1
+ 
+Index: samples/sockets/client.cpp
+===================================================================
+--- samples/sockets/client.cpp	(revision 48212)
++++ samples/sockets/client.cpp	(working copy)
+@@ -75,7 +75,12 @@
+   // event handlers for Protocols menu
+   void OnTestURL(wxCommandEvent& event);
+ #endif
++#if wxUSE_IPV6
++  void OnOpenConnectionIPv6(wxCommandEvent& event);
++#endif
+ 
++  void OpenConnection(int family = AF_INET);
++
+   // event handlers for DatagramSocket menu (stub)
+   void OnDatagram(wxCommandEvent& event);
+ 
+@@ -110,6 +115,9 @@
+   CLIENT_QUIT = wxID_EXIT,
+   CLIENT_ABOUT = wxID_ABOUT,
+   CLIENT_OPEN = 100,
++#if wxUSE_IPV6
++  CLIENT_OPENIPV6,
++#endif
+   CLIENT_TEST1,
+   CLIENT_TEST2,
+   CLIENT_TEST3,
+@@ -131,6 +139,9 @@
+   EVT_MENU(CLIENT_QUIT,     MyFrame::OnQuit)
+   EVT_MENU(CLIENT_ABOUT,    MyFrame::OnAbout)
+   EVT_MENU(CLIENT_OPEN,     MyFrame::OnOpenConnection)
++#if wxUSE_IPV6
++  EVT_MENU(CLIENT_OPENIPV6, MyFrame::OnOpenConnectionIPv6)
++#endif
+   EVT_MENU(CLIENT_TEST1,    MyFrame::OnTest1)
+   EVT_MENU(CLIENT_TEST2,    MyFrame::OnTest2)
+   EVT_MENU(CLIENT_TEST3,    MyFrame::OnTest3)
+@@ -185,6 +196,9 @@
+ 
+   m_menuSocket = new wxMenu();
+   m_menuSocket->Append(CLIENT_OPEN, _("&Open session"), _("Connect to server"));
++#if wxUSE_IPV6
++  m_menuSocket->Append(CLIENT_OPENIPV6, _("&Open session(IPv6)"), _("Connect to server(IPv6)"));
++#endif
+   m_menuSocket->AppendSeparator();
+   m_menuSocket->Append(CLIENT_TEST1, _("Test &1"), _("Test basic functionality"));
+   m_menuSocket->Append(CLIENT_TEST2, _("Test &2"), _("Test ReadMsg and WriteMsg"));
+@@ -258,9 +272,36 @@
+ 
+ void MyFrame::OnOpenConnection(wxCommandEvent& WXUNUSED(event))
+ {
+-  wxIPV4address addr;
++	OpenConnection(AF_INET);
++}
++#if wxUSE_IPV6
++void MyFrame::OnOpenConnectionIPv6(wxCommandEvent& WXUNUSED(event))
++{
++	OpenConnection(AF_INET6);
++}
++#endif
+ 
++void MyFrame::OpenConnection(int family)
++{
++  wxIPaddress * addr;
++#if wxUSE_IPV6
++  wxIPV6address addr6;
++  wxIPV4address addr4;
++  if(family==AF_INET6)
++  {
++    addr = & addr6;
++  } else {
++    addr = & addr4;
++  }
++#else
++  wxIPV4address addr4;
++  addr = & addr4;
++#endif
++
+   m_menuSocket->Enable(CLIENT_OPEN, false);
++#if wxUSE_IPV6
++  m_menuSocket->Enable(CLIENT_OPENIPV6, false);
++#endif
+   m_menuSocket->Enable(CLIENT_CLOSE, false);
+ 
+   // Ask user for server address
+@@ -269,8 +310,8 @@
+     _("Connect ..."),
+     _("localhost"));
+ 
+-  addr.Hostname(hostname);
+-  addr.Service(3000);
++  addr->Hostname(hostname);
++  addr->Service(3000);
+ 
+   // Mini-tutorial for Connect() :-)
+   // ---------------------------
+@@ -322,7 +363,7 @@
+   // And that's all :-)
+ 
+   m_text->AppendText(_("\nTrying to connect (timeout = 10 sec) ...\n"));
+-  m_sock->Connect(addr, false);
++  m_sock->Connect(*addr, false);
+   m_sock->WaitOnConnect(10);
+ 
+   if (m_sock->IsConnected())
+@@ -627,7 +668,11 @@
+   }
+   else
+   {
++#if wxUSE_IPV6
++    wxIPV6address addr;
++#else
+     wxIPV4address addr;
++#endif
+ 
+     m_sock->GetPeer(addr);
+     s.Printf(_("%s : %d"), (addr.Hostname()).c_str(), addr.Service());
+@@ -638,6 +683,9 @@
+ #endif // wxUSE_STATUSBAR
+ 
+   m_menuSocket->Enable(CLIENT_OPEN, !m_sock->IsConnected() && !m_busy);
++#if wxUSE_IPV6
++  m_menuSocket->Enable(CLIENT_OPENIPV6, !m_sock->IsConnected() && !m_busy);
++#endif
+   m_menuSocket->Enable(CLIENT_TEST1, m_sock->IsConnected() && !m_busy);
+   m_menuSocket->Enable(CLIENT_TEST2, m_sock->IsConnected() && !m_busy);
+   m_menuSocket->Enable(CLIENT_TEST3, m_sock->IsConnected() && !m_busy);
+Index: samples/sockets/server.cpp
+===================================================================
+--- samples/sockets/server.cpp	(revision 48212)
++++ samples/sockets/server.cpp	(working copy)
+@@ -170,7 +170,11 @@
+                            wxTE_MULTILINE | wxTE_READONLY);
+ 
+   // Create the address - defaults to localhost:0 initially
++#if wxUSE_IPV6
++  wxIPV6address addr;
++#else
+   wxIPV4address addr;
++#endif
+   addr.Service(3000);
+ 
+   // Create the socket
+Index: src/common/sckaddr.cpp
+===================================================================
+--- src/common/sckaddr.cpp	(revision 48212)
++++ src/common/sckaddr.cpp	(working copy)
+@@ -232,7 +232,7 @@
+ }
+ 
+ wxIPV6address::wxIPV6address(const wxIPV6address& other)
+-             : wxIPaddress(other)
++             : wxIPaddress(other), m_origHostname( other.m_origHostname )
+ {
+ }
+ 
+@@ -247,63 +247,97 @@
+     wxLogWarning( _("Trying to solve a NULL hostname: giving up") );
+     return false;
+   }
+-  return (GAddress_INET_SetHostName(m_address, name.mb_str()) == GSOCK_NOERROR);
++  m_origHostname = name;
++  return (GAddress_INET6_SetHostName(m_address, name.mb_str()) == GSOCK_NOERROR);
+ }
+ 
+-bool wxIPV6address::Hostname(unsigned char[16] WXUNUSED(addr))
++bool wxIPV6address::Hostname(unsigned char addr[16])
+ {
+-  return true;
++  wxString name;
++  unsigned short wk[8];
++  int i;
++  for ( i = 0; i < 8; ++i )
++  {
++    wk[i] = addr[2*i];
++    wk[i] <<= 8;
++    wk[i] |= addr[2*i+1];
++  }
++  name.Printf( wxT( "%x:%x:%x:%x:%x:%x:%x:%x" ), wk[0], wk[1], wk[2], wk[3], wk[4], wk[5], wk[6], wk[7] );
++  return Hostname( name );
+ }
+ 
+ bool wxIPV6address::Service(const wxString& name)
+ {
+-  return (GAddress_INET_SetPortName(m_address, name.mb_str(), "tcp") == GSOCK_NOERROR);
++  return (GAddress_INET6_SetPortName(m_address, name.mb_str(), "tcp") == GSOCK_NOERROR);
+ }
+ 
+ bool wxIPV6address::Service(unsigned short port)
+ {
+-  return (GAddress_INET_SetPort(m_address, port) == GSOCK_NOERROR);
++  return (GAddress_INET6_SetPort(m_address, port) == GSOCK_NOERROR);
+ }
+ 
+ bool wxIPV6address::LocalHost()
+ {
+-  return (GAddress_INET_SetHostName(m_address, "localhost") == GSOCK_NOERROR);
++  return (GAddress_INET6_SetHostName(m_address, "localhost") == GSOCK_NOERROR);
+ }
+ 
+ bool wxIPV6address::IsLocalHost() const
+ {
+-  return (Hostname() == wxT("localhost") || IPAddress() == wxT("127.0.0.1"));
++  if ( Hostname() == wxT("localhost") ) return true;
++  wxString addr = IPAddress();
++  return addr == wxT("::1") || addr == wxT("0:0:0:0:0:0:0:1") || addr == wxT("::ffff:127.0.0.1");
+ }
+ 
+ bool wxIPV6address::AnyAddress()
+ {
+-  return (GAddress_INET_SetAnyAddress(m_address) == GSOCK_NOERROR);
++  return (GAddress_INET6_SetAnyAddress(m_address) == GSOCK_NOERROR);
+ }
+ 
+ wxString wxIPV6address::IPAddress() const
+ {
+-    unsigned long raw =  GAddress_INET_GetHostAddress(m_address);
+-    return wxString::Format(
+-        _T("%u.%u.%u.%u"),
+-        (unsigned char)((raw>>24) & 0xff),
+-        (unsigned char)((raw>>16) & 0xff),
+-        (unsigned char)((raw>>8) & 0xff),
+-        (unsigned char)(raw & 0xff)
+-        );
++  unsigned char addr[16];
++  wxUint16 words[8];
++  int prefix_zero_count = 0;
++  wxString result;
++  int i;
++  GAddress_INET6_GetHostAddress(m_address,(in6_addr*)addr);
++  for ( i = 0; i < 8; ++i )
++  {
++    words[i] = addr[i*2];
++    words[i] <<= 8;
++    words[i] |= addr[i*2+1];
++    if ( i == prefix_zero_count && words[i] == 0 ) ++prefix_zero_count;
++  }
++  result.Printf( wxT( "%x:%x:%x:%x:%x:%x:%x:%x" ), 
++    words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7] );
++  if ( prefix_zero_count == 8 )
++  {
++    result = wxT( "::" );
++  } else if ( prefix_zero_count == 6 && words[5] == 0xFFFF ) {//ipv4 mapped
++    result.Printf( wxT( "::ffff:%d.%d.%d.%d" ), addr[12], addr[13], addr[14], addr[15] );
++  } else {
++    result = wxT( ":" );
++    for ( i = prefix_zero_count; i < 8; ++i )
++    {
++      wxString word;
++      word.Printf( wxT( ":%x" ), words[i] );
++      result = result + word;
++    }
++  }
++  return result;
+ }
+ 
+ wxString wxIPV6address::Hostname() const
+ {
+    char hostname[1024];
+-
+    hostname[0] = 0;
+-   GAddress_INET_GetHostName(m_address, hostname, 1024);
++   if ( GAddress_INET6_GetHostName(m_address, hostname, 1024) != GSOCK_NOERROR ) return wxEmptyString;
+    return wxString::FromAscii(hostname);
+ }
+ 
+ unsigned short wxIPV6address::Service() const
+ {
+-  return GAddress_INET_GetPort(m_address);
++  return GAddress_INET6_GetPort(m_address);
+ }
+ 
+ #endif // wxUSE_IPV6
+Index: src/msw/gsocket.cpp
+===================================================================
+--- src/msw/gsocket.cpp	(revision 48212)
++++ src/msw/gsocket.cpp	(working copy)
+@@ -88,6 +88,13 @@
+ #  define WX_SOCKLEN_T int
+ #endif
+ 
++#if wxUSE_IPV6
++typedef struct sockaddr_storage wxSockAddr;
++#else
++typedef struct sockaddr wxSockAddr;
++#endif
++
++
+ /* Table of GUI-related functions. We must call them indirectly because
+  * of wxBase and GUI separation: */
+ 
+@@ -297,7 +304,7 @@
+ GAddress *GSocket::GetLocal()
+ {
+   GAddress *address;
+-  struct sockaddr addr;
++  wxSockAddr addr;
+   WX_SOCKLEN_T size = sizeof(addr);
+   GSocketError err;
+ 
+@@ -314,7 +321,7 @@
+     return NULL;
+   }
+ 
+-  if (getsockname(m_fd, &addr, &size) == SOCKET_ERROR)
++  if (getsockname(m_fd, (sockaddr*)&addr, &size) == SOCKET_ERROR)
+   {
+     m_error = GSOCK_IOERR;
+     return NULL;
+@@ -327,7 +334,7 @@
+      return NULL;
+   }
+ 
+-  if ((err = _GAddress_translate_from(address, &addr, size)) != GSOCK_NOERROR)
++  if ((err = _GAddress_translate_from(address, (sockaddr*)&addr, size)) != GSOCK_NOERROR)
+   {
+      GAddress_destroy(address);
+      m_error = err;
+@@ -437,7 +444,7 @@
+ GSocket *GSocket::WaitConnection()
+ {
+   GSocket *connection;
+-  struct sockaddr from;
++  wxSockAddr from;
+   WX_SOCKLEN_T fromlen = sizeof(from);
+   GSocketError err;
+   u_long arg = 1;
+@@ -471,7 +478,7 @@
+     return NULL;
+   }
+ 
+-  connection->m_fd = accept(m_fd, &from, &fromlen);
++  connection->m_fd = accept(m_fd, (sockaddr*)&from, &fromlen);
+ 
+   if (connection->m_fd == INVALID_SOCKET)
+   {
+@@ -496,7 +503,7 @@
+     m_error = GSOCK_MEMERR;
+     return NULL;
+   }
+-  err = _GAddress_translate_from(connection->m_peer, &from, fromlen);
++  err = _GAddress_translate_from(connection->m_peer, (sockaddr*)&from, fromlen);
+   if (err != GSOCK_NOERROR)
+   {
+     GAddress_destroy(connection->m_peer);
+@@ -1121,12 +1128,12 @@
+ 
+ int GSocket::Recv_Dgram(char *buffer, int size)
+ {
+-  struct sockaddr from;
++  wxSockAddr from;
+   WX_SOCKLEN_T fromlen = sizeof(from);
+   int ret;
+   GSocketError err;
+ 
+-  ret = recvfrom(m_fd, buffer, size, 0, &from, &fromlen);
++  ret = recvfrom(m_fd, buffer, size, 0, (sockaddr*)&from, &fromlen);
+ 
+   if (ret == SOCKET_ERROR)
+     return SOCKET_ERROR;
+@@ -1141,7 +1148,7 @@
+       return -1;
+     }
+   }
+-  err = _GAddress_translate_from(m_peer, &from, fromlen);
++  err = _GAddress_translate_from(m_peer, (sockaddr*)&from, fromlen);
+   if (err != GSOCK_NOERROR)
+   {
+     GAddress_destroy(m_peer);
+@@ -1309,7 +1316,7 @@
+     case AF_UNIX:
+       address->m_family = GSOCK_UNIX;
+       break;
+-#ifdef AF_INET6
++#if wxUSE_IPV6
+     case AF_INET6:
+       address->m_family = GSOCK_INET6;
+       break;
+@@ -1531,8 +1538,175 @@
+   return ntohs(addr->sin_port);
+ }
+ 
++
++#if wxUSE_IPV6
+ /*
+  * -------------------------------------------------------------------------
++ * Internet IPv6 address family
++ * -------------------------------------------------------------------------
++ */
++#include "ws2tcpip.h"
++
++#pragma comment(lib,"Ws2_32")
++
++GSocketError _GAddress_Init_INET6(GAddress *address)
++{
++  struct in6_addr any_address = IN6ADDR_ANY_INIT;
++  address->m_len  = sizeof(struct sockaddr_in6);
++  address->m_addr = (struct sockaddr *) malloc(address->m_len);
++  if (address->m_addr == NULL)
++  {
++    address->m_error = GSOCK_MEMERR;
++    return GSOCK_MEMERR;
++  }
++  memset(address->m_addr,0,address->m_len);
++
++  address->m_family = GSOCK_INET6;
++  address->m_realfamily = AF_INET6;
++  ((struct sockaddr_in6 *)address->m_addr)->sin6_family = AF_INET6;
++  ((struct sockaddr_in6 *)address->m_addr)->sin6_addr = any_address;
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_SetHostName(GAddress *address, const char *hostname)
++{
++  assert(address != NULL);
++  CHECK_ADDRESS(address, INET6);
++
++  addrinfo hints;
++  memset( & hints, 0, sizeof( hints ) );
++  hints.ai_family = AF_INET6;
++  addrinfo * info = 0;
++  if ( getaddrinfo( hostname, "0", & hints, & info ) || ! info )
++  {
++    address->m_error = GSOCK_NOHOST;
++    return GSOCK_NOHOST;
++  }
++  
++  memcpy( address->m_addr, info->ai_addr, info->ai_addrlen );
++  freeaddrinfo( info );
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_SetAnyAddress(GAddress *address)
++{
++  assert(address != NULL);
++
++  CHECK_ADDRESS(address, INET6);
++
++  struct in6_addr addr;
++  memset( & addr, 0, sizeof( addr ) );
++  return GAddress_INET6_SetHostAddress(address, addr);
++}
++GSocketError GAddress_INET6_SetHostAddress(GAddress *address,
++                                          struct in6_addr hostaddr)
++{
++  assert(address != NULL);
++
++  CHECK_ADDRESS(address, INET6);
++
++  ((struct sockaddr_in6 *)address->m_addr)->sin6_addr = hostaddr;
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_SetPortName(GAddress *address, const char *port,
++                                       const char *protocol)
++{
++  struct servent *se;
++  struct sockaddr_in6 *addr;
++
++  assert(address != NULL);
++  CHECK_ADDRESS(address, INET6);
++
++  if (!port)
++  {
++    address->m_error = GSOCK_INVPORT;
++    return GSOCK_INVPORT;
++  }
++
++  se = getservbyname(port, protocol);
++  if (!se)
++  {
++    if (isdigit(port[0]))
++    {
++      int port_int;
++
++      port_int = atoi(port);
++      addr = (struct sockaddr_in6 *)address->m_addr;
++      addr->sin6_port = htons((u_short) port_int);
++      return GSOCK_NOERROR;
++    }
++
++    address->m_error = GSOCK_INVPORT;
++    return GSOCK_INVPORT;
++  }
++
++  addr = (struct sockaddr_in6 *)address->m_addr;
++  addr->sin6_port = se->s_port;
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_SetPort(GAddress *address, unsigned short port)
++{
++  struct sockaddr_in6 *addr;
++
++  assert(address != NULL);
++  CHECK_ADDRESS(address, INET6);
++
++  addr = (struct sockaddr_in6 *)address->m_addr;
++  addr->sin6_port = htons(port);
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_GetHostName(GAddress *address, char *hostname, size_t sbuf)
++{
++  struct hostent *he;
++  char *addr_buf;
++  struct sockaddr_in6 *addr;
++
++  assert(address != NULL);
++  CHECK_ADDRESS(address, INET6);
++
++  addr = (struct sockaddr_in6 *)address->m_addr;
++  addr_buf = (char *)&(addr->sin6_addr);
++
++  he = gethostbyaddr(addr_buf, sizeof(addr->sin6_addr), AF_INET6);
++  if (he == NULL)
++  {
++    address->m_error = GSOCK_NOHOST;
++    return GSOCK_NOHOST;
++  }
++
++  strncpy(hostname, he->h_name, sbuf);
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_GetHostAddress(GAddress *address,struct in6_addr *hostaddr)
++{
++  assert(address != NULL);
++  assert(hostaddr != NULL);
++  CHECK_ADDRESS_RETVAL(address, INET6, GSOCK_INVADDR);
++  *hostaddr = ( (struct sockaddr_in6 *)address->m_addr )->sin6_addr;
++  return GSOCK_NOERROR;
++}
++
++unsigned short GAddress_INET6_GetPort(GAddress *address)
++{
++  assert(address != NULL);
++  CHECK_ADDRESS_RETVAL(address, INET6, 0);
++
++  return ntohs( ((struct sockaddr_in6 *)address->m_addr)->sin6_port );
++}
++
++#endif // wxUSE_IPV6
++
++/*
++ * -------------------------------------------------------------------------
+  * Unix address family
+  * -------------------------------------------------------------------------
+  */
+Index: src/unix/gsocket.cpp
+===================================================================
+--- src/unix/gsocket.cpp	(revision 48212)
++++ src/unix/gsocket.cpp	(working copy)
+@@ -449,6 +449,12 @@
+ #  define GSocket_Debug(args)
+ #endif /* __GSOCKET_DEBUG__ */
+ 
++#if wxUSE_IPV6
++typedef struct sockaddr_storage wxSockAddr;
++#else
++typedef struct sockaddr wxSockAddr;
++#endif
++
+ /* Table of GUI-related functions. We must call them indirectly because
+  * of wxBase and GUI separation: */
+ 
+@@ -662,7 +668,7 @@
+ GAddress *GSocket::GetLocal()
+ {
+   GAddress *address;
+-  struct sockaddr addr;
++  wxSockAddr addr;
+   WX_SOCKLEN_T size = sizeof(addr);
+   GSocketError err;
+ 
+@@ -679,7 +685,7 @@
+     return NULL;
+   }
+ 
+-  if (getsockname(m_fd, &addr, (WX_SOCKLEN_T *) &size) < 0)
++  if (getsockname(m_fd, (sockaddr*)&addr, (WX_SOCKLEN_T *) &size) < 0)
+   {
+     m_error = GSOCK_IOERR;
+     return NULL;
+@@ -693,7 +699,7 @@
+     return NULL;
+   }
+ 
+-  err = _GAddress_translate_from(address, &addr, size);
++  err = _GAddress_translate_from(address, (sockaddr*)&addr, size);
+   if (err != GSOCK_NOERROR)
+   {
+     GAddress_destroy(address);
+@@ -811,7 +817,7 @@
+  */
+ GSocket *GSocket::WaitConnection()
+ {
+-  struct sockaddr from;
++  wxSockAddr from;
+   WX_SOCKLEN_T fromlen = sizeof(from);
+   GSocket *connection;
+   GSocketError err;
+@@ -843,7 +849,7 @@
+     return NULL;
+   }
+ 
+-  connection->m_fd = accept(m_fd, &from, (WX_SOCKLEN_T *) &fromlen);
++  connection->m_fd = accept(m_fd, (sockaddr*)&from, (WX_SOCKLEN_T *) &fromlen);
+ 
+   /* Reenable CONNECTION events */
+   Enable(GSOCK_CONNECTION);
+@@ -872,7 +878,7 @@
+     return NULL;
+   }
+ 
+-  err = _GAddress_translate_from(connection->m_peer, &from, fromlen);
++  err = _GAddress_translate_from(connection->m_peer, (sockaddr*)&from, fromlen);
+   if (err != GSOCK_NOERROR)
+   {
+     delete connection;
+@@ -1626,7 +1632,7 @@
+ 
+ int GSocket::Recv_Dgram(char *buffer, int size)
+ {
+-  struct sockaddr from;
++  wxSockAddr from;
+   WX_SOCKLEN_T fromlen = sizeof(from);
+   int ret;
+   GSocketError err;
+@@ -1635,7 +1641,7 @@
+ 
+   do
+   {
+-    ret = recvfrom(m_fd, buffer, size, 0, &from, (WX_SOCKLEN_T *) &fromlen);
++    ret = recvfrom(m_fd, buffer, size, 0, (sockaddr*)&from, (WX_SOCKLEN_T *) &fromlen);
+   }
+   while (ret == -1 && errno == EINTR); /* Loop until not interrupted */
+ 
+@@ -1653,7 +1659,7 @@
+     }
+   }
+ 
+-  err = _GAddress_translate_from(m_peer, &from, fromlen);
++  err = _GAddress_translate_from(m_peer, (sockaddr*)&from, fromlen);
+   if (err != GSOCK_NOERROR)
+   {
+     GAddress_destroy(m_peer);
+@@ -1751,12 +1757,6 @@
+     {
+       CALL_CALLBACK(this, GSOCK_CONNECTION);
+     }
+-    else if (num == 0)
+-    {
+-      /* graceful shutdown */
+-      CALL_CALLBACK(this, GSOCK_LOST);
+-      Shutdown();
+-    }
+     else
+     {
+       /* Do not throw a lost event in cases where the socket isn't really lost */
+@@ -1942,7 +1942,7 @@
+     case AF_UNIX:
+       address->m_family = GSOCK_UNIX;
+       break;
+-#ifdef AF_INET6
++#if wxUSE_IPV6
+     case AF_INET6:
+       address->m_family = GSOCK_INET6;
+       break;
+@@ -2203,8 +2203,171 @@
+   return ntohs(addr->sin_port);
+ }
+ 
++#if wxUSE_IPV6
+ /*
+  * -------------------------------------------------------------------------
++ * Internet IPv6 address family
++ * -------------------------------------------------------------------------
++ */
++
++GSocketError _GAddress_Init_INET6(GAddress *address)
++{
++  struct in6_addr any_address = IN6ADDR_ANY_INIT;
++  address->m_len  = sizeof(struct sockaddr_in6);
++  address->m_addr = (struct sockaddr *) malloc(address->m_len);
++  if (address->m_addr == NULL)
++  {
++    address->m_error = GSOCK_MEMERR;
++    return GSOCK_MEMERR;
++  }
++  memset(address->m_addr,0,address->m_len);
++
++  address->m_family = GSOCK_INET6;
++  address->m_realfamily = AF_INET6;
++  ((struct sockaddr_in6 *)address->m_addr)->sin6_family = AF_INET6;
++  ((struct sockaddr_in6 *)address->m_addr)->sin6_addr = any_address;
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_SetHostName(GAddress *address, const char *hostname)
++{
++  assert(address != NULL);
++  CHECK_ADDRESS(address, INET6);
++
++  addrinfo hints;
++  memset( & hints, 0, sizeof( hints ) );
++  hints.ai_family = AF_INET6;
++  addrinfo * info = 0;
++  if ( getaddrinfo( hostname, "0", & hints, & info ) || ! info )
++  {
++    address->m_error = GSOCK_NOHOST;
++    return GSOCK_NOHOST;
++  }
++  
++  memcpy( address->m_addr, info->ai_addr, info->ai_addrlen );
++  freeaddrinfo( info );
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_SetAnyAddress(GAddress *address)
++{
++  assert(address != NULL);
++
++  CHECK_ADDRESS(address, INET6);
++
++  struct in6_addr addr;
++  memset( & addr, 0, sizeof( addr ) );
++  return GAddress_INET6_SetHostAddress(address, addr);
++}
++GSocketError GAddress_INET6_SetHostAddress(GAddress *address,
++                                          struct in6_addr hostaddr)
++{
++  assert(address != NULL);
++
++  CHECK_ADDRESS(address, INET6);
++
++  ((struct sockaddr_in6 *)address->m_addr)->sin6_addr = hostaddr;
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_SetPortName(GAddress *address, const char *port,
++                                       const char *protocol)
++{
++  struct servent *se;
++  struct sockaddr_in6 *addr;
++
++  assert(address != NULL);
++  CHECK_ADDRESS(address, INET6);
++
++  if (!port)
++  {
++    address->m_error = GSOCK_INVPORT;
++    return GSOCK_INVPORT;
++  }
++
++  se = getservbyname(port, protocol);
++  if (!se)
++  {
++    if (isdigit(port[0]))
++    {
++      int port_int;
++
++      port_int = atoi(port);
++      addr = (struct sockaddr_in6 *)address->m_addr;
++      addr->sin6_port = htons((u_short) port_int);
++      return GSOCK_NOERROR;
++    }
++
++    address->m_error = GSOCK_INVPORT;
++    return GSOCK_INVPORT;
++  }
++
++  addr = (struct sockaddr_in6 *)address->m_addr;
++  addr->sin6_port = se->s_port;
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_SetPort(GAddress *address, unsigned short port)
++{
++  struct sockaddr_in6 *addr;
++
++  assert(address != NULL);
++  CHECK_ADDRESS(address, INET6);
++
++  addr = (struct sockaddr_in6 *)address->m_addr;
++  addr->sin6_port = htons(port);
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_GetHostName(GAddress *address, char *hostname, size_t sbuf)
++{
++  struct hostent *he;
++  char *addr_buf;
++  struct sockaddr_in6 *addr;
++
++  assert(address != NULL);
++  CHECK_ADDRESS(address, INET6);
++
++  addr = (struct sockaddr_in6 *)address->m_addr;
++  addr_buf = (char *)&(addr->sin6_addr);
++
++  he = gethostbyaddr(addr_buf, sizeof(addr->sin6_addr), AF_INET6);
++  if (he == NULL)
++  {
++    address->m_error = GSOCK_NOHOST;
++    return GSOCK_NOHOST;
++  }
++
++  strncpy(hostname, he->h_name, sbuf);
++
++  return GSOCK_NOERROR;
++}
++
++GSocketError GAddress_INET6_GetHostAddress(GAddress *address,struct in6_addr *hostaddr)
++{
++  assert(address != NULL);
++  assert(hostaddr != NULL);
++  CHECK_ADDRESS_RETVAL(address, INET6, GSOCK_INVADDR);
++  *hostaddr = ( (struct sockaddr_in6 *)address->m_addr )->sin6_addr;
++  return GSOCK_NOERROR;
++}
++
++unsigned short GAddress_INET6_GetPort(GAddress *address)
++{
++  assert(address != NULL);
++  CHECK_ADDRESS_RETVAL(address, INET6, 0);
++
++  return ntohs( ((struct sockaddr_in6 *)address->m_addr)->sin6_port );
++}
++
++#endif // wxUSE_IPV6
++
++/*
++ * -------------------------------------------------------------------------
+  * Unix address family
+  * -------------------------------------------------------------------------
+  */
+
+ 	  	 

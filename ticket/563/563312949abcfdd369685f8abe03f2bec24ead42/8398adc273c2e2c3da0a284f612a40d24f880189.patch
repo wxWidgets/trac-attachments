@@ -1,0 +1,273 @@
+diff --binary -U 6 -r -x .svn Original/src/msw/dlmsw.cpp Patched/src/msw/dlmsw.cpp
+--- Original/src/msw/dlmsw.cpp	2009-04-26 13:59:32.015625000 +0200
++++ Patched/src/msw/dlmsw.cpp	2009-04-26 14:39:46.828125000 +0200
+@@ -25,12 +25,14 @@
+ 
+ #if wxUSE_DYNLIB_CLASS
+ 
+ #include "wx/msw/private.h"
+ #include "wx/msw/debughlp.h"
+ 
++#include "Psapi.h"
++
+ const wxString wxDynamicLibrary::ms_dllext(_T(".dll"));
+ 
+ // ----------------------------------------------------------------------------
+ // private classes
+ // ----------------------------------------------------------------------------
+ 
+@@ -101,55 +103,228 @@
+ };
+ 
+ // ----------------------------------------------------------------------------
+ // private functions
+ // ----------------------------------------------------------------------------
+ 
+-// return the module handle for the given base name
++// Forward declarations.
++static bool moduleFileNameEquals(HMODULE, wxString const &);
++
++
++////////////////////////////////////////////////////////////////////////////////
++//
++// manualGetModuleHandle()
++// -----------------------
++//
++//   Manually traverses the list of processes currently loaded modules and
++// compares their base names to the given one. Returns a handle of the located
++// module or 0 in case no module matching the given name could be found.
++//
++//   Expects the module to be specified without any path information.
++//
++//   In order to be compatible with the documented ::GetModuleHandle() Windows
++// API behaviour we append the '.dll' extension for module names specified
++// without an extension. We are 'duplicating' the default Windows DLL extension
++// here and not reusing the one defined by the wxDynamicLibrary class since we
++// are directly implenting the ::GetModuleHandle() specification which
++// explicitly defines the extension used.
++//
++//   Returned module handle is compatible with ones returned by the
++// ::GetModuleHandle() Windows API, including the fact that it should not be
++// closed by the caller. See the ::GetModuleHandle() and ::EnumProcessModules()
++// Windows API
++//
++//   If we return 0, we either failed to enumerate all the modules for the
++// current process or did not find the module we were looking for.
++//
++////////////////////////////////////////////////////////////////////////////////
++//
++// (todo)
++//   Better Windows API failure handling. Possibly report such failures back to
++// the caller, but only if we do not find the requested module.
++//                                            (todo) (26.04.2009.) (Jurko)
++//
++// (todo)
++//   Add support handling processes having more than some predetermined number
++// of loaded modules.
++//                                            (todo) (26.04.2009.) (Jurko)
++//
++////////////////////////////////////////////////////////////////////////////////
++
+ static
+-HMODULE wxGetModuleHandle(const char *name, void *addr)
++wxDllType manualGetModuleHandle(wxString const & moduleNameParam)
+ {
+-    // we want to use GetModuleHandleEx() instead of usual GetModuleHandle()
+-    // because the former works correctly for comctl32.dll while the latter
+-    // returns NULL when comctl32.dll version 6 is used under XP (note that
+-    // GetModuleHandleEx() is only available under XP and later, coincidence?)
++    static int const maxSupportedLoadedModules(4096);
++    static wxChar const * const defaultModuleExtensionForGetModuleHandle(_T(".dll"));
++
++    wxString moduleName;
++    moduleName.reserve( moduleNameParam.length() + sizeof(defaultModuleExtensionForGetModuleHandle) / sizeof(wxChar) );
++    moduleName = moduleNameParam;
++
++    if (moduleName.find_first_of(_T('.')) == wxString::npos)
++        moduleName.append(defaultModuleExtensionForGetModuleHandle);
++
++    //   We lowercase the passed moduleName in order to make it compatible with
++    // our internal moduleFileNameEquals() function requirements. Otherwise we
++    // would have to do this for every separate moduleFileNameEquals() call.
++    moduleName.MakeLower();
++
++    HMODULE allModuleHandles[maxSupportedLoadedModules];
++    DWORD allModuleHandlesByteCount(0);
++    if (::EnumProcessModules(::GetCurrentProcess(), allModuleHandles, sizeof(allModuleHandles), &allModuleHandlesByteCount))
++    {
++        DWORD const allModuleHandlesCount(allModuleHandlesByteCount / sizeof(HMODULE));
++        for (unsigned int loadedModuleIndex(0); loadedModuleIndex < allModuleHandlesCount; ++loadedModuleIndex)
++            if (moduleFileNameEquals(allModuleHandles[loadedModuleIndex], moduleName))
++                return wxDllType(allModuleHandles[loadedModuleIndex]);
++    }
++    return wxDllType(0);
++}
+ 
+-    // check if we can use GetModuleHandleEx
++
++////////////////////////////////////////////////////////////////////////////////
++//
++// moduleFileNameEquals()
++// ----------------------
++//
++//   Internal function returning whether a module's file name (path information
++// not included) matches the given one. Expects to be passed the candidate file
++// name using all lowercase letters and including its file extension.
++//
++////////////////////////////////////////////////////////////////////////////////
++
++static bool moduleFileNameEquals(HMODULE const moduleHandle, wxString const & moduleName)
++{
++    wxChar currentModuleFullPath[MAX_PATH * 10] = {0};
++    std::size_t const currentModuleFullPathSize(sizeof(currentModuleFullPath) / sizeof(wxChar));
++
++    // Find out the module's full path.
++    DWORD const apiResult(::GetModuleFileName(moduleHandle, currentModuleFullPath, currentModuleFullPathSize));
++    if (apiResult == 0)
++    {
++        // (todo)
++        //   Better Windows API failure handling.
++        //                                    (todo) (26.04.2009.) (Jurko)
++        return false;
++    }
++    if (apiResult == currentModuleFullPathSize)
++    {
++        // (todo)
++        //   Add more robust support for handling paths longer than MAX_PATH
++        // characters. Current implementation is efficient but only works if
++        // path names are shorter than some predefined size. Note though that
++        // due to the large size chosen it is highly unlikely such paths will
++        // ever appear in practice.
++        //                                    (todo) (26.04.2009.) (Jurko)
++        return false;
++    }
++
++    //   Module's base name starts immediately after the final backslash
++    // character. If there is no trailing backslash that this is actually a
++    // Windows API failure as all paths returned by ::GetModuleFileName() should
++    // be absolute paths.
++    char * const currentModuleBaseName(wxStrrchr(currentModuleFullPath, _T('\\')));
++    if (!currentModuleBaseName) return false;
++
++    // Convert the 'currentModuleBaseName' to lowercase.
++    for (char * pCurrentModuleBaseNameChar(currentModuleBaseName); *pCurrentModuleBaseNameChar; ++pCurrentModuleBaseNameChar)
++        *pCurrentModuleBaseNameChar = wxTolower(*pCurrentModuleBaseNameChar);
++
++    //   Find whether moduleName (expected to be passed to us already
++    // lowercased) matches the current module's lowercased base file name.
++    return !moduleName.compare(currentModuleBaseName);
++}
++
++
++////////////////////////////////////////////////////////////////////////////////
++//
++// wxGetModuleHandle()
++// -------------------
++//
++//   Wrapper function for the ::GetModuleHandle() Windows API providing a
++// workaround for a bug in the original API causing it to sometimes not locate
++// modules specified using just their base name and not their full path. This
++// has been detected on some Windows Vista installations when attempting to
++// locate the comctl32.dll Window Common Controls DLL module.
++//
++//   Note that on systems demonstrating this bug, related :LoadLibrary() Windows
++// API may also behave unexpectedly and not load libraries or load them more
++// than once when requested without specifying their full path.
++//
++////////////////////////////////////////////////////////////////////////////////
++
++static wxDllType wxGetModuleHandle(wxString const & moduleName)
++{
++    wxDllType handle(::GetModuleHandle(moduleName));
++
++    //   If ::GetModuleHandle() Windows API fails and caller specified just the
++    // module file name without its path then there is a chance this might be a
++    // false report so try to look up the module manually. ::GetModuleHandle()
++    // explicitly requires its caller to use backslashes as path separators so
++    // there is no need for any fancy path separator detection here.
++    if (!handle && (moduleName.find_first_of(_T('\\')) == wxString::npos))
++        handle = manualGetModuleHandle(moduleName);
++
++    return handle;
++}
++
++
++////////////////////////////////////////////////////////////////////////////////
++//
++// wxGetModuleHandle()
++// -------------------
++//
++//   Returns a module handle for a module identified by an address belonging to
++// that module, if possible, or by its name if not.
++//
++//   We want to use ::GetModuleHandleEx() instead of the usual
++// ::GetModuleHandle() Windows API because the former works correctly for
++// comctl32.dll while the latter returns NULL when comctl32.dll version 6 is
++// used under XP. Note that GetModuleHandleEx() is only available under XP and
++// later, coincidence?
++//
++////////////////////////////////////////////////////////////////////////////////
++
++static
++HMODULE wxGetModuleHandle(const char *name, void *addr)
++{
++    // Check whether we can use GetModuleHandleEx().
+     typedef BOOL (WINAPI *GetModuleHandleEx_t)(DWORD, LPCSTR, HMODULE *);
+ 
+     static const GetModuleHandleEx_t INVALID_FUNC_PTR = (GetModuleHandleEx_t)-1;
+ 
+     static GetModuleHandleEx_t s_pfnGetModuleHandleEx = INVALID_FUNC_PTR;
+     if ( s_pfnGetModuleHandleEx == INVALID_FUNC_PTR )
+     {
+         wxDynamicLibrary dll(_T("kernel32.dll"), wxDL_VERBATIM);
+         s_pfnGetModuleHandleEx =
+             (GetModuleHandleEx_t)dll.RawGetSymbol(_T("GetModuleHandleExA"));
+ 
+-        // dll object can be destroyed, kernel32.dll won't be unloaded anyhow
++        // DLL object can be destroyed, kernel32.dll won't be unloaded anyhow.
+     }
+ 
+-    // get module handle from its address
++    // Get module handle from its address.
+     if ( s_pfnGetModuleHandleEx )
+     {
+         // flags are GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT |
+         //           GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+         HMODULE hmod;
+         if ( s_pfnGetModuleHandleEx(6, (char *)addr, &hmod) && hmod )
+             return hmod;
+     }
+ 
+-    // Windows CE only has Unicode API, so even we have an ANSI string here, we
+-    // still need to use GetModuleHandleW() there
++    //   Windows CE only has Unicode API, so even if we have an ANSI string
++    // here, we still need to use GetModuleHandleW() there.
+ #ifdef __WXWINCE__
+     return ::GetModuleHandleW(wxConvLibc.cMB2WC(name).data());
+ #else
+     return ::GetModuleHandleA((char *)name);
+ #endif
+ }
+ 
++
+ // ============================================================================
+ // wxVersionDLL implementation
+ // ============================================================================
+ 
+ // ----------------------------------------------------------------------------
+ // loading
+@@ -282,13 +457,13 @@
+ 
+ /* static */
+ wxDllType
+ wxDynamicLibrary::RawLoad(const wxString& libname, int flags)
+ {
+     return flags & wxDL_GET_LOADED
+-            ? ::GetModuleHandle(libname.t_str())
++            ? wxGetModuleHandle(libname.t_str())
+             : ::LoadLibrary(libname.t_str());
+ }
+ 
+ /* static */
+ void wxDynamicLibrary::Unload(wxDllType handle)
+ {

@@ -1,0 +1,826 @@
+NOTE: Dont't forget to rebake after applying this patch!
+---
+ configure.in               |    3 
+ samples/ipc/baseclient.cpp |  306 +++++++++++++++++++++++++++++++++++++++++
+ samples/ipc/baseserver.cpp |  329 +++++++++++++++++++++++++++++++++++++++++++++
+ samples/ipc/ipc.bkl        |   16 +-
+ src/common/sckipc.cpp      |    2 
+ src/unix/gsocket.cpp       |   94 ++++++++++++
+ 6 files changed, 746 insertions(+), 4 deletions(-)
+
+Index: b/configure.in
+===================================================================
+--- a/configure.in
++++ b/configure.in
+@@ -7241,6 +7241,9 @@ else
+     if test "$wxUSE_SOCKETS" = "yes" ; then
+         SAMPLES_SUBDIRS="$SAMPLES_SUBDIRS sockets"
+     fi
++    if test "$wxUSE_IPC" = "yes" ; then
++        SAMPLES_SUBDIRS="$SAMPLES_SUBDIRS ipc"
++    fi
+ fi
+ 
+ 
+Index: b/samples/ipc/ipc.bkl
+===================================================================
+--- a/samples/ipc/ipc.bkl
++++ b/samples/ipc/ipc.bkl
+@@ -3,18 +3,30 @@
+ 
+     <include file="../../build/bakefiles/common_samples.bkl"/>
+ 
+-    <exe id="ipcclient" template="wx_sample" template_append="wx_append">
++    <exe id="ipcclient" template="wx_sample" template_append="wx_append" cond="USE_GUI==1">
+         <sources>client.cpp</sources>
+         <wx-lib>core</wx-lib>
+         <wx-lib>net</wx-lib>
+         <wx-lib>base</wx-lib>
+     </exe>
+ 
+-    <exe id="ipcserver" template="wx_sample" template_append="wx_append">
++    <exe id="ipcserver" template="wx_sample" template_append="wx_append" cond="USE_GUI==1">
+         <sources>server.cpp</sources>
+         <wx-lib>core</wx-lib>
+         <wx-lib>net</wx-lib>
+         <wx-lib>base</wx-lib>
+     </exe>
+ 
++    <exe id="baseipcclient" template="wx_sample_console" template_append="wx_append_base">
++        <sources>baseclient.cpp</sources>
++        <wx-lib>net</wx-lib>
++        <wx-lib>base</wx-lib>
++    </exe>
++
++    <exe id="baseipcserver" template="wx_sample_console" template_append="wx_append_base">
++        <sources>baseserver.cpp</sources>
++        <wx-lib>net</wx-lib>
++        <wx-lib>base</wx-lib>
++    </exe>
++
+ </makefile>
+Index: b/samples/ipc/baseclient.cpp
+===================================================================
+--- /dev/null
++++ b/samples/ipc/baseclient.cpp
+@@ -0,0 +1,306 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        samples/ipc/baseclient.cpp
++// Purpose:     IPC sample: console client
++// Author:      Anders Larsen
++//              Most of the code was stolen from: samples/ipc/client.cpp
++//              (c) Julian Smart, Jurgen Doornik
++// Created:     2007-11-08
++// RCS-ID:      $Id$
++// Copyright:   (c) 2007 Anders Larsen
++// License:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++// ============================================================================
++// declarations
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#ifndef WX_PRECOMP
++    #include "wx/wx.h"
++#endif
++
++// Settings common to both executables: determines whether
++// we're using TCP/IP or real DDE.
++#include "ipcsetup.h"
++
++#include "wx/timer.h"
++#include "wx/datetime.h"
++
++// ----------------------------------------------------------------------------
++// wxWin macros
++// ----------------------------------------------------------------------------
++
++
++// Define a new application
++class MyClient;
++class MyConnection;
++
++class MyApp: public wxApp
++{
++public:
++    virtual bool OnInit();
++    virtual int OnExit();
++
++protected:
++    MyClient         *m_client;
++};
++
++class MyConnection: public wxConnection
++{
++public:
++    MyConnection();
++    virtual ~MyConnection();
++    virtual bool DoExecute(const void *data, size_t size, wxIPCFormat format);
++    virtual const void *Request(const wxString& item, size_t *size = NULL, wxIPCFormat format = wxIPC_TEXT);
++    virtual bool DoPoke(const wxString& item, const void* data, size_t size, wxIPCFormat format);
++    virtual bool OnAdvise(const wxString& topic, const wxString& item, const void *data, size_t size, wxIPCFormat format);
++    virtual bool OnDisconnect();
++
++protected:
++    void Log(const wxString& command, const wxString& topic,
++        const wxString& item, const void *data, size_t size, wxIPCFormat format);
++};
++
++class MyClient: public wxClient, public wxTimer
++{
++public:
++    MyClient();
++    virtual ~MyClient();
++    bool Connect(const wxString& sHost, const wxString& sService, const wxString& sTopic);
++    void Disconnect();
++    wxConnectionBase *OnMakeConnection();
++    bool IsConnected() { return m_connection != NULL; };
++    virtual void Notify();
++
++protected:
++    MyConnection     *m_connection;
++    int              m_step;
++};
++
++// ============================================================================
++// implementation
++// ============================================================================
++
++IMPLEMENT_APP(MyApp)
++
++// ----------------------------------------------------------------------------
++// MyApp
++// ----------------------------------------------------------------------------
++
++// The `main program' equivalent, creating the windows and returning the
++// main frame
++bool MyApp::OnInit()
++{
++    if ( !wxApp::OnInit() )
++        return false;
++
++    delete wxLog::SetActiveTarget(new wxLogStderr);
++
++    // Create a new client
++    m_client = new MyClient;
++    bool retval = m_client->Connect("localhost", "4242", "IPC TEST");
++
++    wxLogMessage(_T("Client host=\"localhost\" port=\"4242\" topic=\"IPC TEST\" %s"),
++        retval ? _T("connected") : _T("failed to connect"));
++
++    return retval;
++}
++
++int MyApp::OnExit()
++{
++    delete m_client;
++
++    return 0;
++}
++
++// ----------------------------------------------------------------------------
++// MyClient
++// ----------------------------------------------------------------------------
++
++MyClient::MyClient() : wxClient()
++{
++    m_connection = NULL;
++    m_step = 0;
++}
++
++bool MyClient::Connect(const wxString& sHost, const wxString& sService, const wxString& sTopic)
++{
++    // suppress the log messages from MakeConnection()
++    wxLogNull nolog;
++
++    m_connection = (MyConnection *)MakeConnection(sHost, sService, sTopic);
++    if (m_connection)
++        Start(1000, false);
++    return m_connection != NULL;
++}
++
++wxConnectionBase *MyClient::OnMakeConnection()
++{
++    return new MyConnection;
++}
++
++void MyClient::Disconnect()
++{
++    if (m_connection)
++    {
++        m_connection->Disconnect();
++        delete m_connection;
++        m_connection = NULL;
++        wxLogMessage(_T("Client disconnected from server"));
++    }
++    wxGetApp().ExitMainLoop();
++}
++
++MyClient::~MyClient()
++{
++    Disconnect();
++}
++
++void MyClient::Notify()
++{
++    switch (m_step++)
++    {
++        case 0:
++        {
++            size_t size;
++            m_connection->Request(_T("Date"));
++            m_connection->Request(_T("Date+len"), &size);
++            m_connection->Request(_T("bytes[3]"), &size, wxIPC_PRIVATE);
++            break;
++        }
++        case 1:
++        {
++            wxString s = wxDateTime::Now().Format();
++            m_connection->Poke(_T("Date"), s);
++            s = wxDateTime::Now().FormatTime() + _T(" ") + wxDateTime::Now().FormatDate();
++            m_connection->Poke(_T("Date"), (const char *)s.c_str(), s.length() + 1);
++            char bytes[3];
++            bytes[0] = '1'; bytes[1] = '2'; bytes[2] = '3';
++            m_connection->Poke(_T("bytes[3]"), bytes, 3, wxIPC_PRIVATE);
++            break;
++        }
++        case 2:
++        {
++            wxString s = _T("Date");
++            m_connection->Execute(s);
++            m_connection->Execute((const char *)s.c_str(), s.length() + 1);
++#if wxUSE_DDE_FOR_IPC
++            wxLogMessage(_T("DDE Execute can only be used to send text strings, not arbitrary data.\nThe type argument will be ignored, text truncated, converted to Unicode and null terminated."));
++#endif
++            char bytes[3];
++            bytes[0] = '1'; bytes[1] = '2'; bytes[2] = '3';
++            m_connection->Execute(bytes, 3, wxIPC_PRIVATE);
++            break;
++        }
++        case 3:
++            wxLogMessage(_T("StartAdvise(\"something\")"));
++            m_connection->StartAdvise(_T("something"));
++            break;
++        case 10:
++            wxLogMessage(_T("StopAdvise(\"something\")"));
++            m_connection->StopAdvise(_T("something"));
++            break;
++        case 15:
++            Disconnect();
++            break;
++    }
++}
++
++// ----------------------------------------------------------------------------
++// MyConnection
++// ----------------------------------------------------------------------------
++
++MyConnection::MyConnection()
++{
++}
++
++MyConnection::~MyConnection()
++{
++}
++
++void MyConnection::Log(const wxString& command, const wxString& topic,
++    const wxString& item, const void *data, size_t size, wxIPCFormat format)
++{
++    wxString s;
++    if (topic.IsEmpty() && item.IsEmpty())
++        s.Printf(_T("%s("), command.c_str());
++    else if (topic.IsEmpty())
++        s.Printf(_T("%s(item=\"%s\","), command.c_str(), item.c_str());
++    else if (item.IsEmpty())
++        s.Printf(_T("%s(topic=\"%s\","), command.c_str(), topic.c_str());
++    else
++        s.Printf(_T("%s(topic=\"%s\",item=\"%s\","), command.c_str(), topic.c_str(), item.c_str());
++
++    switch (format)
++    {
++      case wxIPC_TEXT:
++      case wxIPC_UTF8TEXT:
++#if !wxUSE_UNICODE || wxUSE_UNICODE_UTF8
++        wxLogMessage(_T("%s\"%s\",%d)"), s.c_str(), data, size);
++#else
++        wxLogMessage(_T("%s\"%s\",%d)"), s.c_str(), wxConvUTF8.cMB2WC((const char*)data), size);
++#endif
++        break;
++      case wxIPC_PRIVATE:
++        if (size == 3)
++        {
++            char *bytes = (char *)data;
++            wxLogMessage(_T("%s'%c%c%c',%d)"), s.c_str(), bytes[0], bytes[1], bytes[2], size);
++        }
++        else
++            wxLogMessage(_T("%s...,%d)"), s.c_str(), size);
++        break;
++      case wxIPC_INVALID:
++        wxLogMessage(_T("%s[invalid data],%d)"), s.c_str(), size);
++        break;
++      default:
++        wxLogMessage(_T("%s[unknown data],%d)"), s.c_str(), size);
++        break;
++    }
++}
++
++bool MyConnection::OnAdvise(const wxString& topic, const wxString& item, const void *data,
++    size_t size, wxIPCFormat format)
++{
++    Log(_T("OnAdvise"), topic, item, data, size, format);
++    return true;
++}
++
++bool MyConnection::OnDisconnect()
++{
++    wxLogMessage(_T("OnDisconnect()"));
++    wxGetApp().ExitMainLoop();
++    return true;
++}
++
++bool MyConnection::DoExecute(const void *data, size_t size, wxIPCFormat format)
++{
++    Log(_T("Execute"), wxEmptyString, wxEmptyString, data, size, format);
++    bool retval = wxConnection::DoExecute(data, size, format);
++    if (!retval)
++        wxLogMessage(_T("Execute failed!"));
++    return retval;
++}
++
++const void *MyConnection::Request(const wxString& item, size_t *size, wxIPCFormat format)
++{
++    const void *data =  wxConnection::Request(item, size, format);
++    Log(_T("Request"), wxEmptyString, item, data, size ? *size : wxNO_LEN, format);
++    return data;
++}
++
++bool MyConnection::DoPoke(const wxString& item, const void *data, size_t size, wxIPCFormat format)
++{
++    Log(_T("Poke"), wxEmptyString, item, data, size, format);
++    return wxConnection::DoPoke(item, data, size, format);
++}
+Index: b/samples/ipc/baseserver.cpp
+===================================================================
+--- /dev/null
++++ b/samples/ipc/baseserver.cpp
+@@ -0,0 +1,329 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        samples/ipc/baseserver.cpp
++// Purpose:     IPC sample: console server
++// Author:      Anders Larsen
++//              Most of the code was stolen from: samples/ipc/server.cpp
++//              (c) Julian Smart, Jurgen Doornik
++// Created:     2007-11-08
++// RCS-ID:      $Id$
++// Copyright:   (c) 2007 Anders Larsen
++// License:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++// ============================================================================
++// declarations
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#ifndef WX_PRECOMP
++    #include "wx/wx.h"
++#endif
++
++// Settings common to both executables: determines whether
++// we're using TCP/IP or real DDE.
++#include "ipcsetup.h"
++
++#include "wx/timer.h"
++#include "wx/datetime.h"
++
++// ----------------------------------------------------------------------------
++// wxWin macros
++// ----------------------------------------------------------------------------
++
++// Define a new application
++class MyServer;
++class MyConnection;
++
++class MyApp : public wxApp
++{
++public:
++    virtual bool OnInit();
++    virtual int OnExit();
++
++protected:
++    MyServer       *m_server;
++};
++
++DECLARE_APP(MyApp)
++
++class MyConnection : public wxConnection, public wxTimer
++{
++public:
++    MyConnection();
++    virtual ~MyConnection();
++
++    virtual bool Disconnect() { return wxConnection::Disconnect(); }
++    virtual bool OnExecute(const wxString& topic, const void *data, size_t size, wxIPCFormat format);
++    virtual const void *OnRequest(const wxString& topic, const wxString& item, size_t *size, wxIPCFormat format);
++    virtual bool OnPoke(const wxString& topic, const wxString& item, const void *data, size_t size, wxIPCFormat format);
++    virtual bool OnStartAdvise(const wxString& topic, const wxString& item);
++    virtual bool OnStopAdvise(const wxString& topic, const wxString& item);
++    virtual bool DoAdvise(const wxString& item, const void *data, size_t size, wxIPCFormat format);
++    virtual bool OnDisconnect();
++    virtual void Notify();
++
++protected:
++    void Log(const wxString& command, const wxString& topic, const wxString& item, const void *data, size_t size, wxIPCFormat format);
++
++public:
++    wxString        m_sAdvise;
++
++protected:
++    wxString        m_sRequestDate;
++    char            m_achRequestBytes[3];
++};
++
++class MyServer: public wxServer
++{
++public:
++    MyServer();
++    virtual ~MyServer();
++    void Disconnect();
++    bool IsConnected() { return m_connection != NULL; };
++    MyConnection *GetConnection() { return m_connection; };
++    wxConnectionBase *OnAcceptConnection(const wxString& topic);
++
++protected:
++    MyConnection     *m_connection;
++};
++
++// ============================================================================
++// implementation
++// ============================================================================
++
++IMPLEMENT_APP(MyApp)
++
++// ----------------------------------------------------------------------------
++// MyApp
++// ----------------------------------------------------------------------------
++
++bool MyApp::OnInit()
++{
++    if ( !wxApp::OnInit() )
++        return false;
++
++    delete wxLog::SetActiveTarget(new wxLogStderr);
++
++    // Create a new server
++    m_server = new MyServer;
++    if (m_server->Create("4242"))
++    {
++        wxLogMessage(_T("Server 4242 started"));
++#if wxUSE_DDE_FOR_IPC
++        wxLogMessage(_T("Server uses DDE"));
++#else // !wxUSE_DDE_FOR_IPC
++        wxLogMessage(_T("Server uses TCP"));
++#endif // wxUSE_DDE_FOR_IPC/!wxUSE_DDE_FOR_IPC
++        return true;
++    }
++    else
++    {
++        wxLogMessage(_T("Server 4242 failed to start"));
++        delete m_server;
++        return false;
++    }
++}
++
++int MyApp::OnExit()
++{
++    return 0;
++}
++
++// ----------------------------------------------------------------------------
++// MyServer
++// ----------------------------------------------------------------------------
++
++MyServer::MyServer()
++{
++    m_connection = NULL;
++}
++
++MyServer::~MyServer()
++{
++    Disconnect();
++}
++
++wxConnectionBase *MyServer::OnAcceptConnection(const wxString& topic)
++{
++    wxLogMessage(_T("OnAcceptConnection(\"%s\")"), topic.c_str());
++
++    if ( topic == IPC_TOPIC )
++    {
++        m_connection = new MyConnection;
++        wxLogMessage(_T("Connection accepted"));
++        return m_connection;
++    }
++    // unknown topic
++    return NULL;
++}
++
++void MyServer::Disconnect()
++{
++    if (m_connection)
++    {
++        m_connection->Disconnect();
++        delete m_connection;
++        m_connection = NULL;
++        wxLogMessage(_T("Disconnected client"));
++    }
++}
++
++// ----------------------------------------------------------------------------
++// MyConnection
++// ----------------------------------------------------------------------------
++
++MyConnection::MyConnection()
++{
++}
++
++MyConnection::~MyConnection()
++{
++}
++
++bool MyConnection::OnExecute(const wxString& topic,
++    const void *data, size_t size, wxIPCFormat format)
++{
++    Log(_T("OnExecute"), topic, _T(""), data, size, format);
++    return true;
++}
++
++bool MyConnection::OnPoke(const wxString& topic,
++    const wxString& item, const void *data, size_t size, wxIPCFormat format)
++{
++    Log(_T("OnPoke"), topic, item, data, size, format);
++    return wxConnection::OnPoke(topic, item, data, size, format);
++}
++
++const void *MyConnection::OnRequest(const wxString& topic,
++    const wxString& item, size_t *size, wxIPCFormat format)
++{
++    const void *data;
++    if (item == _T("Date"))
++    {
++        m_sRequestDate = wxDateTime::Now().Format();
++        data = m_sRequestDate.c_str();
++        *size = wxNO_LEN;
++    }
++    else if (item == _T("Date+len"))
++    {
++        m_sRequestDate = wxDateTime::Now().FormatTime() + _T(" ") + wxDateTime::Now().FormatDate();
++        data = m_sRequestDate.c_str();
++        *size = m_sRequestDate.Length() + 1;
++    }
++    else if (item == _T("bytes[3]"))
++    {
++        data = m_achRequestBytes;
++        m_achRequestBytes[0] = '1'; m_achRequestBytes[1] = '2'; m_achRequestBytes[2] = '3';
++        *size = 3;
++    }
++    else
++    {
++        data = NULL;
++        *size = 0;
++    }
++    Log(_T("OnRequest"), topic, item, data, *size, format);
++    return data;
++}
++
++bool MyConnection::OnStartAdvise(const wxString& topic,
++                                 const wxString& item)
++{
++    wxLogMessage(_T("OnStartAdvise(\"%s\",\"%s\")"), topic.c_str(), item.c_str());
++    wxLogMessage(_T("Returning true"));
++    m_sAdvise = item;
++    Start(3000, false);
++    return true;
++}
++
++bool MyConnection::OnStopAdvise(const wxString& topic,
++                                 const wxString& item)
++{
++    wxLogMessage(_T("OnStopAdvise(\"%s\",\"%s\")"), topic.c_str(), item.c_str());
++    wxLogMessage(_T("Returning true"));
++    m_sAdvise.Empty();
++    Stop();
++    return true;
++}
++
++void MyConnection::Notify()
++{
++    if (!m_sAdvise.IsEmpty())
++    {
++        wxString s = wxDateTime::Now().Format();
++        Advise(m_sAdvise, s);
++        s = wxDateTime::Now().FormatTime() + _T(" ") + wxDateTime::Now().FormatDate();
++        Advise(m_sAdvise, (const char *)s.c_str(), s.Length() + 1);
++
++#if wxUSE_DDE_FOR_IPC
++        wxLogMessage(_T("DDE Advise type argument cannot be wxIPC_PRIVATE. The client will receive it as wxIPC_TEXT, and receive the correct no of bytes, but not print a correct log entry."));
++#endif
++        char bytes[3];
++        bytes[0] = '1'; bytes[1] = '2'; bytes[2] = '3';
++        Advise(m_sAdvise, bytes, 3, wxIPC_PRIVATE);
++        // this works, but the log treats it as a string now
++//        m_connection->Advise(m_connection->m_sAdvise, bytes, 3, wxIPC_TEXT );
++    }
++}
++
++void MyConnection::Log(const wxString& command, const wxString& topic,
++    const wxString& item, const void *data, size_t size, wxIPCFormat format)
++{
++    wxString s;
++    if (topic.IsEmpty() && item.IsEmpty())
++        s.Printf(_T("%s("), command.c_str());
++    else if (topic.IsEmpty())
++        s.Printf(_T("%s(\"%s\","), command.c_str(), item.c_str());
++    else if (item.IsEmpty())
++        s.Printf(_T("%s(\"%s\","), command.c_str(), topic.c_str());
++    else
++        s.Printf(_T("%s(\"%s\",\"%s\","), command.c_str(), topic.c_str(), item.c_str());
++
++    switch (format)
++    {
++      case wxIPC_TEXT:
++      case wxIPC_UTF8TEXT:
++#if !wxUSE_UNICODE || wxUSE_UNICODE_UTF8
++        wxLogMessage(_T("%s\"%s\",%d)"), s.c_str(), data, size);
++#else
++        wxLogMessage(_T("%s\"%s\",%d)"), s.c_str(), wxConvUTF8.cMB2WC((const char*)data), size);
++#endif
++        break;
++      case wxIPC_PRIVATE:
++        if (size == 3)
++        {
++            char *bytes = (char *)data;
++            wxLogMessage(_T("%s'%c%c%c',%d)"), s.c_str(), bytes[0], bytes[1], bytes[2], size);
++        }
++        else
++            wxLogMessage(_T("%s...,%d)"), s.c_str(), size);
++        break;
++      case wxIPC_INVALID:
++        wxLogMessage(_T("%s[invalid data],%d)"), s.c_str(), size);
++        break;
++      default:
++        wxLogMessage(_T("%s[unknown data],%d)"), s.c_str(), size);
++        break;
++    }
++}
++
++bool MyConnection::DoAdvise(const wxString& item, const void *data, size_t size, wxIPCFormat format)
++{
++    Log(_T("Advise"), _T(""), item, data, size, format);
++    return wxConnection::DoAdvise(item, data, size, format);
++}
++
++bool MyConnection::OnDisconnect()
++{
++    wxLogMessage(_T("OnDisconnect()"));
++    return true;
++}
+Index: b/src/common/sckipc.cpp
+===================================================================
+--- a/src/common/sckipc.cpp
++++ b/src/common/sckipc.cpp
+@@ -69,7 +69,7 @@ enum
+ #endif
+ 
+ // All sockets will be created with the following flags
+-#define SCKIPC_FLAGS (wxSOCKET_WAITALL)
++#define SCKIPC_FLAGS (wxSOCKET_WAITALL|wxSOCKET_REUSEADDR)
+ 
+ // headers needed for umask()
+ #ifdef __UNIX_LIKE__
+Index: b/src/unix/gsocket.cpp
+===================================================================
+--- a/src/unix/gsocket.cpp
++++ b/src/unix/gsocket.cpp
+@@ -1296,7 +1296,99 @@ GSocketEventFlags GSocket::Select(GSocke
+ {
+   assert(this);
+ 
+-  return flags & m_detected;
++  GSocketEventFlags result = 0;
++  fd_set readfds;
++  fd_set writefds;
++  fd_set exceptfds;
++  struct timeval tv;
++
++  if (m_fd == -1)
++    return (GSOCK_LOST_FLAG & flags);
++
++  /* Do not use a static struct, Linux can garble it */
++  tv.tv_sec = 0;
++  tv.tv_usec = 0;
++
++  wxFD_ZERO(&readfds);
++  wxFD_ZERO(&writefds);
++  wxFD_ZERO(&exceptfds);
++  wxFD_SET(m_fd, &readfds);
++  if (flags & GSOCK_OUTPUT_FLAG || flags & GSOCK_CONNECTION_FLAG)
++    wxFD_SET(m_fd, &writefds);
++  wxFD_SET(m_fd, &exceptfds);
++
++  /* Check 'sticky' CONNECTION flag first */
++  result |= GSOCK_CONNECTION_FLAG & m_detected;
++
++  /* If we have already detected a LOST event, then don't try
++   * to do any further processing.
++   */
++  if ((m_detected & GSOCK_LOST_FLAG) != 0)
++  {
++    m_establishing = false;
++    return (GSOCK_LOST_FLAG & flags);
++  }
++
++  /* Try select now */
++  if (select(m_fd + 1, &readfds, &writefds, &exceptfds, &tv) < 0)
++  {
++    /* What to do here? */
++    return (result & flags);
++  }
++
++  /* Check for exceptions and errors */
++  if (wxFD_ISSET(m_fd, &exceptfds))
++  {
++    m_establishing = false;
++    m_detected = GSOCK_LOST_FLAG;
++
++    /* LOST event: Abort any further processing */
++    return (GSOCK_LOST_FLAG & flags);
++  }
++
++  /* Check for readability */
++  if (wxFD_ISSET(m_fd, &readfds))
++  {
++    result |= GSOCK_INPUT_FLAG;
++
++    if (m_server && m_stream)
++    {
++      /* This is a TCP server socket that detected a connection.
++         While the INPUT_FLAG is also set, it doesn't matter on
++         this kind of  sockets, as we can only Accept() from them. */
++      m_detected |= GSOCK_CONNECTION_FLAG;
++    }
++  }
++
++  /* Check for writability */
++  if (wxFD_ISSET(m_fd, &writefds))
++  {
++    if (m_establishing && !m_server)
++    {
++      int error;
++      SOCKOPTLEN_T len = sizeof(error);
++      m_establishing = false;
++      getsockopt(m_fd, SOL_SOCKET, SO_ERROR, (char*)&error, &len);
++
++      if (error)
++      {
++        m_detected = GSOCK_LOST_FLAG;
++
++        /* LOST event: Abort any further processing */
++        return (GSOCK_LOST_FLAG & flags);
++      }
++      else
++      {
++        m_detected |= GSOCK_CONNECTION_FLAG;
++      }
++    }
++    else
++    {
++      result |= GSOCK_OUTPUT_FLAG;
++    }
++  }
++
++  return (result | m_detected) & flags;
+ }
+ 
+ /* Flags */
+
+ 	  	 

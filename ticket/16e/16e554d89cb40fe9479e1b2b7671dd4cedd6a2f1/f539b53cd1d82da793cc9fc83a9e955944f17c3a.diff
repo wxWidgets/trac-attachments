@@ -1,0 +1,334 @@
+diff -rNbu2 wxW/build/bakefiles/files.bkl wxWidgets/build/bakefiles/files.bkl
+--- wxW/build/bakefiles/files.bkl	Sun Oct  3 03:44:03 2004
++++ wxWidgets/build/bakefiles/files.bkl	Sun Oct  3 12:42:30 2004
+@@ -1923,4 +1923,5 @@
+     src/cocoa/statline2.mm
+     src/cocoa/stattext.mm
++    src/cocoa/taskbar.mm
+     src/cocoa/textctrl.mm
+     src/cocoa/toolbar.mm
+@@ -1929,4 +1930,5 @@
+     src/cocoa/utilsexc.cpp
+     src/cocoa/window.mm
++    src/common/taskbarcmn.cpp
+     <!-- Generic implementations used by wxCocoa: -->
+     src/generic/accel.cpp
+@@ -2009,4 +2011,5 @@
+     wx/cocoa/statline.h
+     wx/cocoa/stattext.h
++    wx/cocoa/taskbarosx.h
+     wx/cocoa/textctrl.h
+     wx/cocoa/toolbar.h
+diff -rNbu2 wxW/include/wx/cocoa/taskbarosx.h wxWidgets/include/wx/cocoa/taskbarosx.h
+--- wxW/include/wx/cocoa/taskbarosx.h	Wed Dec 31 16:00:00 1969
++++ wxWidgets/include/wx/cocoa/taskbarosx.h	Sun Oct  3 09:48:58 2004
+@@ -0,0 +1,61 @@
++/////////////////////////////////////////////////////////////////////////
++// File:        wx/mac/taskbarosx.h
++// Purpose:     Defines wxTaskBarIcon class for OSX
++// Author:      Ryan Norton
++// Modified by:
++// Created:     04/04/2003
++// RCS-ID:      $Id: taskbarosx.h,v 1.9 2004/09/30 13:51:00 RN Exp $
++// Copyright:   (c) Ryan Norton, 2003
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////
++
++#ifndef _TASKBAR_H_
++#define _TASKBAR_H_
++
++#if defined(__GNUG__) && !defined(NO_GCC_PRAGMA)
++#pragma interface "taskbarosx.h"
++#endif
++
++class WXDLLEXPORT wxIcon;
++class WXDLLEXPORT wxMenu;
++
++class WXDLLEXPORT wxTaskBarIcon : public wxTaskBarIconBase
++{
++public:
++    //type of taskbar item to create
++    enum wxTaskBarIconType
++    {
++            DOCK,
++            STATUSITEM
++    };
++        
++    wxTaskBarIcon(const wxTaskBarIconType& nType = STATUSITEM);
++    virtual ~wxTaskBarIcon();
++
++    inline bool IsOk() const;
++    inline bool IsIconInstalled() const { return m_iconAdded; }
++    
++    bool SetIcon(const wxIcon& icon, const wxString& tooltip = wxEmptyString);
++    bool RemoveIcon();
++    
++    //pops up the menu
++    bool PopupMenu(wxMenu *menu);
++
++    //internal functions - don't call       
++    wxMenu* GetCurrentMenu();
++    wxMenu* DoCreatePopupMenu();
++
++    inline WX_NSStatusItem GetNSStatusItem() {return m_statusItem;}
++protected:
++    void Attach();
++    wxTaskBarIconType m_nType;
++    wxMenu* m_pMenu;
++    bool m_iconAdded;
++    WX_NSStatusItem m_statusItem;
++    WX_NSImage m_lastImage;
++    class wxFrame* m_fakeFrame;
++            
++    DECLARE_DYNAMIC_CLASS(wxTaskBarIcon)
++};
++#endif
++    // _TASKBAR_H_
+diff -rNbu2 wxW/include/wx/defs.h wxWidgets/include/wx/defs.h
+--- wxW/include/wx/defs.h	Sun Oct  3 12:36:49 2004
++++ wxWidgets/include/wx/defs.h	Sun Oct  3 07:07:27 2004
+@@ -2188,4 +2188,5 @@
+ DECLARE_WXCOCOA_OBJC_CLASS(NSScrollView);
+ DECLARE_WXCOCOA_OBJC_CLASS(NSSound);
++DECLARE_WXCOCOA_OBJC_CLASS(NSStatusItem);
+ DECLARE_WXCOCOA_OBJC_CLASS(NSTableColumn);
+ DECLARE_WXCOCOA_OBJC_CLASS(NSTableView);
+diff -rNbu2 wxW/include/wx/taskbar.h wxWidgets/include/wx/taskbar.h
+--- wxW/include/wx/taskbar.h	Sun Oct  3 12:35:11 2004
++++ wxWidgets/include/wx/taskbar.h	Sun Oct  3 04:58:06 2004
+@@ -46,4 +46,6 @@
+ #elif defined(__WXGTK__) || defined(__WXX11__) || defined(__WXMOTIF__)
+     #include "wx/unix/taskbarx11.h"
++#elif defined(__WXCOCOA__)
++    #include "wx/cocoa/taskbarosx.h"
+ #elif defined(__DARWIN__)
+     #include "wx/mac/taskbarosx.h"
+diff -rNbu2 wxW/src/cocoa/taskbar.mm wxWidgets/src/cocoa/taskbar.mm
+--- wxW/src/cocoa/taskbar.mm	Wed Dec 31 16:00:00 1969
++++ wxWidgets/src/cocoa/taskbar.mm	Sun Oct  3 09:48:58 2004
+@@ -0,0 +1,223 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        taskbar.cpp
++// Purpose:     wxTaskBarIcon OSX Implementation
++// Author:      Ryan Norton
++// Modified by:
++// Created:     09/25/2004
++// RCS-ID:      $Id: taskbar.cpp,v 1.16 2004/09/30 13:50:56 RN Exp $
++// Copyright:   (c) 2004 Ryan Norton
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#include "wx/wxprec.h"
++
++#include "wx/defs.h"
++
++#ifdef wxHAS_TASK_BAR_ICON
++
++#include "wx/app.h"
++#include "wx/taskbar.h"
++#include "wx/menu.h"
++#include "wx/icon.h"
++#include "wx/frame.h"
++
++#include "wx/cocoa/autorelease.h"
++#include "wx/cocoa/string.h"
++
++#import <AppKit/AppKit.h>
++
++
++#import <objc/objc-class.h>
++
++IMPLEMENT_DYNAMIC_CLASS(wxTaskBarIcon, wxEvtHandler)
++
++wxTaskBarIcon::wxTaskBarIcon(const wxTaskBarIconType& nType)
++    : m_nType(nType), m_pMenu(NULL), 
++        m_iconAdded(false),
++        m_lastImage( [NSImage imageNamed: @"NSApplicationIcon"] )
++{
++    wxASSERT(wxTheApp);
++
++    switch(m_nType)
++    {
++        case STATUSITEM:
++            m_statusItem = 
++                [[NSStatusBar systemStatusBar] statusItemWithLength:
++                
++                NSSquareStatusItemLength
++                //NSVariableStatusItemLength
++                ];
++
++            wxASSERT_MSG(m_statusItem, wxT("Couldn't create a NSStatusItem!!"));
++            
++            if(m_statusItem)
++            {
++                [m_statusItem retain];
++                [m_statusItem setHighlightMode:YES];
++//                [m_statusItem setTitle: NSLocalizedString(@"wxTaskBarIcon",@"")];
++  
++                  //Certain compilers (*cough*GCC*cough*) won't
++                  //let you call derived classs' virtual functions
++                  //in a base class's constructor
++//                if (DoCreatePopupMenu())
++//                    [m_statusItem setMenu:m_pMenu->GetNSMenu()];
++            }
++            
++            m_fakeFrame = new wxFrame(NULL, wxID_ANY, wxT(""));
++            m_fakeFrame->PushEventHandler(this);
++            break;
++        default:
++            m_statusItem = nil;
++            m_fakeFrame = NULL;
++            break;
++    }
++
++}
++
++wxTaskBarIcon::~wxTaskBarIcon()
++{
++    //restore old icon and menu to the dock
++    RemoveIcon();    
++    
++    if (m_statusItem)
++        [m_statusItem release];
++    
++    if (m_fakeFrame)
++        delete m_fakeFrame;
++}
++
++void wxTaskBarIcon::Attach()
++{
++    [m_statusItem setMenu:m_pMenu->GetNSMenu()];
++
++    //attach a "fake" menu bar for events to go correctly
++    wxMenuBar *menuBar = new wxMenuBar();
++    menuBar->Append(m_pMenu, wxT(""));
++    m_fakeFrame->SetMenuBar(menuBar);
++}
++
++wxMenu* wxTaskBarIcon::GetCurrentMenu()
++{
++    return m_pMenu;
++}
++
++bool wxTaskBarIcon::IsOk() const
++{
++    return m_nType == DOCK || m_statusItem != nil;
++}
++
++wxMenu* wxTaskBarIcon::DoCreatePopupMenu()
++{    
++    wxMenu* theNewMenu = CreatePopupMenu();
++    
++    if (theNewMenu)
++    {
++        if (m_pMenu)
++            delete m_pMenu;
++        m_pMenu = theNewMenu;
++        m_pMenu->SetEventHandler(this);
++    }
++    
++    return m_pMenu;
++}
++
++// Operations:
++bool wxTaskBarIcon::SetIcon(const wxIcon& icon, const wxString& tooltip)
++{
++    if(m_nType == DOCK)
++    {
++        [wxTheApp->GetNSApplication() setApplicationIconImage:icon.GetNSImage()];
++    }
++    else
++    {
++        //remember that a menu extra _is_ a status item
++        if (m_statusItem)
++        {
++            //be clever - create it here
++            if (DoCreatePopupMenu())
++                Attach();
++            else
++                [m_statusItem setMenu:nil];
++            
++            [m_statusItem setImage:icon.GetNSImage()];
++        }
++    }
++    
++    m_iconAdded = true;
++    return true;
++}
++    
++bool wxTaskBarIcon::RemoveIcon()
++{
++    if(m_pMenu)
++    {
++        delete m_pMenu;
++        m_pMenu = NULL;
++    }
++    
++    [wxTheApp->GetNSApplication() setApplicationIconImage: m_lastImage];
++
++    //nil removes the menu
++    //if(m_statusItem)	
++    //    [m_statusItem setMenu:nil];
++
++    m_iconAdded = false;
++    return true;
++}
++    
++bool wxTaskBarIcon::PopupMenu(wxMenu *menu)
++{
++    wxASSERT(menu != NULL);
++
++    if (m_pMenu)
++    {
++        delete m_pMenu;
++        m_pMenu = NULL;
++    }
++    
++    //
++    // NB:  Here we have to perform a deep copy of the menu,
++    // copying each and every menu item from menu to m_pMenu.
++    // Other implementations use wxWindow::PopupMenu here, 
++    // which idle execution until the user selects something,
++    // but since the mac handles this internally, we can't - 
++    // and have no way at all to idle it while the dock menu
++    // is being shown before menu goes out of scope (it may
++    // not be on the heap, and may expire right after this function
++    // is done - we need it to last until the carbon event is triggered - 
++    // that's when the user right clicks).
++    //
++    // Also, since there is no equal (assignment) operator 
++    // on either wxMenu or wxMenuItem, we have to do all the
++    // dirty work ourselves.
++    //
++   
++    //Perform a deep copy of the menu
++    wxMenuItemList& theList = menu->GetMenuItems();
++    wxMenuItemList::compatibility_iterator theNode = theList.GetFirst();
++    
++    //create the main menu
++    m_pMenu = new wxMenu(menu->GetTitle());
++    
++    while(theNode != NULL)
++    {
++        wxMenuItem* theItem = theNode->GetData();
++        m_pMenu->Append(new wxMenuItem(	m_pMenu, //parent menu
++                                        theItem->GetId(), //id
++                                        theItem->GetText(), //text label
++                                        theItem->GetHelp(), //status bar help string
++                                        theItem->GetKind(), //menu flags - checkable, seperator, etc.
++                                        theItem->GetSubMenu() //submenu
++                                        ));
++        theNode = theNode->GetNext();
++    }
++    
++    m_pMenu->SetEventHandler(this);
++    
++    if (m_statusItem)
++        Attach();
++        
++    return true;
++}
++
++#endif //wxHAS_TASK_BAR_ICON
+
+ 	  	 

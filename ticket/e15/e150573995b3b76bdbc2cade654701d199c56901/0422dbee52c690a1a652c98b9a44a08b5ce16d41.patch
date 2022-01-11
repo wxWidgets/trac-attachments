@@ -1,0 +1,178 @@
+Index: docs/changes.txt
+===================================================================
+--- docs/changes.txt	(revision 52200)
++++ docs/changes.txt	(working copy)
+@@ -127,6 +127,10 @@
+ - Don't close UDP socket if an empty datagram is received (Mikkel S)
+ - Honour locale modifiers such a "@valencia" in system locale (Tim Kosse)
+ 
++wxMac:
++
++- Fix duplicate (empty) help menu in non-English programs (Andreas Jacobs)
++
+ wxMSW:
+ 
+ - Fix rare bug with messages delivered to wrong wxSocket (Tim Kosse).
+Index: src/mac/carbon/menu.cpp
+===================================================================
+--- src/mac/carbon/menu.cpp	(revision 52197)
++++ src/mac/carbon/menu.cpp	(working copy)
+@@ -737,22 +737,19 @@
+                 CFSTR("About..."), 0, 0, 0);
+     MacInsertMenu( appleMenu , 0 ) ;
+ 
+-    // clean-up the help menu before adding new items
+-    static MenuHandle mh = NULL ;
++    // if we have a mac help menu, clean it up before adding new items
++    MenuHandle mh ;
++    MenuItemIndex firstUserHelpMenuItem ;
+ 
+-    if ( mh != NULL )
++    if ( UMAGetHelpMenuDontCreate( &mh , &firstUserHelpMenuItem) == noErr )
+     {
+-        MenuItemIndex firstUserHelpMenuItem ;
+-        if ( UMAGetHelpMenu( &mh , &firstUserHelpMenuItem) == noErr )
+-        {
+-            for ( int i = CountMenuItems( mh ) ; i >= firstUserHelpMenuItem ; --i )
+-                DeleteMenuItem( mh , i ) ;
+-        }
+-        else
+-        {
+-            mh = NULL ;
+-        }
++        for ( int i = CountMenuItems( mh ) ; i >= firstUserHelpMenuItem ; --i )
++            DeleteMenuItem( mh , i ) ;
+     }
++    else
++    {
++        mh = NULL ;
++    }
+ 
+ #if TARGET_CARBON
+     if ( UMAGetSystemVersion() >= 0x1000 && wxApp::s_macPreferencesMenuItemId)
+@@ -778,14 +775,17 @@
+     }
+ #endif
+ 
++    wxString strippedHelpMenuTitle = wxStripMenuCodes( wxApp::s_macHelpMenuTitleName ) ;
++    wxString strippedTranslatedHelpMenuTitle = wxStripMenuCodes( wxString( _("&Help") ) ) ;
+     wxMenuList::compatibility_iterator menuIter = m_menus.GetFirst();
+     for (size_t i = 0; i < m_menus.GetCount(); i++, menuIter = menuIter->GetNext())
+     {
+         wxMenuItemList::compatibility_iterator node;
+         wxMenuItem *item;
+         wxMenu* menu = menuIter->GetData() , *subMenu = NULL ;
++        wxString strippedMenuTitle = wxStripMenuCodes(m_titles[i]);
+ 
+-        if ( m_titles[i] == wxT("?") || m_titles[i] == wxT("&?")  || m_titles[i] == wxApp::s_macHelpMenuTitleName )
++        if ( strippedMenuTitle == wxT("?") || strippedMenuTitle == strippedHelpMenuTitle || strippedMenuTitle == strippedTranslatedHelpMenuTitle )
+         {
+             for (node = menu->GetMenuItems().GetFirst(); node; node = node->GetNext())
+             {
+@@ -799,9 +799,10 @@
+                 {
+                     if ( item->GetId() != wxApp::s_macAboutMenuItemId )
+                     {
++                        // we have found a user help menu and an item other than the about item,
++                        // so we can create the mac help menu now, if we haven't created it yet
+                         if ( mh == NULL )
+                         {
+-                            MenuItemIndex firstUserHelpMenuItem ;
+                             if ( UMAGetHelpMenu( &mh , &firstUserHelpMenuItem) != noErr )
+                             {
+                                 mh = NULL ;
+Index: src/mac/carbon/uma.cpp
+===================================================================
+--- src/mac/carbon/uma.cpp	(revision 52197)
++++ src/mac/carbon/uma.cpp	(working copy)
+@@ -641,14 +641,29 @@
+ static MenuItemIndex firstCustomItemIndex = 0 ;
+ #endif
+ 
+-OSStatus UMAGetHelpMenu(
++static OSStatus UMAGetHelpMenu(
+     MenuRef *        outHelpMenu,
+-    MenuItemIndex *  outFirstCustomItemIndex)
++    MenuItemIndex *  outFirstCustomItemIndex,
++    bool             allowHelpMenuCreation);
++
++static OSStatus UMAGetHelpMenu(
++    MenuRef *        outHelpMenu,
++    MenuItemIndex *  outFirstCustomItemIndex,
++    bool             allowHelpMenuCreation)
+ {
+ #if TARGET_CARBON
+-    return HMGetHelpMenu( outHelpMenu , outFirstCustomItemIndex ) ;
++    static bool s_createdHelpMenu = false ;
+ 
++    if ( !s_createdHelpMenu && !allowHelpMenuCreation )
++    {
++        return paramErr ;
++    }
++
++    OSStatus status = HMGetHelpMenu( outHelpMenu , outFirstCustomItemIndex ) ;
++    s_createdHelpMenu = ( status == noErr ) ;
++    return status ;
+ #else
++    wxUnusedVar( allowHelpMenuCreation ) ;
+     MenuRef helpMenuHandle ;
+ 
+     helpMenuStatus = HMGetHelpMenuHandle( &helpMenuHandle ) ;
+@@ -664,6 +679,20 @@
+ #endif
+ }
+ 
++OSStatus UMAGetHelpMenu(
++    MenuRef *        outHelpMenu,
++    MenuItemIndex *  outFirstCustomItemIndex)
++{
++    return UMAGetHelpMenu( outHelpMenu , outFirstCustomItemIndex , true );
++}
++
++OSStatus UMAGetHelpMenuDontCreate(
++    MenuRef *        outHelpMenu,
++    MenuItemIndex *  outFirstCustomItemIndex)
++{
++    return UMAGetHelpMenu( outHelpMenu , outFirstCustomItemIndex , false );
++}
++
+ #ifndef __LP64__
+ 
+ wxMacPortStateHelper::wxMacPortStateHelper( GrafPtr newport )
+Index: src/mac/carbon/app.cpp
+===================================================================
+--- src/mac/carbon/app.cpp	(revision 52197)
++++ src/mac/carbon/app.cpp	(working copy)
+@@ -464,7 +464,7 @@
+         static MenuHandle mh = NULL ;
+         if ( mh == NULL )
+         {
+-            if ( UMAGetHelpMenu( &mh , &firstUserHelpMenuItem) != noErr )
++            if ( UMAGetHelpMenuDontCreate( &mh , &firstUserHelpMenuItem) != noErr )
+                 mh = NULL ;
+         }
+ 
+Index: include/wx/mac/carbon/uma.h
+===================================================================
+--- include/wx/mac/carbon/uma.h	(revision 52197)
++++ include/wx/mac/carbon/uma.h	(working copy)
+@@ -94,10 +94,17 @@
+ 
+ void UMAHighlightAndActivateWindow( WindowRef inWindowRef , bool inActivate ) ;
+ 
++// Retrieves the Help menu handle. Warning: As a side-effect this functions also
++// creates the Help menu if it didn't exist yet.
+ OSStatus UMAGetHelpMenu(
+   MenuRef *        outHelpMenu,
+   MenuItemIndex *  outFirstCustomItemIndex);      /* can be NULL */
+ 
++// Same as UMAGetHelpMenu, but doesn't create the Help menu if UMAGetHelpMenu hasn't been called yet.
++OSStatus UMAGetHelpMenuDontCreate(
++  MenuRef *        outHelpMenu,
++  MenuItemIndex *  outFirstCustomItemIndex);      /* can be NULL */
++
+ // Appearance Drawing
+ 
+ OSStatus UMADrawThemePlacard( const Rect *inRect , ThemeDrawState inState ) ;
+
+ 	  	 

@@ -1,0 +1,173 @@
+Index: include/wx/msw/dirdlg.h
+===================================================================
+--- include/wx/msw/dirdlg.h	(revision 70200)
++++ include/wx/msw/dirdlg.h	(working copy)
+@@ -29,6 +29,12 @@
+ 
+ private:
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxDirDialog)
++
++    int ShowSHBrowseForFolder(WXWidget owner);
++
++#if (NTDDI_VERSION >= NTDDI_VISTA) // only if targeting Windows Vista or newer
++    int ShowIFileDialog(WXWidget owner);
++#endif    
+ };
+ 
+ #endif
+Index: src/msw/dirdlg.cpp
+===================================================================
+--- src/msw/dirdlg.cpp	(revision 70200)
++++ src/msw/dirdlg.cpp	(working copy)
+@@ -118,9 +118,28 @@
+ int wxDirDialog::ShowModal()
+ {
+     wxWindow *parent = GetParent();
++    HWND hwndOwner = parent ? GetHwndOf(parent) : NULL;
++    int retCode;
+ 
++#if (NTDDI_VERSION >= NTDDI_VISTA) // only if targeting Windows Vista or newer
++    // only if the user didn't explicitly ask for the old dialog by not using wxRESIZE_BORDER flag in the constructor
++    // and we're on Windows Vista / Windows Server 2008 or newer
++    if ( HasFlag(wxRESIZE_BORDER) && wxPlatformInfo::Get().CheckOSVersion(6, 0) ) 
++        retCode = ShowIFileDialog(hwndOwner);
++    else
++#endif
++        retCode = ShowSHBrowseForFolder(hwndOwner);
++
++    if ( retCode == wxID_OK && HasFlag(wxDD_CHANGE_DIR) )
++        wxSetWorkingDirectory(m_path);  // change current working directory if asked so
++
++    return retCode;
++}
++
++int wxDirDialog::ShowSHBrowseForFolder(WXWidget owner)
++{
+     BROWSEINFO bi;
+-    bi.hwndOwner      = parent ? GetHwndOf(parent) : NULL;
++    bi.hwndOwner      = owner;
+     bi.pidlRoot       = NULL;
+     bi.pszDisplayName = NULL;
+     // Please don't change this without checking it compiles
+@@ -180,14 +199,117 @@
+     }
+ 
+     m_path = pidl.GetPath();
++    
++    return m_path.empty() ? wxID_CANCEL : wxID_OK;
++}
+ 
+-    // change current working directory if asked so
+-    if (HasFlag(wxDD_CHANGE_DIR))
+-        wxSetWorkingDirectory(m_path);
++#if (NTDDI_VERSION >= NTDDI_VISTA) // needed for IFileDialog related declarations
++int wxDirDialog::ShowIFileDialog(WXWidget owner)
++{
++    HRESULT hr;
++    IFileDialog* fileDialog;
+ 
+-    return m_path.empty() ? wxID_CANCEL : wxID_OK;
++    hr = CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fileDialog));
++    if ( FAILED(hr) ) 
++    {
++        wxLogError(_("Failed to initialize IFileDialog, CoCreateInstance returned error code %0lx."), hr);
++        return ShowSHBrowseForFolder(owner); // fall back to implementation using SHBrowseForFolder()
++    }
++
++    // allow to pick only an existing file system folder
++    hr = fileDialog->SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM  | FOS_PATHMUSTEXIST);
++    if ( FAILED(hr) ) 
++    {
++        wxLogError(_("IFileDialog's method SetOptions failed with error code %0lx."), hr);
++        fileDialog->Release();
++        return ShowSHBrowseForFolder(owner); // fall back to implementation using SHBrowseForFolder()
++    }
++    
++    hr = fileDialog->SetTitle(m_message.wx_str());
++    if ( FAILED(hr) ) 
++    {
++        wxLogError(_("Couldn't set the dialog title to \"%s\", error code %0lx."), m_message, hr);
++        // the error is not that serious, so let's continue
++    }
++
++    if ( !m_path.empty() ) 
++    {
++        // function SHCreateItemFromParsingName is only available on Vista and newer,
++        // so linking to it statically would prevent applications from loading on older OSes
++        typedef HRESULT (WINAPI *SHCreateItemFromParsingName_t)(PCWSTR, IBindCtx*, REFIID, void**);
++        SHCreateItemFromParsingName_t pfnSHCreateItemFromParsingName;
++        
++        pfnSHCreateItemFromParsingName = (SHCreateItemFromParsingName_t)GetProcAddress(
++            GetModuleHandle(wxT("shell32.dll")), "SHCreateItemFromParsingName");
++        if ( pfnSHCreateItemFromParsingName ) 
++        {
++            IShellItem* folder; 
++            hr = (*pfnSHCreateItemFromParsingName)(m_path.wx_str(), NULL, IID_PPV_ARGS(&folder));
++            if ( SUCCEEDED(hr) ) 
++            {
++                hr = fileDialog->SetFolder(folder);
++                folder->Release();            
++            }
++            if ( FAILED(hr) ) 
++            { // pfnSHCreateItemFromParsingName() OR fileDialog->SetFolder() call failed
++                wxLogError(_("Couldn't set the dialog initial folder to \"%s\", error code %0lx."), m_path, hr);
++                // the error is not serious, go on
++            }            
++        } 
++        else 
++        {
++            // shouldn't really ever get here, we've already checked in ShowModal() that we're on Vista or newer
++            DWORD errCode = GetLastError();
++            wxLogError(_("Attempt to load the function SHCreateItemFromParsingName from shell32.dll failed with error code %0lx."),
++                errCode);         
++            // let's go on, even without the initial folder set
++        }        
++    }
++    
++    wxString path;
++
++    hr = fileDialog->Show(owner);
++    if ( SUCCEEDED(hr) ) 
++    {
++        IShellItem* folder; 
++
++        hr = fileDialog->GetResult(&folder);
++        if ( SUCCEEDED(hr) ) 
++        {
++            LPOLESTR pathOLE = NULL;
++
++            hr = folder->GetDisplayName(SIGDN_FILESYSPATH, &pathOLE);
++            if ( SUCCEEDED(hr) ) 
++            {                
++                path = pathOLE;
++                CoTaskMemFree(pathOLE);
++            } 
++            else 
++            {
++                wxLogError(_("IShellItem's method GetDisplayName failed with error code %0lx."), hr);
++            }
++            folder->Release();
++        } 
++        else 
++        {
++            wxLogError(_("IFileDialog's method GetResult failed with error code %0lx."), hr);
++        }
++    } 
++    else if ( hr != HRESULT_FROM_WIN32(ERROR_CANCELLED) ) 
++    {
++        wxLogError(_("IFileDialog's method Show failed with error code %0lx."), hr);
++    }    
++    fileDialog->Release();
++
++    if ( path.empty() ) 
++        return wxID_CANCEL;
++    
++    m_path = path;
++    return wxID_OK;    
+ }
++#endif // #if (NTDDI_VERSION >= NTDDI_VISTA)
+ 
++
+ // ----------------------------------------------------------------------------
+ // private functions
+ // ----------------------------------------------------------------------------

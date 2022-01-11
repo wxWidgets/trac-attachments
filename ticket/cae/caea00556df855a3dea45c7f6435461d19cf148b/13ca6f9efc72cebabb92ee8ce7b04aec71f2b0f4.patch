@@ -1,0 +1,890 @@
+--- wxWidgets.orig/include/wx/combo.h	Sun Nov 19 17:01:58 2006
++++ wxWidgets/include/wx/combo.h	Sun Nov 19 19:09:05 2006
+@@ -76,4 +76,10 @@
+     // All text is not automatically selected on click
+     wxCC_NO_TEXT_AUTO_SELECT        = 0x0004,
++    // Drop-button stays down as long as popup is displayed.
++    wxCC_BUTTON_STAYS_DOWN          = 0x0008,
++    // Drop-button covers the entire control.
++    wxCC_FULL_BUTTON                = 0x0010,
++    // Drop-button goes over the custom-border (used under WinVista).
++    wxCC_BUTTON_COVERS_BORDER       = 0x0020,
+ 
+     // Internal use: signals creation is complete
+@@ -88,5 +94,8 @@
+     wxCC_IFLAG_USE_ALT_POPUP        = 0x1000,
+     // Internal use: Skip popup animation.
+-    wxCC_IFLAG_DISABLE_POPUP_ANIM   = 0x2000
++    wxCC_IFLAG_DISABLE_POPUP_ANIM   = 0x2000,
++    // Internal use: Drop-button is a bitmap button or has non-default size
++    // (but can still be on either side of the control).
++    wxCC_IFLAG_HAS_NONSTANDARD_BUTTON   = 0x4000
+ };
+ 
+@@ -366,6 +375,6 @@
+     {
+         const wxWindow* curFocus = FindFocus();
+-        return ( !IsPopupShown() &&
+-                 (curFocus == this || (m_btn && curFocus == m_btn)) &&
++        return ( IsPopupWindowState(Hidden) &&
++                 (curFocus == m_mainCtrlWnd || (m_btn && curFocus == m_btn)) &&
+                  (m_windowStyle & wxCB_READONLY) );
+     }
+@@ -402,4 +411,8 @@
+     void SetCtrlMainWnd( wxWindow* wnd ) { m_mainCtrlWnd = wnd; }
+ 
++    // This is public so we can access it from wxComboCtrlTextCtrl
++    virtual wxWindow *GetMainWindowOfCompositeControl()
++        { return m_mainCtrlWnd; }
++
+ protected:
+ 
+@@ -424,12 +437,14 @@
+     void InstallInputHandlers();
+ 
+-    // flags for DrawButton()
++    // Flags for DrawButton
+     enum
+     {
+-        Draw_PaintBg = 1
++        Button_PaintBackground             = 0x0001, // Paints control background below the button
++        Button_BitmapOnly                  = 0x0002  // Only paints the bitmap
+     };
+ 
+     // Draws dropbutton. Using wxRenderer or bitmaps, as appropriate.
+-    void DrawButton( wxDC& dc, const wxRect& rect, int flags = Draw_PaintBg );
++    // Flags are defined above.
++    void DrawButton( wxDC& dc, const wxRect& rect, int flags = Button_PaintBackground );
+ 
+     // Call if cursor is on button area or mouse is captured for the button.
+@@ -505,7 +520,4 @@
+     virtual void DoSetToolTip( wxToolTip *tip );
+ #endif
+-
+-    virtual wxWindow *GetMainWindowOfCompositeControl()
+-        { return m_mainCtrlWnd; }
+ 
+     // This is used when m_text is hidden (readonly).
+--- wxWidgets.orig/src/common/combocmn.cpp	Sun Nov 19 17:02:45 2006
++++ wxWidgets/src/common/combocmn.cpp	Sun Nov 19 18:28:37 2006
+@@ -367,10 +367,12 @@
+ 
+     wxPopupTransientWindow* ptw = (wxPopupTransientWindow*) this;
+-    wxComboCtrlBase* combo = (wxComboCtrlBase*) GetParent();
+ 
+     if ( show != ptw->IsShown() )
+     {
+         if ( show )
+-            ptw->Popup(combo->GetPopupControl()->GetControl());
++            // We used to do wxPopupTransientWindow::Popup here,
++            // but this would hide normal Show, which we are
++            // also going to need.
++            ptw->Show();
+         else
+             ptw->Dismiss();
+@@ -561,4 +563,5 @@
+     EVT_KEY_DOWN(wxComboBoxExtraInputHandler::OnKey)
+     EVT_SET_FOCUS(wxComboBoxExtraInputHandler::OnFocus)
++    EVT_KILL_FOCUS(wxComboBoxExtraInputHandler::OnFocus)
+ END_EVENT_TABLE()
+ 
+@@ -582,5 +585,6 @@
+     // FIXME: This code does run when control is clicked,
+     //        yet on Windows it doesn't select all the text.
+-    if ( !(m_combo->GetInternalFlags() & wxCC_NO_TEXT_AUTO_SELECT) )
++    if ( event.GetEventType() == wxEVT_SET_FOCUS &&
++        !(m_combo->GetInternalFlags() & wxCC_NO_TEXT_AUTO_SELECT) )
+     {
+         if ( m_combo->GetTextCtrl() )
+@@ -596,5 +600,5 @@
+     //     from combo's focus event handler), they should be quite
+     //     harmless.
+-    wxFocusEvent evt2(wxEVT_SET_FOCUS,m_combo->GetId());
++    wxFocusEvent evt2(event.GetEventType(),m_combo->GetId());
+     evt2.SetEventObject(m_combo);
+     m_combo->GetEventHandler()->ProcessEvent(evt2);
+@@ -649,4 +653,7 @@
+     int evtType = event.GetEventType();
+     bool isInside = pt.x >= 0 && pt.y >= 0 && pt.x < sz.x && pt.y < sz.y;
++    bool relayToButton = false;
++
++    event.Skip();
+ 
+     if ( evtType == wxEVT_MOTION ||
+@@ -658,5 +665,4 @@
+         {
+             event.Skip(false);
+-            return;
+         }
+     }
+@@ -666,8 +672,7 @@
+         {
+             event.Skip(false);
+-            return;
++            relayToButton = true;
+         }
+-
+-        if ( !m_beenInside )
++        else if ( !m_beenInside )
+         {
+             if ( isInside )
+@@ -677,26 +682,49 @@
+             else
+             {
+-                //
+-                // Some mouse events to popup that happen outside it, before cursor
+-                // has been inside the popu, need to be ignored by it but relayed to
+-                // the dropbutton.
+-                //
+-                wxWindow* btn = m_combo->GetButton();
+-                if ( btn )
+-                    btn->GetEventHandler()->AddPendingEvent(event);
+-                else
+-                    m_combo->GetEventHandler()->AddPendingEvent(event);
+-
+-                return;
++                relayToButton = true;
+             }
+-
+-            event.Skip();
+         }
+     }
+ 
+-    event.Skip();
++    if ( relayToButton )
++    {
++        //
++        // Some mouse events to popup that happen outside it, before cursor
++        // has been inside the popup, need to be ignored by it but relayed to
++        // the dropbutton.
++        //
++        wxWindow* eventSink = m_combo;
++        wxWindow* btn = m_combo->GetButton();
++        if ( btn )
++            eventSink = btn;
++
++        eventSink->GetEventHandler()->ProcessEvent(event);
++    }
+ }
+ 
+ // ----------------------------------------------------------------------------
++// wxComboCtrlTextCtrl
++// ----------------------------------------------------------------------------
++
++class wxComboCtrlTextCtrl : public wxTextCtrl
++{
++public:
++    wxComboCtrlTextCtrl() : wxTextCtrl() { }
++    virtual ~wxComboCtrlTextCtrl() { }
++
++    virtual wxWindow *GetMainWindowOfCompositeControl()
++    {
++        wxComboCtrl* combo = (wxComboCtrl*) GetParent();
++
++        // Returning this instead of just 'parent' lets FindFocus work
++        // correctly even when parent control is a child of a composite
++        // generic control (as is case with wxGenericDatePickerCtrl).
++        return combo->GetMainWindowOfCompositeControl();
++    }
++
++private:
++};
++
++// ----------------------------------------------------------------------------
+ // wxComboCtrlBase
+ // ----------------------------------------------------------------------------
+@@ -828,7 +856,8 @@
+             m_ignoreEvtText = 0;
+ 
+-        m_text = new wxTextCtrl(this, wxID_ANY, m_valueString,
+-                                wxDefaultPosition, wxSize(10,-1),
+-                                style, validator);
++        m_text = new wxComboCtrlTextCtrl();
++        m_text->Create(this, wxID_ANY, m_valueString,
++                       wxDefaultPosition, wxSize(10,-1),
++                       style, validator);
+     }
+ }
+@@ -880,4 +909,10 @@
+         btnBorder = 0;
+     }
++    else if ( (m_iFlags & wxCC_BUTTON_COVERS_BORDER) &&
++              m_btnSpacingX == 0 && !m_bmpNormal.Ok() )
++    {
++        m_iFlags &= ~(wxCC_IFLAG_BUTTON_OUTSIDE);
++        btnBorder = 0;
++    }
+     else
+     {
+@@ -968,4 +1003,9 @@
+     m_btnArea.height = sz.y - (btnBorder*2);
+ 
++    if ( m_bmpNormal.Ok() || m_btnArea.width != butWidth || m_btnArea.height != butHeight )
++        m_iFlags |= wxCC_IFLAG_HAS_NONSTANDARD_BUTTON;
++    else
++        m_iFlags &= ~wxCC_IFLAG_HAS_NONSTANDARD_BUTTON;
++
+     m_tcArea.x = ( m_btnSide==wxRIGHT ? 0 : butAreaWid ) + customBorder;
+     m_tcArea.y = customBorder;
+@@ -1180,5 +1220,5 @@
+     wxSize sz = GetClientSize();
+     bool isEnabled;
+-    bool isFocused; // also selected
++    bool doDrawFocusRect; // also selected
+ 
+     // For smaller size control (and for disabled background) use less spacing
+@@ -1190,5 +1230,5 @@
+         // Drawing control
+         isEnabled = IsEnabled();
+-        isFocused = ShouldDrawFocus();
++        doDrawFocusRect = ShouldDrawFocus() & !(m_iFlags & wxCC_FULL_BUTTON);
+ 
+         // Windows-style: for smaller size control (and for disabled background) use less spacing
+@@ -1200,5 +1240,5 @@
+         // Drawing a list item
+         isEnabled = true; // they are never disabled
+-        isFocused = flags & wxCONTROL_SELECTED ? true : false;
++        doDrawFocusRect = flags & wxCONTROL_SELECTED ? true : false;
+ 
+         focusSpacingX = 0;
+@@ -1220,4 +1260,5 @@
+ 
+     wxColour bgCol;
++    bool doDrawSelRect = true;
+ 
+     if ( isEnabled )
+@@ -1225,5 +1266,5 @@
+         // If popup is hidden and this control is focused,
+         // then draw the focus-indicator (selbgcolor background etc.).
+-        if ( isFocused )
++        if ( doDrawFocusRect )
+         {
+             dc.SetTextForeground( wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT) );
+@@ -1234,4 +1275,5 @@
+             dc.SetTextForeground( wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT) );
+             bgCol = GetBackgroundColour();
++            doDrawSelRect = false;
+         }
+     }
+@@ -1243,6 +1285,9 @@
+ 
+     dc.SetBrush( bgCol );
+-    dc.SetPen( bgCol );
+-    dc.DrawRectangle( selRect );
++    if ( doDrawSelRect )
++    {
++        dc.SetPen( bgCol );
++        dc.DrawRectangle( selRect );
++    }
+ 
+     // Don't clip exactly to the selection rectangle so we can draw
+@@ -1259,12 +1304,11 @@
+ #endif
+ 
+-void wxComboCtrlBase::DrawButton( wxDC& dc, const wxRect& rect, int paintBg )
++void wxComboCtrlBase::DrawButton( wxDC& dc, const wxRect& rect, int flags )
+ {
+     int drawState = m_btnState;
+ 
+-#ifdef __WXGTK__
+-    if ( GetPopupWindowState() >= Animating )
++    if ( (m_iFlags & wxCC_BUTTON_STAYS_DOWN) &&
++         GetPopupWindowState() >= Animating )
+         drawState |= wxCONTROL_PRESSED;
+-#endif
+ 
+     wxRect drawRect(rect.x+m_btnSpacingX,
+@@ -1286,6 +1330,9 @@
+     if ( !m_bmpNormal.Ok() )
+     {
++        if ( flags & Button_BitmapOnly )
++            return;
++
+         // Need to clear button background even if m_btn is present
+-        if ( paintBg )
++        if ( flags & Button_PaintBackground )
+         {
+             wxColour bgCol;
+@@ -1326,5 +1373,5 @@
+             // If using blank button background, we need to clear its background
+             // with button face colour instead of colour for rest of the control.
+-            if ( paintBg )
++            if ( flags & Button_PaintBackground )
+             {
+                 wxColour bgCol = GetParent()->GetBackgroundColour(); //wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE);
+@@ -1335,9 +1382,11 @@
+             }
+ 
+-            wxRendererNative::Get().DrawPushButton(this,
+-                                                   dc,
+-                                                   drawRect,
+-                                                   drawState);
+-
++            if ( !(flags & Button_BitmapOnly) )
++            {
++                wxRendererNative::Get().DrawPushButton(this,
++                                                       dc,
++                                                       drawRect,
++                                                       drawState);
++            }
+         }
+         else
+@@ -1346,5 +1395,5 @@
+             // Need to clear button background even if m_btn is present
+             // (assume non-button background was cleared just before this call so brushes are good)
+-            if ( paintBg )
++            if ( flags & Button_PaintBackground )
+                 dc.DrawRectangle(rect);
+         }
+@@ -1393,5 +1442,5 @@
+ // call if cursor is on button area or mouse is captured for the button
+ bool wxComboCtrlBase::HandleButtonMouseEvent( wxMouseEvent& event,
+-                                                 int flags )
++                                              int flags )
+ {
+     int type = event.GetEventType();
+@@ -1399,5 +1448,6 @@
+     if ( type == wxEVT_MOTION )
+     {
+-        if ( flags & wxCC_MF_ON_BUTTON )
++        if ( (flags & wxCC_MF_ON_BUTTON) &&
++             IsPopupWindowState(Hidden) )
+         {
+             if ( !(m_btnState & wxCONTROL_CURRENT) )
+@@ -1468,4 +1518,9 @@
+         return false;
+ 
++    // Never have 'hot' state when popup is being shown
++    // (this is mostly needed because of the animation).
++    if ( !IsPopupWindowState(Hidden) )
++        m_btnState &= ~wxCONTROL_CURRENT;
++
+     return true;
+ }
+@@ -1490,5 +1545,5 @@
+ #endif
+ 
+-    // Filter out clicks on button immediately after popup dismiss (Windows like behaviour)
++    // Filter out clicks on button immediately after popup dismiss
+     if ( evtType == wxEVT_LEFT_DOWN && t < m_timeCanAcceptClick )
+     {
+@@ -1601,5 +1656,7 @@
+         wxWindow* tc = GetTextCtrl();
+         if ( tc && tc != DoFindFocus() )
++        {
+             tc->SetFocus();
++        }
+ #endif
+     }
+@@ -1924,5 +1981,10 @@
+         winPopup->SetSize( rect );
+ 
+-        winPopup->Show();
++#if USES_WXPOPUPTRANSIENTWINDOW
++        if ( m_popupWinType == POPUPWIN_WXPOPUPTRANSIENTWINDOW )
++            ((wxPopupTransientWindow*)winPopup)->Popup(m_popup);
++        else
++#endif
++            winPopup->Show();
+ 
+         m_popupWinState = Visible;
+@@ -1936,4 +1998,6 @@
+         m_popupWinState = Hidden;
+     }
++
++    Refresh();
+ }
+ 
+--- wxWidgets.orig/src/generic/bmpcboxg.cpp	Sun Nov 19 15:23:57 2006
++++ wxWidgets/src/generic/bmpcboxg.cpp	Sun Nov 19 18:16:47 2006
+@@ -378,5 +378,6 @@
+     if ( GetCustomPaintWidth() == 0 ||
+          !(flags & wxODCB_PAINTING_SELECTED) ||
+-         item < 0 )
++         item < 0 ||
++         ( (flags & wxODCB_PAINTING_CONTROL) && (GetInternalFlags() & wxCC_FULL_BUTTON)) )
+     {
+         wxOwnerDrawnComboBox::OnDrawBackground(dc, rect, item, flags);
+--- wxWidgets.orig/src/generic/combog.cpp	Thu Nov 16 18:17:27 2006
++++ wxWidgets/src/generic/combog.cpp	Sun Nov 19 18:18:39 2006
+@@ -160,5 +160,6 @@
+ 
+     Customize( wxCC_BUTTON_OUTSIDE_BORDER |
+-               wxCC_NO_TEXT_AUTO_SELECT );
++               wxCC_NO_TEXT_AUTO_SELECT |
++               wxCC_BUTTON_STAYS_DOWN );
+ 
+ #endif
+--- wxWidgets.orig/src/msw/combo.cpp	Thu Nov 16 18:17:33 2006
++++ wxWidgets/src/msw/combo.cpp	Sun Nov 19 18:46:44 2006
+@@ -45,4 +45,5 @@
+ #if 0
+     #include <tmschema.h>
++    #include <VSStyle.h>
+ #else
+     //----------------------------------
+@@ -59,5 +60,53 @@
+     #define TMT_BORDERCOLOR     3801
+     #define TMT_EDGEFILLCOLOR   3808
+-    //----------------------------------
++    #define TMT_BGTYPE          4001
++
++    #define BT_IMAGEFILE        0
++    #define BT_BORDERFILL       1
++
++    #define CP_DROPDOWNBUTTON           1
++    #define CP_BACKGROUND               2 // This and above are Vista and later only
++    #define CP_TRANSPARENTBACKGROUND    3
++    #define CP_BORDER                   4
++    #define CP_READONLY                 5
++    #define CP_DROPDOWNBUTTONRIGHT      6
++    #define CP_DROPDOWNBUTTONLEFT       7
++    #define CP_CUEBANNER                8
++
++    #define CBXS_NORMAL                 1
++    #define CBXS_HOT                    2
++    #define CBXS_PRESSED                3
++    #define CBXS_DISABLED               4
++
++    #define CBXSR_NORMAL                1
++    #define CBXSR_HOT                   2
++    #define CBXSR_PRESSED               3
++    #define CBXSR_DISABLED              4
++
++    #define CBXSL_NORMAL                1
++    #define CBXSL_HOT                   2
++    #define CBXSL_PRESSED               3
++    #define CBXSL_DISABLED              4
++
++    #define CBTBS_NORMAL                1
++    #define CBTBS_HOT                   2
++    #define CBTBS_DISABLED              3
++    #define CBTBS_FOCUSED               4
++
++    #define CBB_NORMAL                  1
++    #define CBB_HOT                     2
++    #define CBB_FOCUSED                 3
++    #define CBB_DISABLED                4
++
++    #define CBRO_NORMAL                 1
++    #define CBRO_HOT                    2
++    #define CBRO_PRESSED                3
++    #define CBRO_DISABLED               4
++
++    #define CBCB_NORMAL                 1
++    #define CBCB_HOT                    2
++    #define CBCB_PRESSED                3
++    #define CBCB_DISABLED               4
++
+ #endif
+ 
+@@ -69,5 +118,5 @@
+ #define TEXTCTRLYADJUST_XP          3
+ #define TEXTCTRLXADJUST_CLASSIC     1
+-#define TEXTCTRLYADJUST_CLASSIC     2
++#define TEXTCTRLYADJUST_CLASSIC     3
+ 
+ #define COMBOBOX_ANIMATION_RESOLUTION   10
+@@ -115,7 +164,7 @@
+     if ( !border )
+     {
+-        // For XP, have 1-width custom border, for older version use sunken
+         if ( theme )
+         {
++            // For XP, have 1-width custom border, for older version use sunken
+             border = wxBORDER_NONE;
+             m_widthCustomBorder = 1;
+@@ -138,4 +187,12 @@
+         return false;
+ 
++    if ( theme )
++    {
++        const bool isVista = (::wxGetWinVersion() >= wxWinVersion_6);
++
++        if ( isVista )
++            m_iFlags |= (wxCC_BUTTON_STAYS_DOWN|wxCC_BUTTON_COVERS_BORDER);
++    }
++
+     if ( style & wxCC_STD_BUTTON )
+         m_iFlags |= wxCC_POPUP_ON_MOUSE_UP;
+@@ -253,9 +310,8 @@
+ {
+     wxUxThemeHandle hTheme(this, L"COMBOBOX");
+-    //COLORREF cref;
+ 
+     wxSize sz = GetClientSize();
+     bool isEnabled;
+-    bool isFocused; // also selected
++    bool doDrawFocusRect; // also selected
+ 
+     // For smaller size control (and for disabled background) use less spacing
+@@ -267,5 +323,5 @@
+         // Drawing control
+         isEnabled = IsEnabled();
+-        isFocused = ShouldDrawFocus();
++        doDrawFocusRect = ShouldDrawFocus();
+ 
+         // Windows-style: for smaller size control (and for disabled background) use less spacing
+@@ -295,5 +351,5 @@
+         // Drawing a list item
+         isEnabled = true; // they are never disabled
+-        isFocused = flags & wxCONTROL_SELECTED ? true : false;
++        doDrawFocusRect = flags & wxCONTROL_SELECTED ? true : false;
+ 
+         focusSpacingX = 0;
+@@ -319,5 +375,9 @@
+ 
+     wxColour bgCol;
+-    bool drawDottedEdge = false;
++    bool doDrawDottedEdge = false;
++    bool doDrawSelRect = true;
++
++    // TODO: doDrawDottedEdge = true when focus has arrived to control via tab.
++    //       (and other cases which are not that apparent).
+ 
+     if ( isEnabled )
+@@ -325,62 +385,49 @@
+         // If popup is hidden and this control is focused,
+         // then draw the focus-indicator (selbgcolor background etc.).
+-        if ( isFocused )
++        if ( doDrawFocusRect )
+         {
+-        #if 0
+-            // TODO: Proper theme color getting (JMS: I don't know which parts/colors to use,
+-            //       those below don't work)
+-            if ( hTheme )
++            // NB: We can't really use XP visual styles to get TMT_TEXTCOLOR since
++            //     it is not properly defined for combo boxes. Instead, they expect
++            //     you to use DrawThemeText.
++            //
++            //    Here is, however, sample code how to get theme colours:
++            //
++            //    COLORREF cref;
++            //    theme->GetThemeColor(hTheme,EP_EDITTEXT,ETS_NORMAL,TMT_TEXTCOLOR,&cref);
++            //    dc.SetTextForeground( wxRGBToColour(cref) );
++            if ( (m_iFlags & wxCC_FULL_BUTTON) && !(flags & wxCONTROL_ISSUBMENU) )
+             {
+-                theme->GetThemeColor(hTheme,EP_EDITTEXT,ETS_SELECTED,TMT_TEXTCOLOR,&cref);
+-                dc.SetTextForeground( wxRGBToColour(cref) );
+-                theme->GetThemeColor(hTheme,EP_EDITTEXT,ETS_SELECTED,TMT_FILLCOLOR,&cref);
+-                bgCol = wxRGBToColour(cref);
++                // Vista style read-only combo
++                doDrawSelRect = false;
++                doDrawDottedEdge = true;
+             }
+             else
+-        #endif
+             {
+                 dc.SetTextForeground( wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHTTEXT) );
+                 bgCol = wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHT);
+-                if ( m_windowStyle & wxCB_READONLY )
+-                    drawDottedEdge = true;
+             }
+         }
+         else
+         {
+-            /*if ( hTheme )
+-            {
+-                theme->GetThemeColor(hTheme,EP_EDITTEXT,ETS_NORMAL,TMT_TEXTCOLOR,&cref);
+-                dc.SetTextForeground( wxRGBToColour(cref) );
+-                theme->GetThemeColor(hTheme,EP_EDITTEXT,ETS_NORMAL,TMT_FILLCOLOR,&cref);
+-                bgCol = wxRGBToColour(cref);
+-            }
+-            else
+-            {*/
+-                dc.SetTextForeground( wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT) );
+-                bgCol = GetBackgroundColour();
+-            //}
++            dc.SetTextForeground( wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT) );
++            bgCol = GetBackgroundColour();
++            doDrawSelRect = false;
+         }
+     }
+     else
+     {
+-        /*if ( hTheme )
+-        {
+-            theme->GetThemeColor(hTheme,EP_EDITTEXT,ETS_DISABLED,TMT_TEXTCOLOR,&cref);
+-            dc.SetTextForeground( wxRGBToColour(cref) );
+-            theme->GetThemeColor(hTheme,EP_EDITTEXT,ETS_DISABLED,TMT_EDGEFILLCOLOR,&cref);
+-            bgCol = wxRGBToColour(cref);
+-        }
+-        else
+-        {*/
+-            dc.SetTextForeground( wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT) );
+-            bgCol = wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE);
+-        //}
++        dc.SetTextForeground( wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT) );
++        bgCol = wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE);
+     }
+ 
+     dc.SetBrush(bgCol);
+-    dc.SetPen(bgCol);
+-    dc.DrawRectangle(selRect);
+-    if ( drawDottedEdge )
+-        wxMSWDrawFocusRect(dc,selRect);
++    if ( doDrawSelRect )
++    {
++        dc.SetPen(bgCol);
++        dc.DrawRectangle(selRect);
++    }
++
++    if ( doDrawDottedEdge )
++        wxMSWDrawFocusRect(dc, selRect);
+ 
+     // Don't clip exactly to the selection rectangle so we can draw
+@@ -398,82 +445,185 @@
+     wxAutoBufferedPaintDC dc(this);
+ 
+-    const wxRect& rectb = m_btnArea;
+-    wxRect rect = m_tcArea;
+-    bool isEnabled = IsEnabled();
++    const wxRect& rectButton = m_btnArea;
++    wxRect rectTextField = m_tcArea;
++    const bool isEnabled = IsEnabled();
+     wxColour bgCol = GetBackgroundColour();
+-    wxColour fgCol;
++
++    HDC hDc = GetHdcOf(dc);
++    HWND hWnd = GetHwndOf(this);
+ 
+     wxUxThemeEngine* theme = NULL;
+     wxUxThemeHandle hTheme(this, L"COMBOBOX");
+-    int etsState;
+ 
+-    // area around both controls
+-    wxRect rect2(0,0,sz.x,sz.y);
++    if ( hTheme )
++        theme = wxUxThemeEngine::GetIfActive();
++
++    wxRect borderRect(0,0,sz.x,sz.y);
++
+     if ( m_iFlags & wxCC_IFLAG_BUTTON_OUTSIDE )
+     {
+-        rect2 = m_tcArea;
+-        rect2.Inflate(1);
++        borderRect = m_tcArea;
++        borderRect.Inflate(1);
+     }
+ 
+-    // Use theme to draw border on XP
++    int drawButFlags = 0;
++
+     if ( hTheme )
+     {
+-        theme = wxUxThemeEngine::GetIfActive();
+-        COLORREF cref;
++        const bool useVistaComboBox = ::wxGetWinVersion() >= wxWinVersion_6;
++
++        RECT rFull;
++        wxCopyRectToRECT(borderRect, rFull);
++
++        RECT rButton;
++        wxCopyRectToRECT(rectButton, rButton);
++
++        RECT rBorder;
++        wxCopyRectToRECT(borderRect, rBorder);
++
++        bool isNonStdButton = (m_iFlags & wxCC_IFLAG_BUTTON_OUTSIDE) ||
++                              (m_iFlags & wxCC_IFLAG_HAS_NONSTANDARD_BUTTON);
++
++        //
++        // Get some states for themed drawing
++        int butState;
+ 
+-        // Select correct border colour
+         if ( !isEnabled )
+-            etsState = ETS_DISABLED;
++        {
++            butState = CBXS_DISABLED;
++        }
++        // Vista will display the drop-button as depressed always
++        // when the popup window is visilbe
++        else if ( (m_btnState & wxCONTROL_PRESSED) ||
++                  (useVistaComboBox && !IsPopupWindowState(Hidden)) )
++        {
++            butState = CBXS_PRESSED;
++        }
++        else if ( m_btnState & wxCONTROL_CURRENT )
++        {
++            butState = CBXS_HOT;
++        }
+         else
+-            etsState = ETS_NORMAL;
++        {
++            butState = CBXS_NORMAL;
++        }
++
++        int comboBoxPart = 0;  // For XP, use the 'default' part
++        RECT* rUseForBg = &rBorder;
+ 
+-        if ( m_widthCustomBorder )
++        bool drawFullButton = false;
++        int bgState = butState;
++        const bool isFocused = (FindFocus() == GetMainWindowOfCompositeControl()) ? true : false;
++
++        if ( useVistaComboBox )
+         {
+-            theme->GetThemeColor(hTheme,EP_EDITTEXT,etsState,TMT_BORDERCOLOR,&cref);
++            // FIXME: Either SetBackgroundColour or GetBackgroundColour
++            //        doesn't work under Vista, so here's a temporary
++            //        workaround.
++            bgCol = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
++
++            // Draw the entire control as a single button?
++            if ( !isNonStdButton )
++            {
++                if ( HasFlag(wxCB_READONLY) )
++                    drawFullButton = true;
++            }
+ 
+-            // Set border colour
+-            dc.SetPen( wxRGBToColour(cref) );
++            if ( drawFullButton )
++            {
++                comboBoxPart = CP_READONLY;
++                rUseForBg = &rFull;
++
++                // It should be safe enough to update this flag here.
++                m_iFlags |= wxCC_FULL_BUTTON;
++            }
++            else
++            {
++                comboBoxPart = CP_BORDER;
++                m_iFlags &= ~wxCC_FULL_BUTTON;
+ 
+-            dc.SetBrush( *wxTRANSPARENT_BRUSH );
+-            dc.DrawRectangle(rect2);
++                if ( isFocused )
++                    bgState = CBB_FOCUSED;
++                else
++                    bgState = CBB_NORMAL;
++            }
+         }
+ 
+-        theme->GetThemeColor(hTheme,EP_EDITTEXT,etsState,TMT_TEXTCOLOR,&cref);
+-        fgCol = wxRGBToColour(cref);
+-    }
+-    else
+-    {
+-        // draw regular background
+-        fgCol = GetForegroundColour();
+-    }
++        //
++        // Draw parent's background, if necessary
++        RECT* rUseForTb = NULL;
++
++        if ( theme->IsThemeBackgroundPartiallyTransparent( hTheme, comboBoxPart, bgState ) )
++            rUseForTb = &rFull;
++        else if ( m_iFlags & wxCC_IFLAG_BUTTON_OUTSIDE )
++            rUseForTb = &rButton;
++
++        if ( rUseForTb )
++            theme->DrawThemeParentBackground( hWnd, hDc, rUseForTb );
++
++        //
++        // Draw the control background (including the border)
++        if ( m_widthCustomBorder > 0 )
++        {
++            theme->DrawThemeBackground( hTheme, hDc, comboBoxPart, bgState, rUseForBg, NULL );
++        }
++        else
++        {
++            // No border. We can't use theme, since it cannot be relied on
++            // to deliver borderless drawing, even with DrawThemeBackgroundEx.
++            dc.SetBrush(bgCol);
++            dc.SetPen(bgCol);
++            dc.DrawRectangle(borderRect);
++        }
+ 
+-    rect2.Deflate(m_widthCustomBorder);
++        //
++        // Draw the drop-button
++        if ( !isNonStdButton )
++        {
++            drawButFlags = Button_BitmapOnly;
+ 
+-    dc.SetBrush(bgCol);
+-    dc.SetPen(bgCol);
++            int butPart = CP_DROPDOWNBUTTON;
+ 
+-    // clear main background
+-    dc.DrawRectangle(rect);
++            if ( useVistaComboBox )
++            {
++                if ( drawFullButton )
++                {
++                    // We need to alter the button style slightly before
++                    // drawing the actual button (but it was good above
++                    // when background etc was done).
++                    if ( butState == CBXS_HOT || butState == CBXS_PRESSED )
++                        butState = CBXS_NORMAL;
++                }
++
++                if ( m_btnSide == wxRIGHT )
++                    butPart = CP_DROPDOWNBUTTONRIGHT;
++                else
++                    butPart = CP_DROPDOWNBUTTONLEFT;
+ 
+-    // Button background with theme?
+-    int drawButFlags = Draw_PaintBg;
+-    if ( hTheme && m_blankButtonBg )
++            }
++            theme->DrawThemeBackground( hTheme, hDc, butPart, butState, &rButton, NULL );
++        }
++        else if ( useVistaComboBox &&
++                  (m_iFlags & wxCC_IFLAG_BUTTON_OUTSIDE) )
++        {
++            // We'll do this, because DrawThemeParentBackground
++            // doesn't seem to be reliable on Vista.
++            drawButFlags |= Button_PaintBackground;
++        }
++    }
++    else
+     {
+-        RECT r;
+-        wxCopyRectToRECT(rectb, r);
+-
+-        // Draw parent background if needed (since button looks like its out of
+-        // the combo, this is preferred).
+-        theme->DrawThemeParentBackground(GetHwndOf(this),
+-                                         GetHdcOf(dc),
+-                                         &r);
++        // Windows 2000 and earlier
++        drawButFlags = Button_PaintBackground;
+ 
+-        drawButFlags = 0;
++        dc.SetBrush(bgCol);
++        dc.SetPen(bgCol);
++        dc.DrawRectangle(borderRect);
+     }
+ 
+-    // Standard button rendering
+-    DrawButton(dc,rectb,drawButFlags);
++    // Button rendering (may only do the bitmap on button, depending on the flags)
++    DrawButton( dc, rectButton, drawButFlags );
+ 
+-    // paint required portion on the control
++    // Paint required portion of the custom image on the control
+     if ( (!m_text || m_widthCustomPaint) )
+     {
+@@ -483,13 +633,13 @@
+         // right edge to be hidden
+         if ( m_text )
+-            rect.width = m_widthCustomPaint;
++            rectTextField.width = m_widthCustomPaint;
+ 
+         dc.SetFont( GetFont() );
+ 
+-        dc.SetClippingRegion(rect);
++        dc.SetClippingRegion(rectTextField);
+         if ( m_popupInterface )
+-            m_popupInterface->PaintComboControl(dc,rect);
++            m_popupInterface->PaintComboControl(dc,rectTextField);
+         else
+-            wxComboPopup::DefaultPaintComboControl(this,dc,rect);
++            wxComboPopup::DefaultPaintComboControl(this,dc,rectTextField);
+     }
+ }
+
+ 	  	 

@@ -1,0 +1,200 @@
+Index: include/wx/filefn.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/filefn.h,v
+retrieving revision 1.122
+diff -u -r1.122 filefn.h
+--- include/wx/filefn.h 2005/03/17 17:46:19 1.122
++++ include/wx/filefn.h 2005/03/29 13:56:20
+@@ -532,6 +532,12 @@
+                              wxString *pstrName,
+                              wxString *pstrExt);
+
++// adds an additional search path
++WXDLLIMPEXP_BASE void wxAddToSearchPath(const wxString& path);
++
++// construct the search path for the given language
++WXDLLIMPEXP_BASE wxString wxGetFullSearchPath(const wxChar *lang);
++
+ // find a file in a list of directories, returns false if not found
+ WXDLLIMPEXP_BASE bool wxFindFileInPath(wxString *pStr, const wxChar *pszPath, const wxChar *pszFile);
+
+Index: include/wx/html/helpctrl.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/html/helpctrl.h,v
+retrieving revision 1.31
+diff -u -r1.31 helpctrl.h
+--- include/wx/html/helpctrl.h  2004/10/13 14:04:15 1.31
++++ include/wx/html/helpctrl.h  2005/03/30 10:13:38
+@@ -35,8 +35,9 @@
+
+     void SetTitleFormat(const wxString& format);
+     void SetTempDir(const wxString& path) { m_helpData.SetTempDir(path); }
+-    bool AddBook(const wxString& book_url, bool show_wait_msg = false);
+     bool AddBook(const wxFileName& book_file, bool show_wait_msg = false);
++    bool AddBook(const wxString& book, bool show_wait_msg = false);
++    bool AddBook(const wxString& book, const wxChar *lang, bool show_wait_msg = false);
+
+     bool Display(const wxString& x);
+     bool Display(int id);
+Index: src/common/filefn.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/filefn.cpp,v
+retrieving revision 1.231
+diff -u -r1.231 filefn.cpp
+--- src/common/filefn.cpp   2005/03/24 20:01:44 1.231
++++ src/common/filefn.cpp   2005/03/30 08:02:30
+@@ -118,6 +118,13 @@
+ #endif
+
+ // ----------------------------------------------------------------------------
++// global variables
++// ----------------------------------------------------------------------------
++
++// the list of the directories for the search path
++static wxArrayString s_searchPrefixes;
++
++// ----------------------------------------------------------------------------
+ // macros
+ // ----------------------------------------------------------------------------
+
+@@ -1536,6 +1543,88 @@
+     return len && wxIsPathSeparator(pszFileName[len - 1]);
+ }
+
++// adds an additional search path
++void wxAddToSearchPath(const wxString& path)
++{
++    if ( s_searchPrefixes.Index(path) == wxNOT_FOUND )
++    {
++        s_searchPrefixes.Add(path);
++    }
++}
++
++// return all directories to search for given prefix
++wxString GetAllSearchSubdirs(const wxChar *prefix, const wxChar *lang)
++{
++    wxString searchPrefix;
++    const wxChar *sublocale = wxStrchr(lang, wxT('_'));
++
++    // search first in prefix/<lang>/LC_MESSAGES, then in prefix/<lang> and finally in
++    // prefix (assuming the language is <lang>).
++    // <lang> is locale language with (e.g. 'en_GB'), <lg> without sublocale  (e.g. 'en')
++    searchPrefix << prefix << wxFILE_SEP_PATH << lang << wxFILE_SEP_PATH
++                           << wxT("LC_MESSAGES") << wxPATH_SEP
++                 << prefix << wxFILE_SEP_PATH << lang << wxPATH_SEP;
++    if ( sublocale )
++    {
++        wxString lg = wxString(lang).Left((size_t)(sublocale - lang));
++        searchPrefix << prefix << wxFILE_SEP_PATH << lg << wxFILE_SEP_PATH
++                               << wxT("LC_MESSAGES") << wxPATH_SEP
++                     << prefix << wxFILE_SEP_PATH << lg << wxPATH_SEP;
++    }
++    searchPrefix << prefix << wxPATH_SEP;
++
++    return searchPrefix;
++}
++
++// construct the search path for the given language
++wxString wxGetFullSearchPath(const wxChar *lang)
++{
++    wxString searchPath;
++
++    // first take the entries explicitly added by the program
++    size_t count = s_searchPrefixes.Count();
++    for ( size_t n = 0; n < count; n++ )
++    {
++        searchPath << GetAllSearchSubdirs(s_searchPrefixes[n], lang)
++                   << wxPATH_SEP;
++    }
++
++    // TODO: use wxStandardPaths instead of all this mess!!
++
++    // LC_PATH is a standard env var containing the search path for the .mo
++    // files
++#ifndef __WXWINCE__
++    const wxChar *pszLcPath = wxGetenv(wxT("LC_PATH"));
++    if ( pszLcPath != NULL )
++        searchPath << GetAllSearchSubdirs(pszLcPath, lang);
++#endif
++
++#ifdef __UNIX__
++    // add some standard ones and the one in the tree where wxWin was installed:
++    searchPath
++        << GetAllSearchSubdirs(wxString(wxGetInstallPrefix()) + wxT("/share/locale"), lang)
++        << GetAllSearchSubdirs(wxT("/usr/share/locale"), lang)
++        << GetAllSearchSubdirs(wxT("/usr/lib/locale"), lang)
++        << GetAllSearchSubdirs(wxT("/usr/local/share/locale"), lang);
++#endif // __UNIX__
++
++    // then take the current directory
++    // FIXME it should be the directory of the executable
++#if defined(__WXMAC__)
++    searchPath << GetAllSearchSubdirs(wxGetCwd(), lang);
++    // generic search paths could be somewhere in the system folder preferences
++#elif defined(__WXMSW__)
++    // look in the directory of the executable
++    wxString path;
++    wxSplitPath(wxGetFullModuleName(), &path, NULL, NULL);
++    searchPath << GetAllSearchSubdirs(path, lang);
++#else // !Mac, !MSW
++    searchPath << GetAllSearchSubdirs(wxT("."), lang);
++#endif // platform
++
++    return searchPath;
++}
++
+ // find a file in a list of directories, returns false if not found
+ bool wxFindFileInPath(wxString *pStr, const wxChar *pszPath, const wxChar *pszFile)
+ {
+@@ -1543,9 +1632,8 @@
+     wxCHECK_MSG( !wxIsEmpty(pszFile), false,
+                  _T("empty file name in wxFindFileInPath"));
+
+-    // skip path separator in the beginning of the file name if present
+-    if ( wxIsPathSeparator(*pszFile) )
+-        pszFile++;
++    // retrieve only full filename
++    wxString filename = wxFileName(pszFile).GetFullName();
+
+     // copy the path (strtok will modify it)
+     wxChar *szPath = new wxChar[wxStrlen(pszPath) + 1];
+@@ -1561,7 +1649,7 @@
+         strFile = pc;
+         if ( !wxEndsWithPathSeparator(pc) )
+             strFile += wxFILE_SEP_PATH;
+-        strFile += pszFile;
++        strFile += filename;
+
+         if ( wxFileExists(strFile) ) {
+             *pStr = strFile;
+Index: src/html/helpctrl.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/html/helpctrl.cpp,v
+retrieving revision 1.39
+diff -u -r1.39 helpctrl.cpp
+--- src/html/helpctrl.cpp   2005/03/24 17:49:56 1.39
++++ src/html/helpctrl.cpp   2005/03/29 14:06:08
+@@ -119,6 +119,21 @@
+     return retval;
+ }
+
++bool wxHtmlHelpController::AddBook(const wxString& book, const wxChar *lang, bool show_wait_msg)
++{
++    wxString bookPath = wxFileName(book).GetPath();
++    if (!bookPath.IsEmpty()) {
++        wxAddToSearchPath (bookPath);
++    }
++
++    wxString bookFile;
++    if ( !wxFindFileInPath(&bookFile, wxGetFullSearchPath(lang), wxFileName(book).GetFullName()) ) {
++        wxLogVerbose(_("help book file '%s' not found."), book);
++        return false;
++    }
++
++    return AddBook(bookFile, show_wait_msg);
++}
+
+
+ wxHtmlHelpFrame *wxHtmlHelpController::CreateHelpFrame(wxHtmlHelpData *data)
+
+ 	  	 

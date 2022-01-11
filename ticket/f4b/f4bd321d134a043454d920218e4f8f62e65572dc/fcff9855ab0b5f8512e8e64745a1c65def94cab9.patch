@@ -1,0 +1,342 @@
+Index: docs/changes.txt
+===================================================================
+--- docs/changes.txt	(revision 71201)
++++ docs/changes.txt	(working copy)
+@@ -469,6 +469,7 @@
+ All:
+ 
+ - Added wxLogFormatter to allow customizing wxLog output (Sébastien Gallou).
++- Added wxFSInputStream for reading data from wxFileSystem (Armel Asselin).
+ - Added "%z" support to wxDateTime::Format() and Parse() (Armel Asselin).
+ - Add wxHTTP::SetPostBuffer(wxMemoryBuffer) and SetPostText() (Eran Ifrah).
+ - Fix wrong time zone used in wxDateTime::UNow().
+Index: include/wx/filesys.h
+===================================================================
+--- include/wx/filesys.h	(revision 71201)
++++ include/wx/filesys.h	(working copy)
+@@ -293,8 +293,21 @@
+     static wxString ms_root;
+ };
+ 
++// Stream reading data from wxFSFile: this allows to use virtual files with any
++// wx functions accepting streams.
++class WXDLLIMPEXP_BASE wxFSInputStream : public wxWrapperInputStream
++{
++public:
++    // Notice that wxFS_READ is implied in flags.
++    wxFSInputStream(const wxString& filename, int flags = 0);
++    virtual ~wxFSInputStream();
+ 
++private:
++    wxFSFile* m_file;
+ 
++    wxDECLARE_NO_COPY_CLASS(wxFSInputStream);
++};
++
+ #endif
+   // wxUSE_FILESYSTEM
+ 
+Index: include/wx/stream.h
+===================================================================
+--- include/wx/stream.h	(revision 71201)
++++ include/wx/stream.h	(working copy)
+@@ -640,6 +640,54 @@
+     inline wxStreamBuffer *wxBufferedOutputStream::OutputStreamBuffer() const { return m_o_streambuf; }
+ #endif // WXWIN_COMPATIBILITY_2_6
+ 
++// ---------------------------------------------------------------------------
++// wxWrapperInputStream: forwards all IO to another stream.
++// ---------------------------------------------------------------------------
++
++class WXDLLIMPEXP_BASE wxWrapperInputStream : public wxFilterInputStream
++{
++public:
++    // Constructor fully initializing the stream. The overload taking pointer
++    // takes ownership of the parent stream, the one taking reference does not.
++    //
++    // Notice that this class also has a default ctor but it's protected as the
++    // derived class is supposed to take care of calling InitParentStream() if
++    // it's used.
++    wxWrapperInputStream(wxInputStream& stream);
++    wxWrapperInputStream(wxInputStream* stream);
++
++    // Override the base class methods to forward to the wrapped stream.
++    virtual wxFileOffset GetLength() const;
++    virtual bool IsSeekable() const;
++
++protected:
++    virtual size_t OnSysRead(void *buffer, size_t size);
++    virtual wxFileOffset OnSysSeek(wxFileOffset pos, wxSeekMode mode);
++    virtual wxFileOffset OnSysTell() const;
++
++    // Ensure that our own last error is the same as that of the real stream.
++    //
++    // This method is const because the error must be updated even from const
++    // methods (in other words, it really should have been mutable in the first
++    // place).
++    void SynchronizeLastError() const
++    {
++        const_cast<wxWrapperInputStream*>(this)->
++            Reset(m_parent_i_stream->GetLastError());
++    }
++
++    // Default constructor, use InitParentStream() later.
++    wxWrapperInputStream();
++
++    // Set up the wrapped stream for an object initialized using the default
++    // constructor. The ownership logic is the same as above.
++    void InitParentStream(wxInputStream& stream);
++    void InitParentStream(wxInputStream* stream);
++
++    wxDECLARE_NO_COPY_CLASS(wxWrapperInputStream);
++};
++
++
+ #endif // wxUSE_STREAMS
+ 
+ #endif // _WX_WXSTREAM_H__
+Index: interface/wx/filesys.h
+===================================================================
+--- interface/wx/filesys.h	(revision 71201)
++++ interface/wx/filesys.h	(working copy)
+@@ -463,3 +463,38 @@
+     static wxString GetRightLocation(const wxString& location);
+ };
+ 
++
++/**
++    Input stream for virtual file stream files.
++
++    The stream reads data from wxFSFile obtained from wxFileSystem.
++
++    @library{wxbase}
++    @category{streams}
++
++    @see wxWrapperInputStream, wxFSFile
++
++    @since 2.9.4
++*/
++class wxFSInputStream : public wxWrapperInputStream
++{
++public:
++    /**
++        Create a stream associated with the data of the given virtual file
++        system file.
++
++        @param filename
++            The name of the input file passed to wxFileSystem::OpenFile().
++        @param flags
++            Combination of flags from wxFileSystemOpenFlags. ::wxFS_READ is
++            implied, i.e. it is always added to the flags value.
++
++        Use wxStreamBase::IsOk() to verify if the constructor succeeded.
++    */
++    wxFileInputStream(const wxString& filename, int flags = 0);
++
++    /**
++        Returns @true if the stream is initialized and ready.
++    */
++    bool IsOk() const;
++};
+Index: interface/wx/stream.h
+===================================================================
+--- interface/wx/stream.h	(revision 71201)
++++ interface/wx/stream.h	(working copy)
+@@ -1066,3 +1066,57 @@
+ };
+ 
+ 
++/**
++    @class wxWrapperInputStream
++
++    A wrapper input stream is a kind of filter stream which forwards all the
++    operations to its base stream. This is useful to build utility classes such
++    as wxFSInputStream.
++
++    @note
++    The interface of this class is the same as that of wxInputStream.
++    Only a constructor differs and it is documented below.
++
++    @library{wxbase}
++    @category{streams}
++
++    @see wxFSInputStream, wxFilterInputStream
++    @since 2.9.4
++*/
++class wxWrapperInputStream : public wxFilterInputStream
++{
++public:
++    //@{
++    /**
++        Initializes a wrapper stream.
++
++        If the parent stream is passed as a pointer then the new wrapper stream
++        takes ownership of it. If it is passed by reference then it does not.
++    */
++    wxWrapperInputStream(wxInputStream& stream);
++    wxWrapperInputStream(wxInputStream* stream);
++    //@}
++
++protected:
++    /**
++        Default constructor, use InitParentStream() to finish initialization.
++
++        This constructor can be used by the derived classes from their own
++        constructors when the parent stream can't be specified immediately.
++        The derived class must call InitParentStream() later to do it.
++     */
++    wxWrapperInputStream();
++
++    //@{
++    /**
++        Set up the wrapped stream for an object initialized using the default
++        constructor.
++
++        The ownership logic is the same as for the non-default constructor,
++        i.e. this object takes ownership of the stream if it's passed by
++        pointer but not if it's passed by reference.
++     */
++    void InitParentStream(wxInputStream& stream);
++    void InitParentStream(wxInputStream* stream);
++    //@}
++};
+Index: src/common/filesys.cpp
+===================================================================
+--- src/common/filesys.cpp	(revision 71201)
++++ src/common/filesys.cpp	(working copy)
+@@ -756,5 +756,29 @@
+ 
+ IMPLEMENT_DYNAMIC_CLASS(wxFileSystemModule, wxModule)
+ 
++//// wxFSInputStream
++
++wxFSInputStream::wxFSInputStream(const wxString& filename, int flags)
++{
++    wxFileSystem fs;
++    m_file = fs.OpenFile(filename, flags | wxFS_READ);
++
++    if ( m_file )
++    {
++        wxInputStream *stream = m_file->GetStream();
++        if ( stream )
++        {
++            // Notice that we pass the stream by reference: it shouldn't be
++            // deleted by us as it's owned by m_file already.
++            InitParentStream(*stream);
++        }
++    }
++}
++
++wxFSInputStream::~wxFSInputStream()
++{
++    delete m_file;
++}
++
+ #endif
+   // wxUSE_FILESYSTEM
+Index: src/common/stream.cpp
+===================================================================
+--- src/common/stream.cpp	(revision 71201)
++++ src/common/stream.cpp	(working copy)
+@@ -36,6 +36,7 @@
+ #include <ctype.h>
+ #include "wx/datstrm.h"
+ #include "wx/textfile.h"
++#include "wx/scopeguard.h"
+ 
+ // ----------------------------------------------------------------------------
+ // constants
+@@ -1446,6 +1447,93 @@
+     m_o_streambuf = buffer;
+ }
+ 
++// ---------------------------------------------------------------------------
++// wxWrapperInputStream implementation
++// ---------------------------------------------------------------------------
++
++wxWrapperInputStream::wxWrapperInputStream()
++{
++    m_lasterror = wxSTREAM_READ_ERROR;
++}
++
++wxWrapperInputStream::wxWrapperInputStream(wxInputStream& stream)
++    : wxFilterInputStream(stream)
++{
++    SynchronizeLastError();
++}
++
++wxWrapperInputStream::wxWrapperInputStream(wxInputStream *stream)
++    : wxFilterInputStream(stream)
++{
++    if ( m_parent_i_stream )
++        SynchronizeLastError();
++    else
++        m_lasterror = wxSTREAM_READ_ERROR;
++}
++
++void wxWrapperInputStream::InitParentStream(wxInputStream& stream)
++{
++    wxCHECK_RET( !m_parent_i_stream, "Can't init parent stream twice" );
++
++    m_parent_i_stream = &stream;
++
++    SynchronizeLastError();
++}
++
++void wxWrapperInputStream::InitParentStream(wxInputStream* stream)
++{
++    wxCHECK_RET( !m_parent_i_stream, "Can't init parent stream twice" );
++
++    m_parent_i_stream = stream;
++
++    if ( m_parent_i_stream )
++    {
++        m_owns = true;
++
++        SynchronizeLastError();
++    }
++}
++
++wxFileOffset wxWrapperInputStream::GetLength() const
++{
++    wxCHECK_MSG(m_parent_i_stream, wxInvalidOffset, "Stream not valid");
++
++    wxON_BLOCK_EXIT_THIS0(wxWrapperInputStream::SynchronizeLastError);
++    return m_parent_i_stream->GetLength();
++}
++
++bool wxWrapperInputStream::IsSeekable() const
++{
++    wxCHECK_MSG(m_parent_i_stream, false, "Stream not valid");
++    return m_parent_i_stream->IsSeekable();
++}
++
++size_t wxWrapperInputStream::OnSysRead(void *buffer, size_t size)
++{
++    wxCHECK_MSG(m_parent_i_stream, false, "Stream not valid");
++
++    wxON_BLOCK_EXIT_THIS0(wxWrapperInputStream::SynchronizeLastError);
++
++    m_parent_i_stream->Read(buffer, size);
++    return m_parent_i_stream->LastRead();
++}
++
++wxFileOffset wxWrapperInputStream::OnSysSeek(wxFileOffset pos, wxSeekMode mode)
++{
++    wxCHECK_MSG(IsSeekable(), false, "Stream not seekable");
++
++    wxON_BLOCK_EXIT_THIS0(wxWrapperInputStream::SynchronizeLastError);
++    return m_parent_i_stream->SeekI (pos, mode);
++}
++
++wxFileOffset wxWrapperInputStream::OnSysTell() const
++{
++    wxCHECK_MSG(m_parent_i_stream, false, "Stream not valid");
++
++    wxON_BLOCK_EXIT_THIS0(wxWrapperInputStream::SynchronizeLastError);
++    return m_parent_i_stream->TellI();
++}
++
+ // ----------------------------------------------------------------------------
+ // Some IOManip function
+ // ----------------------------------------------------------------------------

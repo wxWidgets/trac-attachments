@@ -1,0 +1,964 @@
+I've expanded quite a bit on the overloaded function versions, adding user allocated output buffers and counted string input support.  When writing the sample/support app, I decided to also add in overloads for stream in/out to make file operations easy (and anything else that can be piped through a stream).
+
+CPPUNIT tests are in (could possibly be more extensive) but I was unable to compile because it kept complaining about a missing header in a directory that didn't exist.
+
+If you want an interesting test, encode an application file using the sample application (to a .b64 extension is easiest on windows at least), and then use your favorite unarchiver to extract the binary, rename it as an exe or set it executable, and try to run it.
+
+I'm not familiar enough with bakefiles to figure out where the sample app projects were built in them, so I'm simply going to include the project files and let someone with more understanding handle the bakefiles.
+
+Thanks for all your feedback on these additions.
+
+
+
+Index: build/bakefiles/files.bkl
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWindows/build/bakefiles/files.bkl,v
+retrieving revision 1.447
+diff -u -2 -r1.447 files.bkl
+--- build/bakefiles/files.bkl	2007/06/10 17:13:14	1.447
++++ build/bakefiles/files.bkl	2007/06/20 00:00:39
+@@ -312,4 +312,5 @@
+     src/common/archive.cpp
+     src/common/arrstr.cpp
++    src/common/base64.cpp
+     src/common/clntdata.cpp
+     src/common/cmdline.cpp
+@@ -395,4 +396,5 @@
+     wx/arrimpl.cpp
+     wx/arrstr.h
++    wx/base64.h
+     wx/beforestd.h
+     wx/buffer.h
+Index: docs/latex/wx/function.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWindows/docs/latex/wx/function.tex,v
+retrieving revision 1.288
+diff -u -2 -r1.288 function.tex
+--- docs/latex/wx/function.tex	2007/06/19 20:02:35	1.288
++++ docs/latex/wx/function.tex	2007/06/20 00:00:40
+@@ -36,4 +36,6 @@
+ \helpref{wxASSERT\_MIN\_BITSIZE}{wxassertminbitsize}\\
+ \helpref{wxASSERT\_MSG}{wxassertmsg}\\
++\helpref{wxBase64Decode}{wxbase64decode}\\
++\helpref{wxBase64Encode}{wxbase64encode}\\
+ \helpref{wxBeginBusyCursor}{wxbeginbusycursor}\\
+ \helpref{wxBell}{wxbell}\\
+@@ -2826,4 +2828,30 @@
+ 
+ \section{Miscellaneous functions}\label{miscellany}
++
++
++\membersection{wxBase64Decode}\label{wxbase64decode}
++
++\func{wxMemoryBuffer}{wxBase64Decode}{\param{const wxString\& }{str}}
++
++\func{wxMemoryBuffer}{wxBase64Decode}{\param{const char *}{str}}
++
++\func{wxMemoryBuffer}{wxBase64Decode}{\param{const char *}{str}, \param{size\_t }{strlength}}
++
++Returns a buffer with the Base64 decoded binary equivalent of the input string.
++The buffer will be empty if an error occurred.
++
++\func{bool}{wxBase64Decode}{\param{void *}{data}, \param{size\_t\& }{len}, \param{const char *}{str}}
++
++\func{bool}{wxBase64Decode}{\param{void *}{data}, \param{size\_t\& }{len}, \param{const char *}{str}, \param{size\_t }{strlength}}
++
++Fills the user allocated buffer with the Base64 decoded binary equivalent of the input string.
++Returns true on success.
++Will fail if the output buffer is not large enough (at most 3/4ths the size of the input string rounded up).
++
++\func{wxStreamError}{wxBase64Decode}{\param{wxOutputStream\& }{out}, \param{wxInputStream\& }{in}}
++
++Reads from the input stream until the EOF marker is read, writing the Base64 decoded binary equivalent to the output stream.
++Returns any stream error encountered, or wxSTREAM_NO_ERROR on success.
++The output stream may contain some decoded data in the case of a failure.
++
++Base64 functionality is only available if \texttt{\wxUSE\_BASE64} $= 1$.
++
++\wxheading{Include files}
++
++<wx/base64.h>
++
++
++\membersection{wxBase64Encode}\label{wxbase64encode}
++
++\func{wxString}{wxBase64Encode}{\param{const wxMemoryBuffer\& }{buf}}
++
++\func{wxString}{wxBase64Encode}{\param{const void *}{buf}, \param{size\_t }{len}}
++
++Returns a string object containing the Base64 encoded equivalent of the input buffer.
++The returned string will be empty in the event of a failure.
++
++\func{bool}{wxBase64Encode}{\param{char *}{str}, \param{size\_t\& }{strlength}, \param{const void *}{data}, \param{size\_t }{len}}
++
++Fills the user allocated string with the Base64 encoded equivalent of the input buffer.
++Returns true on success.
++Will fail if the output string is not large enough (slightly over 4/3rds the size of the input buffer rounded up).
++
++\func{wxStreamError}{wxBase64Encode}{\param{wxOutputStream\& }{out}, \param{wxInputStream\& }{in}}
++
++Reads from the input stream until the EOF marker is read, writing the Base64 encoded equivalent to the output stream.
++Returns any stream error encountered, or wxSTREAM_NO_ERROR on success.
++The output stream may contain some encoded data in the case of a failure.
++
++Base64 functionality is only available if \texttt{\wxUSE\_BASE64} $= 1$.
++
++\wxheading{Include files}
++
++<wx/base64.h>
+ 
+ 
+Index: include/wx/base64.h
+===================================================================
+RCS file: base64.h
+diff -N base64.h
+--- /dev/null	Wed Jun 20 02:00:27 2007
++++ base64.h	Wed Jun 20 02:00:40 2007
+@@ -0,0 +1,93 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/base64.h
++// Purpose:     declaration of BASE64 encoding/decoding functionality
++// Author:      Charles Reimers (algorithm based on description and code from
++//              http://base64.sourceforge.net/)
++// Created:     2007/06/18
++// RCS-ID:      $Id: $
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_BASE64_H_
++#define _WX_BASE64_H_
++
++#if wxUSE_BASE64
++
++#include "wx/string.h"
++#include "wx/buffer.h"
++#include "wx/stream.h"
++
++////////////////////////////////////
++////////////// Encode \\////////////
++//////////////\\\\\\\\\\////////////
++
++// stream encode for files and other potentially large data sets
++// linewidth will allow for line breaks in the case of text files
++// if an error is encountered, it is returned, otherwise wxSTREAM_NO_ERROR
++WXDLLIMPEXP_BASE wxStreamError wxBase64Encode(wxOutputStream &out, wxInputStream &in, int linewidth = 0);
++
++// encode the contents of the given buffer using base64 and return as string
++// wxString will be empty if an error occurs
++WXDLLIMPEXP_BASE wxString wxBase64Encode(const void *data, size_t len);
++
++// allow use of a wxMemoryBuffer as the source
++// wxString will be empty if an error occurs
++inline wxString wxBase64Encode(const wxMemoryBuffer &buf)
++{
++    return wxBase64Encode(buf.GetData(), buf.GetDataLen());
++}
++
++// allow the user to pass a char* buffer with length if they wish to use none of the wx objects
++// return the actual length of the result string in the strlength parameter
++// returns false if an error is encountered, true otherwise
++WXDLLIMPEXP_BASE bool wxBase64Encode(char *str, size_t &strlength, const void *data, size_t len);
++
++
++
++////////////////////////////////////
++////////////// Decode \\////////////
++//////////////\\\\\\\\\\////////////
++
++// stream decode for files and other limited length types
++// if an error is encountered, it is returned, otherwise wxSTREAM_NO_ERROR
++WXDLLIMPEXP_BASE wxStreamError wxBase64Decode(wxOutputStream& out, wxInputStream& in);
++
++// length counted string as input
++// if an error is encountered, the wxMemoryBuffer will be empty
++WXDLLIMPEXP_BASE wxMemoryBuffer wxBase64Decode(const char *str, size_t strlength);
++
++// NULL terminated string as input
++// if an error is encountered, the wxMemoryBuffer will be empty
++inline wxMemoryBuffer wxBase64Decode(const char *str)
++{
++	return wxBase64Decode(str, strlen(str));
++}
++
++// wxString as input
++// if an error is encountered, the wxMemoryBuffer will be empty
++inline wxMemoryBuffer wxBase64Decode(const wxString &str)
++{
++	return wxBase64Decode(str.GetData(), str.Length());
++}
++
++// length counted string as input
++// allow the user to pass a void* buffer and length for output
++// return the actual length of the data in the buffer in the len parameter
++// returns false if any errors were encountered, true if successful
++WXDLLIMPEXP_BASE bool wxBase64Decode(void *data, size_t &len, const char *str, size_t strlength);
++
++// NULL terminated string as input
++// allow the user to pass a void* buffer and length for output
++// return the actual length of the data in the buffer in the len parameter
++// returns false if any errors were encountered, true if successful
++inline bool wxBase64Decode(void *data, size_t &len, const char *str)
++{
++	return wxBase64Decode(data, len, str, strlen(str));
++}
++
++#define wxBINARY_TO_TEXT_ENCODING(buf) wxBase64Encode(buf)
++#define wxTEXT_TO_BINARY_DECODING(str) wxBase64Decode(str)
++
++#endif // wxUSE_BASE64
++
++#endif // _WX_BASE64_H_
+Index: include/wx/setup_inc.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWindows/include/wx/setup_inc.h,v
+retrieving revision 1.63
+diff -u -2 -r1.63 setup_inc.h
+--- include/wx/setup_inc.h	2007/04/17 05:47:11	1.63
++++ include/wx/setup_inc.h	2007/06/20 00:00:40
+@@ -319,4 +319,12 @@
+ #define wxUSE_LONGLONG      1
+ 
++// Set wxUSE_BASE64 to 1, to compile in Base64 support. This is required for
++// storing binary data in wxConfig on most platforms.
++//
++// Default is 1.
++//
++// Recommended setting: 1 (but can be safely disabled if you don't use it)
++#define wxUSE_BASE64        1
++
+ // Set wxUSE_(F)FILE to 1 to compile wx(F)File classes. wxFile uses low level
+ // POSIX functions for file access, wxFFile uses ANSI C stdio.h functions.
+Index: src/common/base64.cpp
+===================================================================
+RCS file: base64.cpp
+diff -N base64.cpp
+--- /dev/null	Wed Jun 20 02:00:27 2007
++++ base64.cpp	Wed Jun 20 02:00:40 2007
+@@ -0,0 +1,199 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        src/common/base64.cpp
++// Purpose:     implementation of BASE64 encoding/decoding functions
++// Author:      Charles Reimers (algorithm based on description and code from 
++//					http://base64.sourceforge.net/ )
++// Modified by:
++// Created:     2007/06/18
++// RCS-ID:      $Id: $
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#include "wx/wxprec.h"
++
++#if wxUSE_BASE64
++
++#include "wx/string.h"
++#include "wx/buffer.h"
++#include "wx/mstream.h"
++
++
++static const unsigned char cb64[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++
++static void encodeblock( unsigned char in[3], unsigned char out[4], int len )
++{
++    out[0] = cb64[ in[0] >> 2 ];
++    out[1] = cb64[ ((in[0] & 0x03) << 4) | ((in[1] & 0xf0) >> 4) ];
++    out[2] = (len > 1 ? cb64[ ((in[1] & 0x0f) << 2) | ((in[2] & 0xc0) >> 6) ] : '=');
++    out[3] = (len > 2 ? cb64[ in[2] & 0x3f ] : '=');
++}
++
++wxStreamError wxBase64Encode(wxOutputStream &sout, wxInputStream &sin, int linewidth = 0)
++{
++	wxStreamError err = wxSTREAM_NO_ERROR, err1 = wxSTREAM_NO_ERROR;
++	unsigned char in[3], out[4];
++	int i, len, blocksout = 0, maxblocks = linewidth >> 2;
++	unsigned char c = 0;
++
++	while(wxSTREAM_NO_ERROR == err)
++	{
++		len = 0;
++		for(i = 0; i < 3; i++)
++		{
++			if(wxSTREAM_NO_ERROR == err)
++			{
++				c = (unsigned char)sin.GetC();
++				err = sin.GetLastError();
++			}
++			if(wxSTREAM_NO_ERROR == err)
++			{
++				in[i] = c;
++				len++;
++			}
++			else
++			{
++				in[i] = 0;
++			}
++		}
++		if( len )
++		{
++			if(0 != maxblocks && blocksout >= maxblocks)
++			{
++				blocksout = 0;
++				sout << wxEndL;
++				err1 = sout.GetLastError();
++			}
++			encodeblock( in, out, len );
++			for( i = 0; i < 4 && wxSTREAM_NO_ERROR == err1; i++ )
++			{
++				sout.PutC( out[i] );
++				err1 = sout.GetLastError();
++			}
++			blocksout++;
++		}
++		if(wxSTREAM_NO_ERROR != err1)
++			err = err1;
++	}
++	if(wxSTREAM_EOF == err)
++		err = wxSTREAM_NO_ERROR;
++	return err;
++}
++
++wxString wxBase64Encode(const void *data, size_t len)
++{
++	wxMemoryInputStream in(data, len);
++	wxMemoryOutputStream out;
++	wxStreamBuffer *obuf = out.GetOutputStreamBuffer();
++	obuf->SetBufferIO(((len + 2) * 4) / 3);
++	if(wxSTREAM_NO_ERROR != wxBase64Encode(out, in))
++		return wxEmptyString;
++	return wxString( static_cast<char*>(obuf->GetBufferStart()),
++		static_cast<char*>(obuf->GetBufferPos()));
++}
++
++bool wxBase64Encode(char *str, size_t &strlength, const void *data, size_t len)
++{
++	wxMemoryInputStream in(data, len);
++	wxMemoryOutputStream out;
++	wxStreamBuffer *obuf = out.GetOutputStreamBuffer();
++	obuf->SetBufferIO(((len + 2) * 4) / 3);
++	wxStreamError err = wxBase64Encode(out, in);
++	size_t outlen = out.GetSize();
++	if(wxSTREAM_NO_ERROR != err || outlen + 1 > strlength)
++		return false;
++	out.CopyTo(str, strlength);
++	str[outlen] = '\0';
++	return true;
++}
++
++
++static const unsigned char cd64[]="|$$$}rstuvwxyz{$$$$$$$>?@ABCDEFGHIJKLMNOPQRSTUVW$$$$$$XYZ[\\]^_`abcdefghijklmnopq";
++
++static void decodeblock( unsigned char in[4], unsigned char out[3] )
++{   
++    out[ 0 ] = (in[0] << 2 | in[1] >> 4);
++    out[ 1 ] = (in[1] << 4 | in[2] >> 2);
++    out[ 2 ] = (((in[2] << 6) & 0xc0) | in[3]);
++}
++
++wxStreamError wxBase64Decode(wxOutputStream &sout, wxInputStream &sin)
++{
++    unsigned char in[4], out[3], v;
++	int i, len, invalid = 0;
++	wxStreamError err = wxSTREAM_NO_ERROR, err1 = wxSTREAM_NO_ERROR;
++
++    while(wxSTREAM_NO_ERROR == err)
++	{
++		for(len = 0, i = 0; i < 4; i++)
++		{
++			v = 0;
++			while(wxSTREAM_NO_ERROR == err && v == 0)
++			{
++				v = (unsigned char)sin.GetC();
++				err = sin.GetLastError();
++				if('=' == v) invalid++;
++				v = ((v < 43 || v > 122) ? 0 : cd64[ v - 43 ]);
++				if( v )
++				{
++					v = ((v == '$') ? 0 : v - 61);
++				}
++			}
++			if(wxSTREAM_NO_ERROR == err)
++			{
++				len++;
++				if( v )
++				{
++					in[ i ] = (v - 1);
++				}
++			}
++			else
++			{
++				in[i] = 0;
++			}
++		}
++		if( len )
++		{
++			decodeblock( in, out );
++			for( i = 0; i < (3 - invalid) && wxSTREAM_NO_ERROR == err1; i++ )
++			{
++				sout.PutC( out[i] );
++				err1 = sout.GetLastError();
++			}
++		}
++		if(wxSTREAM_NO_ERROR != err1)
++			err = err1;
++	}
++	if(wxSTREAM_EOF == err)
++		err = wxSTREAM_NO_ERROR;
++	return err;
++}
++
++bool wxBase64Decode(void *data, size_t &len, const char *str, size_t strlength)
++{
++	wxMemoryInputStream in(str, strlength);
++	wxMemoryOutputStream out;
++	wxStreamBuffer *obuf = out.GetOutputStreamBuffer();
++	obuf->SetBufferIO(((strlength + 1) * 3) / 4);
++	wxStreamError err = wxBase64Decode(out, in);
++	size_t outlen = out.GetSize();
++	if(wxSTREAM_NO_ERROR != err || outlen > len)
++		return false;
++	out.CopyTo(data, len);
++	return true;
++}
++
++wxMemoryBuffer wxBase64Decode(const char *str, size_t strlength)
++{
++	wxMemoryBuffer bout;
++	wxMemoryInputStream in(str, strlength);
++	wxMemoryOutputStream out;
++	wxStreamBuffer *obuf = out.GetOutputStreamBuffer();
++	obuf->SetBufferIO(((strlength + 1) * 3) / 4);
++	if(wxSTREAM_NO_ERROR != wxBase64Decode(out, in))
++		return bout;
++	bout.AppendData(obuf->GetBufferStart(), (char*)obuf->GetBufferPos() - (char*)obuf->GetBufferStart());
++	return bout;
++}
++
++#endif //wxUSE_BASE64
+Index: samples/b64/b64test.cpp
+===================================================================
+RCS file: b64test.cpp
+diff -N b64test.cpp
+--- /dev/null	Wed Jun 20 02:00:27 2007
++++ b64test.cpp	Wed Jun 20 02:00:40 2007
+@@ -0,0 +1,267 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        b64test.cpp
++// Purpose:     demo/test of base64 functionality
++// Author:      Charles Reimers
++// Modified by:
++// Created:     2007/06/21
++// RCS-ID:      $Id: $
++// Licence:     wxWindows license
++///////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++#include "wx/wxprec.h"
++
++#ifndef  WX_PRECOMP
++  #include "wx/wx.h"
++#endif //precompiled headers
++
++#include "wx/log.h"
++
++#include "wx/base64.h"
++
++#include "wx/filepicker.h"
++#include "wx/layout.h"
++#include "wx/wfstream.h"
++
++#define ID_ENCODE_BUTTON 1000
++#define ID_DECODE_BUTTON 1001
++
++// ----------------------------------------------------------------------------
++// classes
++// ----------------------------------------------------------------------------
++
++class MyApp: public wxApp
++{
++public:
++  // implement base class virtuals
++  virtual bool OnInit();
++  virtual int OnExit();
++};
++
++class MyFrame: public wxFrame
++{
++public:
++  MyFrame();
++  virtual ~MyFrame();
++
++  // callbacks
++  void OnQuit(wxCommandEvent& event);
++  void OnAbout(wxCommandEvent& event);
++  void OnTest(wxCommandEvent& event);
++  void OnEncode(wxCommandEvent& event);
++  void OnDecode(wxCommandEvent& event);
++
++private:
++  wxFilePickerCtrl *m_source;
++  wxFilePickerCtrl *m_dest;
++  wxButton *m_encode;
++  wxButton *m_decode;
++
++  DECLARE_EVENT_TABLE()
++};
++
++enum
++{
++  B64test_NoZeroValue,
++  B64Test_Quit,
++  B64Test_About,
++  B64Test_Test
++};
++
++// ----------------------------------------------------------------------------
++// event tables
++// ----------------------------------------------------------------------------
++
++BEGIN_EVENT_TABLE(MyFrame, wxFrame)
++  EVT_MENU(B64Test_Quit, MyFrame::OnQuit)
++  EVT_MENU(B64Test_About, MyFrame::OnAbout)
++  EVT_MENU(B64Test_Test, MyFrame::OnTest)
++  EVT_BUTTON(ID_ENCODE_BUTTON, MyFrame::OnEncode)
++  EVT_BUTTON(ID_DECODE_BUTTON, MyFrame::OnDecode)
++END_EVENT_TABLE()
++
++// ============================================================================
++// implementation
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// application
++// ----------------------------------------------------------------------------
++
++IMPLEMENT_APP(MyApp)
++
++// `Main program' equivalent, creating windows and returning main app frame
++bool MyApp::OnInit()
++{
++  if ( !wxApp::OnInit() )
++	  return false;
++
++  SetVendorName(_T("wxWidgets"));
++  SetAppName(_T("b64test")); // not needed, it's the default value
++
++  // create the main program window
++  MyFrame *frame = new MyFrame;
++  frame->Show(true);
++  SetTopWindow(frame);
++
++  return true;
++}
++
++int MyApp::OnExit()
++{
++  return 0;
++}
++
++// ----------------------------------------------------------------------------
++// frame
++// ----------------------------------------------------------------------------
++
++// main frame ctor
++MyFrame::MyFrame()
++       : wxFrame((wxFrame *) NULL, wxID_ANY, _T("wxConfig Demo"))
++{
++  // menu
++  wxMenu *file_menu = new wxMenu;
++
++//  file_menu->Append(B64Test_Test, _T("Run &Tests"), _T("Delete config file"));
++//  file_menu->AppendSeparator();
++  file_menu->Append(B64Test_About, _T("&About\tF1"), _T("About this sample"));
++  file_menu->AppendSeparator();
++  file_menu->Append(B64Test_Quit, _T("E&xit\tAlt-X"), _T("Exit the program"));
++  wxMenuBar *menu_bar = new wxMenuBar;
++  menu_bar->Append(file_menu, _T("&File"));
++  SetMenuBar(menu_bar);
++
++#if wxUSE_STATUSBAR
++  CreateStatusBar();
++#endif // wxUSE_STATUSBAR
++
++  wxBoxSizer *topsizer = new wxBoxSizer(wxHORIZONTAL);
++
++  wxPanel *panel = new wxPanel(this);
++
++  topsizer->Add(panel, 1, wxEXPAND | wxALL, 0);
++
++  wxBoxSizer *vsizer = new wxBoxSizer(wxVERTICAL);
++
++  wxBoxSizer *hsizer = new wxStaticBoxSizer(wxHORIZONTAL, panel, _T("Files"));
++
++  wxBoxSizer *subsizer = new wxBoxSizer(wxVERTICAL);
++
++  subsizer->Add(new wxStaticText(panel, wxID_ANY, _T("Input File")), 1, wxALIGN_LEFT, 10);
++
++  m_source = new wxFilePickerCtrl(panel, wxID_ANY, wxEmptyString, _T("Select an input file"),
++	  wxFileSelectorDefaultWildcardStr, wxDefaultPosition, wxDefaultSize, wxFLP_OPEN |
++	  wxFLP_FILE_MUST_EXIST | wxFLP_USE_TEXTCTRL);
++
++  subsizer->Add(m_source, 1, wxEXPAND, 10);
++
++  hsizer->Add(subsizer, 1, wxEXPAND, 10);
++
++  subsizer = new wxBoxSizer(wxVERTICAL);
++
++  subsizer->Add(new wxStaticText(panel, wxID_ANY, _T("Output File")), 1, wxALIGN_LEFT, 10);
++
++  m_dest = new wxFilePickerCtrl(panel, wxID_ANY, wxEmptyString, _T("Select an input file"),
++	  wxFileSelectorDefaultWildcardStr, wxDefaultPosition, wxDefaultSize, wxFLP_SAVE |
++	  wxFLP_OVERWRITE_PROMPT | wxFLP_USE_TEXTCTRL);
++
++  subsizer->Add(m_dest, 1, wxEXPAND, 10);
++
++  hsizer->Add(subsizer, 1, wxEXPAND, 10);
++
++  vsizer->Add(hsizer, 1, wxEXPAND | wxALL, 10);
++
++  hsizer = new wxBoxSizer(wxHORIZONTAL);
++
++  m_encode = new wxButton(panel, ID_ENCODE_BUTTON, _T("Base64 Encode"));
++
++  hsizer->Add(m_encode, 1, wxALIGN_RIGHT, 10);
++
++  m_decode = new wxButton(panel, ID_DECODE_BUTTON, _T("Base64 Decode"));
++
++  hsizer->Add(m_decode, 1, wxALIGN_LEFT, 10);
++
++  vsizer->Add(hsizer, 1, 0, 10);
++
++  panel->SetSizer(vsizer);
++
++  SetSizer(topsizer);
++
++  vsizer->SetSizeHints(panel);
++
++  topsizer->SetSizeHints(this);
++}
++
++void MyFrame::OnQuit(wxCommandEvent&)
++{
++  Close(true);
++}
++
++void MyFrame::OnAbout(wxCommandEvent&)
++{
++  wxMessageBox(_T("wxBase64 demo\n 2007 Charles Reimers"), _T("About"),
++               wxICON_INFORMATION | wxOK);
++}
++
++void MyFrame::OnTest(wxCommandEvent&)
++{
++	wxMemoryBuffer buf;
++	int i;
++	for(i = 0; i < 256; i++)
++		buf.AppendByte((char)i);
++	wxString temp = wxBase64Encode(buf);
++	buf = wxBase64Decode(temp);
++}
++
++void MyFrame::OnEncode(wxCommandEvent&)
++{
++	wxFileName fnsource(m_source->GetPath());
++	wxFileName fndest(m_dest->GetPath());
++	if(!fnsource.IsOk() || fnsource.IsDir() || !fnsource.IsFileReadable())
++	{
++		wxMessageBox(_T("Cannot open file for read"), _T("Input File Error"), wxCANCEL | wxICON_ERROR, this);
++		return;
++	}
++	if(!fndest.IsOk() || fndest.IsDir() || (fndest.FileExists() && !fndest.IsFileWritable()))
++	{
++		wxMessageBox(_T("Cannot open file for write"), _T("Output File Error"), wxCANCEL | wxICON_ERROR, this);
++		return;
++	}
++
++	wxFileInputStream fsin(fnsource.GetFullPath());
++	wxFileOutputStream fsout(fndest.GetFullPath());
++
++	wxBusyCursor busy;
++	
++	wxBase64Encode(fsout, fsin, 75);
++}
++
++void MyFrame::OnDecode(wxCommandEvent&)
++{
++	wxFileName fnsource(m_source->GetPath());
++	wxFileName fndest(m_dest->GetPath());
++	if(!fnsource.IsOk() || fnsource.IsDir() || !fnsource.IsFileReadable())
++	{
++		wxMessageBox(_T("Cannot open file for read"), _T("Input File Error"), wxCANCEL | wxICON_ERROR, this);
++		return;
++	}
++	if(!fndest.IsOk() || fndest.IsDir() || (fndest.FileExists() && !fndest.IsFileWritable()))
++	{
++		wxMessageBox(_T("Cannot open file for write"), _T("Output File Error"), wxCANCEL | wxICON_ERROR, this);
++		return;
++	}
++
++	wxFileInputStream fsin(fnsource.GetFullPath());
++	wxFileOutputStream fsout(fndest.GetFullPath());
++
++	wxBusyCursor busy;
++	
++	wxBase64Decode(fsout, fsin);
++}
++
++MyFrame::~MyFrame()
++{
++}
+Index: samples/b64/b64test.rc
+===================================================================
+RCS file: b64test.rc
+diff -N b64test.rc
+--- /dev/null	Wed Jun 20 02:00:27 2007
++++ b64test.rc	Wed Jun 20 02:00:40 2007
+@@ -0,0 +1,2 @@
++#include "wx/msw/wx.rc"
++
+Index: tests/base64/base64.cpp
+===================================================================
+RCS file: base64.cpp
+diff -N base64.cpp
+--- /dev/null	Wed Jun 20 02:00:27 2007
++++ base64.cpp	2007-06-22 17:40:45.585430300 -0700
+@@ -0,0 +1,237 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        tests/base64/base64.cpp
++// Purpose:     wxBase64Encode/Decode unit test
++// Author:      Charles Reimers
++// Modified:    
++// Created:     2007-06-22
++// RCS-ID:      $Id: $
++///////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++#include "testprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#ifndef WX_PRECOMP
++    #include "wx/wx.h"
++#endif // WX_PRECOMP
++
++#include "wx/base64.h"
++#include "time.h"
++#include "stdlib.h"
++
++// --------------------------------------------------------------------------
++// static test data and data generator
++// using test cases at
++// http://base64.sourceforge.net/b64.c
++// as a starting point
++// --------------------------------------------------------------------------
++
++static const unsigned char charblurb[] = "This is a test.  This is a test of the Base64 binary to text and text to binary functionality.  If this were a real application, you'd see somthing much more spectacular on your screen.";
++
++static const unsigned char charempty[] = "";
++
++static const unsigned char charA[] = "A";
++
++static const unsigned char charAencoded[] = "QQ==";
++
++static const unsigned char charAB[] = "AB";
++
++static const unsigned char charABC[] = "ABC";
++
++static const unsigned char charABCencoded[] = "QUJD";
++
++static const unsigned char encoded0to255[] = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIj
++                    JCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZH
++                    SElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWpr
++                    bG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6P
++                    kJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKz
++                    tLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX
++                    2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7
++                    /P3+/w==
++";
++
++static const unsigned char cb64[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++
++
++static void generatePatternedData(void* buff, size_t len, unsigned char startVal,
++								  unsigned char addVal, unsigned char multVal = 1,
++								  unsigned char xorMask = 0, unsigned char andMask = 255)
++{
++	unsigned char *cbuff = (unsigned char *)buff;
++	unsigned char curval = startVal;
++	while(len--)
++	{
++		*(cbuff++) = curval;
++		curval = (((curval + addVal) * multVal) ^ xorMask) & andMask;
++	}
++}
++static void generateRandomData(void* buff, size_t len)
++{
++	unsigned char *cbuff = (unsigned char *)buff;
++	srand(time(NULL))
++	randomize();
++	while(len--)
++	{
++		*(cbuff++) = (unsigned char)(((rand() * 255) / RAND_MAX));
++	}
++}
++static void generateGibberish(void* buff, size_t len)
++{
++	unsigned char *cbuff = (unsigned char *)buff;
++	srand(time(NULL))
++	randomize();
++	while(len--)
++	{
++		*(cbuff++) = cb64[((rand() * 64) / RAND_MAX)];
++	}
++}
++
++
++static bool compareBuffs(void* buffa, void* buffb, size_t len)
++{
++	return memcmp(buffa, buffb, len) == 0;
++}
++
++// --------------------------------------------------------------------------
++// test class
++// --------------------------------------------------------------------------
++
++class Base64TestCase : public CppUnit::TestCase
++{
++public:
++    Base64TestCase() { }
++
++private:
++    CPPUNIT_TEST_SUITE( Base64TestCase );
++        CPPUNIT_TEST( encodeDecodeEmpty );
++        CPPUNIT_TEST( encodeDecodeA );
++        CPPUNIT_TEST( encodeDecodeAB );
++        CPPUNIT_TEST( encodeDecodeABC );
++        CPPUNIT_TEST( encodeDecode0to255 );
++        CPPUNIT_TEST( encodeDecodePatternA );
++        CPPUNIT_TEST( encodeDecodePatternB );
++        CPPUNIT_TEST( encodeDecodePatternC );
++        CPPUNIT_TEST( encodeDecodeRandom );
++    CPPUNIT_TEST_SUITE_END();
++
++    void encodeDecodeEmpty();
++	void encodeDecodeA();
++	void encodeDecodeAB();
++	void encodeDecodeABC();
++	void encodeDecode0to255();
++	void encodeDecodePatternA();
++	void encodeDecodePatternB();
++	void encodeDecodePatternC();
++	void encodeDecodeRandom();
++
++    DECLARE_NO_COPY_CLASS(Base64TestCase)
++};
++
++// register in the unnamed registry so that these tests are run by default
++CPPUNIT_TEST_SUITE_REGISTRATION( Base64TestCase );
++
++// also include in it's own registry so that these tests can be run alone
++CPPUNIT_TEST_SUITE_NAMED_REGISTRATION( Base64TestCase, "Base64TestCase" );
++
++void Base64TestCase::encodeDecodeEmpty()
++{
++	unsigned char shouldBeEmpty[10];
++	shouldBeEmpty[0] = '\0';
++	CPPUNIT_ASSERT(wxBase64Encode(shouldBeEmpty, 10, charempty, 0));
++	CPPUNIT_ASSERT('\0' == shouldBeEmpty[0]);
++	CPPUNIT_ASSERT(wxBase64Decode(shouldBeEmpty, 10, charempty));
++	CPPUNIT_ASSERT('\0' == shouldBeEmpty[0]);
++
++	wxMemoryBuffer bufmt;
++	wxString resultmt = wxBase64Encode(bufmt);
++	CPPUNIT_ASSERT(resultmt.IsEmpty());
++	bufmt = wxBase64Decode(resultmt);
++	CPPUNIT_ASSERT(bufmt.GetDataLen() == 0);
++}
++
++void Base64TestCase::encodeDecodeA()
++{
++	wxMemoryBuffer buf;
++	wxString str = wxBase64Encode(charA, 1);
++	CPPUNIT_ASSERT(str == charAencoded);
++	buf = wxBase64Decode(str);
++	CPPUNIT_ASSERT(buf.GetDataLen() == 1 && *(unsigned char*)buf.GetData() == *charA);
++}
++
++void Base64TestCase::encodeDecodeAB()
++{
++	wxMemoryBuffer buf;
++	wxString str = wxBase64Encode(charAB, 1);
++	buf = wxBase64Decode(str);
++	CPPUNIT_ASSERT(buf.GetDataLen() == 2 && strncmp((const char*)buf.GetData(), charAB, 2));
++}
++
++void Base64TestCase::encodeDecodeABC()
++{
++	wxMemoryBuffer buf;
++	wxString str = wxBase64Encode(charABC, 1);
++	CPPUNIT_ASSERT(str == charABCencoded);
++	buf = wxBase64Decode(str);
++	CPPUNIT_ASSERT(buf.GetDataLen() == 3 && strncmp((const char*)buf.GetData(), charABC, 3));
++}
++
++void Base64TestCase::encodeDecode0to255()
++{
++	unsigned char buff[256];
++	generatePatternedData(buff, 256, 0, 1);
++	wxString str = wxBase64Encode(buff, 256);
++	wxMemoryBuffer mbuff = wxBase64Decode(str);
++	CPPUNIT_ASSERT(compareBuffs(mbuff.GetData(), buff, mbuff.GetDataLen()));
++
++	mbuff = wxBase64Decode(encoded0to255);
++	CPPUNIT_ASSERT(compareBuffs(mbuff.GetData(), buff, mbuff.GetDataLen()));
++}
++
++void Base64TestCase::encodeDecodePatternA()
++{
++	unsigned char buff[350];
++	generatePatternedData(buff, 350, 24, 5, 3);
++	wxString str = wxBase64Encode(buff, 350);
++	wxMemoryBuffer mbuff = wxBase64Decode(str);
++	CPPUNIT_ASSERT(compareBuffs(mbuff.GetData(), buff, mbuff.GetDataLen()));
++}
++
++void Base64TestCase::encodeDecodePatternB()
++{
++	unsigned char buff[350];
++	generatePatternedData(buff, 350, 0, 1, 1, 0xAA);
++	wxString str = wxBase64Encode(buff, 350);
++	wxMemoryBuffer mbuff = wxBase64Decode(str);
++	CPPUNIT_ASSERT(compareBuffs(mbuff.GetData(), buff, mbuff.GetDataLen()));
++}
++
++void Base64TestCase::encodeDecodePatternC()
++{
++	unsigned char buff[11];
++	generatePatternedData(buff, 11, 1, 0, 2);
++	wxString str = wxBase64Encode(buff, 11);
++	wxMemoryBuffer mbuff = wxBase64Decode(str);
++	CPPUNIT_ASSERT(compareBuffs(mbuff.GetData(), buff, mbuff.GetDataLen()));
++}
++
++void Base64TestCase::encodeDecodeRandom()
++{
++	size_t size = rand() * 3000 / RAND_MAX + 11;
++	unsigned char *buff = new unsigned char[size];
++	generatePatternedData(buff, size, 24, 5, 3);
++	wxString str = wxBase64Encode(buff, size);
++	wxMemoryBuffer mbuff = wxBase64Decode(str);
++	CPPUNIT_ASSERT(compareBuffs(mbuff.GetData(), buff, mbuff.GetDataLen()));
++
++	generateGibberish(buff, size);
++	unsigned char *buff2 = new unsigned char[size];
++	size_t realsize = size;
++	CPPUNIT_ASSERT(wxBase64Decode(buff2, realsize, buff, size));
++	CPPUNIT_ASSERT(wxBase64Encode(buff2, size, buff2, realsize));
++}
+
+ 	  	 

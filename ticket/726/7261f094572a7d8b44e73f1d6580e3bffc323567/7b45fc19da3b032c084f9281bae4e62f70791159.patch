@@ -1,0 +1,153 @@
+Index: include/wx/graphics.h
+===================================================================
+--- include/wx/graphics.h	(revision 72537)
++++ include/wx/graphics.h	(working copy)
+@@ -665,6 +665,11 @@
+ 
+     virtual void GetPartialTextExtents(const wxString& text, wxArrayDouble& widths) const = 0;
+ 
++#ifdef __WXMSW__
++	enum { GDI_SMALL_TEXT, GDI_GENERIC_TYPOGRAPHIC };
++	virtual void SetGDIStringFormat( int type ) = 0;
++#endif
++
+     //
+     // image support
+     //
+Index: src/msw/graphics.cpp
+===================================================================
+--- src/msw/graphics.cpp	(revision 72537)
++++ src/msw/graphics.cpp	(working copy)
+@@ -78,39 +78,6 @@
+     return Color(col.Alpha(), col.Red(), col.Green(), col.Blue());
+ }
+ 
+-// Do not use this pointer directly, it's only used by
+-// GetDrawTextStringFormat() and the cleanup code in wxGDIPlusRendererModule.
+-StringFormat* gs_drawTextStringFormat = NULL;
+-
+-// Get the string format used for the text drawing and measuring functions:
+-// notice that it must be the same one for all of them, otherwise the drawn
+-// text might be of different size than what measuring it returned.
+-inline StringFormat* GetDrawTextStringFormat()
+-{
+-    if ( !gs_drawTextStringFormat )
+-    {
+-        // We create this string format with exactly the same flags as
+-        // StringFormat::GenericTypographic() is documented to use in MSDN
+-        // except for the last one which doesn't make any difference for
+-        // DrawText() but that we do want to use when measuring text.
+-        //
+-        // The reason for not just using GenericTypographic itself is that it
+-        // does something else (what exactly is unfortunately not documented),
+-        // which results in string being displayed quite differently from the
+-        // default rendering, see #14537.
+-        gs_drawTextStringFormat
+-            = new StringFormat
+-                  (
+-                    StringFormatFlagsLineLimit |
+-                    StringFormatFlagsNoClip |
+-                    StringFormatFlagsNoFitBlackBox |
+-                    StringFormatFlagsMeasureTrailingSpaces
+-                  );
+-    }
+-
+-    return gs_drawTextStringFormat;
+-}
+-
+ } // anonymous namespace
+ 
+ //-----------------------------------------------------------------------------
+@@ -427,7 +394,8 @@
+     virtual void GetSize( wxDouble* width, wxDouble *height );
+ 
+     Graphics* GetGraphics() const { return m_context; }
+-
++	
++	virtual void SetGDIStringFormat( int type );
+ protected:
+ 
+     wxDouble m_fontScaleRatio;
+@@ -443,6 +411,7 @@
+     wxStack<GraphicsState> m_stateStack;
+     GraphicsState m_state1;
+     GraphicsState m_state2;
++	StringFormat *m_textStringFormat;
+ 
+     wxDECLARE_NO_COPY_CLASS(wxGDIPlusContext);
+ };
+@@ -1418,6 +1387,7 @@
+ 
+ void wxGDIPlusContext::Init(Graphics* graphics, int width, int height)
+ {
++	m_textStringFormat = new StringFormat( StringFormat::GenericTypographic() );
+     m_context = graphics;
+     m_state1 = 0;
+     m_state2 = 0;
+@@ -1435,6 +1405,9 @@
+ 
+ wxGDIPlusContext::~wxGDIPlusContext()
+ {
++	if ( m_textStringFormat )
++		delete m_textStringFormat;
++
+     if ( m_context )
+     {
+         m_context->Restore( m_state2 );
+@@ -1792,7 +1765,7 @@
+                     -1,                     // length: string is NUL-terminated
+                     fontData->GetGDIPlusFont(),
+                     PointF(x, y),
+-                    GetDrawTextStringFormat(),
++					m_textStringFormat,
+                     fontData->GetGDIPlusBrush()
+                );
+ }
+@@ -1836,7 +1809,7 @@
+         RectF layoutRect(0,0, 100000.0f, 100000.0f);
+ 
+         RectF bounds ;
+-        m_context->MeasureString((const wchar_t *) s , wcslen(s) , f, layoutRect, GetDrawTextStringFormat(), &bounds ) ;
++        m_context->MeasureString((const wchar_t *) s , wcslen(s) , f, layoutRect, m_textStringFormat, &bounds ) ;
+         if ( width )
+             *width = bounds.Width;
+         if ( height )
+@@ -1860,7 +1833,7 @@
+     wxASSERT_MSG(text.length() == len , wxT("GetPartialTextExtents not yet implemented for multichar situations"));
+ 
+     RectF layoutRect(0,0, 100000.0f, 100000.0f);
+-    StringFormat strFormat( GetDrawTextStringFormat() );
++    StringFormat strFormat( m_textStringFormat );
+ 
+     size_t startPosition = 0;
+     size_t remainder = len;
+@@ -1894,6 +1867,20 @@
+     delete[] regions;
+ }
+ 
++void wxGDIPlusContext::SetGDIStringFormat( int type )
++{
++	if ( this->m_textStringFormat != 0 )
++		delete m_textStringFormat;
++
++	if ( type == GDI_SMALL_TEXT )
++		m_textStringFormat = new StringFormat( StringFormatFlagsLineLimit | 
++							StringFormatFlagsNoClip | 
++							StringFormatFlagsNoFitBlackBox | 
++							StringFormatFlagsMeasureTrailingSpaces );
++	else
++		m_textStringFormat = new StringFormat( StringFormat::GenericTypographic() );
++}
++
+ bool wxGDIPlusContext::ShouldOffset() const
+ {
+     if ( !m_enableOffset )
+@@ -2294,8 +2281,6 @@
+     virtual bool OnInit() { return true; }
+     virtual void OnExit()
+     {
+-        wxDELETE(gs_drawTextStringFormat);
+-
+         gs_GDIPlusRenderer.Unload();
+     }
+ 

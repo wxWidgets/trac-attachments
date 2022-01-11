@@ -1,0 +1,122 @@
+Index: src/common/treebase.cpp
+===================================================================
+--- src/common/treebase.cpp	(revision 54317)
++++ src/common/treebase.cpp	(working copy)
+@@ -110,13 +110,19 @@
+ {
+     if ( state == wxTREE_ITEMSTATE_NEXT )
+     {
+-        state = GetItemState(item) + 1;
++        int current = GetItemState(item);
++        if ( current == wxTREE_ITEMSTATE_NONE )
++            return;
++        state = current + 1;
+         if ( m_imageListState && state >= m_imageListState->GetImageCount() )
+             state = 0;
+     }
+     else if ( state == wxTREE_ITEMSTATE_PREV )
+     {
+-        state = GetItemState(item) - 1;
++        int current = GetItemState(item);
++        if ( current == wxTREE_ITEMSTATE_NONE )
++            return;
++        state = current - 1;
+         if ( state == -1 )
+             state = m_imageListState ? m_imageListState->GetImageCount() - 1 : 0;
+     }
+Index: src/generic/treectlg.cpp
+===================================================================
+--- src/generic/treectlg.cpp	(revision 54317)
++++ src/generic/treectlg.cpp	(working copy)
+@@ -2106,6 +2106,20 @@
+         }
+     }
+ 
++    if ( m_imageListState )
++    {
++        // Calculate a m_lineHeight value from the state Image sizes.
++        // May be toggle off. Then wxGenericTreeCtrl will spread when
++        // necessary (which might look ugly).
++        int n = m_imageListState->GetImageCount();
++        for (int i = 0; i < n ; i++)
++        {
++            int width = 0, height = 0;
++            m_imageListState->GetSize(i, width, height);
++            if (height > m_lineHeight) m_lineHeight = height;
++        }
++    }
++
+     if (m_imageListButtons)
+     {
+         // Calculate a m_lineHeight value from the Button image sizes.
+@@ -2143,6 +2157,11 @@
+     if (m_ownsImageListState) delete m_imageListState;
+     m_imageListState = imageList;
+     m_ownsImageListState = false;
++    m_dirty = true;
++    // Don't do any drawing if we're setting the list to NULL,
++    // since we may be in the process of deleting the tree control.
++    if (imageList)
++        CalculateLineHeight();
+ }
+ 
+ void wxGenericTreeCtrl::SetButtonsImageList(wxImageList *imageList)
+@@ -2355,7 +2374,7 @@
+     {
+         dc.SetClippingRegion( item->GetX() + state_w, item->GetY(), image_w, total_h );
+         m_imageListNormal->Draw( image, dc,
+-                                 item->GetX(),
++                                 item->GetX() + state_w,
+                                  item->GetY() + ((total_h > image_h)?((total_h-image_h)/2):0),
+                                  wxIMAGELIST_DRAW_TRANSPARENT );
+         dc.DestroyClippingRegion();
+Index: src/msw/treectrl.cpp
+===================================================================
+--- src/msw/treectrl.cpp	(revision 54317)
++++ src/msw/treectrl.cpp	(working copy)
+@@ -2691,8 +2691,45 @@
+                         // notify us before painting each item
+                         *result = m_hasAnyAttr ? CDRF_NOTIFYITEMDRAW
+                                                : CDRF_DODEFAULT;
++
++                        // windows in TreeCtrl use one-based index for item state images,
++                        // 0 indexed image is not being used, we're using zero-based index,
++                        // so we have to add temp image (of zero index) to state image list
++                        // before we draw any item, then after items are drawn we have to
++                        // delete it (in POSTPAINT notify)
++                        if (m_imageListState && m_imageListState->GetImageCount() > 0)
++                        {
++                            #define hImageList (HIMAGELIST)m_imageListState->GetHIMAGELIST()
++
++                            // add temporary image
++                            int width, height;
++                            m_imageListState->GetSize(0, width, height);
++
++                            HBITMAP hbmpTemp = ::CreateBitmap(width, height, 1, 1, NULL);
++                            int index = ::ImageList_Add(hImageList, hbmpTemp, hbmpTemp);
++                            ::DeleteObject(hbmpTemp);
++
++                            if ( index != -1 )
++                            {
++                                // move images to right
++                                for ( int i = index; i > 0; i-- )
++                                    ::ImageList_Copy(hImageList, i, hImageList, i-1, 0);
++
++                                // we must remove the image in POSTPAINT notify
++                                *result |= CDRF_NOTIFYPOSTPAINT;
++                            }
++
++                            #undef hImageList
++                        }
+                         break;
+ 
++                    case CDDS_POSTPAINT:
++                        // we are deleting temp image of 0 index, which was
++                        // added before items were drawn (in PREPAINT notify)
++                        if (m_imageListState && m_imageListState->GetImageCount() > 0)
++                            m_imageListState->Remove(0);
++                        break;
++
+                     case CDDS_ITEMPREPAINT:
+                         {
+                             wxMapTreeAttr::iterator

@@ -1,0 +1,1225 @@
+Index: configure.in
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/configure.in,v
+retrieving revision 1.791
+diff -u -2 -r1.791 configure.in
+--- configure.in	2004/02/10 21:49:21	1.791
++++ configure.in	2004/02/13 12:17:43
+@@ -1912,4 +1912,6 @@
+         fi
+     fi
++
++    SAMPLES_SUBDIRS="$SAMPLES_SUBDIRS rxunittest"
+ fi
+ 
+@@ -5706,5 +5708,14 @@
+     fi
+ else
+-    SAMPLES_SUBDIRS="console"
++    dnl remove from the list any samples which do not mention the console
++    dnl template 'wx_sample_console' in their bakefile.
++    samples="$SAMPLES_SUBDIRS console"
++    SAMPLES_SUBDIRS=""
++
++    for sample in $samples; do
++        if grep wx_sample_console $srcdir/samples/$sample/*.bkl >/dev/null; then
++            SAMPLES_SUBDIRS="$SAMPLES_SUBDIRS $sample"
++        fi
++    done
+ fi
+ 
+@@ -6067,23 +6078,19 @@
+ for subdir in `echo $SUBDIRS`; do
+     if test -d ${srcdir}/${subdir} ; then
+-        if test "$wxUSE_GUI" = "yes"; then
+-            if test ${subdir} = "samples"; then
+-                dnl only take those samples which compile in the current
+-                dnl configuration and which exist
+-                makefiles="samples/Makefile.in $makefiles"
+-                for sample in `echo $SAMPLES_SUBDIRS`; do
+-                    if test -d $srcdir/samples/$sample; then
+-                        makefiles="samples/$sample/Makefile.in $makefiles"
+-                    fi
+-                done
+-            else dnl assume that everything compiles for utils &c
++        if test ${subdir} = "samples"; then
++            dnl only take those samples which compile in the current
++            dnl configuration and which exist
++            makefiles="samples/Makefile.in $makefiles"
++            for sample in `echo $SAMPLES_SUBDIRS`; do
++                if test -d $srcdir/samples/$sample; then
++                    makefiles="samples/$sample/Makefile.in $makefiles"
++                fi
++            done
++        else
++            if test "$wxUSE_GUI" = "yes"; then
++                dnl assume that everything compiles for utils &c
+                 makefiles=`(cd $srcdir ; find $subdir -name Makefile.in)`
+-            fi
+-        else dnl we build wxBase only
+-            dnl don't take all samples/utils, just those which build with
+-            dnl wxBase
+-            if test ${subdir} = "samples"; then
+-                makefiles="samples/Makefile.in samples/console/Makefile.in"
+-            else dnl utils
++            else
++                dnl don't take all utils, just those which build with wxBase
+                 makefiles="utils/HelpGen/Makefile.in \
+                            utils/HelpGen/src/Makefile.in \
+--- /dev/null	Tue Oct  8 15:13:04 2002
++++ samples/rxunittest/rxunittest.bkl	Wed Feb 11 10:56:01 2004
+@@ -0,0 +1,14 @@
++<?xml version="1.0" ?>
++<!-- $id$ -->
++
++<makefile>
++
++    <include file="../../build/bakefiles/common_samples.bkl"/>
++
++    <!-- rxunittest -->
++    <exe id="rxunittest" template="wx_sample_console" template_append="wx_append_base">
++        <sources>rxunittest.cpp</sources>
++        <wx-lib>base</wx-lib>
++    </exe>
++
++</makefile>
+--- /dev/null	Tue Oct  8 15:13:04 2002
++++ samples/rxunittest/rxunittest.cpp	Wed Feb 11 10:56:01 2004
+@@ -0,0 +1,485 @@
++////////////////////////////////////////////////////////////////////////////
++// Name:        rxunittest.cpp
++// Purpose:     Test the built-in regex lib and wxRegEx
++// Author:      Mike Wetherell
++// RCS-ID:      $Id$
++// Copyright:   (c) Mike Wetherell
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#if defined(__GNUG__) && !defined(__APPLE__)
++    #pragma implementation
++    #pragma interface
++#endif
++
++// For compilers that support precompilation, includes "wx/wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++// for all others, include the necessary headers
++#ifndef WX_PRECOMP
++    #include "wx/wx.h"
++#endif
++
++#include "wx/cmdline.h"
++#include "wx/regex.h"
++#include "wx/wfstream.h"
++#include "wx/txtstrm.h"
++#include "wx/intl.h"
++#include <locale.h>
++
++// test data
++#include "testdata.inc"
++
++
++// The application class
++//
++class RegApp : public wxAppConsole
++{
++public:
++    // standard overrides
++    RegApp();
++    void OnInitCmdLine(wxCmdLineParser& parser);
++    bool OnCmdLineParsed(wxCmdLineParser& parser);
++    bool OnInit();
++    int  OnRun();
++
++private:
++    enum Status { Success, Skipped, Fail };
++
++    // functions specific to this app
++    bool InitTest(size_t count);
++    int RunTest();
++    Status DoTest(int flavor);
++    void PrintStatus(Status status);
++    bool ParseFlags(wxString flags);
++    static size_t MatchCount(wxString expr, int flags);
++    
++    // command line options allowing the testing to be restricted to a
++    // particular section or row 
++    wxString m_select_section;
++    wxString m_select_id;
++
++    // the current position in the 'testdata' array, and the current
++    // row decoded
++    const char **m_testptr;
++    wxArrayString m_test;
++
++    // the current test's columns decoded, which are:
++    // mode, id, flags, pattern, test data, expected results...
++    int m_mode;
++    wxString m_id;
++    wxString m_pattern;
++    wxString m_data;
++    wxArrayString m_expected;
++
++    // the flag column decoded
++    int m_compileFlags;
++    int m_matchFlags;
++    bool m_basic;
++    bool m_extended;
++    bool m_advanced;
++
++    // the section currently being processed
++    wxString m_section;
++
++    // results totals
++    int m_success;
++    int m_fail;
++    int m_skipped;
++ 
++    // in a non-unicode build, regex's character classifications depend on
++    // the current locale.
++    wxLocale m_locale;
++
++    // using a wxTextOutputStream instead of wcout for the moment to be
++    // as old compiler friendly as possible
++    wxFFileOutputStream m_outfile;
++    wxTextOutputStream m_out;
++};
++
++IMPLEMENT_APP_CONSOLE(RegApp)
++
++RegApp::RegApp()
++ :  m_success(0),
++    m_fail(0),
++    m_skipped(0),
++    m_outfile(stdout),
++    m_out(m_outfile)    // no lossy conversions so just using UTF-8 for now
++{
++}
++
++// Init
++//
++bool RegApp::OnInit()
++{
++    m_locale.Init(wxLANGUAGE_DEFAULT, 0),   // no translations
++
++    m_out << _T("Test the built-in regex lib and wxRegEx\n\n")
++          << wxString(testfrom, wxConvUTF8) << _T("\n");
++
++    return wxAppConsole::OnInit();
++};
++
++// The table of command line options
++//
++void RegApp::OnInitCmdLine(wxCmdLineParser& parser)
++{
++    wxAppConsole::OnInitCmdLine(parser);
++
++    static const wxCmdLineEntryDesc cmdLineDesc[] = {
++        { wxCMD_LINE_PARAM, 0, 0, _T("section"), wxCMD_LINE_VAL_STRING,
++                wxCMD_LINE_PARAM_OPTIONAL },
++        { wxCMD_LINE_PARAM, 0, 0, _T("test id"), wxCMD_LINE_VAL_STRING,
++                wxCMD_LINE_PARAM_OPTIONAL },
++        { wxCMD_LINE_NONE , 0, 0, 0, wxCMD_LINE_VAL_NONE, 0 }
++    };
++
++    parser.SetDesc(cmdLineDesc);
++}
++
++// Handle command line options
++//
++bool RegApp::OnCmdLineParsed(wxCmdLineParser& parser)
++{
++    if (parser.GetParamCount() > 0)
++        m_select_section = parser.GetParam(0);
++    if (parser.GetParamCount() > 1)
++        m_select_id = parser.GetParam(1);
++
++    return true;
++}
++
++// Run
++//
++int RegApp::OnRun()
++{
++    size_t count;
++    bool first = true;
++
++    // loop over the test rows, null terminated
++    for (m_testptr = testdata; *m_testptr; m_testptr += count + 1)
++    {
++        // count the columns in this row, also null terminated
++        count = 0;
++        while (m_testptr[count])
++            count++;
++            
++        // if there are two columns then this row specifies a new section
++        if (count == 2) {
++            m_section = wxString(m_testptr[0], wxConvUTF8);
++
++            if (!m_select_section || m_select_section == m_section) {
++                if (!first)
++                    m_out << _T("\n");
++                m_out << m_section << _T(" ")
++                      << wxString(m_testptr[1], wxConvUTF8) << _T("\n");
++                first = false;
++            }
++        // otherwise initalise and run the test
++        } else {
++            // the user can restrict the test to a particular section
++            if (!m_select_section || m_select_section == m_section) {
++                if (InitTest(count))
++                    RunTest();
++                first = false;
++            }
++        }
++    }
++    
++    // start summary with some general info
++    m_out << _T("\nSummary\n");
++    m_out << _T("-------\n");
++    if (!m_select_section.empty())
++        m_out << _T("section:  ") << m_select_section << _T("\n");
++    if (!m_select_id.empty())
++        m_out << _T("test id:  ") << m_select_id << _T("\n");
++    wxString opts(WX_BUILD_OPTIONS_SIGNATURE, *wxConvCurrent);
++    m_out << _T("build:    ") << opts << _T("\n");
++#ifdef WX_NO_REGEX_ADVANCED
++    m_out << _T("regex:    system\n");
++#else
++    m_out << _T("regex:    builtin\n");
++#endif
++    wxString loc(setlocale(LC_CTYPE, NULL), *wxConvCurrent);
++    m_out << _T("locale:   ") << loc << _T("\n");
++    m_out << _T("encoding: ") << wxLocale::GetSystemEncodingName() << _T("\n");
++
++    // print out the grand totals
++    m_out << _T("\n");
++    m_out << _T("Total:   ") << m_success + m_fail + m_skipped << _T("\n");
++    m_out << _T("------------\n");
++    m_out << _T("Success: ") << m_success << _T("\n");
++    m_out << _T("Fail:    ") << m_fail << _T("\n");
++    m_out << _T("Skipped: ") << m_skipped << _T("\n");
++    m_out << _T("------------\n");
++
++    if (m_fail)
++        m_out << _T("\n**FAIL**\n");
++
++    return m_fail ? EXIT_FAILURE : EXIT_SUCCESS;
++}
++
++// Initialise the tester according to the current row in the test table
++//
++bool RegApp::InitTest(size_t count)
++{
++    wxString errmsg;
++    m_test.clear();
++
++    // convert the current test row into an array 'm_test'
++    for (size_t i = 0; i < count; i++) {
++        const wxWCharBuffer wstr = wxConvUTF8.cMB2WC(m_testptr[i]);
++        const wxWC2WXbuf buf = wxConvCurrent->cWC2WX(wstr);
++        if (!buf || wcscmp(wxConvCurrent->cWX2WC(buf), wstr) != 0) {
++            if (!errmsg)
++                errmsg = _T("<cannot convert>");
++            m_test.push_back(errmsg);
++        } else {
++            m_test.push_back(buf);
++        }
++    }
++
++    // the user can restrict the test to a particular row
++    if (count > 1 && !m_select_id.empty() && m_select_id != m_test[1])
++        return false;
++
++    // couldn't be converted so skip
++    if (!errmsg.empty() || count < 5 || m_test[0].length() != 1) {
++        PrintStatus(Skipped);
++        return false;
++    }
++
++    // decode the columns
++    m_mode = m_test[0][0u];
++    m_id = m_test[1];
++    wxString flags = m_test[2];
++    m_pattern = m_test[3];
++    m_data = m_test[4];
++    m_expected.assign(m_test.begin() + 5, m_test.end());
++
++    // the flags need further parsing...
++    m_compileFlags = 0;
++    m_matchFlags = 0;
++    m_basic = false;
++    m_extended = false;
++    m_advanced = false;
++
++    if (strchr("efmip", m_mode) == NULL || !ParseFlags(flags)) {
++        PrintStatus(Skipped);
++        return false;
++    }
++
++    return true;
++}
++
++// Display results
++//
++void RegApp::PrintStatus(Status status)
++{
++    switch (status) {
++        case Success:   m_out << _T("Success: "); m_success++; break;
++        case Skipped:   m_out << _T("Skipped: "); m_skipped++; break;
++        case Fail:      m_out << _T("**FAIL**:"); m_fail++; break;
++    }
++
++    const wxChar *needEscape = _T("\a\b\t\n\v\f\r\"\\");
++    const wxChar *escapes = _T("abtnvfr\"\\");
++    int pos = -1;
++
++    // loop over the columns of the test
++    for (size_t i = 0; i < m_test.size(); i++) {
++        size_t j = 0;
++        wxString arg = m_test[i];
++
++        if (arg[0u] != '"')
++            for (j = 0; j < arg.length(); j++)
++                if (wxIsctrl(arg[j]) || wxIsspace(arg[j]))
++                    break;
++
++        // if the string begins with a '"' or contains any spaces or control
++        // characters then print it as an escaped quoted string
++        if (j == 0 || j < arg.length()) {
++            wxString str = _T("\"");
++
++            for (size_t k = 0; k < arg.length(); k++) {
++                wxUChar ch = arg[k];
++                const wxChar *p = wxStrchr(needEscape, ch);
++                
++                if (p)
++                    str += wxString::Format(_T("\\%c"), escapes[p-needEscape]);
++                else if (ch < 128 && wxIsctrl(ch))
++                    str += wxString::Format(_T("\\%03o"), ch);
++                else
++                    str += ch;
++            }
++
++            str += _T("\"");
++            arg = str;
++        }
++
++        // line up the columns
++        int width = i < 3 ? 4 : i < 4 ? 6 : 10;
++        do {
++            m_out << _T(" ");
++        } while (++pos % width);
++
++        m_out << arg;
++        pos = arg.length();
++    }
++
++    m_out << _T("\n");
++}
++
++// Parse flags
++//
++bool RegApp::ParseFlags(wxString flags)
++{
++    for (const wxChar *p = flags; *p; p++) {
++        switch (*p) {
++            // noop
++            case '-': break;
++
++            // match options
++            case '^': m_matchFlags |= wxRE_NOTBOL; break;
++            case '$': m_matchFlags |= wxRE_NOTEOL; break;
++#if wxUSE_UNICODE
++            case '*': break;
++#endif
++            // compile options
++            case '&': m_advanced = m_basic = true; break;
++            case 'b': m_basic = true; break;
++            case 'e': m_extended = true; break;
++            case 'i': m_compileFlags |= wxRE_ICASE; break;
++            case 'o': m_compileFlags |= wxRE_NOSUB; break;
++            case 'n': m_compileFlags |= wxRE_NEWLINE; break;
++            case 't': if (strchr("ep", m_mode)) break; else return false;
++
++            // we don't fully support these flags, but they don't stop us
++            // checking for success of failure of the match, so treat as noop
++            case 'A': case 'B': case 'E': case 'H':
++            case 'I': case 'L': case 'M': case 'N':
++            case 'P': case 'Q': case 'R': case 'S':
++            case 'T': case 'U': case '%':
++                break;
++
++            // anything else we must skip the test
++            default:
++                return false;
++        }
++    }
++
++    return true;
++}
++
++// Try test for all flavours of expression specified
++//
++int RegApp::RunTest()
++{
++    Status status = Skipped;
++
++    if (m_basic)
++        status = DoTest(wxRE_BASIC);
++    if (status != Fail && m_extended)
++        status = DoTest(wxRE_EXTENDED);
++#ifndef WX_NO_REGEX_ADVANCED
++    if (status != Fail && (m_advanced || (!m_basic && !m_extended)))
++        status = DoTest(wxRE_ADVANCED);
++#endif
++
++    PrintStatus(status);
++    return status;
++}
++    
++// Try the test for a single flavour of expression
++//
++RegApp::Status RegApp::DoTest(int flavor)
++{
++    wxRegEx re(m_pattern, m_compileFlags | flavor);
++
++    // 'e' - test that the pattern fails to compile
++    if (m_mode == 'e')
++        return !re.IsValid() ? Success : Fail;
++
++    if (!re.IsValid())
++        return Fail;
++
++    bool matches = re.Matches(m_data, m_matchFlags);
++
++    // 'f' or 'p' - test that the pattern does not match
++    if (m_mode == 'f' || m_mode == 'p')
++        return matches ? Fail : Success;
++
++    // otherwise 'm' or 'i' - test the pattern does match
++    if (!matches)
++        return Fail;
++
++    // Check that wxRegEx is going to allocate a large enough array for the
++    // results we are suppose to get
++    if (m_expected.size() > MatchCount(m_pattern, m_compileFlags | flavor))
++        return Fail;
++
++    wxString result;
++    size_t start, len;
++
++    for (size_t i = 0; i < m_expected.size(); i++) {
++        if (!re.GetMatch(&start, &len, i))
++            return Fail;
++
++        // m - check the match returns the strings given
++        if (m_mode == 'm')
++            if (start < INT_MAX)
++                result = m_data.Mid(start, len);
++            else
++                result = _T("");
++
++        // i - check the match returns the offsets given
++        else if (m_mode == 'i')
++            if (start < INT_MAX)
++                result = wxString::Format(_T("%d %d"), start, start + len - 1);
++            else
++                result = _T("-1 -1");
++        else
++            return Skipped;
++
++        if (result != m_expected[i])
++            return Fail;
++    }
++
++    return Success;
++}
++
++// Count the number of subexpressions (taken from wxRegExImpl::Compile)
++//
++size_t RegApp::MatchCount(wxString expr, int flags)
++{
++    // there is always one for the whole expression
++    size_t nMatches = 1;
++
++    // and some more for bracketed subexperessions
++    for ( const wxChar *cptr = expr; *cptr; cptr++ )
++    {
++        if ( *cptr == _T('\\') )
++        {
++            // in basic RE syntax groups are inside \(...\)
++            if ( *++cptr == _T('(') && (flags & wxRE_BASIC) )
++            {
++                nMatches++;
++            }
++        }
++        else if ( *cptr == _T('(') && !(flags & wxRE_BASIC) )
++        {
++            // we know that the previous character is not an unquoted
++            // backslash because it would have been eaten above, so we
++            // have a bar '(' and this indicates a group start for the
++            // extended syntax
++            nMatches++;
++        }
++    }
++
++    return nMatches;
++}
++
+--- /dev/null	Tue Oct  8 15:13:04 2002
++++ samples/rxunittest/testdata.inc	Wed Feb 11 10:56:01 2004
+@@ -0,0 +1,634 @@
++/*
++ * Test data for wxRegEx (UTF-8 encoded)
++ * 
++ * Generated Wed Feb 11 01:28:00 2004 by maketestdata from the following files:
++ * 
++ *   reg.test: Copyright (c) 1998, 1999 Henry Spencer. All rights reserved.
++ *   wxreg.test: Copyright (c) 2004 Mike Wetherell.
++ * 
++ * Test types:
++ *  	e	compile error expected
++ *  	f	match failure expected
++ *  	m	successful match
++ *  	i	successful match with -indices (used in checking things like
++ *  		nonparticipating subexpressions)
++ *  	p	unsuccessful match with -indices (!!) (used in checking
++ *  		partial-match reporting)
++ * 
++ * Flag characters:
++ *  	-	no-op (placeholder)
++ *  	+	provide fake xy equivalence class and ch collating element
++ *  	%	force small state-set cache in matcher (to test cache replace)
++ *  	^	beginning of string is not beginning of line
++ *  	$	end of string is not end of line
++ *  	*	test is Unicode-specific, needs big character set
++ * 
++ *  	&	test as both ARE and BRE
++ *  	b	BRE
++ *  	e	ERE
++ *  	a	turn advanced-features bit on (error unless ERE already)
++ *  	q	literal string, no metacharacters at all
++ * 
++ *  	i	case-independent matching
++ *  	o	("opaque") no subexpression capture
++ *  	p	newlines are half-magic, excluded from . and [^ only
++ *  	w	newlines are half-magic, significant to ^ and $ only
++ *  	n	newlines are fully magic, both effects
++ *  	x	expanded RE syntax
++ *  	t	incomplete-match reporting
++ * 
++ *  	A	backslash-_a_lphanumeric seen
++ *  	B	ERE/ARE literal-_b_race heuristic used
++ *  	E	backslash (_e_scape) seen within []
++ *  	H	looka_h_ead constraint seen
++ *  	I	_i_mpossible to match
++ *  	L	_l_ocale-specific construct seen
++ *  	M	unportable (_m_achine-specific) construct seen
++ *  	N	RE can match empty (_n_ull) string
++ *  	P	non-_P_OSIX construct seen
++ *  	Q	{} _q_uantifier seen
++ *  	R	back _r_eference seen
++ *  	S	POSIX-un_s_pecified syntax seen
++ *  	T	prefers shortest (_t_iny)
++ *  	U	saw original-POSIX botch:  unmatched right paren in ERE (_u_gh)
++ */
++
++const char *testfrom =
++"Generated Wed Feb 11 01:28:00 2004 by maketestdata from the following files:\n"
++"reg.test: Copyright (c) 1998, 1999 Henry Spencer. All rights reserved.\n"
++"wxreg.test: Copyright (c) 2004 Mike Wetherell.\n";
++
++const char *testdata[] =
++{
++    "1", "basic sanity checks", NULL,
++    "m", "1", "&", "abc", "abc", "abc", NULL,
++    "f", "2", "&", "abc", "def", NULL,
++    "m", "3", "&", "abc", "xyabxabce", "abc", NULL,
++
++    "2", "invalid option combinations", NULL,
++    "e", "1", "qe", "a", "INVARG", NULL,
++    "e", "2", "qa", "a", "INVARG", NULL,
++    "e", "3", "qx", "a", "INVARG", NULL,
++    "e", "4", "qn", "a", "INVARG", NULL,
++    "e", "5", "ba", "a", "INVARG", NULL,
++
++    "3", "basic syntax", NULL,
++    "i", "1", "&NS", "", "a", "0 -1", NULL,
++    "m", "2", "NS", "a|", "a", "a", NULL,
++    "m", "3", "-", "a|b", "a", "a", NULL,
++    "m", "4", "-", "a|b", "b", "b", NULL,
++    "m", "5", "NS", "a||b", "b", "b", NULL,
++    "m", "6", "&", "ab", "ab", "ab", NULL,
++
++    "4", "parentheses", NULL,
++    "m", "1", "-", "(a)e", "ae", "ae", "a", NULL,
++    "m", "2", "o", "(a)e", "ae", NULL,
++    "m", "3", "b", "\\(a\\)b", "ab", "ab", "a", NULL,
++    "m", "4", "-", "a((b)c)", "abc", "abc", "bc", "b", NULL,
++    "m", "5", "-", "a(b)(c)", "abc", "abc", "b", "c", NULL,
++    "e", "6", "-", "a(b", "EPAREN", NULL,
++    "e", "7", "b", "a\\(b", "EPAREN", NULL,
++    "m", "8", "eU", "a)b", "a)b", "a)b", NULL,
++    "e", "9", "-", "a)b", "EPAREN", NULL,
++    "e", "10", "b", "a\\)b", "EPAREN", NULL,
++    "m", "11", "P", "a(?:b)c", "abc", "abc", NULL,
++    "e", "12", "e", "a(?:b)c", "BADRPT", NULL,
++    "i", "13", "S", "a()b", "ab", "0 1", "1 0", NULL,
++    "m", "14", "SP", "a(?:)b", "ab", "ab", NULL,
++    "i", "15", "S", "a(|b)c", "ac", "0 1", "1 0", NULL,
++    "m", "16", "S", "a(b|)c", "abc", "abc", "b", NULL,
++
++    "5", "simple one-char matching", NULL,
++    "m", "1", "&", "a.b", "axb", "axb", NULL,
++    "f", "2", "&n", "a.b", "a\nb", NULL,
++    "m", "3", "&", "a[bc]d", "abd", "abd", NULL,
++    "m", "4", "&", "a[bc]d", "acd", "acd", NULL,
++    "f", "5", "&", "a[bc]d", "aed", NULL,
++    "f", "6", "&", "a[^bc]d", "abd", NULL,
++    "m", "7", "&", "a[^bc]d", "aed", "aed", NULL,
++    "f", "8", "&p", "a[^bc]d", "a\nd", NULL,
++
++    "6", "context-dependent syntax", NULL,
++    "e", "1", "-", "*", "BADRPT", NULL,
++    "m", "2", "b", "*", "*", "*", NULL,
++    "m", "3", "b", "\\(*\\)", "*", "*", "*", NULL,
++    "e", "4", "-", "(*)", "BADRPT", NULL,
++    "m", "5", "b", "^*", "*", "*", NULL,
++    "e", "6", "-", "^*", "BADRPT", NULL,
++    "f", "7", "&", "^b", "^b", NULL,
++    "m", "8", "b", "x^", "x^", "x^", NULL,
++    "f", "9", "I", "x^", "x", NULL,
++    "m", "10", "n", "\n^", "x\nb", "\n", NULL,
++    "f", "11", "bS", "\\(^b\\)", "^b", NULL,
++    "m", "12", "-", "(^b)", "b", "b", "b", NULL,
++    "m", "13", "&", "x$", "x", "x", NULL,
++    "m", "14", "bS", "\\(x$\\)", "x", "x", "x", NULL,
++    "m", "15", "-", "(x$)", "x", "x", "x", NULL,
++    "m", "16", "b", "x$y", "x$y", "x$y", NULL,
++    "f", "17", "I", "x$y", "xy", NULL,
++    "m", "18", "n", "x$\n", "x\n", "x\n", NULL,
++    "e", "19", "-", "+", "BADRPT", NULL,
++    "e", "20", "-", "?", "BADRPT", NULL,
++
++    "7", "simple quantifiers", NULL,
++    "m", "1", "&N", "a*", "aa", "aa", NULL,
++    "i", "2", "&N", "a*", "b", "0 -1", NULL,
++    "m", "3", "-", "a+", "aa", "aa", NULL,
++    "m", "4", "-", "a?b", "ab", "ab", NULL,
++    "m", "5", "-", "a?b", "b", "b", NULL,
++    "e", "6", "-", "**", "BADRPT", NULL,
++    "m", "7", "bN", "**", "***", "***", NULL,
++    "e", "8", "&", "a**", "BADRPT", NULL,
++    "e", "9", "&", "a**b", "BADRPT", NULL,
++    "e", "10", "&", "***", "BADRPT", NULL,
++    "e", "11", "-", "a++", "BADRPT", NULL,
++    "e", "12", "-", "a?+", "BADRPT", NULL,
++    "e", "13", "-", "a?*", "BADRPT", NULL,
++    "e", "14", "-", "a+*", "BADRPT", NULL,
++    "e", "15", "-", "a*+", "BADRPT", NULL,
++
++    "8", "braces", NULL,
++    "m", "1", "NQ", "a{0,1}", "", "", NULL,
++    "m", "2", "NQ", "a{0,1}", "ac", "a", NULL,
++    "e", "3", "-", "a{1,0}", "BADBR", NULL,
++    "e", "4", "-", "a{1,2,3}", "BADBR", NULL,
++    "e", "5", "-", "a{257}", "BADBR", NULL,
++    "e", "6", "-", "a{1000}", "BADBR", NULL,
++    "e", "7", "-", "a{1", "EBRACE", NULL,
++    "e", "8", "-", "a{1n}", "BADBR", NULL,
++    "m", "9", "BS", "a{b", "a{b", "a{b", NULL,
++    "m", "10", "BS", "a{", "a{", "a{", NULL,
++    "m", "11", "bQ", "a\\{0,1\\}b", "cb", "b", NULL,
++    "e", "12", "b", "a\\{0,1", "EBRACE", NULL,
++    "e", "13", "-", "a{0,1\\", "BADBR", NULL,
++    "m", "14", "Q", "a{0}b", "ab", "b", NULL,
++    "m", "15", "Q", "a{0,0}b", "ab", "b", NULL,
++    "m", "16", "Q", "a{0,1}b", "ab", "ab", NULL,
++    "m", "17", "Q", "a{0,2}b", "b", "b", NULL,
++    "m", "18", "Q", "a{0,2}b", "aab", "aab", NULL,
++    "m", "19", "Q", "a{0,}b", "aab", "aab", NULL,
++    "m", "20", "Q", "a{1,1}b", "aab", "ab", NULL,
++    "m", "21", "Q", "a{1,3}b", "aaaab", "aaab", NULL,
++    "f", "22", "Q", "a{1,3}b", "b", NULL,
++    "m", "23", "Q", "a{1,}b", "aab", "aab", NULL,
++    "f", "24", "Q", "a{2,3}b", "ab", NULL,
++    "m", "25", "Q", "a{2,3}b", "aaaab", "aaab", NULL,
++    "f", "26", "Q", "a{2,}b", "ab", NULL,
++    "m", "27", "Q", "a{2,}b", "aaaab", "aaaab", NULL,
++
++    "9", "brackets", NULL,
++    "m", "1", "&", "a[bc]", "ac", "ac", NULL,
++    "m", "2", "&", "a[-]", "a-", "a-", NULL,
++    "m", "3", "&", "a[[.-.]]", "a-", "a-", NULL,
++    "m", "4", "&L", "a[[.zero.]]", "a0", "a0", NULL,
++    "m", "5", "&LM", "a[[.zero.]-9]", "a2", "a2", NULL,
++    "m", "6", "&M", "a[0-[.9.]]", "a2", "a2", NULL,
++    "m", "7", "&+L", "a[[=x=]]", "ax", "ax", NULL,
++    "m", "8", "&+L", "a[[=x=]]", "ay", "ay", NULL,
++    "f", "9", "&+L", "a[[=x=]]", "az", NULL,
++    "e", "10", "&", "a[0-[=x=]]", "ERANGE", NULL,
++    "m", "11", "&L", "a[[:digit:]]", "a0", "a0", NULL,
++    "e", "12", "&", "a[[:woopsie:]]", "ECTYPE", NULL,
++    "f", "13", "&L", "a[[:digit:]]", "ab", NULL,
++    "e", "14", "&", "a[0-[:digit:]]", "ERANGE", NULL,
++    "m", "15", "&LP", "[[:<:]]a", "a", "a", NULL,
++    "m", "16", "&LP", "a[[:>:]]", "a", "a", NULL,
++    "e", "17", "&", "a[[..]]b", "ECOLLATE", NULL,
++    "e", "18", "&", "a[[==]]b", "ECOLLATE", NULL,
++    "e", "19", "&", "a[[::]]b", "ECTYPE", NULL,
++    "e", "20", "&", "a[[.a", "EBRACK", NULL,
++    "e", "21", "&", "a[[=a", "EBRACK", NULL,
++    "e", "22", "&", "a[[:a", "EBRACK", NULL,
++    "e", "23", "&", "a[", "EBRACK", NULL,
++    "e", "24", "&", "a[b", "EBRACK", NULL,
++    "e", "25", "&", "a[b-", "EBRACK", NULL,
++    "e", "26", "&", "a[b-c", "EBRACK", NULL,
++    "m", "27", "&M", "a[b-c]", "ab", "ab", NULL,
++    "m", "28", "&", "a[b-b]", "ab", "ab", NULL,
++    "m", "29", "&M", "a[1-2]", "a2", "a2", NULL,
++    "e", "30", "&", "a[c-b]", "ERANGE", NULL,
++    "e", "31", "&", "a[a-b-c]", "ERANGE", NULL,
++    "m", "32", "&M", "a[--?]b", "a?b", "a?b", NULL,
++    "m", "33", "&", "a[---]b", "a-b", "a-b", NULL,
++    "m", "34", "&", "a[]b]c", "a]c", "a]c", NULL,
++    "m", "35", "EP", "a[\\]]b", "a]b", "a]b", NULL,
++    "f", "36", "bE", "a[\\]]b", "a]b", NULL,
++    "m", "37", "bE", "a[\\]]b", "a\\]b", "a\\]b", NULL,
++    "m", "38", "eE", "a[\\]]b", "a\\]b", "a\\]b", NULL,
++    "m", "39", "EP", "a[\\\\]b", "a\\b", "a\\b", NULL,
++    "m", "40", "eE", "a[\\\\]b", "a\\b", "a\\b", NULL,
++    "m", "41", "bE", "a[\\\\]b", "a\\b", "a\\b", NULL,
++    "e", "42", "-", "a[\\Z]b", "EESCAPE", NULL,
++    "m", "43", "&", "a[[b]c", "a[c", "a[c", NULL,
++    "m", "44", "EMP*", "a[\\u00fe-\\u0507][\\u00ff-\\u0300]b", "aĂ˿b", "aĂ˿b", NULL,
++
++    "10", "anchors and newlines", NULL,
++    "m", "1", "&", "^a", "a", "a", NULL,
++    "f", "2", "&^", "^a", "a", NULL,
++    "i", "3", "&N", "^", "a", "0 -1", NULL,
++    "i", "4", "&", "a$", "aba", "2 2", NULL,
++    "f", "5", "&$", "a$", "a", NULL,
++    "i", "6", "&N", "$", "ab", "2 1", NULL,
++    "m", "7", "&n", "^a", "a", "a", NULL,
++    "m", "8", "&n", "^a", "b\na", "a", NULL,
++    "i", "9", "&w", "^a", "a\na", "0 0", NULL,
++    "i", "10", "&n^", "^a", "a\na", "2 2", NULL,
++    "m", "11", "&n", "a$", "a", "a", NULL,
++    "m", "12", "&n", "a$", "a\nb", "a", NULL,
++    "i", "13", "&n", "a$", "a\na", "0 0", NULL,
++    "i", "14", "N", "^^", "a", "0 -1", NULL,
++    "m", "15", "b", "^^", "^", "^", NULL,
++    "i", "16", "N", "$$", "a", "1 0", NULL,
++    "m", "17", "b", "$$", "$", "$", NULL,
++    "m", "18", "&N", "^$", "", "", NULL,
++    "f", "19", "&N", "^$", "a", NULL,
++    "i", "20", "&nN", "^$", "a\n\nb", "2 1", NULL,
++    "m", "21", "N", "$^", "", "", NULL,
++    "m", "22", "b", "$^", "$^", "$^", NULL,
++    "m", "23", "P", "\\Aa", "a", "a", NULL,
++    "m", "24", "^P", "\\Aa", "a", "a", NULL,
++    "f", "25", "^nP", "\\Aa", "b\na", NULL,
++    "m", "26", "P", "a\\Z", "a", "a", NULL,
++    "m", "27", "$P", "a\\Z", "a", "a", NULL,
++    "f", "28", "$nP", "a\\Z", "a\nb", NULL,
++    "e", "29", "-", "^*", "BADRPT", NULL,
++    "e", "30", "-", "$*", "BADRPT", NULL,
++    "e", "31", "-", "\\A*", "BADRPT", NULL,
++    "e", "32", "-", "\\Z*", "BADRPT", NULL,
++
++    "11", "boundary constraints", NULL,
++    "m", "1", "&LP", "[[:<:]]a", "a", "a", NULL,
++    "m", "2", "&LP", "[[:<:]]a", "-a", "a", NULL,
++    "f", "3", "&LP", "[[:<:]]a", "ba", NULL,
++    "m", "4", "&LP", "a[[:>:]]", "a", "a", NULL,
++    "m", "5", "&LP", "a[[:>:]]", "a-", "a", NULL,
++    "f", "6", "&LP", "a[[:>:]]", "ab", NULL,
++    "m", "7", "bLP", "\\<a", "a", "a", NULL,
++    "f", "8", "bLP", "\\<a", "ba", NULL,
++    "m", "9", "bLP", "a\\>", "a", "a", NULL,
++    "f", "10", "bLP", "a\\>", "ab", NULL,
++    "m", "11", "LP", "\\ya", "a", "a", NULL,
++    "f", "12", "LP", "\\ya", "ba", NULL,
++    "m", "13", "LP", "a\\y", "a", "a", NULL,
++    "f", "14", "LP", "a\\y", "ab", NULL,
++    "m", "15", "LP", "a\\Y", "ab", "a", NULL,
++    "f", "16", "LP", "a\\Y", "a-", NULL,
++    "f", "17", "LP", "a\\Y", "a", NULL,
++    "f", "18", "LP", "-\\Y", "-a", NULL,
++    "m", "19", "LP", "-\\Y", "-%", "-", NULL,
++    "f", "20", "LP", "\\Y-", "a-", NULL,
++    "e", "21", "-", "[[:<:]]*", "BADRPT", NULL,
++    "e", "22", "-", "[[:>:]]*", "BADRPT", NULL,
++    "e", "23", "b", "\\<*", "BADRPT", NULL,
++    "e", "24", "b", "\\>*", "BADRPT", NULL,
++    "e", "25", "-", "\\y*", "BADRPT", NULL,
++    "e", "26", "-", "\\Y*", "BADRPT", NULL,
++    "m", "27", "LP", "\\ma", "a", "a", NULL,
++    "f", "28", "LP", "\\ma", "ba", NULL,
++    "m", "29", "LP", "a\\M", "a", "a", NULL,
++    "f", "30", "LP", "a\\M", "ab", NULL,
++    "f", "31", "ILP", "\\Ma", "a", NULL,
++    "f", "32", "ILP", "a\\m", "a", NULL,
++
++    "12", "character classes", NULL,
++    "m", "1", "LP", "a\\db", "a0b", "a0b", NULL,
++    "f", "2", "LP", "a\\db", "axb", NULL,
++    "f", "3", "LP", "a\\Db", "a0b", NULL,
++    "m", "4", "LP", "a\\Db", "axb", "axb", NULL,
++    "m", "5", "LP", "a\\sb", "a b", "a b", NULL,
++    "m", "6", "LP", "a\\sb", "a\tb", "a\tb", NULL,
++    "m", "7", "LP", "a\\sb", "a\nb", "a\nb", NULL,
++    "f", "8", "LP", "a\\sb", "axb", NULL,
++    "m", "9", "LP", "a\\Sb", "axb", "axb", NULL,
++    "f", "10", "LP", "a\\Sb", "a b", NULL,
++    "m", "11", "LP", "a\\wb", "axb", "axb", NULL,
++    "f", "12", "LP", "a\\wb", "a-b", NULL,
++    "f", "13", "LP", "a\\Wb", "axb", NULL,
++    "m", "14", "LP", "a\\Wb", "a-b", "a-b", NULL,
++    "m", "15", "LP", "\\y\\w+z\\y", "adze-guz", "guz", NULL,
++    "m", "16", "LPE", "a[\\d]b", "a1b", "a1b", NULL,
++    "m", "17", "LPE", "a[\\s]b", "a b", "a b", NULL,
++    "m", "18", "LPE", "a[\\w]b", "axb", "axb", NULL,
++
++    "13", "escapes", NULL,
++    "e", "1", "&", "a\\", "EESCAPE", NULL,
++    "m", "2", "-", "a\\<b", "a<b", "a<b", NULL,
++    "m", "3", "e", "a\\<b", "a<b", "a<b", NULL,
++    "m", "4", "bAS", "a\\wb", "awb", "awb", NULL,
++    "m", "5", "eAS", "a\\wb", "awb", "awb", NULL,
++    "m", "6", "PL", "a\\ab", "a\ab", "a\ab", NULL,
++    "m", "7", "P", "a\\bb", "a\bb", "a\bb", NULL,
++    "m", "8", "P", "a\\Bb", "a\\b", "a\\b", NULL,
++    "m", "9", "MP", "a\\chb", "a\bb", "a\bb", NULL,
++    "m", "10", "MP", "a\\cHb", "a\bb", "a\bb", NULL,
++    "m", "11", "LMP", "a\\e", "a\033", "a\033", NULL,
++    "m", "12", "P", "a\\fb", "a\fb", "a\fb", NULL,
++    "m", "13", "P", "a\\nb", "a\nb", "a\nb", NULL,
++    "m", "14", "P", "a\\rb", "a\rb", "a\rb", NULL,
++    "m", "15", "P", "a\\tb", "a\tb", "a\tb", NULL,
++    "m", "16", "P", "a\\u0008x", "a\bx", "a\bx", NULL,
++    "e", "17", "-", "a\\u008x", "EESCAPE", NULL,
++    "m", "18", "P", "a\\u00088x", "a\b8x", "a\b8x", NULL,
++    "m", "19", "P", "a\\U00000008x", "a\bx", "a\bx", NULL,
++    "e", "20", "-", "a\\U0000008x", "EESCAPE", NULL,
++    "m", "21", "P", "a\\vb", "a\vb", "a\vb", NULL,
++    "m", "22", "MP", "a\\x08x", "a\bx", "a\bx", NULL,
++    "e", "23", "-", "a\\xq", "EESCAPE", NULL,
++    "m", "24", "MP", "a\\x0008x", "a\bx", "a\bx", NULL,
++    "e", "25", "-", "a\\z", "EESCAPE", NULL,
++    "m", "26", "MP", "a\\010b", "a\bb", "a\bb", NULL,
++
++    "14", "back references", NULL,
++    "m", "1", "RP", "a(b*)c\\1", "abbcbb", "abbcbb", "bb", NULL,
++    "m", "2", "RP", "a(b*)c\\1", "ac", "ac", "", NULL,
++    "f", "3", "RP", "a(b*)c\\1", "abbcb", NULL,
++    "m", "4", "RP", "a(b*)\\1", "abbcbb", "abb", "b", NULL,
++    "m", "5", "RP", "a(b|bb)\\1", "abbcbb", "abb", "b", NULL,
++    "m", "6", "RP", "a([bc])\\1", "abb", "abb", "b", NULL,
++    "f", "7", "RP", "a([bc])\\1", "abc", NULL,
++    "m", "8", "RP", "a([bc])\\1", "abcabb", "abb", "b", NULL,
++    "f", "9", "RP", "a([bc])*\\1", "abc", NULL,
++    "f", "10", "RP", "a([bc])\\1", "abB", NULL,
++    "m", "11", "iRP", "a([bc])\\1", "abB", "abB", "b", NULL,
++    "m", "12", "RP", "a([bc])\\1+", "abbb", "abbb", "b", NULL,
++    "m", "13", "QRP", "a([bc])\\1{3,4}", "abbbb", "abbbb", "b", NULL,
++    "f", "14", "QRP", "a([bc])\\1{3,4}", "abbb", NULL,
++    "m", "15", "RP", "a([bc])\\1*", "abbb", "abbb", "b", NULL,
++    "m", "16", "RP", "a([bc])\\1*", "ab", "ab", "b", NULL,
++    "m", "17", "RP", "a([bc])(\\1*)", "ab", "ab", "b", "", NULL,
++    "e", "18", "-", "a((b)\\1)", "ESUBREG", NULL,
++    "e", "19", "-", "a(b)c\\2", "ESUBREG", NULL,
++    "m", "20", "bR", "a\\(b*\\)c\\1", "abbcbb", "abbcbb", "bb", NULL,
++
++    "15", "octal escapes vs back references", NULL,
++    "m", "1", "MP", "a\\010b", "a\bb", "a\bb", NULL,
++    "m", "2", "MP", "a\\0070b", "a\a0b", "a\a0b", NULL,
++    "m", "3", "MP", "a\\07b", "a\ab", "a\ab", NULL,
++    "m", "4", "MP", "a(b)(b)(b)(b)(b)(b)(b)(b)(b)(b)\\07c", "abbbbbbbbbb\ac", "abbbbbbbbbb\ac", "b", "b", "b", "b", "b", "b", "b", "b", "b", "b", NULL,
++    "e", "5", "-", "a\\7b", "ESUBREG", NULL,
++    "m", "6", "MP", "a\\10b", "a\bb", "a\bb", NULL,
++    "m", "7", "MP", "a\\101b", "aAb", "aAb", NULL,
++    "m", "8", "RP", "a(b)(b)(b)(b)(b)(b)(b)(b)(b)(b)\\10c", "abbbbbbbbbbbc", "abbbbbbbbbbbc", "b", "b", "b", "b", "b", "b", "b", "b", "b", "b", NULL,
++    "e", "9", "-", "a((((((((((b\\10))))))))))c", "ESUBREG", NULL,
++    "m", "10", "MP", "a\\12b", "a\nb", "a\nb", NULL,
++    "e", "11", "b", "a\\12b", "ESUBREG", NULL,
++    "m", "12", "eAS", "a\\12b", "a12b", "a12b", NULL,
++
++    "16", "expanded syntax", NULL,
++    "m", "1", "xP", "a b c", "abc", "abc", NULL,
++    "m", "2", "xP", "a b #oops\nc\td", "abcd", "abcd", NULL,
++    "m", "3", "x", "a\\ b\\\tc", "a b\tc", "a b\tc", NULL,
++    "m", "4", "xP", "a b\\#c", "ab#c", "ab#c", NULL,
++    "m", "5", "xP", "a b[c d]e", "ab e", "ab e", NULL,
++    "m", "6", "xP", "a b[c#d]e", "ab#e", "ab#e", NULL,
++    "m", "7", "xP", "a b[c#d]e", "abde", "abde", NULL,
++    "m", "8", "xSPB", "ab{ d", "ab{d", "ab{d", NULL,
++    "m", "9", "xPQ", "ab{ 1 , 2 }c", "abc", "abc", NULL,
++
++    "17", "misc syntax", NULL,
++    "m", "1", "P", "a(?#comment)b", "ab", "ab", NULL,
++
++    "18", "unmatchable REs", NULL,
++    "f", "1", "I", "a^b", "ab", NULL,
++
++    "19", "case independence", NULL,
++    "m", "1", "&i", "ab", "Ab", "Ab", NULL,
++    "m", "2", "&i", "a[bc]", "aC", "aC", NULL,
++    "f", "3", "&i", "a[^bc]", "aB", NULL,
++    "m", "4", "&iM", "a[b-d]", "aC", "aC", NULL,
++    "f", "5", "&iM", "a[^b-d]", "aC", NULL,
++
++    "20", "directors and embedded options", NULL,
++    "e", "1", "&", "***?", "BADPAT", NULL,
++    "m", "2", "q", "***?", "***?", "***?", NULL,
++    "m", "3", "&P", "***=a*b", "a*b", "a*b", NULL,
++    "m", "4", "q", "***=a*b", "***=a*b", "***=a*b", NULL,
++    "m", "5", "bLP", "***:\\w+", "ab", "ab", NULL,
++    "m", "6", "eLP", "***:\\w+", "ab", "ab", NULL,
++    "e", "7", "&", "***:***=a*b", "BADRPT", NULL,
++    "m", "8", "&P", "***:(?b)a+b", "a+b", "a+b", NULL,
++    "m", "9", "P", "(?b)a+b", "a+b", "a+b", NULL,
++    "e", "10", "e", "(?b)\\w+", "BADRPT", NULL,
++    "m", "11", "bAS", "(?b)\\w+", "(?b)w+", "(?b)w+", NULL,
++    "m", "12", "iP", "(?c)a", "a", "a", NULL,
++    "f", "13", "iP", "(?c)a", "A", NULL,
++    "m", "14", "APS", "(?e)\\W+", "WW", "WW", NULL,
++    "m", "15", "P", "(?i)a+", "Aa", "Aa", NULL,
++    "f", "16", "P", "(?m)a.b", "a\nb", NULL,
++    "m", "17", "P", "(?m)^b", "a\nb", "b", NULL,
++    "f", "18", "P", "(?n)a.b", "a\nb", NULL,
++    "m", "19", "P", "(?n)^b", "a\nb", "b", NULL,
++    "f", "20", "P", "(?p)a.b", "a\nb", NULL,
++    "f", "21", "P", "(?p)^b", "a\nb", NULL,
++    "m", "22", "P", "(?q)a+b", "a+b", "a+b", NULL,
++    "m", "23", "nP", "(?s)a.b", "a\nb", "a\nb", NULL,
++    "m", "24", "xP", "(?t)a b", "a b", "a b", NULL,
++    "m", "25", "P", "(?w)a.b", "a\nb", "a\nb", NULL,
++    "m", "26", "P", "(?w)^b", "a\nb", "b", NULL,
++    "m", "27", "P", "(?x)a b", "ab", "ab", NULL,
++    "e", "28", "-", "(?z)ab", "BADOPT", NULL,
++    "m", "29", "P", "(?ici)a+", "Aa", "Aa", NULL,
++    "e", "30", "P", "(?i)(?q)a+", "BADRPT", NULL,
++    "m", "31", "P", "(?q)(?i)a+", "(?i)a+", "(?i)a+", NULL,
++    "m", "32", "P", "(?qe)a+", "a", "a", NULL,
++    "m", "33", "xP", "(?q)a b", "a b", "a b", NULL,
++    "m", "34", "P", "(?qx)a b", "a b", "a b", NULL,
++    "m", "35", "P", "(?qi)ab", "Ab", "Ab", NULL,
++
++    "21", "capturing", NULL,
++    "m", "1", "-", "a(b)c", "abc", "abc", "b", NULL,
++    "m", "2", "P", "a(?:b)c", "xabc", "abc", NULL,
++    "m", "3", "-", "a((b))c", "xabcy", "abc", "b", "b", NULL,
++    "m", "4", "P", "a(?:(b))c", "abcy", "abc", "b", NULL,
++    "m", "5", "P", "a((?:b))c", "abc", "abc", "b", NULL,
++    "m", "6", "P", "a(?:(?:b))c", "abc", "abc", NULL,
++    "i", "7", "Q", "a(b){0}c", "ac", "0 1", "-1 -1", NULL,
++    "m", "8", "-", "a(b)c(d)e", "abcde", "abcde", "b", "d", NULL,
++    "m", "9", "-", "(b)c(d)e", "bcde", "bcde", "b", "d", NULL,
++    "m", "10", "-", "a(b)(d)e", "abde", "abde", "b", "d", NULL,
++    "m", "11", "-", "a(b)c(d)", "abcd", "abcd", "b", "d", NULL,
++    "m", "12", "-", "(ab)(cd)", "xabcdy", "abcd", "ab", "cd", NULL,
++    "m", "13", "-", "a(b)?c", "xabcy", "abc", "b", NULL,
++    "i", "14", "-", "a(b)?c", "xacy", "1 2", "-1 -1", NULL,
++    "m", "15", "-", "a(b)?c(d)?e", "xabcdey", "abcde", "b", "d", NULL,
++    "i", "16", "-", "a(b)?c(d)?e", "xacdey", "1 4", "-1 -1", "3 3", NULL,
++    "i", "17", "-", "a(b)?c(d)?e", "xabcey", "1 4", "2 2", "-1 -1", NULL,
++    "i", "18", "-", "a(b)?c(d)?e", "xacey", "1 3", "-1 -1", "-1 -1", NULL,
++    "m", "19", "-", "a(b)*c", "xabcy", "abc", "b", NULL,
++    "i", "20", "-", "a(b)*c", "xabbbcy", "1 5", "4 4", NULL,
++    "i", "21", "-", "a(b)*c", "xacy", "1 2", "-1 -1", NULL,
++    "m", "22", "-", "a(b*)c", "xabbbcy", "abbbc", "bbb", NULL,
++    "m", "23", "-", "a(b*)c", "xacy", "ac", "", NULL,
++    "f", "24", "-", "a(b)+c", "xacy", NULL,
++    "m", "25", "-", "a(b)+c", "xabcy", "abc", "b", NULL,
++    "i", "26", "-", "a(b)+c", "xabbbcy", "1 5", "4 4", NULL,
++    "m", "27", "-", "a(b+)c", "xabbbcy", "abbbc", "bbb", NULL,
++    "i", "28", "Q", "a(b){2,3}c", "xabbbcy", "1 5", "4 4", NULL,
++    "i", "29", "Q", "a(b){2,3}c", "xabbcy", "1 4", "3 3", NULL,
++    "f", "30", "Q", "a(b){2,3}c", "xabcy", NULL,
++    "m", "31", "LP", "\\y(\\w+)\\y", "-- abc-", "abc", "abc", NULL,
++    "m", "32", "-", "a((b|c)d+)+", "abacdbd", "acdbd", "bd", "b", NULL,
++    "m", "33", "N", "(.*).*", "abc", "abc", "abc", NULL,
++    "m", "34", "N", "(a*)*", "bc", "", "", NULL,
++
++    "22", "multicharacter collating elements", NULL,
++    "m", "1", "&+L", "a[c]e", "ace", "ace", NULL,
++    "f", "2", "&+IL", "a[c]h", "ach", NULL,
++    "m", "3", "&+L", "a[[.ch.]]", "ach", "ach", NULL,
++    "f", "4", "&+L", "a[[.ch.]]", "ace", NULL,
++    "m", "5", "&+L", "a[c[.ch.]]", "ac", "ac", NULL,
++    "m", "6", "&+L", "a[c[.ch.]]", "ace", "ac", NULL,
++    "m", "7", "&+L", "a[c[.ch.]]", "ache", "ach", NULL,
++    "f", "8", "&+L", "a[^c]e", "ace", NULL,
++    "m", "9", "&+L", "a[^c]e", "abe", "abe", NULL,
++    "m", "10", "&+L", "a[^c]e", "ache", "ache", NULL,
++    "f", "11", "&+L", "a[^[.ch.]]", "ach", NULL,
++    "m", "12", "&+L", "a[^[.ch.]]", "ace", "ac", NULL,
++    "m", "13", "&+L", "a[^[.ch.]]", "ac", "ac", NULL,
++    "m", "14", "&+L", "a[^[.ch.]]", "abe", "ab", NULL,
++    "f", "15", "&+L", "a[^c[.ch.]]", "ach", NULL,
++    "f", "16", "&+L", "a[^c[.ch.]]", "ace", NULL,
++    "f", "17", "&+L", "a[^c[.ch.]]", "ac", NULL,
++    "m", "18", "&+L", "a[^c[.ch.]]", "abe", "ab", NULL,
++    "m", "19", "&+L", "a[^b]", "ac", "ac", NULL,
++    "m", "20", "&+L", "a[^b]", "ace", "ac", NULL,
++    "m", "21", "&+L", "a[^b]", "ach", "ach", NULL,
++    "f", "22", "&+L", "a[^b]", "abe", NULL,
++
++    "23", "lookahead constraints", NULL,
++    "m", "1", "HP", "a(?=b)b*", "ab", "ab", NULL,
++    "f", "2", "HP", "a(?=b)b*", "a", NULL,
++    "m", "3", "HP", "a(?=b)b*(?=c)c*", "abc", "abc", NULL,
++    "f", "4", "HP", "a(?=b)b*(?=c)c*", "ab", NULL,
++    "f", "5", "HP", "a(?!b)b*", "ab", NULL,
++    "m", "6", "HP", "a(?!b)b*", "a", "a", NULL,
++    "m", "7", "HP", "(?=b)b", "b", "b", NULL,
++    "f", "8", "HP", "(?=b)b", "a", NULL,
++
++    "24", "non-greedy quantifiers", NULL,
++    "m", "1", "PT", "ab+?", "abb", "ab", NULL,
++    "m", "2", "PT", "ab+?c", "abbc", "abbc", NULL,
++    "m", "3", "PT", "ab*?", "abb", "a", NULL,
++    "m", "4", "PT", "ab*?c", "abbc", "abbc", NULL,
++    "m", "5", "PT", "ab??", "ab", "a", NULL,
++    "m", "6", "PT", "ab??c", "abc", "abc", NULL,
++    "m", "7", "PQT", "ab{2,4}?", "abbbb", "abb", NULL,
++    "m", "8", "PQT", "ab{2,4}?c", "abbbbc", "abbbbc", NULL,
++    "m", "9", "-", "3z*", "123zzzz456", "3zzzz", NULL,
++    "m", "10", "PT", "3z*?", "123zzzz456", "3", NULL,
++    "m", "11", "-", "z*4", "123zzzz456", "zzzz4", NULL,
++    "m", "12", "PT", "z*?4", "123zzzz456", "zzzz4", NULL,
++
++    "25", "mixed quantifiers", NULL,
++    "m", "1", "PNT", "^(.*?)(a*)$", "xyza", "xyza", "xyz", "a", NULL,
++    "m", "2", "PNT", "^(.*?)(a*)$", "xyzaa", "xyzaa", "xyz", "aa", NULL,
++    "m", "3", "PNT", "^(.*?)(a*)$", "xyz", "xyz", "xyz", "", NULL,
++
++    "26", "tricky cases", NULL,
++    "m", "1", "-", "(week|wee)(night|knights)", "weeknights", "weeknights", "wee", "knights", NULL,
++    "m", "2", "RP", "a(bc*).*\\1", "abccbccb", "abccbccb", "b", NULL,
++    "m", "3", "-", "a(b.[bc]*)+", "abcbd", "abcbd", "bd", NULL,
++
++    "27", "implementation misc.", NULL,
++    "m", "1", "P", "a(?:b|b)c", "abc", "abc", NULL,
++    "m", "2", "&", "[ab][ab][ab]", "aba", "aba", NULL,
++    "m", "3", "&", "[ab][ab][ab][ab][ab][ab][ab]", "abababa", "abababa", NULL,
++
++    "28", "boundary busters etc.", NULL,
++    "m", "1", "&", "abcdefghijkl", "abcdefghijkl", "abcdefghijkl", NULL,
++    "m", "2", "P", "a(?:b|c|d|e|f|g|h|i|j|k|l|m)n", "agn", "agn", NULL,
++    "m", "3", "-", "a(((((((((((((b)))))))))))))c", "abc", "abc", "b", "b", "b", "b", "b", "b", "b", "b", "b", "b", "b", "b", "b", NULL,
++    "m", "4", "Q", "ab{1,100}c", "abbc", "abbc", NULL,
++    "m", "5", "Q", "ab{1,100}c", "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc", "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc", NULL,
++    "m", "6", "Q", "ab{1,100}c", "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc", "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc", NULL,
++    "m", "7", "LP", "\\w+abcdefgh", "xyzabcdefgh", "xyzabcdefgh", NULL,
++    "m", "8", "%LP", "\\w+abcdefgh", "xyzabcdefgh", "xyzabcdefgh", NULL,
++    "m", "9", "%LP", "\\w+abcdefghijklmnopqrst", "xyzabcdefghijklmnopqrst", "xyzabcdefghijklmnopqrst", NULL,
++    "i", "10", "%LP", "\\w+(abcdefgh)?", "xyz", "0 2", "-1 -1", NULL,
++    "i", "11", "%LP", "\\w+(abcdefgh)?", "xyzabcdefg", "0 9", "-1 -1", NULL,
++    "i", "12", "%LP", "\\w+(abcdefghijklmnopqrst)?", "xyzabcdefghijklmnopqrs", "0 21", "-1 -1", NULL,
++
++    "29", "incomplete matches", NULL,
++    "p", "1", "t", "def", "abc", "3 2", "", NULL,
++    "p", "2", "t", "bcd", "abc", "1 2", "", NULL,
++    "p", "3", "t", "abc", "abab", "0 3", "", NULL,
++    "p", "4", "t", "abc", "abdab", "3 4", "", NULL,
++    "i", "5", "t", "abc", "abc", "0 2", "0 2", NULL,
++    "i", "6", "t", "abc", "xyabc", "2 4", "2 4", NULL,
++    "p", "7", "t", "abc+", "xyab", "2 3", "", NULL,
++    "i", "8", "t", "abc+", "xyabc", "2 4", "2 4", NULL,
++    "i", "10", "t", "abc+", "xyabcdd", "2 4", "7 6", NULL,
++    "p", "11", "tPT", "abc+?", "xyab", "2 3", "", NULL,
++    "i", "12", "tPT", "abc+?", "xyabc", "2 4", "5 4", NULL,
++    "i", "13", "tPT", "abc+?", "xyabcc", "2 4", "6 5", NULL,
++    "i", "14", "tPT", "abc+?", "xyabcd", "2 4", "6 5", NULL,
++    "i", "15", "tPT", "abc+?", "xyabcdd", "2 4", "7 6", NULL,
++    "i", "16", "t", "abcd|bc", "xyabc", "3 4", "2 4", NULL,
++    "p", "17", "tn", ".*k", "xx\nyyy", "3 5", "", NULL,
++
++    "30", "misc. oddities and old bugs", NULL,
++    "e", "1", "&", "***", "BADRPT", NULL,
++    "m", "2", "N", "a?b*", "abb", "abb", NULL,
++    "m", "3", "N", "a?b*", "bb", "bb", NULL,
++    "m", "4", "&", "a*b", "aab", "aab", NULL,
++    "m", "5", "&", "^a*b", "aaaab", "aaaab", NULL,
++    "m", "6", "&M", "[0-6][1-2][0-3][0-6][1-6][0-6]", "010010", "010010", NULL,
++    "m", "7", "s", "abc", "abcd", "abc", NULL,
++    "f", "8", "s", "abc", "xabcd", NULL,
++    "m", "9", "HLP", "(?n)^(?![t#])\\S+", "tk\n\n#\n#\nit0", "it0", NULL,
++
++    "extra_1", "checks for bug fixes", NULL,
++    "m", "Bug 230589", "-", "[ ]*(^|[^%])%V", "*%V2", NULL,
++    "m", "Bug 504785", "-", "([^_.]*)([^.]*)\\.(..)(.).*", "bbcos_001_c01.q1la", "bbcos_001_c01.q1la", "bbcos", "_001_c01", "q1", "l", NULL,
++    "m", "Bug 505048", "-", "\\A\\s*[^<]*\\s*<([^>]+)>", "a<a>", NULL,
++    "m", "Bug 505048", "-", "\\A\\s*([^b]*)b", "ab", NULL,
++    "m", "Bug 505048", "-", "\\A\\s*[^b]*(b)", "ab", NULL,
++    "m", "Bug 505048", "-", "\\A(\\s*)[^b]*(b)", "ab", NULL,
++    "m", "Bug 505048", "-", "\\A\\s*[^b]*b", "ab", NULL,
++    "m", "Bug 505048", "-", "\\A\\s*[^b]*b", "ab", "ab", NULL,
++    "i", "Bug 505048", "-", "\\A\\s*[^b]*b", "ab", "0 1", NULL,
++
++    "wx_1", "character classification: ascii", NULL,
++    "m", "1", "&", "[^[:alnum:]]", "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!", "!", NULL,
++    "m", "2", "&", "[[:alnum:]]", "\a\b\t\n\v\f\r !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~X", "X", NULL,
++    "m", "3", "&", "[^[:alpha:]]", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!", "!", NULL,
++    "m", "4", "&", "[[:alpha:]]", "\a\b\t\n\v\f\r !\"#$%&'()*+,-./0123456789:;<=>?@[\\]^_`{|}~X", "X", NULL,
++    "m", "5", "&", "[^[:cntrl:]]", "\a\b\t\n\v\f\r!", "!", NULL,
++    "m", "6", "&", "[[:cntrl:]]", " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\n", "\n", NULL,
++    "m", "7", "&", "[^[:digit:]]", "0123456789!", "!", NULL,
++    "m", "8", "&", "[[:digit:]]", "\a\b\t\n\v\f\r !\"#$%&'()*+,-./:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ 0", "0", NULL,
++    "m", "9", "&", "[^[:graph:]]", "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\n", "\n", NULL,
++    "m", "10", "&", "[[:graph:]]", "\a\b\t\n\v\f\r !", "!", NULL,
++    "m", "11", "&", "[^[:lower:]]", "abcdefghijklmnopqrstuvwxyz!", "!", NULL,
++    "m", "12", "&", "[[:lower:]]", "\a\b\t\n\v\f\r !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`{|}~x", "x", NULL,
++    "m", "13", "&", "[^[:print:]]", "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\n", "\n", NULL,
++    "m", "14", "&", "[[:print:]]", "\a\b\n\v\f\rX", "X", NULL,
++    "m", "15", "&", "[^[:punct:]]", "!\"#%&'()*,-./:;?@[\\]_{}X", "X", NULL,
++    "m", "16", "&", "[[:punct:]]", "\a\b\t\n\v\f\r 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!", "!", NULL,
++    "m", "17", "&", "[^[:space:]]", "\t\n\v\f\r X", "X", NULL,
++    "m", "18", "&", "[[:space:]]", "\a\b!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\n", "\n", NULL,
++    "m", "19", "&", "[^[:upper:]]", "ABCDEFGHIJKLMNOPQRSTUVWXYZ!", "!", NULL,
++    "m", "20", "&", "[[:upper:]]", "\a\b\t\n\v\f\r !\"#$%&'()*+,-./0123456789:;<=>?@[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~X", "X", NULL,
++    "m", "21", "&", "[^[:xdigit:]]", "0123456789ABCDEFabcdef!", "!", NULL,
++    "m", "22", "&", "[[:xdigit:]]", "\a\b\t\n\v\f\r !\"#$%&'()*+,-./:;<=>?@GHIJKLMNOPQRSTUVWXYZ[\\]^_`ghijklmnopqrstuvwxyz{|}~a", "a", NULL,
++    "i", "23", "&i", "AbCdEfGhIjKlMnOpQrStUvWxYz", "aBcDeFgHiJkLmNoPqRsTuVwXyZ", "0 25", NULL,
++
++    "wx_2", "character classification: western european", NULL,
++    "m", "1", "&", "[^[:alpha:]]", "ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ!", "!", NULL,
++    "m", "2", "&", "[[:alpha:]]", " ¡¢£¤¥¦§¨©«¬­®¯°±²³´¶·¸¹»¼½¾¿×÷X", "X", NULL,
++    "m", "3", "&", "[^[:lower:]]", "ßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿ!", "!", NULL,
++    "m", "4", "&", "[[:lower:]]", " ¡¢£¤¥¦§¨©«¬­®¯°±²³´¶·¸¹»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞ÷x", "x", NULL,
++    "m", "5", "&", "[^[:upper:]]", "ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ!", "!", NULL,
++    "m", "6", "&", "[[:upper:]]", " ¡¢£¤¥¦§¨©«¬­®¯°±²³´¶·¸¹»¼½¾¿×ßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿX", "X", NULL,
++    "i", "7", "&i*", "ÀáÂãÄåÆçÈéÊëÌíÎïÐñÒóÔõÖøÙúÛüÝþ", "àÁâÃäÅæÇèÉêËìÍîÏðÑòÓôÕöØùÚûÜýÞ", "0 29", NULL,
++
++    "wx_3", "character classification: cyrillic", NULL,
++    "m", "1", "&", "[^[:alpha:]]", "ёЁюабцдефгхийклмнопярстужвьызшэщчъЮАБЦДЕФГХИЙКЛМНОПЯРСТУЖВЬЫЗШЭЩЧЪ!", "!", NULL,
++    "m", "2", "&", "[^[:lower:]]", "ёюабцдефгхийклмнопярстужвьызшэщчъ!", "!", NULL,
++    "m", "3", "&", "[[:lower:]]", "ЁЮАБЦДЕФГХИЙКЛМНОПЯРСТУЖВЬЫЗШЭЩЧЪx", "x", NULL,
++    "m", "4", "&", "[^[:upper:]]", "ЁЮАБЦДЕФГХИЙКЛМНОПЯРСТУЖВЬЫЗШЭЩЧЪ!", "!", NULL,
++    "m", "5", "&", "[[:upper:]]", "ёюабцдефгхийклмнопярстужвьызшэщчъX", "X", NULL,
++    "i", "6", "&i*", "ЁюАбЦдЕфГхИйКлМнОпЯрСтУжВьЫзШэЩчЪ", "ёЮаБцДеФгХиЙкЛмНоПяРсТуЖвЬыЗшЭщЧъ", "0 32", NULL,
++
++    NULL
++};
+Index: samples/samples.bkl
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/samples/samples.bkl,v
+retrieving revision 1.9
+diff -u -2 -r1.9 samples.bkl
+--- samples/samples.bkl	2004/02/01 10:51:52	1.9
++++ samples/samples.bkl	2004/02/13 17:12:57
+@@ -65,4 +65,5 @@
+     <subproject id="richedit" template="sub"/>
+     <subproject id="rotate" template="sub"/>
++    <subproject id="rxunittest" template="sub"/>
+     <subproject id="sashtest" template="sub"/>
+     <subproject id="scroll" template="sub"/>
+
+ 	  	 

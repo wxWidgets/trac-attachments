@@ -1,0 +1,252 @@
+diff --git a/include/wx/fswatcher.h b/include/wx/fswatcher.h
+index 2646817..cbc6d99 100644
+--- a/include/wx/fswatcher.h
++++ b/include/wx/fswatcher.h
+@@ -49,6 +49,10 @@ enum
+     wxFSW_EVENT_WARNING = 0x20,
+     wxFSW_EVENT_ERROR = 0x40,
+ 
++    // For unix platforms only: don't dereference symlinks
++    // The default is to dereference, so this isn't included in wxFSW_EVENT_ALL
++    wxFSW_EVENT_DONT_FOLLOW = 0x80,
++
+     wxFSW_EVENT_ALL = wxFSW_EVENT_CREATE | wxFSW_EVENT_DELETE |
+                          wxFSW_EVENT_RENAME | wxFSW_EVENT_MODIFY |
+                          wxFSW_EVENT_ACCESS |
+diff --git a/samples/fswatcher/fswatcher.cpp b/samples/fswatcher/fswatcher.cpp
+index 0a9753d..f5a8d16 100644
+--- a/samples/fswatcher/fswatcher.cpp
++++ b/samples/fswatcher/fswatcher.cpp
+@@ -46,11 +46,13 @@ private:
+     void OnClear(wxCommandEvent& WXUNUSED(event)) { m_evtConsole->Clear(); }
+     void OnQuit(wxCommandEvent& WXUNUSED(event)) { Close(true); }
+     void OnWatch(wxCommandEvent& event);
++    void OnFollowLinks(wxCommandEvent& event);
+     void OnAbout(wxCommandEvent& event);
+ 
+     void OnAdd(wxCommandEvent& event);
+     void OnAddTree(wxCommandEvent& event);
+     void OnRemove(wxCommandEvent& event);
++    void OnRemoveUpdateUI(wxUpdateUIEvent& event);
+ 
+     void OnFileSystemEvent(wxFileSystemWatcherEvent& event);
+     void LogEvent(const wxFileSystemWatcherEvent& event);
+@@ -58,6 +60,7 @@ private:
+     wxTextCtrl *m_evtConsole;         // events console
+     wxListView *m_filesList;          // list of watched paths
+     wxFileSystemWatcher* m_watcher;   // file system watcher
++    bool m_followLinks;               // should symlinks be dereferenced
+ 
+     const static wxString LOG_FORMAT; // how to format events
+ };
+@@ -135,7 +138,7 @@ IMPLEMENT_APP(MyApp)
+ // frame constructor
+ MyFrame::MyFrame(const wxString& title)
+     : wxFrame(NULL, wxID_ANY, title),
+-      m_watcher(NULL)
++      m_watcher(NULL), m_followLinks(false)
+ {
+     SetIcon(wxICON(sample));
+ 
+@@ -145,6 +148,7 @@ MyFrame::MyFrame(const wxString& title)
+         MENU_ID_QUIT = wxID_EXIT,
+         MENU_ID_CLEAR = wxID_CLEAR,
+         MENU_ID_WATCH = 101,
++        MENU_ID_DEREFERENCE,
+ 
+         BTN_ID_ADD = 200,
+         BTN_ID_ADD_TREE,
+@@ -166,6 +170,19 @@ MyFrame::MyFrame(const wxString& title)
+     // started by default, because file system watcher is started by default
+     it->Check(true);
+ 
++#if defined(__UNIX__)
++    // Let the user decide whether to dereference symlinks. If he makes the
++    // wrong choice, asserts will occur if the symlink target is also watched
++    it = menuMon->AppendCheckItem(MENU_ID_DEREFERENCE,
++                                  "&Follow symlinks\tCtrl-F",
++                                  _("If checked, dereference symlinks")
++                                 );
++    it->Check(false);
++    Bind(wxEVT_COMMAND_MENU_SELECTED,
++         wxCommandEventHandler(MyFrame::OnFollowLinks),
++         this, MENU_ID_DEREFERENCE);
++#endif // __UNIX__
++
+     // the "About" item should be in the help menu
+     wxMenu *menuHelp = new wxMenu;
+     menuHelp->Append(wxID_ABOUT, "&About\tF1", "Show about dialog");
+@@ -247,22 +264,25 @@ MyFrame::MyFrame(const wxString& title)
+     // event handlers & show
+ 
+     // menu
+-    Connect(MENU_ID_CLEAR, wxEVT_COMMAND_MENU_SELECTED,
+-            wxCommandEventHandler(MyFrame::OnClear));
+-    Connect(MENU_ID_QUIT, wxEVT_COMMAND_MENU_SELECTED,
+-            wxCommandEventHandler(MyFrame::OnQuit));
+-    Connect(MENU_ID_WATCH, wxEVT_COMMAND_MENU_SELECTED,
+-            wxCommandEventHandler(MyFrame::OnWatch));
+-    Connect(wxID_ABOUT, wxEVT_COMMAND_MENU_SELECTED,
+-            wxCommandEventHandler(MyFrame::OnAbout));
++    Bind(wxEVT_COMMAND_MENU_SELECTED,
++            wxCommandEventHandler(MyFrame::OnClear), this, MENU_ID_CLEAR);
++    Bind(wxEVT_COMMAND_MENU_SELECTED,
++            wxCommandEventHandler(MyFrame::OnQuit),  this, MENU_ID_QUIT);
++    Bind(wxEVT_COMMAND_MENU_SELECTED,
++            wxCommandEventHandler(MyFrame::OnWatch), this, MENU_ID_WATCH);
++    Bind(wxEVT_COMMAND_MENU_SELECTED,
++            wxCommandEventHandler(MyFrame::OnAbout), this, wxID_ABOUT);
+ 
+     // buttons
+-    Connect(BTN_ID_ADD, wxEVT_COMMAND_BUTTON_CLICKED,
+-            wxCommandEventHandler(MyFrame::OnAdd));
+-    Connect(BTN_ID_ADD_TREE, wxEVT_COMMAND_BUTTON_CLICKED,
+-            wxCommandEventHandler(MyFrame::OnAddTree));
+-    Connect(BTN_ID_REMOVE, wxEVT_COMMAND_BUTTON_CLICKED,
+-            wxCommandEventHandler(MyFrame::OnRemove));
++    Bind(wxEVT_COMMAND_BUTTON_CLICKED,
++            wxCommandEventHandler(MyFrame::OnAdd),     this, BTN_ID_ADD);
++    Bind(wxEVT_COMMAND_BUTTON_CLICKED,
++            wxCommandEventHandler(MyFrame::OnAddTree), this, BTN_ID_ADD_TREE);
++    Bind(wxEVT_COMMAND_BUTTON_CLICKED,
++            wxCommandEventHandler(MyFrame::OnRemove),  this, BTN_ID_REMOVE);
++
++    Bind(wxEVT_UPDATE_UI, wxUpdateUIEventHandler(MyFrame::OnRemoveUpdateUI),
++            this, BTN_ID_REMOVE);
+ 
+     // and show itself (the frames, unlike simple controls, are not shown when
+     // created initially)
+@@ -324,6 +344,11 @@ void MyFrame::OnWatch(wxCommandEvent& event)
+     }
+ }
+ 
++void MyFrame::OnFollowLinks(wxCommandEvent& event)
++{
++    m_followLinks = event.IsChecked();
++}
++
+ void MyFrame::OnAdd(wxCommandEvent& WXUNUSED(event))
+ {
+     AddEntry(wxFSWPath_Dir);
+@@ -353,15 +378,17 @@ void MyFrame::AddEntry(wxFSWPathType type, wxString filename)
+ 
+     wxString prefix;
+     bool ok = false;
++    int flags = m_followLinks ? wxFSW_EVENT_ALL  
++                              : wxFSW_EVENT_ALL | wxFSW_EVENT_DONT_FOLLOW;
+     switch ( type )
+     {
+         case wxFSWPath_Dir:
+-            ok = m_watcher->Add(wxFileName::DirName(filename));
++            ok = m_watcher->Add(wxFileName::DirName(filename), flags);
+             prefix = "Dir:  ";
+             break;
+ 
+         case wxFSWPath_Tree:
+-            ok = m_watcher->AddTree(wxFileName::DirName(filename));
++            ok = m_watcher->AddTree(wxFileName::DirName(filename), flags);
+             prefix = "Tree: ";
+             break;
+ 
+@@ -415,6 +442,11 @@ void MyFrame::OnRemove(wxCommandEvent& WXUNUSED(event))
+     }
+ }
+ 
++void MyFrame::OnRemoveUpdateUI(wxUpdateUIEvent& event)
++{
++    event.Enable(m_filesList->GetFirstSelected() != wxNOT_FOUND);
++}
++
+ void MyFrame::OnFileSystemEvent(wxFileSystemWatcherEvent& event)
+ {
+     // TODO remove when code is rock-solid
+diff --git a/src/unix/fswatcher_inotify.cpp b/src/unix/fswatcher_inotify.cpp
+index 675d116..2590b4e 100644
+--- a/src/unix/fswatcher_inotify.cpp
++++ b/src/unix/fswatcher_inotify.cpp
+@@ -387,10 +387,16 @@ protected:
+         return path;
+     }
+ 
+-    static int Watcher2NativeFlags(int WXUNUSED(flags))
++    static int Watcher2NativeFlags(int flags)
+     {
+         // TODO: it would be nice to subscribe only to the events we really need
+-        return IN_ALL_EVENTS;
++        int nativeflags = IN_ALL_EVENTS;
++        // See if we shouldn't dereference symlinks
++        if (flags & wxFSW_EVENT_DONT_FOLLOW)
++        {
++            nativeflags |= IN_DONT_FOLLOW;
++        }
++        return nativeflags;
+     }
+ 
+     static int Native2WatcherFlags(int flags)
+diff --git a/tests/fswatcher/fswatchertest.cpp b/tests/fswatcher/fswatchertest.cpp
+index fea0f1f..67dc7f1 100644
+--- a/tests/fswatcher/fswatchertest.cpp
++++ b/tests/fswatcher/fswatchertest.cpp
+@@ -650,12 +650,13 @@ void FileSystemWatcherTestCase::TestTrees()
+     public:
+         TreeTester() : subdirs(5), files(3) {}
+ 
+-        void GrowTree(wxFileName dir)
++        void GrowTree(wxFileName dir, bool withSymlinks)
+         {
+             CPPUNIT_ASSERT(dir.Mkdir());
+             // Now add a subdir with an easy name to remember in WatchTree()
+             dir.AppendDir("child");
+             CPPUNIT_ASSERT(dir.Mkdir());
++            wxFileName child(dir);  // Create a copy to which to symlink
+ 
+             // Create a branch of 5 numbered subdirs, each containing 3
+             // numbered files
+@@ -672,6 +673,18 @@ void FileSystemWatcherTestCase::TestTrees()
+                     wxFile(prefix + wxString::Format("file%u", f+1) + ext[f],
+                            wxFile::write);
+                 }
++#if defined(__UNIX__)
++                if (withSymlinks)
++                {
++                    // Create a symlink to a files, and another to 'child'
++                    CPPUNIT_ASSERT_EQUAL(0, 
++                        symlink(wxString(prefix + "file1").c_str(),
++                        wxString(prefix + "file.lnk").c_str()));
++                    CPPUNIT_ASSERT_EQUAL(0,
++                        symlink(child.GetFullPath().c_str(),
++                        wxString(prefix + "dir.lnk").c_str()));
++                }
++#endif // __UNIX__
+             }
+         }
+ 
+@@ -720,7 +733,7 @@ void FileSystemWatcherTestCase::TestTrees()
+             // Store the initial count; there may already be some watches
+             const int initial = m_watcher->GetWatchedPathsCount();
+ 
+-            GrowTree(dir);
++            GrowTree(dir, false); // false == no symlinks
+ 
+             m_watcher->AddTree(dir);
+             const int plustree = m_watcher->GetWatchedPathsCount();
+@@ -750,6 +763,19 @@ void FileSystemWatcherTestCase::TestTrees()
+             CPPUNIT_ASSERT(initial < m_watcher->GetWatchedPathsCount());
+             m_watcher->RemoveTree(dir);
+             CPPUNIT_ASSERT_EQUAL(initial, m_watcher->GetWatchedPathsCount());
++#if defined(__UNIX__)
++            // Finally, test a tree containing internal symlinks
++            // If we don't pass the wxFSW_EVENT_DONT_FOLLOW  flag it would assert
++            RmDir(dir);
++            GrowTree(dir, true);
++
++            CPPUNIT_ASSERT(m_watcher->AddTree(dir, wxFSW_EVENT_ALL | wxFSW_EVENT_DONT_FOLLOW));
++            CPPUNIT_ASSERT(m_watcher->RemoveTree(dir));
++
++            // Uncomment these if you add more tests
++            //RmDir(dir);
++            //GrowTree(dir, false);
++#endif // __UNIX__
+         }
+ 
+         void WatchTreeWithFilespec(const wxFileName& dir)

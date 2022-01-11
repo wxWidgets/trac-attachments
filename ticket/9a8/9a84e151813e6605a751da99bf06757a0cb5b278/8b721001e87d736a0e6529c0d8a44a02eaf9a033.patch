@@ -1,0 +1,1516 @@
+Index: wxWidgets-2.9/include/wx/msw/treectrl.h
+===================================================================
+--- wxWidgets-2.9/include/wx/msw/treectrl.h	(revision 59159)
++++ wxWidgets-2.9/include/wx/msw/treectrl.h	(working copy)
+@@ -109,6 +109,10 @@
+                                          const wxColour& col);
+     virtual void SetItemFont(const wxTreeItemId& item, const wxFont& font);
+ 
++    // implement base class overrides
++    // ------------------------------
++    virtual void SetFocus();
++
+     // item status inquiries
+     // ---------------------
+ 
+@@ -248,6 +252,8 @@
+ 
+     void DoExpand(const wxTreeItemId& item, int flag);
+ 
++    void DoUnselectAll();
++
+     void DeleteTextCtrl();
+ 
+     // return true if the item is the hidden root one (i.e. it's the root item
+@@ -273,6 +279,12 @@
+     wxTreeItemId m_htSelStart, m_htClickedItem;
+     wxPoint m_ptClick;
+ 
++    // whether focus was lost between subsequent clicks of a single item
++    bool m_focusLost;
++
++    // whether we need to trigger a state image click event
++    bool m_triggerStateImageClick;
++
+     friend class wxTreeItemIndirectData;
+     friend class wxTreeSortHelper;
+ 
+Index: wxWidgets-2.9/src/msw/treectrl.cpp
+===================================================================
+--- wxWidgets-2.9/src/msw/treectrl.cpp	(revision 59159)
++++ wxWidgets-2.9/src/msw/treectrl.cpp	(working copy)
+@@ -113,7 +113,6 @@
+ // wrappers for TreeView_GetItem/TreeView_SetItem
+ static bool IsItemSelected(HWND hwndTV, HTREEITEM hItem)
+ {
+-
+     TV_ITEM tvi;
+     tvi.mask = TVIF_STATE | TVIF_HANDLE;
+     tvi.stateMask = TVIS_SELECTED;
+@@ -153,32 +152,56 @@
+     SelectItem(hwndTV, htItem, false);
+ }
+ 
++static inline void ToggleItemSelection(HWND hwndTV, HTREEITEM htItem)
++{
++    SelectItem(hwndTV, htItem, !IsItemSelected(hwndTV, htItem));
++}
++
+ // helper function which selects all items in a range and, optionally,
+ // unselects all others
+-static void SelectRange(HWND hwndTV,
++enum
++{
++    SR_SELECT,
++    SR_SIMULATE,
++    SR_UNSELECT_OTHERS
++};
++
++static bool SelectRange(HWND hwndTV,
+                         HTREEITEM htFirst,
+                         HTREEITEM htLast,
+-                        bool unselectOthers = true)
++                        int flags)
+ {
+     // find the first (or last) item and select it
++    bool changed = false;
+     bool cont = true;
+     HTREEITEM htItem = (HTREEITEM)TreeView_GetRoot(hwndTV);
++
+     while ( htItem && cont )
+     {
+         if ( (htItem == htFirst) || (htItem == htLast) )
+         {
+             if ( !IsItemSelected(hwndTV, htItem) )
+             {
+-                SelectItem(hwndTV, htItem);
++                if ( !(flags & SR_SIMULATE) )
++                {
++                    SelectItem(hwndTV, htItem);
++                }
++
++                changed = true;
+             }
+ 
+             cont = false;
+         }
+         else
+         {
+-            if ( unselectOthers && IsItemSelected(hwndTV, htItem) )
++            if ( (flags & SR_UNSELECT_OTHERS) && IsItemSelected(hwndTV, htItem) )
+             {
+-                UnselectItem(hwndTV, htItem);
++                if ( !(flags & SR_SIMULATE) )
++                {
++                    UnselectItem(hwndTV, htItem);
++                }
++
++                changed = true;
+             }
+         }
+ 
+@@ -191,7 +214,12 @@
+     {
+         if ( !IsItemSelected(hwndTV, htItem) )
+         {
+-            SelectItem(hwndTV, htItem);
++            if ( !(flags & SR_SIMULATE) )
++            {
++                SelectItem(hwndTV, htItem);
++            }
++
++            changed = true;
+         }
+ 
+         cont = (htItem != htFirst) && (htItem != htLast);
+@@ -200,13 +228,18 @@
+     }
+ 
+     // unselect the rest
+-    if ( unselectOthers )
++    if ( flags & SR_UNSELECT_OTHERS )
+     {
+         while ( htItem )
+         {
+             if ( IsItemSelected(hwndTV, htItem) )
+             {
+-                UnselectItem(hwndTV, htItem);
++                if ( !(flags & SR_SIMULATE) )
++                {
++                    UnselectItem(hwndTV, htItem);
++                }
++
++                changed = true;
+             }
+ 
+             htItem = (HTREEITEM)TreeView_GetNextVisible(hwndTV, htItem);
+@@ -215,7 +248,12 @@
+ 
+     // seems to be necessary - otherwise the just selected items don't always
+     // appear as selected
+-    UpdateWindow(hwndTV);
++    if ( !(flags & SR_SIMULATE) )
++    {
++        UpdateWindow(hwndTV);
++    }
++
++    return changed;
+ }
+ 
+ // helper function which tricks the standard control into changing the focused
+@@ -680,6 +718,8 @@
+     m_dragImage = NULL;
+ #endif
+     m_pVirtualRoot = NULL;
++    m_focusLost = true;
++    m_triggerStateImageClick = false;
+ 
+     // initialize the global array of events now as it can't be done statically
+     // with the wxEVT_XXX values being allocated during run-time only
+@@ -709,7 +749,7 @@
+     DWORD wstyle = MSWGetStyle(m_windowStyle, & exStyle);
+     wstyle |= WS_TABSTOP | TVS_SHOWSELALWAYS;
+ 
+-    if ((m_windowStyle & wxTR_NO_LINES) == 0)
++    if ( !(m_windowStyle & wxTR_NO_LINES) )
+         wstyle |= TVS_HASLINES;
+     if ( m_windowStyle & wxTR_HAS_BUTTONS )
+         wstyle |= TVS_HASBUTTONS;
+@@ -1176,6 +1216,17 @@
+ }
+ 
+ // ----------------------------------------------------------------------------
++// Base class overrides
++// ----------------------------------------------------------------------------
++
++void wxTreeCtrl::SetFocus()
++{
++    HTREEITEM htFocus = TreeView_GetSelection(GetHwnd());
++    wxWindow::SetFocus();
++    if ( !htFocus ) DoUnselectAll();
++}
++
++// ----------------------------------------------------------------------------
+ // Item status
+ // ----------------------------------------------------------------------------
+ 
+@@ -1271,7 +1322,7 @@
+ 
+ wxTreeItemId wxTreeCtrl::GetSelection() const
+ {
+-    wxCHECK_MSG( !(m_windowStyle & wxTR_MULTIPLE), wxTreeItemId(),
++    wxCHECK_MSG( !HasFlag(wxTR_MULTIPLE), wxTreeItemId(),
+                  wxT("this only works with single selection controls") );
+ 
+     return wxTreeItemId(TreeView_GetSelection(GetHwnd()));
+@@ -1552,10 +1603,45 @@
+     // tree ctrl will eventually crash after item deletion
+     TreeItemUnlocker unlock_all;
+ 
++    bool selected = IsSelected(item);
++    wxTreeItemId next;
++   
++    if ( selected )
++    {
++        next = TreeView_GetNextVisible(GetHwnd(), HITEM(item));
++
++        if ( !next.IsOk() )
++        {
++            next = TreeView_GetPrevVisible(GetHwnd(), HITEM(item));
++        }
++    }
++
+     if ( !TreeView_DeleteItem(GetHwnd(), HITEM(item)) )
+     {
+         wxLogLastError(wxT("TreeView_DeleteItem"));
++        return;
+     }
++
++    if ( !selected )
++    {
++        return;
++    }
++
++    if ( next.IsOk() )
++    {
++        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, next);
++
++        if ( !HandleWindowEvent(event) || event.IsAllowed() )
++        {
++            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++            (void)HandleWindowEvent(event);
++        }
++        else
++        {
++            ::SelectItem(GetHwnd(), HITEM(next), false);
++            TreeView_SelectItem(GetHwnd(), 0);
++        }
++    }
+ }
+ 
+ // delete all children (but don't delete the item itself)
+@@ -1578,10 +1664,7 @@
+     size_t nCount = children.Count();
+     for ( size_t n = 0; n < nCount; n++ )
+     {
+-        if ( !TreeView_DeleteItem(GetHwnd(), HITEM(children[n])) )
+-        {
+-            wxLogLastError(wxT("TreeView_DeleteItem"));
+-        }
++        Delete(children[n]);
+     }
+ }
+ 
+@@ -1629,14 +1712,24 @@
+     tvItem.state = 0;
+     DoSetItem(&tvItem);
+ 
+-    if ( TreeView_Expand(GetHwnd(), HITEM(item), flag) != 0 )
++    if ( IsExpanded(item) )
+     {
+-        // note that the {EXPAND|COLLAPS}ING event is sent by TreeView_Expand()
+-        // itself
+-        wxTreeEvent event(gs_expandEvents[IsExpanded(item) ? IDX_EXPAND
+-                                                           : IDX_COLLAPSE]
+-                                         [IDX_DONE],
+-                           this, item);
++        wxTreeEvent event(wxEVT_COMMAND_TREE_ITEM_COLLAPSING, this, wxTreeItemId(item));
++
++        if ( HandleWindowEvent(event) && !event.IsAllowed() )
++        {
++            return;
++        }
++    }
++
++    if ( TreeView_Expand(GetHwnd(), HITEM(item), flag) )
++    {
++        if ( IsExpanded(item) )
++        {
++            return;
++        }
++
++        wxTreeEvent event(wxEVT_COMMAND_TREE_ITEM_COLLAPSED, this, item);
+         (void)HandleWindowEvent(event);
+     }
+     //else: change didn't took place, so do nothing at all
+@@ -1664,30 +1757,56 @@
+ 
+ void wxTreeCtrl::Unselect()
+ {
+-    wxASSERT_MSG( !(m_windowStyle & wxTR_MULTIPLE),
++    wxASSERT_MSG( !HasFlag(wxTR_MULTIPLE),
+                   wxT("doesn't make sense, may be you want UnselectAll()?") );
+ 
+-    // just remove the selection
+-    SelectItem(wxTreeItemId());
++    // the current focus
++    HTREEITEM htFocus = (HTREEITEM)TreeView_GetSelection(GetHwnd());
++
++    if ( !htFocus )
++    {
++        return;
++    }
++
++    wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, wxTreeItemId());
++    event.m_itemOld = htFocus;
++
++    if ( !HandleWindowEvent(event) || event.IsAllowed() )
++    {
++        TreeView_SelectItem(GetHwnd(), 0);
++        event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++        (void)HandleWindowEvent(event);
++    }
+ }
+ 
+-void wxTreeCtrl::UnselectAll()
++void wxTreeCtrl::DoUnselectAll()
+ {
+-    if ( m_windowStyle & wxTR_MULTIPLE )
++    wxArrayTreeItemIds selections;
++    size_t count = GetSelections(selections);
++
++    for ( size_t n = 0; n < count; n++ )
+     {
+-        wxArrayTreeItemIds selections;
+-        size_t count = GetSelections(selections);
+-        for ( size_t n = 0; n < count; n++ )
+-        {
+-            ::UnselectItem(GetHwnd(), HITEM(selections[n]));
+-        }
++        ::UnselectItem(GetHwnd(), HITEM(selections[n]));
++    }
+ 
+-        m_htSelStart.Unset();
+-    }
+-    else
++    m_htSelStart.Unset();
++}
++
++void wxTreeCtrl::UnselectAll()
++{
++    // the current focus
++    HTREEITEM htFocus = (HTREEITEM)TreeView_GetSelection(GetHwnd());
++    if ( !htFocus ) return;
++
++    wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this);
++    event.m_itemOld = htFocus;
++
++    if ( !HandleWindowEvent(event) || event.IsAllowed() )
+     {
+-        // just remove the selection
+-        Unselect();
++        DoUnselectAll();
++        TreeView_SelectItem(GetHwnd(), 0);
++        event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++        (void)HandleWindowEvent(event);
+     }
+ }
+ 
+@@ -1695,34 +1814,55 @@
+ {
+     wxCHECK_RET( !IsHiddenRoot(item), _T("can't select hidden root item") );
+ 
+-    wxASSERT_MSG( select || HasFlag(wxTR_MULTIPLE),
+-                  _T("SelectItem(false) works only for multiselect") );
++    if ( IsSelected(item) == select )
++    {
++        return;
++    }
+ 
+-    wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, item);
+-    if ( !HandleWindowEvent(event) || event.IsAllowed() )
++    if ( HasFlag(wxTR_MULTIPLE) )
+     {
+-        if ( HasFlag(wxTR_MULTIPLE) )
++        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, item);
++
++        if ( !HandleWindowEvent(event) || event.IsAllowed() )
+         {
+-            if ( !::SelectItem(GetHwnd(), HITEM(item), select) )
++            HTREEITEM htFocus = (HTREEITEM)TreeView_GetSelection(GetHwnd());
++            ::SelectItem(GetHwnd(), HITEM(item), select);
++
++            if ( !htFocus )
+             {
+-                wxLogLastError(wxT("TreeView_SelectItem"));
+-                return;
++                ::SetFocus(GetHwnd(), HITEM(item));
+             }
++
++            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++            (void)HandleWindowEvent(event);
+         }
+-        else // single selection
++    }
++    else
++    {
++        wxASSERT_MSG( select,
++                      _T("SelectItem(false) works only for multiselect") );
++
++        // inspite of the docs (MSDN Jan 99 edition), we don't seem to receive
++        // the notification from the control (i.e. TVN_SELCHANG{ED|ING}), so
++        // send them ourselves
++
++        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, item);
++
++        if ( !HandleWindowEvent(event) || event.IsAllowed() )
+         {
+-            // use TreeView_SelectItem() to deselect the previous selection
+             if ( !TreeView_SelectItem(GetHwnd(), HITEM(item)) )
+             {
+                 wxLogLastError(wxT("TreeView_SelectItem"));
+-                return;
+             }
++            else // ok
++            {
++                ::SetFocus(GetHwnd(), HITEM(item));
++                event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                (void)HandleWindowEvent(event);
++            }
+         }
+-
+-        event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
+-        (void)HandleWindowEvent(event);
++        //else: program vetoed the change
+     }
+-    //else: program vetoed the change
+ }
+ 
+ void wxTreeCtrl::EnsureVisible(const wxTreeItemId& item)
+@@ -2004,6 +2144,7 @@
+             TV_HITTESTINFO tvhti;
+             tvhti.pt.x = pt.x;
+             tvhti.pt.y = pt.y;
++
+             if ( TreeView_HitTest(GetHwnd(), &tvhti) )
+                 item = wxTreeItemId(tvhti.hItem);
+         }
+@@ -2028,83 +2169,146 @@
+         tvht.pt.x = x;
+         tvht.pt.y = y;
+ 
++        HTREEITEM htOldItem = TreeView_GetSelection(GetHwnd());
+         HTREEITEM htItem = TreeView_HitTest(GetHwnd(), &tvht);
+ 
+         switch ( nMsg )
+         {
+             case WM_LBUTTONDOWN:
+-                if ( htItem && isMultiple && (tvht.flags & TVHT_ONITEM) != 0 )
++                m_htClickedItem.Unset();
++
++                if ( tvht.flags & TVHT_ONITEMBUTTON || !(tvht.flags & TVHT_ONITEM) )
+                 {
+-                    m_htClickedItem = (WXHTREEITEM) htItem;
+-                    m_ptClick = wxPoint(x, y);
++                    break;
++                }
+ 
++                m_htClickedItem = (WXHTREEITEM) htItem;
++                m_ptClick = wxPoint(x, y);
++                processed = true;
++                SetFocus();
++
++                if ( isMultiple )
++                {
+                     if ( wParam & MK_CONTROL )
+                     {
+-                        SetFocus();
++                        if ( HandleMouseEvent(nMsg, x, y, wParam) )
++                        {
++                            m_htClickedItem.Unset();
++                            break;
++                        }
+ 
+-                        // toggle selected state
+-                        ToggleItemSelection(htItem);
++                        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, htItem);
++                        event.m_itemOld = htOldItem;
+ 
+-                        ::SetFocus(GetHwnd(), htItem);
++                        if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                        {
++                            // toggle selected state
++                            ::ToggleItemSelection(GetHwnd(), htItem);
+ 
+-                        // reset on any click without Shift
+-                        m_htSelStart.Unset();
++                            ::SetFocus(GetHwnd(), htItem);
+ 
+-                        processed = true;
++                            // reset on any click without Shift
++                            m_htSelStart.Unset();
++
++                            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                            (void)HandleWindowEvent(event);
++                        }
+                     }
+                     else if ( wParam & MK_SHIFT )
+                     {
+-                        // this selects all items between the starting one and
+-                        // the current
++                        if ( HandleMouseEvent(nMsg, x, y, wParam) )
++                        {
++                            m_htClickedItem.Unset();
++                            break;
++                        }
+ 
++                        int srFlags = SR_SELECT;
++                        bool willChange = true;
++
++                        if ( !(wParam & MK_CONTROL) )
++                        {
++                            srFlags |= SR_UNSELECT_OTHERS;
++                        }
++
+                         if ( !m_htSelStart )
+                         {
+                             // take the focused item
+-                            m_htSelStart = TreeView_GetSelection(GetHwnd());
++                            m_htSelStart = htOldItem;
+                         }
+-
+-                        if ( m_htSelStart )
+-                            SelectRange(GetHwnd(), HITEM(m_htSelStart), htItem,
+-                                    !(wParam & MK_CONTROL));
+                         else
+-                            ::SelectItem(GetHwnd(), htItem);
++                        {
++                            willChange = SelectRange(GetHwnd(), HITEM(m_htSelStart),
++                                                     htItem, srFlags | SR_SIMULATE);
++                        }
+ 
+-                        ::SetFocus(GetHwnd(), htItem);
++                        if ( willChange )
++                        {
++                            wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, htItem);
++                            event.m_itemOld = htOldItem;
+ 
+-                        processed = true;
++                            if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                            {
++                                // this selects all items between the starting one and
++                                // the current
++
++                                if ( m_htSelStart )
++                                {
++                                    SelectRange(GetHwnd(), HITEM(m_htSelStart), htItem, srFlags);
++                                }
++                                else
++                                {
++                                    ::SelectItem(GetHwnd(), htItem);
++                                }
++
++                                ::SetFocus(GetHwnd(), htItem);
++
++                                event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                                (void)HandleWindowEvent(event);
++                            }
++                        }
+                     }
+                     else // normal click
+                     {
+                         // avoid doing anything if we click on the only
+                         // currently selected item
+ 
+-                        SetFocus();
+-
+                         wxArrayTreeItemIds selections;
+                         size_t count = GetSelections(selections);
++
+                         if ( count == 0 ||
+                              count > 1 ||
+                              HITEM(selections[0]) != htItem )
+                         {
++                            if ( HandleMouseEvent(nMsg, x, y, wParam) )
++                            {
++                                m_htClickedItem.Unset();
++                                break;
++                            }
++
+                             // clear the previously selected items, if the
+                             // user clicked outside of the present selection.
+                             // otherwise, perform the deselection on mouse-up.
+                             // this allows multiple drag and drop to work.
+ 
+-                            if (!IsItemSelected(GetHwnd(), htItem))
++                            if ( !IsItemSelected(GetHwnd(), htItem))
+                             {
+-                                UnselectAll();
++                                wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, htItem);
++                                event.m_itemOld = htOldItem;
+ 
+-                                // prevent the click from starting in-place editing
+-                                // which should only happen if we click on the
+-                                // already selected item (and nothing else is
+-                                // selected)
++                                if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                                {
++                                    DoUnselectAll();
++                                    ::SelectItem(GetHwnd(), htItem);
++                                    ::SetFocus(GetHwnd(), htItem);
+ 
+-                                TreeView_SelectItem(GetHwnd(), 0);
+-                                ::SelectItem(GetHwnd(), htItem);
++                                    event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                                    (void)HandleWindowEvent(event);
++                                }
+                             }
+-                            ::SetFocus(GetHwnd(), htItem);
+-                            processed = true;
++                            else
++                            {
++                                ::SetFocus(GetHwnd(), htItem);
++                            }
+                         }
+                         else // click on a single selected item
+                         {
+@@ -2113,44 +2317,91 @@
+                             // proc will start the drag itself if we let have
+                             // WM_LBUTTONDOWN
+                             m_htClickedItem.Unset();
++
++                            // prevent in-place editing from starting if focus lost
++                            // since previous click
++                            if ( m_focusLost )
++                            {
++                                TreeView_SelectItem(GetHwnd(), 0);
++                                ::SelectItem(GetHwnd(), htItem);
++                            }
++
++                            processed = false;
+                         }
+ 
+                         // reset on any click without Shift
+                         m_htSelStart.Unset();
+                     }
+                 }
++                else
++                {
++                    if ( HandleMouseEvent(nMsg, x, y, wParam) && htItem )
++                    {
++                        m_htClickedItem.Unset();
++                        break;
++                    }
++
++                    ::SelectItem(GetHwnd(), htOldItem, false);
++                    ::SelectItem(GetHwnd(), htItem);
++                }
++
++                m_focusLost = false;
++
++                // we consumed the event so we need to trigger state image click
++                // if needed
++                if ( processed )
++                {
++                    int htFlags = 0;
++                    wxTreeItemId item = HitTest(wxPoint(x, y), htFlags);
++
++                    if ( htFlags & wxTREE_HITTEST_ONITEMSTATEICON )
++                    {
++                        m_triggerStateImageClick = true;
++                    }
++                }
++                
+                 break;
+ 
+             case WM_RBUTTONDOWN:
+-                // default handler removes the highlight from the currently
+-                // focused item when right mouse button is pressed on another
+-                // one but keeps the remaining items highlighted, which is
+-                // confusing, so override this default behaviour for tree with
+-                // multiple selections
++                processed = true;
++                SetFocus();
++
+                 if ( isMultiple )
+                 {
+-                    if ( !IsItemSelected(GetHwnd(), htItem) )
++                    if ( HandleMouseEvent(nMsg, x, y, wParam) || !htItem )
+                     {
+-                        UnselectAll();
+-                        SelectItem(htItem);
+-                        ::SetFocus(GetHwnd(), htItem);
++                        break;
+                     }
+ 
+-                    // fire EVT_RIGHT_DOWN
+-                    HandleMouseEvent(nMsg, x, y, wParam);
++                    // default handler removes the highlight from the currently
++                    // focused item when right mouse button is pressed on another
++                    // one but keeps the remaining items highlighted, which is
++                    // confusing, so override this default behaviour
++                    if ( !IsItemSelected(GetHwnd(), htItem) )
++                    {
++                        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, htItem);
++                        event.m_itemOld = htOldItem;
+ 
+-                    // send NM_RCLICK
+-                    NMHDR nmhdr;
+-                    nmhdr.hwndFrom = GetHwnd();
+-                    nmhdr.idFrom = ::GetWindowLong(GetHwnd(), GWL_ID);
+-                    nmhdr.code = NM_RCLICK;
+-                    ::SendMessage(::GetParent(GetHwnd()), WM_NOTIFY,
+-                                  nmhdr.idFrom, (LPARAM)&nmhdr);
++                        if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                        {
++                            DoUnselectAll();
++                            ::SelectItem(GetHwnd(), htItem);
++                            ::SetFocus(GetHwnd(), htItem);
+ 
+-                    // prevent tree control default processing, as we've
+-                    // already done everything
+-                    processed = true;
++                            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                            (void)HandleWindowEvent(event);
++                        }
++                    }
+                 }
++                else
++                {
++                    if ( !HandleMouseEvent(nMsg, x, y, wParam) )
++                    {
++                        ::SelectItem(GetHwnd(), htOldItem, false);
++                        ::SelectItem(GetHwnd(), htItem);
++                    }
++                }
++
+                 break;
+ 
+             case WM_MOUSEMOVE:
+@@ -2219,9 +2470,59 @@
+                 break;
+ 
+             case WM_LBUTTONUP:
++                if ( !isMultiple )
++                {
++                    // item clicked
++                    if ( htItem && m_htClickedItem &&
++                         !(tvht.flags & TVHT_ONITEMBUTTON) &&
++                         (tvht.flags & TVHT_ONITEM) )
++                    {
++                        wxTreeItemId item(htItem);
++                        wxTreeItemId oldItem(htOldItem);
+ 
+-                // facilitates multiple drag-and-drop
+-                if (htItem && isMultiple)
++                        if ( item.IsOk() )
++                        {
++                            if ( htItem != htOldItem )
++                            {
++                                wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, htItem);
++                                event.m_itemOld = htOldItem;
++
++                                if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                                {
++                                    DoUnselectAll();
++                                    ::SelectItem(GetHwnd(), htItem);
++                                    ::SetFocus(GetHwnd(), htItem);
++
++                                    event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                                    (void)HandleWindowEvent(event);
++                                }
++                            }
++                        }
++                        else if ( oldItem.IsOk() )
++                        {
++                            wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this);
++                            event.m_itemOld = htOldItem;
++
++                            if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                            {
++                                DoUnselectAll();
++                                ::SelectItem(GetHwnd(), htItem);
++                                ::SetFocus(GetHwnd(), htItem);
++
++                                event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                                (void)HandleWindowEvent(event);
++                            }
++                        }
++                    }
++                    // make sure we have only the focused item selected
++                    else
++                    {
++                        DoUnselectAll();
++                        ::SelectItem(GetHwnd(), htOldItem);
++                    }
++                }
++                // deselect other items if multiple items selected
++                else if ( htItem )
+                 {
+                     wxArrayTreeItemIds selections;
+                     size_t count = GetSelections(selections);
+@@ -2230,14 +2531,37 @@
+                         !(wParam & MK_CONTROL) &&
+                         !(wParam & MK_SHIFT))
+                     {
+-                        UnselectAll();
+-                        TreeView_SelectItem(GetHwnd(), htItem);
+-                        ::SelectItem(GetHwnd(), htItem);
+-                        ::SetFocus(GetHwnd(), htItem);
++                        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, htItem);
++                        event.m_itemOld = htOldItem;
++
++                        if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                        {
++                            DoUnselectAll();
++                            ::SelectItem(GetHwnd(), htItem);
++                            ::SetFocus(GetHwnd(), htItem);
++
++                            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                            (void)HandleWindowEvent(event);
++                        }
+                     }
+-                    m_htClickedItem.Unset();
+                 }
+ 
++                m_htClickedItem.Unset();
++
++                if ( m_triggerStateImageClick )
++                {
++                    int htFlags = 0;
++                    wxTreeItemId item = HitTest(wxPoint(x, y), htFlags);
++
++                    if ( htFlags & wxTREE_HITTEST_ONITEMSTATEICON )
++                    {
++                        wxTreeEvent event(wxEVT_COMMAND_TREE_STATE_IMAGE_CLICK, this, htItem);
++                        HandleWindowEvent(event);
++
++                        m_triggerStateImageClick = false;
++                    }
++                }
++
+                 // fall through
+ 
+             case WM_RBUTTONUP:
+@@ -2251,7 +2575,6 @@
+                     // generate the drag end event
+                     wxTreeEvent event(wxEVT_COMMAND_TREE_END_DRAG, this, htItem);
+                     event.m_pointDrag = wxPoint(x, y);
+-
+                     (void)HandleWindowEvent(event);
+ 
+                     // if we don't do it, the tree seems to think that 2 items
+@@ -2259,107 +2582,498 @@
+                     TreeView_SelectDropTarget(GetHwnd(), 0);
+                 }
+ #endif // wxUSE_DRAGIMAGE
++
++                if ( nMsg == WM_RBUTTONUP )
++                {
++                    if ( !HandleMouseEvent(nMsg, x, y, wParam) )
++                    {
++                        // send NM_RCLICK
++                        NMHDR nmhdr;
++                        nmhdr.hwndFrom = GetHwnd();
++                        nmhdr.idFrom = ::GetWindowLong(GetHwnd(), GWL_ID);
++                        nmhdr.code = NM_RCLICK;
++                        ::SendMessage(::GetParent(GetHwnd()), WM_NOTIFY,
++                                      nmhdr.idFrom, (LPARAM)&nmhdr);
++                    }
++
++                    if ( !isMultiple && htItem != htOldItem )
++                    {
++                        ::SelectItem(GetHwnd(), htItem, false);
++                        ::SelectItem(GetHwnd(), htOldItem);
++                    }
++
++                    processed = true;
++                }
++
+                 break;
+         }
+     }
+-    else if ( (nMsg == WM_SETFOCUS || nMsg == WM_KILLFOCUS) && isMultiple )
++    else if ( (nMsg == WM_SETFOCUS || nMsg == WM_KILLFOCUS) )
+     {
+-        // the tree control greys out the selected item when it loses focus and
+-        // paints it as selected again when it regains it, but it won't do it
+-        // for the other items itself - help it
+-        wxArrayTreeItemIds selections;
+-        size_t count = GetSelections(selections);
+-        RECT rect;
+-        for ( size_t n = 0; n < count; n++ )
++        if ( isMultiple )
+         {
+-            // TreeView_GetItemRect() will return false if item is not visible,
+-            // which may happen perfectly well
+-            if ( TreeView_GetItemRect(GetHwnd(), HITEM(selections[n]),
+-                                      &rect, TRUE) )
++            // the tree control greys out the selected item when it loses focus and
++            // paints it as selected again when it regains it, but it won't do it
++            // for the other items itself - help it
++            wxArrayTreeItemIds selections;
++            size_t count = GetSelections(selections);
++            RECT rect;
++
++            for ( size_t n = 0; n < count; n++ )
+             {
+-                ::InvalidateRect(GetHwnd(), &rect, FALSE);
++                // TreeView_GetItemRect() will return false if item is not visible,
++                // which may happen perfectly well
++                if ( TreeView_GetItemRect(GetHwnd(), HITEM(selections[n]),
++                   &rect, TRUE) )
++                {
++                    ::InvalidateRect(GetHwnd(), &rect, FALSE);
++                }
+             }
+         }
++
++        if ( nMsg == WM_KILLFOCUS )
++        {
++            m_focusLost = true;
++        }
+     }
+-    else if ( nMsg == WM_KEYDOWN && isMultiple )
++    else if ( nMsg == WM_KEYDOWN || nMsg == WM_SYSKEYDOWN )
+     {
++        wxTreeEvent keyEvent(wxEVT_COMMAND_TREE_KEY_DOWN, this);
++
++        int keyCode = wxCharCodeMSWToWX(wParam);
++
++        if ( !keyCode )
++        {
++            // wxCharCodeMSWToWX() returns 0 to indicate that this is a
++            // simple ASCII key
++            keyCode = wParam;
++        }
++
++        keyEvent.m_evtKey = CreateKeyEvent(wxEVT_KEY_DOWN, keyCode, lParam, wParam);
++
+         bool bCtrl = wxIsCtrlDown(),
+              bShift = wxIsShiftDown();
++        HTREEITEM htSel = (HTREEITEM)TreeView_GetSelection(GetHwnd());
+ 
+-        HTREEITEM htSel = (HTREEITEM)TreeView_GetSelection(GetHwnd());
++        processed = true;
++
+         switch ( wParam )
+         {
+             case VK_SPACE:
+-                if ( bCtrl )
++                if ( HandleWindowEvent(keyEvent) )
+                 {
+-                    ToggleItemSelection(htSel);
++                    break;
+                 }
++
++                if ( isMultiple && bCtrl )
++                {
++                    wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, htSel);
++                    event.m_itemOld = htSel;
++
++                    if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                    {
++                        ::ToggleItemSelection(GetHwnd(), htSel);
++
++                        event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                        (void)HandleWindowEvent(event);
++                    }
++                }
+                 else
+                 {
+-                    UnselectAll();
++                    wxArrayTreeItemIds selections;
++                    size_t count = GetSelections(selections);
+ 
+-                    ::SelectItem(GetHwnd(), htSel);
++                    if (count != 1 || HITEM(selections[0]) != htSel)
++                    {
++                        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, htSel);
++                        event.m_itemOld = htSel;
++
++                        if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                        {
++                            DoUnselectAll();
++                            ::SelectItem(GetHwnd(), htSel);
++
++                            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                            (void)HandleWindowEvent(event);
++                        }
++                    }
+                 }
+-
+-                processed = true;
+                 break;
+ 
+             case VK_UP:
+             case VK_DOWN:
+-                if ( !bCtrl && !bShift )
+                 {
+-                    // no modifiers, just clear selection and then let the default
+-                    // processing to take place
+-                    UnselectAll();
++                    if ( HandleWindowEvent(keyEvent) )
++                    {
++                        break;
++                    }
++
++                    if ( !isMultiple || (!bCtrl && !bShift) )
++                    {
++                        wxArrayTreeItemIds selections;
++                        size_t count = GetSelections(selections);
++                        wxTreeItemId next;
++
++                        if ( htSel && count > 0 )
++                        {
++                            next = (wParam == VK_UP) ? TreeView_GetPrevVisible(GetHwnd(), htSel) :
++                                TreeView_GetNextVisible(GetHwnd(), htSel);
++                        }
++                        else
++                        {
++                            next = GetRootItem();
++
++                            if ( IsHiddenRoot(next) )
++                            {
++                                next = TreeView_GetChild(GetHwnd(), HITEM(next));
++                            }
++
++                            if ( wParam == VK_DOWN && TreeView_GetNextVisible(GetHwnd(), HITEM(next)) )
++                            {
++                                next = TreeView_GetNextVisible(GetHwnd(), HITEM(next));
++                            }
++                        }
++
++                        if ( !next.IsOk() )
++                        {
++                            break;
++                        }
++
++                        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, next);
++                        event.m_itemOld = htSel;
++
++                        if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                        {
++                            DoUnselectAll();
++                            ::SelectItem(GetHwnd(), HITEM(next));
++                            ::SetFocus(GetHwnd(), HITEM(next));
++
++                            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                            (void)HandleWindowEvent(event);
++                        }
++                    }
++                    else if ( htSel )
++                    {
++                        wxTreeItemId next = (wParam == VK_UP) ? TreeView_GetPrevVisible(GetHwnd(), htSel) :
++                            TreeView_GetNextVisible(GetHwnd(), htSel);
++
++                        if ( !next.IsOk() )
++                        {
++                            break;
++                        }
++
++                        if ( !m_htSelStart )
++                        {
++                            m_htSelStart = htSel;
++                        }
++
++                        if ( bShift && SelectRange(GetHwnd(), HITEM(m_htSelStart), HITEM(next),
++                             SR_UNSELECT_OTHERS | SR_SIMULATE) )
++                        {
++                            wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, next);
++                            event.m_itemOld = htSel;
++
++                            if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                            {
++                                SelectRange(GetHwnd(), HITEM(m_htSelStart), HITEM(next),
++                                            SR_UNSELECT_OTHERS);
++
++                                event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                                (void)HandleWindowEvent(event);
++                            }
++                        }
++
++                        ::SetFocus(GetHwnd(), HITEM(next));
++                    }
+                 }
+-                else if ( htSel )
++                break;
++
++            case VK_LEFT:
+                 {
+-                    (void)wxControl::MSWWindowProc(nMsg, wParam, lParam);
++                    if ( HandleWindowEvent(keyEvent) )
++                    {
++                        break;
++                    }
+ 
+-                    HTREEITEM htNext = (HTREEITEM)
+-                        TreeView_GetNextItem
+-                        (
+-                            GetHwnd(),
+-                            htSel,
+-                            wParam == VK_UP ? TVGN_PREVIOUSVISIBLE
+-                                            : TVGN_NEXTVISIBLE
+-                        );
++                    if ( HasChildren(htSel) && IsExpanded(htSel) )
++                    {
++                        Collapse(htSel);
++                    }
++                    else
++                    {
++                        wxTreeItemId next = GetItemParent(htSel);
+ 
+-                    if ( !htNext )
++                        if ( next.IsOk() && !IsHiddenRoot(next) )
++                        {
++                            wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, next);
++                            event.m_itemOld = htSel;
++
++                            if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                            {
++                                DoUnselectAll();
++                                ::SelectItem(GetHwnd(), HITEM(next));
++                                ::SetFocus(GetHwnd(), HITEM(next));
++
++                                event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                                (void)HandleWindowEvent(event);
++                            }
++                        }
++                    }
++                }
++                break;
++
++            case VK_RIGHT:
++                {
++                    if ( HandleWindowEvent(keyEvent) )
+                     {
+-                        // at the top/bottom
+-                        htNext = htSel;
++                        break;
+                     }
+ 
+-                    if ( bShift )
++                    if ( !IsVisible(htSel) )
+                     {
++                        EnsureVisible(htSel);
++                    }
++
++                    if ( HasChildren(htSel) )
++                    {
++                        if ( !IsExpanded(htSel) )
++                        {
++                            Expand(htSel);
++                        }
++                        else
++                        {
++                            wxTreeItemId next = TreeView_GetChild(GetHwnd(), htSel);
++
++                            wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, next);
++                            event.m_itemOld = htSel;
++
++                            if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                            {
++                                DoUnselectAll();
++                                ::SelectItem(GetHwnd(), HITEM(next));
++                                ::SetFocus(GetHwnd(), HITEM(next));
++
++                                event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                                (void)HandleWindowEvent(event);
++                            }
++                        }
++                    }
++                }
++                break;
++
++            case VK_HOME:
++            case VK_END:
++                {
++                    if ( HandleWindowEvent(keyEvent) )
++                    {
++                        break;
++                    }
++
++                    wxTreeItemId next = GetRootItem();
++
++                    if ( IsHiddenRoot(next) )
++                    {
++                        next = TreeView_GetChild(GetHwnd(), HITEM(next));
++                    }
++
++                    if ( !next.IsOk() )
++                    {
++                        break;
++                    }
++
++                    if ( wParam == VK_END )
++                    {
++                        for ( ;; )
++                        {
++                            wxTreeItemId nextTemp = TreeView_GetNextVisible(GetHwnd(), HITEM(next));
++
++                            if ( !nextTemp.IsOk() )
++                            {
++                                break;
++                            }
++
++                            next = nextTemp;
++                        }
++                    }
++
++                    if ( htSel == HITEM(next) )
++                    {
++                        break;
++                    }
++
++                    if ( isMultiple && bShift )
++                    {
+                         if ( !m_htSelStart )
++                        {
+                             m_htSelStart = htSel;
++                        }
+ 
+-                        SelectRange(GetHwnd(), HITEM(m_htSelStart), htNext);
++                        if ( SelectRange(GetHwnd(), HITEM(m_htSelStart), HITEM(next),
++                             SR_UNSELECT_OTHERS | SR_SIMULATE) )
++                        {
++                            wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, next);
++                            event.m_itemOld = htSel;
++
++                            if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                            {
++                                SelectRange(GetHwnd(), HITEM(m_htSelStart), HITEM(next),
++                                            SR_UNSELECT_OTHERS);
++                                ::SetFocus(GetHwnd(), HITEM(next));
++
++                                event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                                (void)HandleWindowEvent(event);
++                            }
++                        }
+                     }
+-                    else // bCtrl
++                    else
+                     {
+-                        // without changing selection
+-                        ::SetFocus(GetHwnd(), htNext);
++                        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, next);
++                        event.m_itemOld = htSel;
++
++                        if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                        {
++                            DoUnselectAll();
++                            ::SelectItem(GetHwnd(), HITEM(next));
++                            ::SetFocus(GetHwnd(), HITEM(next));
++
++                            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                            (void)HandleWindowEvent(event);
++                        }
+                     }
+-
+-                    processed = true;
+                 }
+                 break;
+ 
+-            case VK_HOME:
+-            case VK_END:
+             case VK_PRIOR:
+             case VK_NEXT:
+-                // TODO: handle Shift/Ctrl with these keys
+-                if ( !bCtrl && !bShift )
+                 {
+-                    UnselectAll();
++                    if ( HandleWindowEvent(keyEvent) )
++                    {
++                        break;
++                    }
+ 
+-                    m_htSelStart.Unset();
++                    if ( bCtrl )
++                    {
++                        wxTreeItemId firstVisible = GetFirstVisibleItem();
++                        size_t visibleCount = TreeView_GetVisibleCount(GetHwnd());
++                        wxTreeItemId nextAdjacent = (wParam == VK_PRIOR) ?
++                            TreeView_GetPrevVisible(GetHwnd(), HITEM(firstVisible)) :
++                            TreeView_GetNextVisible(GetHwnd(), HITEM(firstVisible));
++
++                        if ( !nextAdjacent )
++                        {
++                            break;
++                        }
++
++                        wxTreeItemId nextStart = firstVisible;
++
++                        for ( size_t n = 1; n < visibleCount; n++ )
++                        {
++                            wxTreeItemId nextTemp = (wParam == VK_PRIOR) ?
++                                TreeView_GetPrevVisible(GetHwnd(), HITEM(nextStart)) :
++                                TreeView_GetNextVisible(GetHwnd(), HITEM(nextStart));
++
++                            if ( nextTemp.IsOk() )
++                            {
++                                nextStart = nextTemp;
++                            }
++                            else
++                            {
++                                break;
++                            }
++                        }
++
++                        EnsureVisible(nextStart);
++
++                        if ( wParam == VK_NEXT )
++                        {
++                            wxTreeItemId nextEnd = nextStart;
++
++                            for ( size_t n = 1; n < visibleCount; n++ )
++                            {
++                                wxTreeItemId nextTemp = 
++                                    TreeView_GetNextVisible(GetHwnd(), HITEM(nextEnd));
++
++                                if ( nextTemp.IsOk() )
++                                {
++                                    nextEnd = nextTemp;
++                                }
++                                else
++                                {
++                                    break;
++                                }
++                            }
++
++                            EnsureVisible(nextEnd);
++                        }
++                    }
++                    else
++                    {
++                        size_t visibleCount = TreeView_GetVisibleCount(GetHwnd());
++                        wxTreeItemId nextAdjacent = (wParam == VK_PRIOR) ?
++                            TreeView_GetPrevVisible(GetHwnd(), htSel) :
++                            TreeView_GetNextVisible(GetHwnd(), htSel);
++
++                        if ( !nextAdjacent )
++                        {
++                            break;
++                        }
++
++                        wxTreeItemId next(htSel);
++
++                        for ( size_t n = 1; n < visibleCount; n++ )
++                        {
++                            wxTreeItemId nextTemp = (wParam == VK_PRIOR) ?
++                                TreeView_GetPrevVisible(GetHwnd(), HITEM(next)) :
++                                TreeView_GetNextVisible(GetHwnd(), HITEM(next));
++
++                            if ( nextTemp.IsOk() )
++                            {
++                                next = nextTemp;
++                            }
++                            else
++                            {
++                                break;
++                            }
++                        }
++
++                        wxTreeEvent event(wxEVT_COMMAND_TREE_SEL_CHANGING, this, next);
++                        event.m_itemOld = htSel;
++
++                        if ( !HandleWindowEvent(event) || event.IsAllowed() )
++                        {
++                            DoUnselectAll();
++                            m_htSelStart.Unset();
++                            ::SelectItem(GetHwnd(), HITEM(next));
++                            ::SetFocus(GetHwnd(), HITEM(next));
++
++                            event.SetEventType(wxEVT_COMMAND_TREE_SEL_CHANGED);
++                            (void)HandleWindowEvent(event);
++                        }
++                    }
+                 }
++                break;
++
++            default:
++                processed = false;
++                break;
+         }
++
++        const bool isAltDown = ::GetKeyState(VK_MENU) < 0;
++
++        // a separate event for Space/Return
++        if ( !wxIsCtrlDown() && !wxIsShiftDown() && !isAltDown &&
++             ((wParam == VK_SPACE) || (wParam == VK_RETURN)) )
++        {
++            wxTreeItemId item;
++
++            if ( !HasFlag(wxTR_MULTIPLE) )
++            {
++                item = GetSelection();
++            }
++
++            wxTreeEvent activatedEvent(wxEVT_COMMAND_TREE_ITEM_ACTIVATED, this, item);
++            (void)HandleWindowEvent(activatedEvent);
++        }
+     }
+     else if ( nMsg == WM_COMMAND )
+     {
+@@ -2577,7 +3291,8 @@
+                 // fabricate the lParam and wParam parameters sufficiently
+                 // similar to the ones from a "real" WM_KEYDOWN so that
+                 // CreateKeyEvent() works correctly
+-                WXLPARAM lParam = (wxIsAltDown() ? KF_ALTDOWN : 0) << 16;
++                const bool isAltDown = ::GetKeyState(VK_MENU) < 0;
++                WXLPARAM lParam = (isAltDown ? KF_ALTDOWN : 0) << 16;
+ 
+                 WXWPARAM wParam = info->wVKey;
+ 
+@@ -2595,16 +3310,23 @@
+                                                 wParam);
+ 
+                 // a separate event for Space/Return
+-                if ( !wxIsAnyModifierDown() &&
++                if ( !wxIsCtrlDown() && !wxIsShiftDown() && !isAltDown &&
+                      ((info->wVKey == VK_SPACE) || (info->wVKey == VK_RETURN)) )
+                 {
+-                   wxTreeItemId item;
+-                   if ( !HasFlag(wxTR_MULTIPLE) )
+-                       item = GetSelection();
++                    wxTreeItemId item;
+ 
+-                   wxTreeEvent event2(wxEVT_COMMAND_TREE_ITEM_ACTIVATED,
++                    if ( !HasFlag(wxTR_MULTIPLE) )
++                    {
++                        item = GetSelection();
++                    }
++                    else
++                    {
++                        item = m_htSelStart;
++                    }
++
++                    wxTreeEvent event2(wxEVT_COMMAND_TREE_ITEM_ACTIVATED,
+                                         this, item);
+-                   (void)HandleWindowEvent(event2);
++                    (void)GetEventHandler()->ProcessEvent(event2);
+                 }
+             }
+             break;
+@@ -2640,52 +3362,8 @@
+             }
+             return false;
+ 
+-        // NB: MSLU is broken and sends TVN_SELCHANGEDA instead of
+-        //     TVN_SELCHANGEDW in Unicode mode under Win98. Therefore
+-        //     we have to handle both messages:
+-        case TVN_SELCHANGEDA:
+-        case TVN_SELCHANGEDW:
+-            eventType = wxEVT_COMMAND_TREE_SEL_CHANGED;
+-            // fall through
+-
+-        case TVN_SELCHANGINGA:
+-        case TVN_SELCHANGINGW:
+-            {
+-                if ( eventType == wxEVT_NULL )
+-                    eventType = wxEVT_COMMAND_TREE_SEL_CHANGING;
+-                //else: already set above
+-
+-                if (hdr->code == TVN_SELCHANGINGW ||
+-                    hdr->code == TVN_SELCHANGEDW)
+-                {
+-                    NM_TREEVIEWW *tv = (NM_TREEVIEWW *)lParam;
+-                    event.m_item = tv->itemNew.hItem;
+-                    event.m_itemOld = tv->itemOld.hItem;
+-                }
+-                else
+-                {
+-                    NM_TREEVIEWA *tv = (NM_TREEVIEWA *)lParam;
+-                    event.m_item = tv->itemNew.hItem;
+-                    event.m_itemOld = tv->itemOld.hItem;
+-                }
+-            }
+-
+-            // we receive this message from WM_LBUTTONDOWN handler inside
+-            // comctl32.dll and so before the click is passed to
+-            // DefWindowProc() which sets the focus to the window which was
+-            // clicked and this can lead to unexpected event sequences: for
+-            // example, we may get a "selection change" event from the tree
+-            // before getting a "kill focus" event for the text control which
+-            // had the focus previously, thus breaking user code doing input
+-            // validation
+-            //
+-            // to avoid such surprises, we force the generation of focus events
+-            // now, before we generate the selection change ones
+-            SetFocus();
+-            break;
+-
+-            // instead of explicitly checking for _WIN32_IE, check if the
+-            // required symbols are available in the headers
++        // instead of explicitly checking for _WIN32_IE, check if the
++        // required symbols are available in the headers
+ #if defined(CDDS_PREPAINT) && !wxUSE_COMCTL32_SAFELY
+         case NM_CUSTOMDRAW:
+             {
+@@ -2841,13 +3519,15 @@
+                 point.x = LOWORD(pos);
+                 point.y = HIWORD(pos);
+                 ::MapWindowPoints(HWND_DESKTOP, GetHwnd(), &point, 1);
+-                int flags = 0;
+-                wxTreeItemId item = HitTest(wxPoint(point.x, point.y), flags);
+-                if (flags & wxTREE_HITTEST_ONITEMSTATEICON)
++                int htFlags = 0;
++                wxTreeItemId item = HitTest(wxPoint(point.x, point.y), htFlags);
++
++                if (htFlags & wxTREE_HITTEST_ONITEMSTATEICON)
+                 {
+                     event.m_item = item;
+                     eventType = wxEVT_COMMAND_TREE_STATE_IMAGE_CLICK;
+                 }
++
+                 break;
+             }
+ 

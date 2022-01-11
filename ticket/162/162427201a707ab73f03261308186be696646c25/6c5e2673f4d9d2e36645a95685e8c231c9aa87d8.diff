@@ -1,0 +1,203 @@
+diff -ur ../wxWidgets/include/wx/gtk/textctrl.h ./include/wx/gtk/textctrl.h
+--- ../wxWidgets/include/wx/gtk/textctrl.h	2006-01-22 16:30:05.000000000 -0800
++++ ./include/wx/gtk/textctrl.h	2006-01-22 21:37:49.000000000 -0800
+@@ -152,10 +152,6 @@
+     virtual void Freeze();
+     virtual void Thaw();
+ 
+-    // textctrl specific scrolling
+-    virtual bool ScrollLines(int lines);
+-    virtual bool ScrollPages(int pages);
+-
+     // implementation only from now on
+ 
+     // wxGTK-specific: called recursively by Enable,
+@@ -178,13 +174,6 @@
+     // common part of all ctors
+     void Init();
+ 
+-    // get the vertical adjustment, if any, NULL otherwise
+-    GtkAdjustment *GetVAdj() const;
+-
+-    // scroll the control by the given number of pixels, return true if the
+-    // scroll position changed
+-    bool DoScroll(GtkAdjustment *adj, int diff);
+-
+     // Widgets that use the style->base colour for the BG colour should
+     // override this and return true.
+     virtual bool UseGTKStyleBase() const { return true; }
+diff -ur ../wxWidgets/include/wx/gtk/window.h ./include/wx/gtk/window.h
+--- ../wxWidgets/include/wx/gtk/window.h	2006-01-22 16:30:05.000000000 -0800
++++ ./include/wx/gtk/window.h	2006-01-22 21:37:49.000000000 -0800
+@@ -103,6 +103,8 @@
+     virtual int GetScrollRange( int orient ) const;
+     virtual void ScrollWindow( int dx, int dy,
+                                const wxRect* rect = (wxRect *) NULL );
++    virtual bool ScrollLines(int lines);
++    virtual bool ScrollPages(int pages);
+ 
+ #if wxUSE_DRAG_AND_DROP
+     virtual void SetDropTarget( wxDropTarget *dropTarget );
+@@ -268,6 +270,10 @@
+     // ApplyWidgetStyle -- override this, not ApplyWidgetStyle
+     virtual void DoApplyWidgetStyle(GtkRcStyle *style);
+ 
++protected:
++    // GtkAdjustment to be used by Scroll{Lines,Pages}
++    void SetVScrollAdjustment(GtkAdjustment* adj);
++
+ private:
+     DECLARE_DYNAMIC_CLASS(wxWindowGTK)
+     DECLARE_NO_COPY_CLASS(wxWindowGTK)
+diff -ur ../wxWidgets/src/gtk/scrolbar.cpp ./src/gtk/scrolbar.cpp
+--- ../wxWidgets/src/gtk/scrolbar.cpp	2006-01-22 16:30:06.000000000 -0800
++++ ./src/gtk/scrolbar.cpp	2006-01-22 21:37:49.000000000 -0800
+@@ -187,6 +187,10 @@
+         m_widget = gtk_hscrollbar_new( (GtkAdjustment *) NULL );
+ 
+     m_adjust = gtk_range_get_adjustment( GTK_RANGE(m_widget) );
++    if ((style & wxSB_VERTICAL) == wxSB_VERTICAL)
++    {
++        SetVScrollAdjustment(m_adjust);
++    }
+ 
+     g_signal_connect (m_adjust, "value_changed",
+                       G_CALLBACK (gtk_scrollbar_callback), this);
+diff -ur ../wxWidgets/src/gtk/textctrl.cpp ./src/gtk/textctrl.cpp
+--- ../wxWidgets/src/gtk/textctrl.cpp	2006-01-22 16:30:07.000000000 -0800
++++ ./src/gtk/textctrl.cpp	2006-01-22 21:41:11.000000000 -0800
+@@ -618,7 +618,10 @@
+     PostCreation(size);
+ 
+     if (multi_line)
++    {
+         gtk_widget_show(m_text);
++        SetVScrollAdjustment(gtk_scrolled_window_get_vadjustment((GtkScrolledWindow*)m_widget));
++    }
+ 
+     if (!value.empty())
+     {
+@@ -1706,64 +1709,6 @@
+     GetEventHandler()->ProcessEvent(url_event);
+ }
+ 
+-// ----------------------------------------------------------------------------
+-// scrolling
+-// ----------------------------------------------------------------------------
+-
+-GtkAdjustment *wxTextCtrl::GetVAdj() const
+-{
+-    if ( !IsMultiLine() )
+-        return NULL;
+-
+-    return gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(m_widget));
+-}
+-
+-bool wxTextCtrl::DoScroll(GtkAdjustment *adj, int diff)
+-{
+-    float value = adj->value + diff;
+-
+-    if ( value < 0 )
+-        value = 0;
+-
+-    float upper = adj->upper - adj->page_size;
+-    if ( value > upper )
+-        value = upper;
+-
+-    // did we noticeably change the scroll position?
+-    if ( fabs(adj->value - value) < 0.2 )
+-    {
+-        // well, this is what Robert does in wxScrollBar, so it must be good...
+-        return false;
+-    }
+-
+-    adj->value = value;
+-
+-    gtk_adjustment_value_changed(GTK_ADJUSTMENT(adj));
+-
+-    return true;
+-}
+-
+-bool wxTextCtrl::ScrollLines(int lines)
+-{
+-    GtkAdjustment *adj = GetVAdj();
+-    if ( !adj )
+-        return false;
+-
+-    int diff = (int)ceil(lines*adj->step_increment);
+-
+-    return DoScroll(adj, diff);
+-}
+-
+-bool wxTextCtrl::ScrollPages(int pages)
+-{
+-    GtkAdjustment *adj = GetVAdj();
+-    if ( !adj )
+-        return false;
+-
+-    return DoScroll(adj, (int)ceil(pages*adj->page_increment));
+-}
+-
+-
+ // static
+ wxVisualAttributes
+ wxTextCtrl::GetClassDefaultAttributes(wxWindowVariant WXUNUSED(variant))
+diff -ur ../wxWidgets/src/gtk/window.cpp ./src/gtk/window.cpp
+--- ../wxWidgets/src/gtk/window.cpp	2006-01-22 16:30:07.000000000 -0800
++++ ./src/gtk/window.cpp	2006-01-22 21:37:50.000000000 -0800
+@@ -3595,6 +3595,39 @@
+         gdk_window_warp_pointer( window, x, y );
+ }
+ 
++static bool wxScrollAdjust(GtkAdjustment* adj, double change)
++{
++    double value_start = adj->value;
++    double value = value_start + change;
++    double upper = adj->upper - adj->page_size;
++    if (value > upper)
++    {
++        value = upper;
++    }
++    // Lower bound will be checked by gtk_adjustment_set_value
++    gtk_adjustment_set_value(adj, value);
++    return adj->value != value_start;
++}
++
++bool wxWindowGTK::ScrollLines(int lines)
++{
++    return
++        m_vAdjust != NULL &&
++        wxScrollAdjust(m_vAdjust, lines * m_vAdjust->step_increment);
++}
++
++bool wxWindowGTK::ScrollPages(int pages)
++{
++    return
++        m_vAdjust != NULL &&
++        wxScrollAdjust(m_vAdjust, pages * m_vAdjust->page_increment);
++}
++
++void wxWindowGTK::SetVScrollAdjustment(GtkAdjustment* adj)
++{
++    wxASSERT(m_vAdjust == NULL);
++    m_vAdjust = adj;
++}
+ 
+ void wxWindowGTK::Refresh( bool eraseBackground, const wxRect *rect )
+ {
+diff -ur ../wxWidgets/docs/latex/wx/window.tex ./docs/latex/wx/window.tex
+--- ../wxWidgets/docs/latex/wx/window.tex	2006-01-21 20:18:08.000000000 -0800
++++ ./docs/latex/wx/window.tex	2006-01-22 21:37:50.000000000 -0800
+@@ -2404,9 +2404,7 @@
+ 
+ \wxheading{Remarks}
+ 
+-This function is currently only implemented under MSW and wxTextCtrl under
+-wxGTK (it also works for wxScrolledWindow derived classes under all
+-platforms).
++This function is currently only implemented under MSW and wxGTK.
+ 
+ \wxheading{See also}
+ 
+
+ 	  	 

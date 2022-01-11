@@ -1,0 +1,203 @@
+--- src/tiff/tif_fax3.c.352	2002-01-04 10:47:58.000000000 -0500
++++ src/tiff/tif_fax3.c	2002-12-01 15:15:33.000000000 -0500
+@@ -56,4 +56,5 @@
+  */
+ typedef struct {
++        int     rw_mode;                /* O_RDONLY for decode, else encode */
+ 	int	mode;			/* operating mode */
+ 	uint32	rowbytes;		/* bytes in a decoded scanline */
+@@ -85,9 +86,10 @@
+ #define	DecoderState(tif)	((Fax3DecodeState*) Fax3State(tif))
+ 
++typedef enum { G3_1D, G3_2D } Ttag;
+ typedef struct {
+     Fax3BaseState b;
+     int    data;                /* current i/o byte */
+     int    bit;                 /* current i/o bit in byte */
+-    enum { G3_1D, G3_2D } tag;  /* encoding state */
++    Ttag    tag;                /* encoding state */
+     u_char*    refline;         /* reference line for 2d decoding */
+     int    k;                   /* #rows left that can be 2d encoded */
+@@ -171,5 +173,5 @@
+ 	    TIFFGetBitRevTable(tif->tif_dir.td_fillorder != FILLORDER_LSB2MSB);
+ 	if (sp->refruns) {		/* init reference line to white */
+-		sp->refruns[0] = sp->b.rowpixels;
++		sp->refruns[0] = (uint32) sp->b.rowpixels;
+ 		sp->refruns[1] = 0;
+ 	}
+@@ -373,6 +375,6 @@
+ 	for (; runs < erun; runs += 2) {
+ 	    run = runs[0];
+-	    if (x+run > lastx)
+-		run = runs[0] = lastx - x;
++	    if (x+run > lastx || run > lastx )
++		run = runs[0] = (uint32) (lastx - x);
+ 	    if (run) {
+ 		cp = buf + (x>>3);
+@@ -412,5 +414,5 @@
+ 	    }
+ 	    run = runs[1];
+-	    if (x+run > lastx)
++	    if (x+run > lastx || run > lastx )
+ 		run = runs[1] = lastx - x;
+ 	    if (run) {
+@@ -495,10 +497,10 @@
+ 	    td->td_compression == COMPRESSION_CCITTFAX4
+ 	);
+-	if (tif->tif_mode == O_RDONLY) {	/* 1d/2d decoding */
++	if (sp->rw_mode == O_RDONLY) {	/* 1d/2d decoding */
+ 		Fax3DecodeState* dsp = DecoderState(tif);
+ 		uint32 nruns = needsRefLine ?
+ 		     2*TIFFroundup(rowpixels,32) : rowpixels;
+ 
+-		dsp->runs = (uint32*) _TIFFmalloc(nruns*sizeof (uint16));
++		dsp->runs = (uint32*) _TIFFmalloc((2*nruns+3)*sizeof (uint32));
+ 		if (dsp->runs == NULL) {
+ 			TIFFError("Fax3SetupState",
+@@ -579,5 +581,5 @@
+ {
+ 	Fax3EncodeState* sp = EncoderState(tif);
+-	int bit = sp->bit;
++	u_int bit = sp->bit;
+ 	int data = sp->data;
+ 
+@@ -614,5 +616,5 @@
+ {
+ 	Fax3EncodeState* sp = EncoderState(tif);
+-	int bit = sp->bit;
++	u_int bit = sp->bit;
+ 	int data = sp->data;
+ 	u_int code, length;
+@@ -657,7 +659,7 @@
+ {
+ 	Fax3EncodeState* sp = EncoderState(tif);
+-	int bit = sp->bit;
++	u_int bit = sp->bit;
+ 	int data = sp->data;
+-	u_int code, length;
++	u_int code, length, tparm;
+ 
+ 	if (sp->b.groupoptions & GROUP3OPT_FILLBITS) {
+@@ -674,5 +676,6 @@
+ 				align = sp->bit - align;
+ 			code = 0;
+-			_PutBits(tif, 0, align);
++			tparm=align;
++			_PutBits(tif, 0, tparm);
+ 		}
+ 	}
+@@ -931,5 +934,6 @@
+ {
+ 	Fax3EncodeState* sp = EncoderState(tif);
+-	int32 bs = 0, span;
++	int32 span;
++        uint32 bs = 0;
+ 
+ 	for (;;) {
+@@ -977,8 +981,8 @@
+ {
+ #define	PIXEL(buf,ix)	((((buf)[(ix)>>3]) >> (7-((ix)&7))) & 1)
+-	int32 a0 = 0;
+-	int32 a1 = (PIXEL(bp, 0) != 0 ? 0 : finddiff(bp, 0, bits, 0));
+-	int32 b1 = (PIXEL(rp, 0) != 0 ? 0 : finddiff(rp, 0, bits, 0));
+-	int32 a2, b2;
++        uint32 a0 = 0;
++	uint32 a1 = (PIXEL(bp, 0) != 0 ? 0 : finddiff(bp, 0, bits, 0));
++	uint32 b1 = (PIXEL(rp, 0) != 0 ? 0 : finddiff(rp, 0, bits, 0));
++	uint32 a2, b2;
+ 
+ 	for (;;) {
+@@ -1105,5 +1109,5 @@
+ {
+ 	if (tif->tif_data) {
+-		if (tif->tif_mode == O_RDONLY) {
++		if (Fax3State(tif)->rw_mode == O_RDONLY) {
+ 			Fax3DecodeState* sp = DecoderState(tif);
+ 			if (sp->runs)
+@@ -1172,5 +1176,5 @@
+ 		return (1);			/* NB: pseudo tag */
+ 	case TIFFTAG_FAXFILLFUNC:
+-		if (tif->tif_mode == O_RDONLY)
++		if (sp->rw_mode == O_RDONLY)
+ 			DecoderState(tif)->fill = va_arg(ap, TIFFFaxFillFunc);
+ 		return (1);			/* NB: pseudo tag */
+@@ -1215,5 +1219,5 @@
+ 		break;
+ 	case TIFFTAG_FAXFILLFUNC:
+-		if (tif->tif_mode == O_RDONLY)
++		if (sp->rw_mode == O_RDONLY)
+ 			*va_arg(ap, TIFFFaxFillFunc*) = DecoderState(tif)->fill;
+ 		break;
+@@ -1311,13 +1315,10 @@
+ 	 */
+ 	if (tif->tif_mode == O_RDONLY)
+-#if defined(__VISAGECPP__)
+-		tif->tif_data = (tidata_t)_TIFFmalloc(sizeof (Fax3DecodeState));
+-	else
+-		tif->tif_data = (tidata_t)_TIFFmalloc(sizeof (Fax3EncodeState));
+-#else
+-		tif->tif_data = _TIFFmalloc(sizeof (Fax3DecodeState));
++		tif->tif_data = (tidata_t)
++                    _TIFFmalloc(sizeof (Fax3DecodeState));
+ 	else
+-		tif->tif_data = _TIFFmalloc(sizeof (Fax3EncodeState));
+-#endif
++		tif->tif_data = (tidata_t)
++                    _TIFFmalloc(sizeof (Fax3EncodeState));
++
+ 	if (tif->tif_data == NULL) {
+ 		TIFFError("TIFFInitCCITTFax3",
+@@ -1326,4 +1327,5 @@
+ 	}
+ 	sp = Fax3State(tif);
++        sp->rw_mode = tif->tif_mode;
+ 
+ 	/*
+@@ -1341,5 +1343,5 @@
+ 	sp->subaddress = NULL;
+ 
+-	if (tif->tif_mode == O_RDONLY) {
++	if (sp->rw_mode == O_RDONLY) {
+ 		tif->tif_flags |= TIFF_NOBITREV;/* decoder does bit reversal */
+ 		DecoderState(tif)->runs = NULL;
+@@ -1410,4 +1412,6 @@
+ #endif
+ 		EXPAND2D(EOFG4);
++                if (EOLcnt)
++                    goto EOFG4;
+ 		(*sp->fill)(buf, thisrun, pa, lastx);
+ 		SETVAL(0);		/* imaginary change for reference */
+@@ -1419,4 +1423,11 @@
+ 		continue;
+ 	EOFG4:
++                NeedBits16( 13, BADG4 );
++        BADG4:
++#ifdef FAX3_DEBUG
++                if( GetBits(13) != 0x1001 )
++                    fputs( "Bad RTC\n", stderr );
++#endif
++                ClrBits( 13 );
+ 		(*sp->fill)(buf, thisrun, pa, lastx);
+ 		UNCACHE_STATE(tif, sp);
+--- src/tiff/tif_fax3.h.352	2002-01-04 10:47:58.000000000 -0500
++++ src/tiff/tif_fax3.h	2002-12-01 14:41:08.000000000 -0500
+@@ -361,4 +361,6 @@
+ 	if (a0 >= lastx)						\
+ 	    goto done1d;						\
++        if( *(pa-1) == 0 && *(pa-2) == 0 )				\
++            pa -= 2;                                                    \
+     }									\
+ eof1d:									\
+@@ -486,7 +488,8 @@
+ 	case S_EOL:							\
+ 	    *pa++ = lastx - a0;						\
+-	    NeedBits8(5,eof2d);						\
+-	    if (GetBits(5))						\
++	    NeedBits8(4,eof2d);						\
++	    if (GetBits(4))						\
+ 		unexpected("EOL", a0);					\
++            ClrBits(4);                                                 \
+ 	    EOLcnt = 1;							\
+ 	    goto eol2d;							\
+
+ 	  	 

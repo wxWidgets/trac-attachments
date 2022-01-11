@@ -1,0 +1,2311 @@
+diff -uNr wx-Trunk-bline/include/wx/file.h wx-Trunk/include/wx/file.h
+--- wx-Trunk-bline/include/wx/file.h	2012-10-01 00:30:13.000000000 +0000
++++ wx-Trunk/include/wx/file.h	2013-02-04 05:07:36.083122800 +0000
+@@ -49,11 +49,11 @@
+   // ctors
+   // -----
+     // def ctor
+-  wxFile() { m_fd = fd_invalid; m_lasterror = 0; }
++  wxFile() { m_fd = fd_invalid; m_lasterror = 0; m_was_informed_closed=false;}
+     // open specified file (may fail, use IsOpened())
+   wxFile(const wxString& fileName, OpenMode mode = read);
+     // attach to (already opened) file
+-  wxFile(int lfd) { m_fd = lfd; m_lasterror = 0; }
++  wxFile(int lfd) { m_fd = lfd; m_lasterror = 0; m_was_informed_closed=false;}
+ 
+   // open/close
+     // create a new file (with the default value of bOverwrite, it will fail if
+@@ -64,6 +64,20 @@
+             int access = wxS_DEFAULT);
+   bool Close();  // Close is a NOP if not opened
+ 
++  /** In OSX, the only way to stop a callback on a file handle (at EOF) is to close the
++   *  file.  However, that needs to be done outside of wxFile.  By calling
++   *  InformClosed(), wxFile will be made aware that the file was closed so
++   *  that it can act accordingly - such as to not read from or close the
++   *  file descriptor after it knows the FD was closed. */
++  void InformClosed();
++
++  /** The wxFileInputStream::IsOk() function decides that the wxFileInputStream
++   *  is OK if the file is open, or if the file was opened, but it was informed closed.
++   *  The latter case of when the file was already closed occurs in OSX where we
++   *  need to close the file handler in order to disable callbacks on that file handle
++   *  after we have reached EOF. */
++  bool WasInformedClosed(){return m_was_informed_closed;};
++
+   // assign an existing file descriptor and get it back from wxFile object
+   void Attach(int lfd) { Close(); m_fd = lfd; m_lasterror = 0; }
+   void Detach()       { m_fd = fd_invalid;  }
+@@ -126,6 +140,10 @@
+ 
+   int m_fd; // file descriptor or INVALID_FD if not opened
+   int m_lasterror; // errno value of last error
++
++  /** This flag gets set by InformClosed() if the file handle had to be closed
++   *  outside of wxFile. */
++  bool m_was_informed_closed;
+ };
+ 
+ // ----------------------------------------------------------------------------
+diff -uNr wx-Trunk-bline/include/wx/osx/cocoa/evtloop.h wx-Trunk/include/wx/osx/cocoa/evtloop.h
+--- wx-Trunk-bline/include/wx/osx/cocoa/evtloop.h	2012-05-03 00:30:30.000000000 +0000
++++ wx-Trunk/include/wx/osx/cocoa/evtloop.h	2013-02-04 05:03:59.152715100 +0000
+@@ -44,6 +44,11 @@
+     int m_modalNestedLevel;
+     
+     bool m_osxLowLevelWakeUp;
++
++    /** This is set to True when DoStop() is called.
++     *  See the loop inside of wxGUIEventLoop::DoRun() for
++     *  why m_stopCalled is needed. */
++    bool m_stopCalled;
+ };
+ 
+ #endif // _WX_OSX_COCOA_EVTLOOP_H_
+diff -uNr wx-Trunk-bline/include/wx/process.h wx-Trunk/include/wx/process.h
+--- wx-Trunk-bline/include/wx/process.h	2013-01-21 01:30:17.000000000 +0000
++++ wx-Trunk/include/wx/process.h	2013-02-04 05:08:45.367085600 +0000
+@@ -30,6 +30,12 @@
+     wxPROCESS_REDIRECT = 1
+ };
+ 
++#ifdef __UNIX__
++class wxExecuteIOHandler;
++#else
++typedef void wxExecuteIOHandler;
++#endif
++
+ // ----------------------------------------------------------------------------
+ // A wxProcess object should be passed to wxExecute - than its OnTerminate()
+ // function will be called when the process terminates.
+@@ -71,7 +77,7 @@
+     // call this before passing the object to wxExecute() to redirect the
+     // launched process stdin/stdout, then use GetInputStream() and
+     // GetOutputStream() to get access to them
+-    void Redirect() { m_redirect = true; }
++    void Redirect(bool notify_flag=false) { m_redirect = true; m_notify = notify_flag;}
+     bool IsRedirected() const { return m_redirect; }
+ 
+     // detach from the parent - should be called by the parent if it's deleted
+@@ -94,6 +100,27 @@
+     bool IsInputAvailable() const;
+     bool IsErrorAvailable() const;
+ 
++    /** This can be overridden by the user if they want to be notified of
++     *  when input is available from the stdout of the child process.
++     *  
++     *  The notification only happens if 'notify_flag' was set to 'true'
++     *  in the call to Redirect().
++     *  
++     *  This callback is only supported in unix based ports such as wxOSX
++     *  and wxGTK.  It is currently not supported in Windows. */
++    virtual void OnInputAvailable(){};
++
++    /** This can be overridden by the user if they want to be notified of
++     *  when input is available from the stderr of the child
++     *  process.
++     *  
++     *  The notification only happens if 'notify_flag' was set to 'true'
++     *  in the call to Redirect().
++     *  
++     *  This callback is only supported in unix based ports such as wxOSX
++     *  and wxGTK.  It is currently not supported in Windows. */
++    virtual void OnErrorAvailable(){};
++
+     // implementation only (for wxExecute)
+     //
+     // NB: the streams passed here should correspond to the child process
+@@ -104,6 +131,11 @@
+                         wxInputStream *errStream);
+ #endif // wxUSE_STREAMS
+ 
++    /** Can be used to determine if the application will be notified about
++     *  the availability of data on stdout or stderr, i.e. get the
++     *  callbacks to OnInputAvailable() and OnErrorAvailable().*/
++    bool IsNotifyEnabled() {return m_notify;}
++
+     // priority
+         // Sets the priority to the given value: see wxPRIORITY_XXX constants.
+         //
+@@ -119,6 +151,22 @@
+     // needs to be public since it needs to be used from wxExecute() global func
+     void SetPid(long pid) { m_pid = pid; }
+ 
++#if wxUSE_STREAMS
++    wxExecuteIOHandler *GetStdoutHandler() {return m_stdoutHandler;}
++
++    wxExecuteIOHandler *GetStderrHandler() {return m_stderrHandler;}
++#endif
++
++    /** It is necessary to know the endProcDataPtr for the mechanism that
++     *  determines when to end the temporary event loop for synchronous
++     *  wxExecute. */
++    void *GetEndProcDataPtr() {return m_endProcDataPtr;}
++
++    /** It is necessary to set the endProcDataPtr for the mechanism that
++     *  determines when to end the temporary event loop for synchronous
++     *  wxExecute. */
++    void SetEndProcDataPtr(void *endProcDataPtr) {m_endProcDataPtr=endProcDataPtr;}
++
+ protected:
+     void Init(wxEvtHandler *parent, int id, int flags);
+ 
+@@ -134,9 +182,16 @@
+     wxInputStream  *m_inputStream,
+                    *m_errorStream;
+     wxOutputStream *m_outputStream;
++
++    wxExecuteIOHandler *m_stdoutHandler;
++    wxExecuteIOHandler *m_stderrHandler;
++
+ #endif // wxUSE_STREAMS
+ 
+     bool m_redirect;
++    bool m_notify;
++
++    void *m_endProcDataPtr;
+ 
+     DECLARE_DYNAMIC_CLASS(wxProcess)
+     wxDECLARE_NO_COPY_CLASS(wxProcess);
+diff -uNr wx-Trunk-bline/include/wx/stream.h wx-Trunk/include/wx/stream.h
+--- wx-Trunk-bline/include/wx/stream.h	2012-04-17 00:30:32.000000000 +0000
++++ wx-Trunk/include/wx/stream.h	2013-02-04 05:08:54.449605100 +0000
+@@ -181,6 +181,12 @@
+     // return the current position of the stream pointer or wxInvalidOffset
+     virtual wxFileOffset TellI() const;
+ 
++    /** In OSX, the only way to stop a callback on a file handle (at EOF) is to close the
++     *  file.  However, that needs to be done outside of this class.  By calling
++     *  InformClosed(), this class will be made aware that the file was closed so
++     *  that it can act accordingly - such as to not read from or close the
++     *  file descriptor after it knows the FD was closed. */
++    virtual void InformClosed() {};
+ 
+     // stream-like operators
+     // ---------------------
+diff -uNr wx-Trunk-bline/include/wx/unix/app.h wx-Trunk/include/wx/unix/app.h
+--- wx-Trunk-bline/include/wx/unix/app.h	2008-11-29 01:30:55.000000000 +0000
++++ wx-Trunk/include/wx/unix/app.h	2013-02-04 05:05:50.996112100 +0000
+@@ -11,14 +11,51 @@
+ //Ensure that sigset_t is being defined
+ #include <signal.h>
+ 
++class WakeUpPipe;
++
++const int wxOnReadWaiting_DONOTHING=0;
++const int wxOnReadWaiting_INFORM_CALLER_ONLY=1;
++const int wxOnReadWaiting_INFORM_CALLER_AND_DEREGISTER=2;
++
++extern "C"
++{
++/** This function gets called by the OS when it detects that there
++ *  is data written to the pipe that needs to get processed.  It is
++ *  written in a platform independent way so that each OS's specific
++ *  handler (such as GTK, OSX, and Unix console) can call it for
++ *  common processing for all platforms.
++ *  
++ *  @param data
++ *      Should be a pointer to wxFDIOHandler *, but it is
++ *      void * for convenience.
++ *  
++ *  @param fd
++ *      The file descriptor that this callback was made on.
++ *  
++ *  @retval false
++ *      Tells the caller of this function to disable future callbacks.
++ *  
++ *  @retval true
++ *      Tells the caller of this function to keep future callbacks enabled.
++ *  
++ *     */
++int wxOnReadWaiting(void *data, int fd);
++}
++
+ // wxApp subclass implementing event processing for console applications
+ class WXDLLIMPEXP_BASE wxAppConsole : public wxAppConsoleBase
+ {
+ public:
++    /** Constructor is needed to initialize the m_wakeupPipe to NULL. */
++    wxAppConsole();
++
++    /** Destructor is needed to de-allocate the m_wakeupPipe if it was
++     *  created. */
++    virtual ~wxAppConsole();
++
+     // override base class initialization
+     virtual bool Initialize(int& argc, wxChar** argv);
+ 
+-
+     // Unix-specific: Unix signal handling
+     // -----------------------------------
+ 
+@@ -38,6 +75,37 @@
+     // handlers for them
+     void CheckSignal();
+ 
++    /** This triggers the wakeup of the application, and the calling of
++     *  wxAppConsole::OnWakeUp() during normal event loop processing or OS
++     *  callbacks.
++     *  
++     *  This call is not multi-thread safe.  It is necessary for it to exist
++     *  because we can't perform locks in the signal handler, and we want to
++     *  use this function to wake up the application from a signal handler.
++     *  
++     *  This is currently only supported on Unix-based ports like GTK and OSX.
++     *  
++     *  This function is not supported in Windows.
++     *   */
++    void WakeUpMTUnsafe();
++
++    /** Same as WakeUpMTUnsafe(), but it guarantees thread safety.  It can/should
++     *  be called from another thread.
++     *  
++     *  This is currently only supported on Unix-based ports like GTK and OSX.
++     *  
++     *  This is not supported in Windows. */
++    void WakeUp();
++
++    /** This is the callback that gets invoked when the application is
++     *  "Woken up".
++     *  
++     *  This is currently only supported on Unix-based ports like GTK and OSX.
++     *  
++     *  This is not supported in Windows.
++     *   */
++    virtual void OnWakeUp();
++
+ private:
+     // signal handler set up by SetSignalHandler() for all signals we handle,
+     // it just adds the signal to m_signalsCaught -- the real processing is
+@@ -52,4 +120,8 @@
+     // the signal handlers
+     WX_DECLARE_HASH_MAP(int, SignalHandler, wxIntegerHash, wxIntegerEqual, SignalHandlerHash);
+     SignalHandlerHash m_signalHandlerHash;
++
++    // pipe used for wake up messages: when a child thread wants to wake up
++    // the event loop in the main thread it writes to this pipe
++    WakeUpPipe *m_wakeupPipe;
+ };
+diff -uNr wx-Trunk-bline/include/wx/unix/apptbase.h wx-Trunk/include/wx/unix/apptbase.h
+--- wx-Trunk-bline/include/wx/unix/apptbase.h	2010-06-28 09:21:46.000000000 +0000
++++ wx-Trunk/include/wx/unix/apptbase.h	2013-02-04 05:06:40.584948500 +0000
+@@ -15,6 +15,8 @@
+ struct wxEndProcessData;
+ struct wxExecuteData;
+ class wxFDIOManager;
++class wxFDIOHandler;
++class wxExecuteCallbackPipe;
+ 
+ // ----------------------------------------------------------------------------
+ // wxAppTraits: the Unix version adds extra hooks needed by Unix code
+@@ -33,15 +35,28 @@
+     // wxEXEC_NOEVENTS one which is implemented at the GUI level
+     virtual int WaitForChild(wxExecuteData& execData);
+ 
+-    // integrate the monitoring of the given fd with the port-specific event
+-    // loop: when this fd, which corresponds to a dummy pipe opened between the
+-    // parent and child processes, is closed by the child, the parent is
+-    // notified about this via a call to wxHandleProcessTermination() function
+-    //
+-    // the default implementation uses wxFDIODispatcher and so is suitable for
+-    // the console applications or ports which don't have any specific event
+-    // loop
+-    virtual int AddProcessCallback(wxEndProcessData *data, int fd);
++    /** Common code for GUI and console apps to wait for process
++     *  termination for synchronous execution. */
++    int WaitForChildSync(wxExecuteData& execData);
++
++    /** Wrapper for calling the platform specific, AddProcessCallback, so
++     *  that there is more control over the handling of callbacks that might
++     *  still be occurring after we don't want them anymore, but the fd is
++     *  still closing. */
++    virtual int RegisterProcessCallback(wxExecuteCallbackPipe *data, int fd);
++
++    /** Removes the fd from the hash that keeps track of which
++     *  fds have callbacks.  It also disables the callback.
++     *  Additionally, it will return 'true' if the fd needed to
++     *  be closed in order to disable the callback. */
++    bool UnRegisterProcessCallback(int fd);
++
++    /** Used to find out if we should still be executing the callback for
++     *  this fd. */
++    bool IsFdCallbackEnabled(int fd);
++
++    /** Returns the pipe associated with the fd. */
++    wxExecuteCallbackPipe *GetFdExecutePipe(int fd);
+ 
+ #if wxUSE_SOCKETS
+     // return a pointer to the object which should be used to integrate
+@@ -61,6 +76,19 @@
+     // checks the streams used for redirected IO in execData and returns true
+     // if there is any activity in them
+     bool CheckForRedirectedIO(wxExecuteData& execData);
++
++    // integrate the monitoring of the given fd with the port-specific event
++    // loop: when this fd is written to, then the callback function will
++    // be queued for execution in the event loop.  The callback function
++    // is specificed in data->handler.
++    // 
++    // This should only be called by RegisterProcessCallback().
++    virtual int AddProcessCallback(wxExecuteCallbackPipe *data, int fd);
++
++    virtual bool RemoveProcesscallback(int fd);
++
++    WX_DECLARE_HASH_MAP(int, wxExecuteCallbackPipe *, wxIntegerHash, wxIntegerEqual, FdsWithCallbackHash);
++    FdsWithCallbackHash fdsWithCallbackHash;
+ };
+ 
+ #endif // _WX_UNIX_APPTBASE_H_
+diff -uNr wx-Trunk-bline/include/wx/unix/apptrait.h wx-Trunk/include/wx/unix/apptrait.h
+--- wx-Trunk-bline/include/wx/unix/apptrait.h	2012-11-15 01:30:16.000000000 +0000
++++ wx-Trunk/include/wx/unix/apptrait.h	2013-02-04 05:07:11.290704700 +0000
+@@ -51,9 +51,7 @@
+ public:
+     virtual wxEventLoopBase *CreateEventLoop();
+     virtual int WaitForChild(wxExecuteData& execData);
+-#ifdef wxHAS_GUI_PROCESS_CALLBACKS
+-    virtual int AddProcessCallback(wxEndProcessData *data, int fd);
+-#endif
++
+ #if wxUSE_TIMER
+     virtual wxTimerImpl *CreateTimerImpl(wxTimer *timer);
+ #endif
+@@ -88,6 +86,14 @@
+ #endif
+ 
+ #endif // wxUSE_SOCKETS
++
++protected:
++#ifdef wxHAS_GUI_PROCESS_CALLBACKS
++    virtual int AddProcessCallback(wxExecuteCallbackPipe *data, int fd);
++    virtual bool RemoveProcesscallback(int fd);
++
++#endif
++
+ };
+ 
+ #endif // wxUSE_GUI
+diff -uNr wx-Trunk-bline/include/wx/unix/execute.h wx-Trunk/include/wx/unix/execute.h
+--- wx-Trunk-bline/include/wx/unix/execute.h	2011-03-20 01:30:42.000000000 +0000
++++ wx-Trunk/include/wx/unix/execute.h	2013-02-04 05:07:19.987202100 +0000
+@@ -24,13 +24,24 @@
+         exitcode = -1;
+         process = NULL;
+         async = false;
++        sync_event_loop_ptr = NULL;
++        childProcessTerminatedFlag=false;
+     }
+ 
++    // For async processes:  Handles the termination and notifies the user.
++    // 
++    // For sync processes:  Checks if stdout/stderr and child process have all terminated before
++    // stopping the event loop and informing the application about termination.
++    void CheckHandleTermination();
++
+     int pid;                // pid of the process
+     int tag;                // port dependent value
+     wxProcess *process;     // if !NULL: notified on process termination
+     int exitcode;           // the exit code
+     bool async;             // if true, delete us on process termination
++    wxEventLoopBase *sync_event_loop_ptr;  // Used for ending the event loop
++                            // for synchronous processing.
++    bool childProcessTerminatedFlag;
+ };
+ 
+ // struct in which information is passed from wxExecute() to wxAppTraits
+@@ -51,6 +62,8 @@
+         fdOut =
+         fdErr = wxPipe::INVALID_FD;
+ #endif // wxUSE_STREAMS
++
++        endProcDataPtr=&endProcData;
+     }
+ 
+     // get the FD corresponding to the read end of the process end detection
+@@ -62,7 +75,6 @@
+         return fd;
+     }
+ 
+-
+     // wxExecute() flags
+     int flags;
+ 
+@@ -75,6 +87,16 @@
+     // pipe used for end process detection
+     wxPipe pipeEndProcDetect;
+ 
++    // For synchronous execution, this stores the endProcData on the
++    // stack.
++    wxEndProcessData endProcData;
++
++    // This pointer can be used to reference the endProcData for both
++    // sync and async.  For sync, it points to the element inside of
++    // this wxExecuteData.  For async, it points to an endProcData that
++    // was created on the heap.
++    wxEndProcessData *endProcDataPtr;
++
+ #if wxUSE_STREAMS
+     // the input buffer bufOut is connected to stdout, this is why it is
+     // called bufOut and not bufIn
+@@ -89,6 +111,13 @@
+ 
+ // this function is called when the process terminates from port specific
+ // callback function and is common to all ports (src/unix/utilsunx.cpp)
+-extern WXDLLIMPEXP_BASE void wxHandleProcessTermination(wxEndProcessData *proc_data);
++extern WXDLLIMPEXP_BASE void wxHandleProcessTermination(void *proc_data);
++
++// This function is called in order to check if any of our child processes
++// have terminated, and if so to call their OnTerminate() function.  It will
++// get called as a result of receiving SIGCHLD, it will also get called during
++// the event loop for robustness.  Additionally, for synchronous cases of
++// wxExecute, it will get called during their wait loops.
++extern WXDLLIMPEXP_BASE void wxCheckChildProcessTermination(int sig);
+ 
+ #endif // _WX_UNIX_EXECUTE_H
+diff -uNr wx-Trunk-bline/include/wx/unix/private/executepipe.h wx-Trunk/include/wx/unix/private/executepipe.h
+--- wx-Trunk-bline/include/wx/unix/private/executepipe.h	1970-01-01 00:00:00.000000000 +0000
++++ wx-Trunk/include/wx/unix/private/executepipe.h	2013-02-03 01:38:23.000000000 +0000
+@@ -0,0 +1,127 @@
++///////////////////////////////////////////////////////////////////////////////
++// Name:        wx/private/executepipe.h
++// Purpose:     declares pipes needed to support wxExecute()
++// Author:      Rob Bresalier
++// Created:     2013-01-06
++// RCS-ID:      $Id$
++// Copyright:   (c) 2013 Rob Bresalier
++// Licence:     wxWindows licence
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_PRIVATE_EXECUTEPIPE_H_
++#define _WX_PRIVATE_EXECUTEPIPE_H_
++
++#include "wx/unix/pipe.h"
++#include "wx/private/fdiohandler.h"
++
++/** Base class for 2 types of pipes needed for wxExecute:
++      wxExecuteIOHandler (stdout/stderr handling)
++      WakeUpPipe (for waking up the application when SIGCHLD is caught)
++      */
++class wxExecuteCallbackPipe : public wxFDIOHandler
++{
++public:
++    wxExecuteCallbackPipe()
++    {
++        m_shutDownCallbackFlag=false;
++    }
++
++    /** Empty function because base class wxFDIOHandler() has a pure
++      * virtual method.  We never get OnWriteWaiting() for this class
++      * so we will just have an empty function.*/
++    virtual void OnWriteWaiting() { }
++
++    /** Empty function because base class wxFDIOHandler() has a pure
++      * virtual method.  We never get OnExceptionWaiting() for this class
++      * so we will just have an empty function.*/
++    virtual void OnExceptionWaiting() { }
++
++    virtual bool IsShutDownFlagSet(){return m_shutDownCallbackFlag;}
++
++    virtual void SetShutDownFlag(bool shutDownFlagNew=true){m_shutDownCallbackFlag=shutDownFlagNew;}
++
++private:
++    /** If true, it means to shut down and de-register the
++     *  callback function. */
++    bool m_shutDownCallbackFlag;
++};
++
++class wxStreamTempInputBuffer;
++
++/** This class is used to handle callbacks from the OS that indicate data
++ *  is available on stdout or stderr. */
++class wxExecuteIOHandler : public wxExecuteCallbackPipe
++{
++public:
++    void Init(
++        int flags,
++        int fd,
++        wxProcess *process,
++        wxStreamTempInputBuffer *buf,
++        bool stderrHandlerFlag)
++    {
++        m_flags=flags;
++        m_fd=fd;
++        m_process=process;
++        m_buf=buf;
++        m_stderrHandlerFlag=stderrHandlerFlag;
++    }
++
++    /** called when descriptor is available for non-blocking read. */
++    virtual void OnReadWaiting();
++
++    /** Disables future callbacks. */
++    void DisableCallback();
++
++private:
++    int m_flags;
++    int m_fd;
++    wxProcess *m_process;
++    wxStreamTempInputBuffer *m_buf;
++
++    bool m_stderrHandlerFlag;
++};
++
++/** pipe used for wake up messages: when a child thread wants to wake up
++  * the event loop in the main thread it writes to this pipe, which will
++  * cause wxAppConsole::OnWakeUp() to get called.  For support of 
++  * synchronous wxExecute(), the OnWakeUp() will check for any signal 
++  * handlers that were invoked. */ 
++class WakeUpPipe : public wxExecuteCallbackPipe
++{
++public:
++    /** default ctor does nothing, call Create() to really initialize the
++      * object.*/
++    WakeUpPipe() : m_pipeIsEmpty(true) {}
++
++    virtual bool Create();
++
++    /** This method should only be called from a signal handler, where is won't
++        get interrupted. */
++    virtual void WakeUpMTUnsafe();
++
++    /** This method can be called from anythread, it is multi-thread
++      * safe. */
++    virtual void WakeUp();
++
++    virtual int GetReadFd() { return m_pipe[wxPipe::Read]; }
++
++    /** This method is invoked in the event loop as a result of injecting
++     *  data into the wakeup pipe in the signal handler. */
++    virtual void OnReadWaiting();
++
++private:
++    wxPipe m_pipe;
++
++    // Protects access to m_pipeIsEmpty.
++    wxCriticalSection m_pipeLock;
++
++    // This flag is set to true after writing to the pipe and reset to false
++    // after reading from it in the main thread. Having it allows us to avoid
++    // overflowing the pipe with too many writes if the main thread can't keep
++    // up with reading from it.
++    bool m_pipeIsEmpty;
++};
++
++#endif // _WX_PRIVATE_EXECUTEPIPE_H_
++
+diff -uNr wx-Trunk-bline/include/wx/wfstream.h wx-Trunk/include/wx/wfstream.h
+--- wx-Trunk-bline/include/wx/wfstream.h	2010-06-28 09:21:54.000000000 +0000
++++ wx-Trunk/include/wx/wfstream.h	2013-02-04 05:08:58.180818500 +0000
+@@ -42,6 +42,16 @@
+     virtual bool IsOk() const;
+     bool IsSeekable() const { return m_file->GetKind() == wxFILE_KIND_DISK; }
+ 
++    /** In OSX, the only way to stop a callback on a file handle (at EOF) is to close the
++     *  file.  However, that needs to be done outside of this class.  By calling
++     *  InformClosed(), this class will be made aware that the file was closed so
++     *  that it can act accordingly - such as to not read from or close the
++     *  file descriptor after it knows the FD was closed. */
++    virtual void InformClosed() 
++    {
++        m_file->InformClosed();
++    };
++
+ protected:
+     wxFileInputStream();
+ 
+diff -uNr wx-Trunk-bline/interface/wx/file.h wx-Trunk/interface/wx/file.h
+--- wx-Trunk-bline/interface/wx/file.h	2012-10-01 00:30:13.000000000 +0000
++++ wx-Trunk/interface/wx/file.h	2013-02-04 05:09:03.348114100 +0000
+@@ -279,6 +279,20 @@
+     */
+     bool Close();
+ 
++    /** In OSX, the only way to stop a callback on a file handle (at EOF) is to close the
++     *  file.  However, that needs to be done outside of wxFile.  By calling
++     *  InformClosed(), wxFile will be made aware that the file was closed so
++     *  that it can act accordingly - such as to not read from or close the
++     *  file descriptor after it knows the FD was closed. */
++    void InformClosed();
++
++    /** The wxFileInputStream::IsOk() function decides that the wxFileInputStream
++     *  is OK if the file is open, or if the file was opened, but it was informed closed.
++     *  The latter case of when the file was already closed occurs in OSX where we
++     *  need to close the file handler in order to disable callbacks on that file handle
++     *  after we have reached EOF. */
++    bool WasInformedClosed(){return m_was_informed_closed;};
++
+     /**
+         Creates a file for writing.
+ 
+diff -uNr wx-Trunk-bline/interface/wx/process.h wx-Trunk/interface/wx/process.h
+--- wx-Trunk-bline/interface/wx/process.h	2013-01-21 01:30:17.000000000 +0000
++++ wx-Trunk/interface/wx/process.h	2013-02-04 05:09:06.619301200 +0000
+@@ -170,6 +170,32 @@
+     */
+     bool IsInputAvailable() const;
+ 
++    /** This can be overridden by the user if they want to be notified of
++     *  when input is available from the stdout of the child process.
++     *  
++     *  The notification only happens if 'notify_flag' was set to 'true'
++     *  in the call to Redirect().
++     *  
++     *  This callback is only supported in unix based ports such as wxOSX
++     *  and wxGTK.  It is currently not supported in Windows. */
++    virtual void OnInputAvailable(){};
++
++    /** This can be overridden by the user if they want to be notified of
++     *  when input is available from the stderr of the child
++     *  process.
++     *  
++     *  The notification only happens if 'notify_flag' was set to 'true'
++     *  in the call to Redirect().
++     *  
++     *  This callback is only supported in unix based ports such as wxOSX
++     *  and wxGTK.  It is currently not supported in Windows. */
++    virtual void OnErrorAvailable(){};
++
++    /** Can be used to determine if the application will be notified about
++     *  the availability of data on stdout or stderr, i.e. get the
++     *  callbacks to OnInputAvailable() and OnErrorAvailable(). */
++    bool IsNotifyEnabled() {return m_notify;}
++
+     /**
+         Returns @true if the child process standard output stream is opened.
+     */
+@@ -241,8 +267,15 @@
+         ::wxExecute() will try to open a couple of pipes to catch the subprocess stdio.
+         The caught input stream is returned by GetOutputStream() as a non-seekable stream.
+         The caught output stream is returned by GetInputStream() as a non-seekable stream.
++        
++        @param notify_flag
++            If this is set to 'true', then when data is available on stdout then
++            OnInputAvailable() will get called, and when data is available on stderr
++            then OnErrorAvailable() will get called.  These callbacks are currently
++            only supported in Unix ports, such as wxOSX and wxGTK.  These callbacks
++            are not supported in Windows.
+     */
+-    void Redirect();
++    void Redirect(bool notify_flag=false);
+ 
+     /**
+         Sets the priority of the process, between 0 (lowest) and 100 (highest).
+diff -uNr wx-Trunk-bline/interface/wx/stream.h wx-Trunk/interface/wx/stream.h
+--- wx-Trunk-bline/interface/wx/stream.h	2012-04-17 00:30:33.000000000 +0000
++++ wx-Trunk/interface/wx/stream.h	2013-02-04 05:09:09.585470800 +0000
+@@ -677,6 +677,13 @@
+     */
+     bool Ungetch(char c);
+ 
++    /** In OSX, the only way to stop a callback on a file handle (at EOF) is to close the
++     *  file.  However, that needs to be done outside of this class.  By calling
++     *  InformClosed(), this class will be made aware that the file was closed so
++     *  that it can act accordingly - such as to not read from or close the
++     *  file descriptor after it knows the FD was closed. */
++    virtual void InformClosed();
++
+ protected:
+ 
+     /**
+diff -uNr wx-Trunk-bline/interface/wx/wfstream.h wx-Trunk/interface/wx/wfstream.h
+--- wx-Trunk-bline/interface/wx/wfstream.h	2010-07-14 00:30:30.000000000 +0000
++++ wx-Trunk/interface/wx/wfstream.h	2013-02-04 05:09:15.006780900 +0000
+@@ -192,6 +192,13 @@
+     */
+     virtual ~wxFileInputStream();
+ 
++    /** In OSX, the only way to stop a callback on a file handle (at EOF) is to close the
++     *  file.  However, that needs to be done outside of this class.  By calling
++     *  InformClosed(), this class will be made aware that the file was closed so
++     *  that it can act accordingly - such as to not read from or close the
++     *  file descriptor after it knows the FD was closed. */
++    virtual void InformClosed() 
++
+     /**
+         Returns @true if the stream is initialized and ready.
+     */
+diff -uNr wx-Trunk-bline/src/common/execcmn.cpp wx-Trunk/src/common/execcmn.cpp
+--- wx-Trunk-bline/src/common/execcmn.cpp	2011-03-20 01:30:37.000000000 +0000
++++ wx-Trunk/src/common/execcmn.cpp	2013-02-04 05:11:06.035131400 +0000
+@@ -56,6 +56,13 @@
+     // return true if anything was done
+     bool Update();
+ 
++    /** We need a way to determine if the stream embedded in this object has
++     *  reached EOF during the callback functions that occur when we have
++     *  data on stdout/stderr.  If we have determined we have hit EOF, then
++     *  the callback gets disabled so that we don't keep getting
++     *  it. */
++    bool Eof();
++
+     ~wxStreamTempInputBuffer();
+ 
+ private:
+@@ -112,6 +119,18 @@
+     return true;
+ }
+ 
++bool wxStreamTempInputBuffer::Eof()
++{
++    if (m_stream!=NULL)
++    {
++        return m_stream->Eof();
++    }
++    else
++    {   // If stream was deleted, act as if we hit the Eof.
++        return true;
++    }
++}
++
+ inline
+ wxStreamTempInputBuffer::~wxStreamTempInputBuffer()
+ {
+diff -uNr wx-Trunk-bline/src/common/file.cpp wx-Trunk/src/common/file.cpp
+--- wx-Trunk-bline/src/common/file.cpp	2012-12-08 01:30:31.000000000 +0000
++++ wx-Trunk/src/common/file.cpp	2013-02-04 05:11:11.259430200 +0000
+@@ -179,6 +179,7 @@
+ {
+     m_fd = fd_invalid;
+     m_lasterror = 0;
++    m_was_informed_closed=false;
+ 
+     Open(fileName, mode);
+ }
+@@ -267,6 +268,8 @@
+     }
+ 
+     Attach(fildes);
++    m_was_informed_closed=false;
++
+     return true;
+ }
+ 
+@@ -287,6 +290,12 @@
+     return true;
+ }
+ 
++void wxFile::InformClosed()
++{
++    m_fd = fd_invalid;
++    m_was_informed_closed=true;
++}
++
+ // ----------------------------------------------------------------------------
+ // read/write
+ // ----------------------------------------------------------------------------
+diff -uNr wx-Trunk-bline/src/common/process.cpp wx-Trunk/src/common/process.cpp
+--- wx-Trunk-bline/src/common/process.cpp	2013-01-21 01:30:15.000000000 +0000
++++ wx-Trunk/src/common/process.cpp	2013-02-04 05:11:15.591678000 +0000
+@@ -26,6 +26,10 @@
+ 
+ #include "wx/process.h"
+ 
++#ifdef __UNIX__
++#include "wx/unix/private/executepipe.h"
++#endif
++
+ // ----------------------------------------------------------------------------
+ // event tables and such
+ // ----------------------------------------------------------------------------
+@@ -52,11 +56,20 @@
+     m_pid        = 0;
+     m_priority   = wxPRIORITY_DEFAULT;
+     m_redirect   = (flags & wxPROCESS_REDIRECT) != 0;
++    m_notify     = false;
+ 
+ #if wxUSE_STREAMS
+     m_inputStream  = NULL;
+     m_errorStream  = NULL;
+     m_outputStream = NULL;
++
++    #ifndef __UNIX__
++    m_stdoutHandler=NULL;
++    m_stderrHandler=NULL;
++    #else
++    m_stdoutHandler=new wxExecuteIOHandler();
++    m_stderrHandler=new wxExecuteIOHandler();
++    #endif
+ #endif // wxUSE_STREAMS
+ }
+ 
+@@ -88,7 +101,10 @@
+     delete m_inputStream;
+     delete m_errorStream;
+     delete m_outputStream;
++    delete m_stdoutHandler;
++    delete m_stderrHandler;
+ #endif // wxUSE_STREAMS
++
+ }
+ 
+ void wxProcess::OnTerminate(int pid, int status)
+diff -uNr wx-Trunk-bline/src/common/utilscmn.cpp wx-Trunk/src/common/utilscmn.cpp
+--- wx-Trunk-bline/src/common/utilscmn.cpp	2012-12-01 01:30:22.000000000 +0000
++++ wx-Trunk/src/common/utilscmn.cpp	2013-02-04 05:11:19.369894100 +0000
+@@ -666,7 +666,10 @@
+ {
+     // create a wxProcess which will capture the output
+     wxProcess *process = new wxProcess;
+-    process->Redirect();
++
++    // Pass 'true' to Redirect so that OnInputAvailable and OnErrorAvailable
++    // will get called when data is available from the child process.
++    process->Redirect(true);
+ 
+     long rc = wxExecute(command, wxEXEC_SYNC | flags, process, env);
+ 
+diff -uNr wx-Trunk-bline/src/common/wfstream.cpp wx-Trunk/src/common/wfstream.cpp
+--- wx-Trunk-bline/src/common/wfstream.cpp	2011-03-20 01:30:37.000000000 +0000
++++ wx-Trunk/src/common/wfstream.cpp	2013-02-04 05:11:22.738086700 +0000
+@@ -73,7 +73,21 @@
+ 
+ size_t wxFileInputStream::OnSysRead(void *buffer, size_t size)
+ {
+-    ssize_t ret = m_file->Read(buffer, size);
++    ssize_t ret;
++
++    // Check if we had to close the file in order to disable the
++    // callback.
++    if (!(m_file->WasInformedClosed()))
++    {
++        ret = m_file->Read(buffer, size);
++    }
++    else
++    {   // When the stream is used in wxExecute, the file descriptor may
++        // get closed when disabling the callback.  If the file did get closed,
++        // then don't attempt to read from it anymore, and just register that
++        // we have hit the EOF.
++        ret = 0;
++    }
+ 
+     // NB: we can't use a switch here because HP-UX CC doesn't allow
+     //     switching over long long (which size_t is in 64bit mode)
+@@ -109,7 +123,7 @@
+ 
+ bool wxFileInputStream::IsOk() const
+ {
+-    return wxInputStream::IsOk() && m_file->IsOpened();
++    return wxInputStream::IsOk() && (m_file->WasInformedClosed() || m_file->IsOpened());
+ }
+ 
+ // ----------------------------------------------------------------------------
+diff -uNr wx-Trunk-bline/src/gtk/utilsgtk.cpp wx-Trunk/src/gtk/utilsgtk.cpp
+--- wx-Trunk-bline/src/gtk/utilsgtk.cpp	2013-01-04 01:30:26.000000000 +0000
++++ wx-Trunk/src/gtk/utilsgtk.cpp	2013-02-04 05:11:27.289347000 +0000
+@@ -193,30 +193,49 @@
+ #ifdef __UNIX__
+ 
+ extern "C" {
+-static gboolean EndProcessDetector(GIOChannel* source, GIOCondition, void* data)
++static bool GTK_RemoveProcessCallback(int fd)
+ {
+-    wxEndProcessData * const
+-        proc_data = static_cast<wxEndProcessData *>(data);
++    close(fd);
++    return true;
++}
++
++static gboolean GTK_OnReadWaiting(GIOChannel* source, GIOCondition WXUNUSED(cond), void* data)
++{
++    int fd=g_io_channel_unix_get_fd(source);
+ 
+-    // child exited, end waiting
+-    close(g_io_channel_unix_get_fd(source));
++    int result=wxOnReadWaiting(data,fd);
+ 
+-    wxHandleProcessTermination(proc_data);
++    if (result!=wxOnReadWaiting_DONOTHING)
++    {
++        if (result==wxOnReadWaiting_INFORM_CALLER_AND_DEREGISTER)
++        {
++            GTK_RemoveProcessCallback(fd);
++        }
++
++        // Don't call us again!
++        return false;
++    }
+ 
+-    // don't call us again!
+-    return false;
++    // DO call us again!
++    return true;
+ }
++
+ }
+ 
+-int wxGUIAppTraits::AddProcessCallback(wxEndProcessData *proc_data, int fd)
++int wxGUIAppTraits::AddProcessCallback(wxExecuteCallbackPipe *proc_data, int fd)
+ {
+     GIOChannel* channel = g_io_channel_unix_new(fd);
+     GIOCondition cond = GIOCondition(G_IO_IN | G_IO_HUP | G_IO_ERR);
+-    unsigned id = g_io_add_watch(channel, cond, EndProcessDetector, proc_data);
++    unsigned id = g_io_add_watch(channel, cond, GTK_OnReadWaiting, proc_data);
+     g_io_channel_unref(channel);
+     return int(id);
+ }
+ 
++bool wxGUIAppTraits::RemoveProcesscallback(int fd)
++{
++    return GTK_RemoveProcessCallback(fd);
++}
++
+ #endif // __UNIX__
+ 
+ // ----------------------------------------------------------------------------
+diff -uNr wx-Trunk-bline/src/gtk1/utilsgtk.cpp wx-Trunk/src/gtk1/utilsgtk.cpp
+--- wx-Trunk-bline/src/gtk1/utilsgtk.cpp	2012-11-15 01:30:15.000000000 +0000
++++ wx-Trunk/src/gtk1/utilsgtk.cpp	2013-02-04 05:11:30.620537600 +0000
+@@ -126,34 +126,61 @@
+ // subprocess routines
+ // ----------------------------------------------------------------------------
+ 
++WX_DECLARE_HASH_MAP(int, int, wxIntegerHash, wxIntegerEqual, OutstandingCallbackTag_t);
++static OutstandingCallbackTag_t OutstandingCallbackTag;
++
+ extern "C" {
+ static
+-void GTK_EndProcessDetector(gpointer data, gint source,
++void GTK1_EndProcessDetector(gpointer data, gint source,
+                             GdkInputCondition WXUNUSED(condition) )
+ {
+-    wxEndProcessData * const
+-        proc_data = static_cast<wxEndProcessData *>(data);
+-
+-    // child exited, end waiting
+-    close(source);
++    void * const
++        proc_data = static_cast<void *>(data);
+ 
+-    // don't call us again!
+-    gdk_input_remove(proc_data->tag);
++    int result=wxOnReadWaiting(proc_data,fd);
+ 
+-    wxHandleProcessTermination(proc_data);
+-}
++    if (result==wxOnReadWaiting_INFORM_CALLER_AND_DEREGISTER)
++    {
++        // child exited, end waiting
++        close(source);
++
++        // don't call us again!
++        gdk_input_remove(proc_data->tag);
++    }
+ }
+ 
+-int wxGUIAppTraits::AddProcessCallback(wxEndProcessData *proc_data, int fd)
++int wxGUIAppTraits::AddProcessCallback(wxExecuteCallbackPipe *proc_data, int fd)
+ {
+     int tag = gdk_input_add(fd,
+                             GDK_INPUT_READ,
+-                            GTK_EndProcessDetector,
++                            GTK1_EndProcessDetector,
+                             (gpointer)proc_data);
+ 
++    OutstandingCallbackTag[fd]=tag;
++
+     return tag;
+ }
+ 
++bool wxGUIAppTraits::RemoveProcesscallback(int fd)
++{
++    // child exited, end waiting
++
++    // Don't close the fd because wxProcess will close it in its
++    // destructor.  Also we don't want to close it so that we can
++    // keep using the output/error streams in the wxProcess.
++    // close(fd);
++
++    if(OutstandingCallbackTag.find(fd)!=OutstandingCallbackTag.end())
++    {
++       int tag=OutstandingCallbackTag[fd];
++       // don't call us again!
++       gdk_input_remove(tag);
++    }
++
++    /* The fd was not closed, inform the caller. */
++    return false;
++}
++
+ #if wxUSE_TIMER
+ 
+ wxTimerImpl* wxGUIAppTraits::CreateTimerImpl(wxTimer *timer)
+diff -uNr wx-Trunk-bline/src/motif/utils.cpp wx-Trunk/src/motif/utils.cpp
+--- wx-Trunk-bline/src/motif/utils.cpp	2012-06-18 00:30:16.000000000 +0000
++++ wx-Trunk/src/motif/utils.cpp	2013-02-04 05:11:34.373752200 +0000
+@@ -83,30 +83,47 @@
+ // wxExecute stuff
+ // ----------------------------------------------------------------------------
+ 
+-static void xt_notify_end_process(XtPointer data, int *WXUNUSED(fid),
++WX_DECLARE_HASH_MAP(int, int, wxIntegerHash, wxIntegerEqual, OutstandingCallbackTag_t);
++static OutstandingCallbackTag_t OutstandingCallbackTag;
++
++static void xt_OnReadWaiting(XtPointer data, int *fid,
+                                   XtInputId *id)
+ {
+-    wxEndProcessData *proc_data = (wxEndProcessData *)data;
+-
+-    wxHandleProcessTermination(proc_data);
+-
+-    // VZ: I think they should be the same...
+-    wxASSERT( (int)*id == proc_data->tag );
+-
+-    XtRemoveInput(*id);
++    int result=wxOnReadWaiting(data,*fid)
++    if (result==wxOnReadWaiting_INFORM_CALLER_AND_DEREGISTER)
++    {
++        // Prevent from getting called again.
++        XtRemoveInput(*id);
++    }
+ }
+ 
+-int wxGUIAppTraits::AddProcessCallback(wxEndProcessData *proc_data, int fd)
++int wxGUIAppTraits::AddProcessCallback(wxExecuteCallbackPipe *proc_data, int fd)
+ {
+     XtInputId id = XtAppAddInput((XtAppContext) wxTheApp->GetAppContext(),
+                                  fd,
+                                  (XtPointer *) XtInputReadMask,
+-                                 (XtInputCallbackProc) xt_notify_end_process,
++                                 (XtInputCallbackProc) xt_OnReadWaiting,
+                                  (XtPointer) proc_data);
+ 
++    OutstandingCallbackTag[fd]=id;
++
+     return (int)id;
+ }
+ 
++bool wxGUIAppTraits::RemoveProcesscallback(int fd)
++{
++   if(OutstandingCallbackTag.find(fd)!=OutstandingCallbackTag.end())
++   {
++      int tag=OutstandingCallbackTag[fd];
++      // don't call us again!
++      XtRemoveInput(tag);
++      OutstandingCallbackTag.erase(fd);
++   }
++
++   /* fd is not closed to disable the callback. */
++   return false;
++}
++
+ // ----------------------------------------------------------------------------
+ // misc
+ // ----------------------------------------------------------------------------
+diff -uNr wx-Trunk-bline/src/osx/cocoa/evtloop.mm wx-Trunk/src/osx/cocoa/evtloop.mm
+--- wx-Trunk-bline/src/osx/cocoa/evtloop.mm	2012-05-03 00:30:29.000000000 +0000
++++ wx-Trunk/src/osx/cocoa/evtloop.mm	2013-02-04 05:11:39.374038200 +0000
+@@ -110,6 +110,7 @@
+     m_modalNestedLevel = 0;
+     m_modalWindow = NULL;
+     m_osxLowLevelWakeUp = false;
++    m_stopCalled = false;
+ }
+ 
+ wxGUIEventLoop::~wxGUIEventLoop()
+@@ -243,11 +244,26 @@
+ void wxGUIEventLoop::DoRun()
+ {
+     wxMacAutoreleasePool autoreleasepool;
+-    [NSApp run];
++
++    // This loop is necessary because of the following scenario.
++    // The main event loop is executing, and it triggers an event
++    // that starts a temporary event loop (wxGUIEventLoop::Run()).
++    // When the temporary event loop is ended, DoStop() is called.
++    // This calls [NSApp stop:0].  This call to stop not only ends
++    // the temporary event loop, but it also ends the main event loop.
++    // To have the main event loop continue, we need to call [NSApp run]
++    // again, otherwise the application will exit.  We should only exit
++    // this event loop of DoStop() was called for it.
++    while (!m_stopCalled)
++    {
++      [NSApp run];
++    }
+ }
+ 
+ void wxGUIEventLoop::DoStop()
+ {
++    m_stopCalled=true;
++
+     // only calling stop: is not enough when called from a runloop-observer,
+     // therefore add a dummy event, to make sure the runloop gets another round
+     [NSApp stop:0];
+diff -uNr wx-Trunk-bline/src/osx/core/utilsexc_cf.cpp wx-Trunk/src/osx/core/utilsexc_cf.cpp
+--- wx-Trunk-bline/src/osx/core/utilsexc_cf.cpp	2011-03-20 01:30:38.000000000 +0000
++++ wx-Trunk/src/osx/core/utilsexc_cf.cpp	2013-02-04 05:11:47.494502700 +0000
+@@ -26,32 +26,38 @@
+ 
+ #include <CoreFoundation/CFSocket.h>
+ 
++WX_DECLARE_HASH_MAP(int, CFSocketRef, wxIntegerHash, wxIntegerEqual, CFSocketRefOutstandingHash_t);
++static CFSocketRefOutstandingHash_t CFSocketRefOutstandingHash;
++
+ /*!
+     Called due to source signal detected by the CFRunLoop.
+     This is nearly identical to the wxGTK equivalent.
+  */
+-extern "C" void WXCF_EndProcessDetector(CFSocketRef s,
++extern "C" void WXCF_OnReadWaiting(CFSocketRef s,
+                                         CFSocketCallBackType WXUNUSED(callbackType),
+                                         CFDataRef WXUNUSED(address),
+                                         void const *WXUNUSED(data),
+                                         void *info)
+ {
+-    /*
+-        Either our pipe was closed or the process ended successfully.  Either way,
+-        we're done.  It's not if waitpid is going to magically succeed when
+-        we get fired again.  CFSocketInvalidate closes the fd for us and also
+-        invalidates the run loop source for us which should cause it to
+-        release the CFSocket (thus causing it to be deallocated) and remove
+-        itself from the runloop which should release it and cause it to also
+-        be deallocated.  Of course, it's possible the RunLoop hangs onto
+-        one or both of them by retaining/releasing them within its stack
+-        frame.  However, that shouldn't be depended on.  Assume that s is
+-        deallocated due to the following call.
+-     */
+-    CFSocketInvalidate(s);
++    int result=wxOnReadWaiting(info,CFSocketGetNative(s));
+ 
+-    // Now tell wx that the process has ended.
+-    wxHandleProcessTermination(static_cast<wxEndProcessData *>(info));
++    if (result==wxOnReadWaiting_INFORM_CALLER_AND_DEREGISTER)
++    {
++       /*
++           The wxOnReadWaiting() function has informed us that we need
++           to disable future callbacks.
++
++           CFSocketInvalidate closes the fd for us and also
++           invalidates the run loop source for us which should cause it to
++           release the CFSocket (thus causing it to be deallocated) and remove
++           itself from the runloop which should release it and cause it to also
++           be deallocated.  Of course, it's possible the RunLoop hangs onto
++           one or both of them by retaining/releasing them within its stack
++           frame.  However, that shouldn't be depended on.  Assume that s is
++           deallocated due to the following call.
++        */
++        CFSocketInvalidate(s);
++    }
+ }
+ 
+ /*!
+@@ -62,7 +68,7 @@
+     apparently be used with CFSocket so long as you only tell CFSocket
+     to do things with it that would be valid for a non-socket fd.
+  */
+-int wxGUIAppTraits::AddProcessCallback(wxEndProcessData *proc_data, int fd)
++int wxGUIAppTraits::AddProcessCallback(wxExecuteCallbackPipe *proc_data, int fd)
+ {
+     static int s_last_tag = 0;
+     CFSocketContext context =
+@@ -72,7 +78,7 @@
+     ,   NULL
+     ,   NULL
+     };
+-    CFSocketRef cfSocket = CFSocketCreateWithNative(kCFAllocatorDefault,fd,kCFSocketReadCallBack,&WXCF_EndProcessDetector,&context);
++    CFSocketRef cfSocket = CFSocketCreateWithNative(kCFAllocatorDefault,fd,kCFSocketReadCallBack,&WXCF_OnReadWaiting,&context);
+     if(cfSocket == NULL)
+     {
+         wxLogError(wxT("Failed to create socket for end process detection"));
+@@ -87,9 +93,9 @@
+         CFRelease(cfSocket);
+         return 0;
+     }
+-    // Now that the run loop source has the socket retained and we no longer
+-    // need to refer to it within this method, we can release it.
+-    CFRelease(cfSocket);
++
++    // Save the socket so that we can remove it later if asked to.
++    CFSocketRefOutstandingHash[fd]=cfSocket;
+ 
+     CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, kCFRunLoopCommonModes);
+     // Now that the run loop has the source retained we can release it.
+@@ -104,6 +110,19 @@
+     return ++s_last_tag;
+ }
+ 
++bool wxGUIAppTraits::RemoveProcesscallback(int fd)
++{
++    if(CFSocketRefOutstandingHash.find(fd)!=CFSocketRefOutstandingHash.end())
++    {
++       CFSocketRef cfSocket=CFSocketRefOutstandingHash[fd];
++       CFSocketInvalidate(cfSocket);
++       CFSocketRefOutstandingHash.erase(fd);
++    }
++
++    /* fd needed to be closed in order to disable the callback. */
++    return true;
++}
++
+ /////////////////////////////////////////////////////////////////////////////
+ 
+ // NOTE: This doesn't really belong here but this was a handy file to
+diff -uNr wx-Trunk-bline/src/unix/apptraits.cpp wx-Trunk/src/unix/apptraits.cpp
+--- wx-Trunk-bline/src/unix/apptraits.cpp	2008-03-24 01:30:11.000000000 +0000
++++ wx-Trunk/src/unix/apptraits.cpp	2013-02-04 05:11:57.305063800 +0000
+@@ -30,6 +30,7 @@
+ #endif // WX_PRECOMP
+ 
+ #include "wx/unix/execute.h"
++#include "wx/evtloop.h"
+ 
+ // ============================================================================
+ // implementation
+@@ -45,39 +46,19 @@
+         return wxAppTraits::WaitForChild(execData);
+     }
+ 
+-    // here we're dealing with the case of synchronous execution when we want
+-    // to process the GUI events while waiting for the child termination
+-
+-    wxEndProcessData endProcData;
+-    endProcData.pid = execData.pid;
+-    endProcData.tag = AddProcessCallback
+-                      (
+-                         &endProcData,
+-                         execData.GetEndProcReadFD()
+-                      );
+-    endProcData.async = false;
+-
+-
+     // prepare to wait for the child termination: show to the user that we're
+     // busy and refuse all input unless explicitly told otherwise
+     wxBusyCursor bc;
+     wxWindowDisabler wd(!(flags & wxEXEC_NODISABLE));
+ 
+-    // endProcData.pid will be set to 0 from wxHandleProcessTermination() when
+-    // the process terminates
+-    while ( endProcData.pid != 0 )
+-    {
+-        // don't consume 100% of the CPU while we're sitting in this
+-        // loop
+-        if ( !CheckForRedirectedIO(execData) )
+-            wxMilliSleep(1);
+-
+-        // give the toolkit a chance to call wxHandleProcessTermination() here
+-        // and also repaint the GUI and handle other accumulated events
+-        wxYield();
+-    }
+-
+-    return endProcData.exitcode;
++    // Allocate an event loop that will be used to wait for the process 
++    // to terminate, will handle stdout, stderr, and any other events.
++    // 
++    // The event loop will get started in common (to console and GUI) code 
++    // in WaitForChildSync
++    wxGUIEventLoop loop;
++    execData.endProcData.sync_event_loop_ptr=&loop;
++    
++    return WaitForChildSync(execData);
+ }
+ 
+-
+diff -uNr wx-Trunk-bline/src/unix/appunix.cpp wx-Trunk/src/unix/appunix.cpp
+--- wx-Trunk-bline/src/unix/appunix.cpp	2011-03-20 01:30:34.000000000 +0000
++++ wx-Trunk/src/unix/appunix.cpp	2013-02-04 05:12:00.522247800 +0000
+@@ -20,15 +20,33 @@
+ #endif
+ 
+ #include "wx/evtloop.h"
++#include "wx/unix/private/executepipe.h"
++#include "wx/private/fdiodispatcher.h"
++#include "wx/apptrait.h"
++#include "wx/unix/apptbase.h"
+ 
+ #include <signal.h>
+ #include <unistd.h>
++#include <errno.h>
+ 
+ #ifndef SA_RESTART
+     // don't use for systems which don't define it (at least VMS and QNX)
+     #define SA_RESTART 0
+ #endif
+ 
++wxAppConsole::wxAppConsole()
++{
++    m_wakeupPipe=NULL;
++}
++
++wxAppConsole::~wxAppConsole()
++{
++    if (m_wakeupPipe!=NULL)
++    {
++        delete m_wakeupPipe;
++    }
++}
++
+ // use unusual names for arg[cv] to avoid clashes with wxApp members with the
+ // same names
+ bool wxAppConsole::Initialize(int& argc_, wxChar** argv_)
+@@ -41,16 +59,100 @@
+     return true;
+ }
+ 
++/* This is the actual signal interrupt called by the OS.
++   We're very limited as to what we can do in this function because
++   it is literally interrupting our application code.  All we should
++   be doing is waking registering the signal that we received and
++   triggering the wakeup of the application so that it can process
++   this information at the right time.
++ 
++   This function is a static function of the wxAppConsole class, so
++   we will get a pointer to the app and then call the Wakeup() function.
++*/
+ void wxAppConsole::HandleSignal(int signal)
+ {
+     wxAppConsole * const app = wxTheApp;
+     if ( !app )
+         return;
+ 
++    // Register the signal that is caught.
+     sigaddset(&(app->m_signalsCaught), signal);
+-    app->WakeUpIdle();
++
++    // Wake up the application for handling the signal.
++    // Use multi-thread unsafe function because we can't
++    // block in the signal interrupt - it can cause a deadlock.
++    app->WakeUpMTUnsafe();
++}
++
++void wxAppConsole::WakeUpMTUnsafe()
++{
++    if (m_wakeupPipe!=NULL)
++    {
++        m_wakeupPipe->WakeUpMTUnsafe();
++    }
++}
++
++void wxAppConsole::WakeUp()
++{
++    if (m_wakeupPipe!=NULL)
++    {
++        m_wakeupPipe->WakeUp();
++    }
++}
++
++void wxAppConsole::OnWakeUp()
++{
++    /* Check for user signal handlers that need to get processed. */
++    CheckSignal();
+ }
+ 
++extern "C" 
++{
++
++/* See include/unix/app.h for documentation of this function. */
++int wxOnReadWaiting(void *data, int fd)
++{
++    wxExecuteCallbackPipe *expected_data_ptr;
++
++    if (wxTheApp->GetTraits()->IsFdCallbackEnabled(fd))
++    {
++        wxExecuteCallbackPipe *pipe_handler=(wxExecuteCallbackPipe *) data;
++
++        expected_data_ptr=wxTheApp->GetTraits()->GetFdExecutePipe(fd);
++        if (data!=expected_data_ptr)
++        {
++            wxASSERT_MSG(0,"Unexpected callback in wxOnReadWaiting()!");
++
++            // This is a leftover unprocessed callback.  This should never
++            // happen because we now wait to end the temporary event
++            // loop for synchrounous wxExecute() only when 3 events have
++            // occurred:  stdout has reached EOF, stderr has reached EOF,
++            // and we have observed the child process termination.
++            // 
++            // This code is kept in here for safety reasons in case we get
++            // a callback that we were not expecting.
++            return wxOnReadWaiting_INFORM_CALLER_ONLY;
++        }
++
++        // Execute callback function.
++        pipe_handler->OnReadWaiting();
++
++        // Check if we should be shutting down the callback.
++        if (pipe_handler->IsShutDownFlagSet())
++        {
++            wxTheApp->GetTraits()->UnRegisterProcessCallback(fd);
++            return wxOnReadWaiting_INFORM_CALLER_ONLY;  // Don't call again.
++        }
++        return wxOnReadWaiting_DONOTHING;  // Do call again.
++    }
++
++    // We should not have been here in the first place, inform the caller
++    // to deregister any more callbacks.
++    return wxOnReadWaiting_INFORM_CALLER_AND_DEREGISTER;    
++}
++
++} // extern "C"
++
+ void wxAppConsole::CheckSignal()
+ {
+     for ( SignalHandlerHash::iterator it = m_signalHandlerHash.begin();
+@@ -80,6 +182,21 @@
+     const bool install = (SignalHandler_t)handler != SIG_DFL &&
+                          (SignalHandler_t)handler != SIG_IGN;
+ 
++    if (m_wakeupPipe==NULL) 
++    {
++        // Configure the pipe that the signal handler will use to
++        // cause the event loop to call wxAppConsole::CheckSignal().
++        m_wakeupPipe = new WakeUpPipe();
++        if ( !m_wakeupPipe->Create() )
++        {
++            wxDELETE(m_wakeupPipe);
++            return false;
++        }
++
++        // Setup the callback for the wake-up pipe.
++        this->GetTraits()->RegisterProcessCallback(m_wakeupPipe,m_wakeupPipe->GetReadFd());
++    }
++
+     struct sigaction sa;
+     memset(&sa, 0, sizeof(sa));
+     sa.sa_handler = (SignalHandler_t)&wxAppConsole::HandleSignal;
+@@ -99,3 +216,4 @@
+     return true;
+ }
+ 
++
+diff -uNr wx-Trunk-bline/src/unix/utilsunx.cpp wx-Trunk/src/unix/utilsunx.cpp
+--- wx-Trunk-bline/src/unix/utilsunx.cpp	2013-01-22 01:30:22.000000000 +0000
++++ wx-Trunk/src/unix/utilsunx.cpp	2013-02-04 05:12:19.832352300 +0000
+@@ -52,6 +52,9 @@
+ #include "wx/private/fdiodispatcher.h"
+ #endif
+ 
++#include "wx/unix/private/executepipe.h"
++#include "wx/evtloop.h"
++
+ #include <pwd.h>
+ #include <sys/wait.h>       // waitpid()
+ 
+@@ -136,6 +139,10 @@
+     #include <sys/resource.h>   // for setpriority()
+ #endif
+ 
++// Keep track of open PIDs
++WX_DECLARE_HASH_MAP(int, wxEndProcessData *, wxIntegerHash, wxIntegerEqual, ChildProcessesOpenedHash);
++static ChildProcessesOpenedHash childProcessesOpenedHash;
++
+ // ----------------------------------------------------------------------------
+ // conditional compilation
+ // ----------------------------------------------------------------------------
+@@ -460,6 +467,35 @@
+ // ----------------------------------------------------------------------------
+ // wxExecute implementations
+ // ----------------------------------------------------------------------------
++void wxUpdateListOfOpenChildProcesses(wxExecuteData& execData)
++{
++    wxEndProcessData *endProcData;
++
++    endProcData=&(execData.endProcData);
++
++    if (!(execData.flags & wxEXEC_SYNC) )
++    {   // For asynchronous execution, we need a pointer on the heap otherwise
++        // the pointer that we are passed is on the stack of wxExecute().
++        // However for sync execution we need endProcData to be on the stack
++        // so that we can retrieve the exit code.
++        endProcData = new wxEndProcessData;
++
++        // Save flag that this is an async process so that the wxEndProcessData
++        // data will get deleted in wxHandleProcessTermination()
++        endProcData->async=true;
++    }
++
++    execData.endProcDataPtr=endProcData;
++
++    endProcData->process = execData.process;
++    endProcData->pid = execData.pid;
++
++    // Add the pid of this process to a list of pids that
++    // we are keeping track of, so that when we get the SIGCHLD
++    // signal, we can go through our list of open PIDS to check
++    // each one for termination.
++    childProcessesOpenedHash[endProcData->pid]=endProcData;
++}
+ 
+ #if defined(__DARWIN__)
+ bool wxMacLaunch(char **argv);
+@@ -486,6 +522,8 @@
+ 
+ #endif // wxUSE_UNICODE
+ 
++bool wxExecuteExecutedAlready=false;
++
+ // wxExecute: the real worker function
+ long wxExecute(char **argv, int flags, wxProcess *process,
+         const wxExecuteEnv *env)
+@@ -520,6 +558,15 @@
+     }
+ #endif // __DARWIN__
+ 
++    if (!wxExecuteExecutedAlready)
++    {
++        // Setup the signal handler for SIGCHLD, as this is the
++        // mechanism that is used to detect that the child process
++        // has terminated.
++        wxTheApp->SetSignalHandler(SIGCHLD,wxCheckChildProcessTermination);
++
++        wxExecuteExecutedAlready=true;
++    }
+ 
+     // this struct contains all information which we use for housekeeping
+     wxExecuteData execData;
+@@ -710,9 +757,30 @@
+     {
+         // save it for WaitForChild() use
+         execData.pid = pid;
++
++        // We update the information about open child processes right away
++        // to avoid a race condition.
++        // The SIGCHLD handler will interrupt the code, and then will trigger
++        // idle processing where we will call wxCheckChildProcessTermination()
++        // We don't want the call to wxCheckChildProcessTermination() to occur
++        // before we've added the new opened PID.  wxCheckChildProcessTermination()
++        // will get called during an event loop.
++        // By adding this information as soon as we
++        // know what the PID is, then we can be sure that this information
++        // is properly stored before we go back into any event loop where
++        // the signal handler could get processed.
++        wxUpdateListOfOpenChildProcesses(execData);
++
+         if (execData.process)
++        {
+             execData.process->SetPid(pid);  // and also in the wxProcess
+ 
++            // Save endProcDataPtr so we can refer to it when we want to 
++            // check to terminate a synchronous event loop.
++            process->SetEndProcDataPtr((void*) (execData.endProcDataPtr));
++        }
++        
++
+         // prepare for IO redirection
+ 
+ #if HAS_PIPE_STREAMS
+@@ -775,6 +843,34 @@
+         if ( !traits )
+             traits = &traitsConsole;
+ 
++#if wxUSE_STREAMS
++        if ( process && process->IsRedirected() && process->IsNotifyEnabled())
++        {
++            // If enabled, register and activate the callbacks for output/error
++            process->GetStdoutHandler()->Init(
++                execData.flags,   // int flags,
++                execData.fdOut,   // int fd,
++                process,          // wxProcess *process,
++                execData.bufOut,  // wxStreamTempInputBuffer *buf,
++                false             // bool stderrHandlerFlag);
++            );
++
++            process->GetStderrHandler()->Init(
++                execData.flags,   // int flags,
++                execData.fdErr,   // int fd,
++                process,          // wxProcess *process,
++                execData.bufErr,  // wxStreamTempInputBuffer *buf,
++                true              // bool stderrHandlerFlag);
++            );
++
++            // Register the callback for stdout.
++            traits->RegisterProcessCallback(process->GetStdoutHandler(),execData.fdOut);
++
++            // Register the callback for stderr.
++            traits->RegisterProcessCallback(process->GetStderrHandler(),execData.fdErr);
++        }
++#endif
++
+         return traits->WaitForChild(execData);
+     }
+ 
+@@ -1333,42 +1429,37 @@
+ // wxExecute support
+ // ----------------------------------------------------------------------------
+ 
+-int wxAppTraits::AddProcessCallback(wxEndProcessData *data, int fd)
++// This version of AddProcessCallback is only for console applications.
++// For GUI applications, AddProcessCallback is specific to the platform, so
++// there are specialized versions for both OSX and GTK.
++int wxAppTraits::AddProcessCallback(wxExecuteCallbackPipe *data, int fd)
+ {
+-    // define a custom handler processing only the closure of the descriptor
+-    struct wxEndProcessFDIOHandler : public wxFDIOHandler
+-    {
+-        wxEndProcessFDIOHandler(wxEndProcessData *data, int fd)
+-            : m_data(data), m_fd(fd)
+-        {
+-        }
+-
+-        virtual void OnReadWaiting()
+-        {
+-            wxFDIODispatcher::Get()->UnregisterFD(m_fd);
+-            close(m_fd);
+-
+-            wxHandleProcessTermination(m_data);
+-
+-            delete this;
+-        }
+-
+-        virtual void OnWriteWaiting() { wxFAIL_MSG("unreachable"); }
+-        virtual void OnExceptionWaiting() { wxFAIL_MSG("unreachable"); }
+-
+-        wxEndProcessData * const m_data;
+-        const int m_fd;
+-    };
+-
+     wxFDIODispatcher::Get()->RegisterFD
+                              (
+                                  fd,
+-                                 new wxEndProcessFDIOHandler(data, fd),
++                                 data,
+                                  wxFDIO_INPUT
+                              );
++
+     return fd; // unused, but return something unique for the tag
+ }
+ 
++// This version of RemoveProcesscallback is only for console applications.
++// For GUI applications, RemoveProcesscallback is specific to the platform, so
++// there are specialized versions for both OSX and GTK.
++bool wxAppTraits::RemoveProcesscallback(int fd)
++{
++    wxFDIODispatcher::Get()->UnregisterFD(fd);
++
++    // Don't close the fd because wxProcess will close it in its
++    // destructor.  Also we don't want to close it so that we can
++    // keep using the wxInputStream's in the wxProcess
++    // close(fd);
++
++    // Not necessary to close the fd.
++    return false;
++}
++
+ bool wxAppTraits::CheckForRedirectedIO(wxExecuteData& execData)
+ {
+ #if HAS_PIPE_STREAMS
+@@ -1388,212 +1479,484 @@
+ #endif // HAS_PIPE_STREAMS/!HAS_PIPE_STREAMS
+ }
+ 
+-// helper classes/functions used by WaitForChild()
+-namespace
++// helper function which calls waitpid() and analyzes the result
++int DoWaitForChild(int pid, int flags = 0, int *waitpid_rc = NULL)
+ {
++    wxASSERT_MSG( pid > 0, "invalid PID" );
+ 
+-// convenient base class for IO handlers which are registered for read
+-// notifications only and which also stores the FD we're reading from
+-//
+-// the derived classes still have to implement OnReadWaiting()
+-class wxReadFDIOHandler : public wxFDIOHandler
+-{
+-public:
+-    wxReadFDIOHandler(wxFDIODispatcher& disp, int fd) : m_fd(fd)
++    int status, rc;
++
++    // loop while we're getting EINTR
++    for ( ;; )
+     {
+-        if ( fd )
+-            disp.RegisterFD(fd, this, wxFDIO_INPUT);
++        rc = waitpid(pid, &status, flags);
++
++        if (waitpid_rc!=NULL)
++        {
++            *waitpid_rc=rc;
++        }
++
++        if ( rc != -1 || errno != EINTR )
++            break;
+     }
+ 
+-    virtual void OnWriteWaiting() { wxFAIL_MSG("unreachable"); }
+-    virtual void OnExceptionWaiting() { wxFAIL_MSG("unreachable"); }
++    if ( rc != 0 )
++    {
++        if ( rc == -1 )
++        {
++            wxLogLastError(wxString::Format("waitpid(%d)", pid));
++        }
++        else // child did terminate
++        {
++            wxASSERT_MSG( rc == pid, "unexpected waitpid() return value" );
++
++            // notice that the caller expects the exit code to be signed, e.g. -1
++            // instead of 255 so don't assign WEXITSTATUS() to an int
++            signed char exitcode;
++            if ( WIFEXITED(status) )
++                exitcode = WEXITSTATUS(status);
++            else if ( WIFSIGNALED(status) )
++                exitcode = -WTERMSIG(status);
++            else
++            {
++                wxLogError("Child process (PID %d) exited for unknown reason, "
++                           "status = %d", pid, status);
++                exitcode = -1;
++            }
+ 
+-protected:
+-    const int m_fd;
++            return exitcode;
++        }
++    }
+ 
+-    wxDECLARE_NO_COPY_CLASS(wxReadFDIOHandler);
+-};
++    return -1;
++}
+ 
+-// class for monitoring our end of the process detection pipe, simply sets a
+-// flag when input on the pipe (which must be due to EOF) is detected
+-class wxEndHandler : public wxReadFDIOHandler
++int wxAppTraits::WaitForChild(wxExecuteData& execData)
+ {
+-public:
+-    wxEndHandler(wxFDIODispatcher& disp, int fd)
+-        : wxReadFDIOHandler(disp, fd)
++    if ( !(execData.flags & wxEXEC_SYNC) )
+     {
+-        m_terminated = false;
++        // asynchronous execution: just launch the process and return,
++        return execData.pid;
+     }
++    //else: synchronous execution case
+ 
+-    bool Terminated() const { return m_terminated; }
++    // Allocate an event loop that will be used to wait for the process 
++    // to terminate, will handle stdout, stderr, and any other events.
++    // 
++    // The event loop will get started in common (to console and GUI) code 
++    // in WaitForChildSync
++    wxConsoleEventLoop loop;
++    execData.endProcData.sync_event_loop_ptr=&loop;
++
++    return WaitForChildSync(execData);
++}
++
++int wxAppTraits::WaitForChildSync(wxExecuteData& execData)
++{
++    // endProcData.pid will be set to 0 from wxHandleProcessTermination() when
++    // the process terminates.  If it has already terminated then don't enter
++    // the wait loop.
++    if (execData.endProcData.pid != 0)
++    {
++        // Run a temporary event loop.  The OS will call our callback functions
++        // upon arrival of stdout/stderr data as well as a callback (SIGCHLD)
++        // if the child process terminates.
++        execData.endProcData.sync_event_loop_ptr->Run();
++    }
+ 
+-    virtual void OnReadWaiting() { m_terminated = true; }
++#if HAS_PIPE_STREAMS && wxUSE_SOCKETS
++    wxProcess * const process = execData.process;
++    if ( process && process->IsRedirected() )
++    {
++        // Event loop has finished and the process has terminated.
+ 
+-private:
+-    bool m_terminated;
++        // Perform some final updates in case we did not get a chance to execute
++        // a final callback.
++        execData.bufOut->Update();
++        execData.bufErr->Update();
++
++        // Disable future callbacks.
++        process->GetStdoutHandler()->DisableCallback();
++        process->GetStderrHandler()->DisableCallback();
++    }
++    //else: no IO redirection, just block waiting for the child to exit
++#endif // HAS_PIPE_STREAMS
+ 
+-    wxDECLARE_NO_COPY_CLASS(wxEndHandler);
+-};
++    int exitcode;
+ 
+-#if HAS_PIPE_STREAMS
++    // The exit code will have been set in execData.endProcData.exitcode 
++    // by the call to wxCheckChildProcessTermination(), which will have
++    // occurred during the event loop.
++    exitcode=execData.endProcData.exitcode;
+ 
+-// class for monitoring our ends of child stdout/err, should be constructed
+-// with the FD and stream from wxExecuteData and will do nothing if they're
+-// invalid
+-//
+-// unlike wxEndHandler this class registers itself with the provided dispatcher
+-class wxRedirectedIOHandler : public wxReadFDIOHandler
++    return exitcode;
++}
++
++void wxHandleProcessTermination(void *data_parm)
+ {
+-public:
+-    wxRedirectedIOHandler(wxFDIODispatcher& disp,
+-                          int fd,
+-                          wxStreamTempInputBuffer *buf)
+-        : wxReadFDIOHandler(disp, fd),
+-          m_buf(buf)
++    wxEndProcessData *data=(wxEndProcessData *) data_parm;
++
++    // Perform final handling of the IO pipes and
++    // notify user about termination if required
++    if ( (data->process) && (data->async) )
+     {
++#if wxUSE_STREAMS
++        if (
++                (data->process->IsRedirected())
++              &&(data->process->IsNotifyEnabled())
++           )
++        {
++            // Process any remaining data from the process that was not handled
++            // yet, and then shut down the callback functions for stdout and
++            // stderr.
++            if (!(data->process->GetStdoutHandler()->IsShutDownFlagSet()))
++            {
++                data->process->GetStdoutHandler()->OnReadWaiting();
++                data->process->GetStdoutHandler()->DisableCallback();
++            }
++
++            if (!(data->process->GetStderrHandler()->IsShutDownFlagSet()))
++            {
++                data->process->GetStderrHandler()->OnReadWaiting();
++                data->process->GetStderrHandler()->DisableCallback();
++            }
++        }
++#endif
++
++        data->process->OnTerminate(data->pid, data->exitcode);
++
++        // in case of asynchronous execution we don't need this data any more
++        // after the child terminates
++        delete data;
+     }
++    else // sync execution
++    {
++        // let wxExecute() know that the process has terminated
++        data->pid = 0;
++
++        if (data->sync_event_loop_ptr!=NULL)
++        {   // Stop the event loop for synchronous wxExecute.
++            data->sync_event_loop_ptr->Exit();
++        }
++    }
++}
+ 
+-    virtual void OnReadWaiting()
++int wxAppTraits::RegisterProcessCallback(wxExecuteCallbackPipe *data, int fd)
++{
++   int retval=0;
++
++   if(fdsWithCallbackHash.find(fd)==fdsWithCallbackHash.end())
++   {
++      fdsWithCallbackHash[fd]=data;  // Save that this file descriptor is enabled.
++      retval=AddProcessCallback(data,fd);
++   }
++
++   return retval;
++}
++
++bool wxAppTraits::UnRegisterProcessCallback(int fd)
++{
++    if (IsFdCallbackEnabled(fd))
+     {
+-        m_buf->Update();
++        // Remove the fd from the hash so it will no longer be called.
++        fdsWithCallbackHash.erase(fd);
++
++        // Call the platform specific method in order to de-register.
++        return RemoveProcesscallback(fd);
+     }
+ 
+-private:
+-    wxStreamTempInputBuffer * const m_buf;
++    return false;
++}
+ 
+-    wxDECLARE_NO_COPY_CLASS(wxRedirectedIOHandler);
+-};
++bool wxAppTraits::IsFdCallbackEnabled(int fd)
++{
++   if(fdsWithCallbackHash.find(fd)==fdsWithCallbackHash.end())
++   {
++      return false;
++   }
++   else
++   {
++      return true;
++   }
++}
+ 
+-#endif // HAS_PIPE_STREAMS
++wxExecuteCallbackPipe *wxAppTraits::GetFdExecutePipe(int fd)
++{
++    return fdsWithCallbackHash[fd];
++}
+ 
+-// helper function which calls waitpid() and analyzes the result
+-int DoWaitForChild(int pid, int flags = 0)
++void wxCheckChildProcessTermination(int WXUNUSED(sig))
+ {
+-    wxASSERT_MSG( pid > 0, "invalid PID" );
++    wxEndProcessData *endProcData;
+ 
+-    int status, rc;
++    int exitcode;
++    int waitpid_rc;
++    bool hash_entry_deleted_flag;
++    int pid;
+ 
+-    // loop while we're getting EINTR
+-    for ( ;; )
++    do
+     {
+-        rc = waitpid(pid, &status, flags);
++        hash_entry_deleted_flag=false;
+ 
+-        if ( rc != -1 || errno != EINTR )
++        // Traverse the list of opened child processes to check which one's terminated.
++        // And if it terminated, then call wxHandleProcessTermination()
++        for ( ChildProcessesOpenedHash::iterator it = childProcessesOpenedHash.begin();
++              it != childProcessesOpenedHash.end();
++              ++it )
++        {
++            pid=it->first;
++
++            // Try to execute waitpid() on the child, and see if it terminates.
++            exitcode=DoWaitForChild(pid,
++                                    WNOHANG,
++                                    &waitpid_rc // Get return code of waitpid()
++                                   );
++
++            if (waitpid_rc==0)
++            {   // This means that this PID is still running, so move onto the
++                // next PID.
++                continue;
++            }
++
++            // If we are here, it means we have detected the end of this
++            // process, or there was a problem with this PID.
++
++            // Get the pointer to the endProcData before we erase the
++            // iterator, so that we can use it after the iterator is erased.
++            endProcData=it->second;
++
++            // Remove this process from the hash list of child processes
++            // that are still open.  Do not use the iterator after this
++            // as it is now invalid.  We erase this from the list so that
++            // we don't chance handling another signal from any possible
++            // event loop that could be called inside of 
++            // wxHandleProcessTermination()
++            childProcessesOpenedHash.erase(it);    
++            hash_entry_deleted_flag=true;    
++
++            // Save the exit code.
++            endProcData->exitcode=exitcode;
++
++            // Inform the next call to CheckHandleTermination(), and also possible
++            // future calls for when stdout/stderr are done that the child process
++            // has terminated.
++            endProcData->childProcessTerminatedFlag=true;
++
++            // Check if it is time to handle the termination and inform user.
++            endProcData->CheckHandleTermination();
++
++            // Since we deleted this entry, we can't trust the ++it in
++            // the loop, so start the iterator loop over again.
+             break;
+-    }
++        }
++    } while(hash_entry_deleted_flag);
++}
+ 
+-    if ( rc == 0 )
++bool WakeUpPipe::Create()
++{
++    if ( !m_pipe.Create() )
+     {
+-        // This can only happen if the child application closes our dummy pipe
+-        // that is used to monitor its lifetime; in that case, our best bet is
+-        // to pretend the process did terminate, because otherwise wxExecute()
+-        // would hang indefinitely (OnReadWaiting() won't be called again, the
+-        // descriptor is closed now).
+-        wxLogDebug("Child process (PID %d) still alive but pipe closed so "
+-                   "generating a close notification", pid);
+-    }
+-    else if ( rc == -1 )
+-    {
+-        wxLogLastError(wxString::Format("waitpid(%d)", pid));
+-    }
+-    else // child did terminate
+-    {
+-        wxASSERT_MSG( rc == pid, "unexpected waitpid() return value" );
+-
+-        // notice that the caller expects the exit code to be signed, e.g. -1
+-        // instead of 255 so don't assign WEXITSTATUS() to an int
+-        signed char exitcode;
+-        if ( WIFEXITED(status) )
+-            exitcode = WEXITSTATUS(status);
+-        else if ( WIFSIGNALED(status) )
+-            exitcode = -WTERMSIG(status);
+-        else
+-        {
+-            wxLogError("Child process (PID %d) exited for unknown reason, "
+-                       "status = %d", pid, status);
+-            exitcode = -1;
+-        }
++        wxLogError(_("Failed to create wake up pipe used by event loop."));
++        return false;
++    }
+ 
+-        return exitcode;
++
++    if ( !m_pipe.MakeNonBlocking(wxPipe::Read) )
++    {
++        wxLogSysError(_("Failed to switch wake up pipe to non-blocking mode"));
++        return false;
+     }
+ 
+-    return -1;
++    return true;
+ }
+ 
+-} // anonymous namespace
++// ----------------------------------------------------------------------------
++// wakeup handling
++// ----------------------------------------------------------------------------
+ 
+-int wxAppTraits::WaitForChild(wxExecuteData& execData)
++void WakeUpPipe::WakeUp()
+ {
+-    if ( !(execData.flags & wxEXEC_SYNC) )
+-    {
+-        // asynchronous execution: just launch the process and return,
+-        // endProcData will be destroyed when it terminates (currently we leak
+-        // it if the process doesn't terminate before we do and this should be
+-        // fixed but it's not a real leak so it's not really very high
+-        // priority)
+-        wxEndProcessData *endProcData = new wxEndProcessData;
+-        endProcData->process = execData.process;
+-        endProcData->pid = execData.pid;
+-        endProcData->tag = AddProcessCallback
+-                           (
+-                             endProcData,
+-                             execData.GetEndProcReadFD()
+-                           );
+-        endProcData->async = true;
++  wxCriticalSectionLocker lock(m_pipeLock);
+ 
+-        return execData.pid;
++  this->WakeUpMTUnsafe();
++}
++
++void WakeUpPipe::WakeUpMTUnsafe()
++{
++    // No need to do anything if the pipe already contains something.
++    if ( !m_pipeIsEmpty )
++      return;
++
++    if ( write(m_pipe[wxPipe::Write], "s", 1) != 1 )
++    {
++        // don't use wxLog here, we can be in another thread and this could
++        // result in dead locks
++        perror("write(wake up pipe)");
+     }
+-    //else: synchronous execution case
++    else
++    {
++        // We just wrote to it, so it's not empty any more.
++        m_pipeIsEmpty = false;
++    }
++}
+ 
+-#if HAS_PIPE_STREAMS && wxUSE_SOCKETS
+-    wxProcess * const process = execData.process;
+-    if ( process && process->IsRedirected() )
++void WakeUpPipe::OnReadWaiting()
++{
++    // got wakeup from child thread, remove the data that provoked it from the
++    // pipe
++
++    wxCriticalSectionLocker lock(m_pipeLock);
++
++    char buf[4];
++    for ( ;; )
+     {
+-        // we can't simply block waiting for the child to terminate as we would
+-        // dead lock if it writes more than the pipe buffer size (typically
+-        // 4KB) bytes of output -- it would then block waiting for us to read
+-        // the data while we'd block waiting for it to terminate
+-        //
+-        // so multiplex here waiting for any input from the child or closure of
+-        // the pipe used to indicate its termination
+-        wxSelectDispatcher disp;
++        const int size = read(GetReadFd(), buf, WXSIZEOF(buf));
+ 
+-        wxEndHandler endHandler(disp, execData.GetEndProcReadFD());
++        if ( size > 0 )
++        {
++            break;
++        }
+ 
+-        wxRedirectedIOHandler outHandler(disp, execData.fdOut, execData.bufOut),
+-                              errHandler(disp, execData.fdErr, execData.bufErr);
++        if ( size == 0 || (size == -1 && errno == EAGAIN) )
++        {
++            // No data available, not an error (but still surprising,
++            // spurious wakeup?)
++            break;
++        }
+ 
+-        while ( !endHandler.Terminated() )
++        if ( errno == EINTR )
+         {
+-            disp.Dispatch();
++            // We were interrupted, try again.
++            continue;
+         }
++
++        wxLogSysError(_("Failed to read from wake-up pipe"));
++
++        return;
+     }
+-    //else: no IO redirection, just block waiting for the child to exit
+-#endif // HAS_PIPE_STREAMS
+ 
+-    return DoWaitForChild(execData.pid);
++    // The pipe is empty now, so future calls to WakeUp() would need to write
++    // to it again.
++    m_pipeIsEmpty = true;
++
++    wxAppConsole * const app = wxTheApp;
++    if ( app != NULL)
++        app->OnWakeUp();
++
++    // writing to the wake up pipe will make wxConsoleEventLoop return from
++    // wxFDIODispatcher::Dispatch() it might be currently blocking in, nothing
++    // else needs to be done
+ }
+ 
+-void wxHandleProcessTermination(wxEndProcessData *data)
++void wxExecuteIOHandler::DisableCallback()
+ {
+-    data->exitcode = DoWaitForChild(data->pid, WNOHANG);
++    bool inform_closed;
+ 
+-    // notify user about termination if required
+-    if ( data->process )
++    if (!IsShutDownFlagSet())  // Don't shutdown more than once.
+     {
+-        data->process->OnTerminate(data->pid, data->exitcode);
++        inform_closed=wxTheApp->GetTraits()->UnRegisterProcessCallback(m_fd);
++
++        if (inform_closed)
++        {
++            if (!m_stderrHandlerFlag)
++            {
++                m_process->GetInputStream()->InformClosed();
++            }
++            else
++            {
++                m_process->GetErrorStream()->InformClosed();
++            }
++        }
++
++        // Inform the callback to stop itself
++        SetShutDownFlag(true);
+     }
++}
++
++void wxExecuteIOHandler::OnReadWaiting()
++{
++    bool disableCallbackAndTerminate=false;
++
++    wxEndProcessData *endProcDataPtr;
++    endProcDataPtr=static_cast<wxEndProcessData *>(this->m_process->GetEndProcDataPtr());
++
++    if (m_flags & wxEXEC_SYNC)
++    {   // Sync process, process all data coming at us from the pipe
++        // so that the pipe does not get full and cause a deadlock
++        // situation.
++        if ( m_buf )
++        {
++            m_buf->Update();
+ 
+-    if ( data->async )
++            if (m_buf->Eof())
++            {
++                disableCallbackAndTerminate=true;
++            }
++        }
++    }
++    else
++    {   // Async, call user function to handle.
++        // If the user did not want these called, then this callback would
++        // never have been enabled, and we would not be here.  
++        // The fact that we are here means that the user wants the callbacks.
++        if (!m_stderrHandlerFlag)
++        {   // This is stdout.
++            m_process->OnInputAvailable();
++
++            // If we've read everything in the pipe, then disable the callback
++            // otherwise we will keep getting it.
++            if (m_process->GetInputStream()->Eof())
++            {
++                disableCallbackAndTerminate=true;
++            }
++        }
++        else
++        {   // This is stderr.
++            m_process->OnErrorAvailable();
++
++            // If we've read everything in the pipe, then disable the callback
++            // otherwise we will keep getting it.
++            if (m_process->GetErrorStream()->Eof())
++            {
++                disableCallbackAndTerminate=true;
++            }
++        }
++    }
++
++    if (disableCallbackAndTerminate)
+     {
+-        // in case of asynchronous execution we don't need this data any more
+-        // after the child terminates
+-        delete data;
++        DisableCallback();
++        endProcDataPtr->CheckHandleTermination();
+     }
+-    else // sync execution
++}
++
++// Checks if stdout/stderr and child process have all terminated before
++// stopping the event loop and informing the application about termination.
++//
++// The check on stdout/stderr is only done if notifications (that is the
++// callbacks to wxProcess::OnInputAvailable() and ::OnErrorAvailable() are
++// activated).
++void wxEndProcessData::CheckHandleTermination()
++{
++    if (    process 
++         && process->IsRedirected() 
++         && process->IsNotifyEnabled()
++       )
+     {
+-        // let wxExecute() know that the process has terminated
+-        data->pid = 0;
++        if (!(process->GetStdoutHandler()->IsShutDownFlagSet()))
++        {   // Still waiting for stdout data, so do not terminate event loop.
++            return;
++        }
++        if (!(process->GetStderrHandler()->IsShutDownFlagSet()))
++        {   // Still waiting for stderr data, so do not terminate event loop.
++            return;
++        }
++    }
++
++    if (childProcessTerminatedFlag)
++    {
++        // The Exit() for the event loop will get called in wxHandleProcessTermination().
++        wxHandleProcessTermination((void *) this);
+     }
+ }
+ 

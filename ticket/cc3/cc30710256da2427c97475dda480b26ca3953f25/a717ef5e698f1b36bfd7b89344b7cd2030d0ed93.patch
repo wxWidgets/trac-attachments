@@ -1,0 +1,258 @@
+ src/msw/dcclient.cpp | 177 +++++++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 157 insertions(+), 20 deletions(-)
+
+diff --git a/src/msw/dcclient.cpp b/src/msw/dcclient.cpp
+index 7307271..fe7dd08 100644
+--- a/src/msw/dcclient.cpp
++++ b/src/msw/dcclient.cpp
+@@ -25,6 +25,8 @@
+ 
+ #include "wx/dcclient.h"
+ #include "wx/msw/dcclient.h"
++#include "wx/vector.h"
++#include "wx/sharedptr.h"
+ 
+ #ifndef WX_PRECOMP
+     #include "wx/string.h"
+@@ -61,6 +63,74 @@ protected:
+     wxDECLARE_NO_COPY_CLASS(wxPaintDCInfo);
+ };
+ 
++typedef wxSharedPtr<wxPaintDCInfo> wxPaintDCInfoPtr;
++
++// This class holds the wxPaintDCInfo stack for a 
++// wxWindow.
++// If the window is destroyed then this object cleans up
++// after itself.
++class wxPaintDCInfoStack : public wxTrackerNode
++{
++public:
++    typedef wxVector<wxPaintDCInfoPtr> Storage;
++
++    wxPaintDCInfoStack(wxWindow* win)
++        : m_win(win)
++    {
++        m_win->AddNode(this);
++    }
++
++    virtual void OnObjectDestroy()
++    {
++        wxWindow* win = m_win;
++        m_win = 0;
++        removeFromHash(win);
++        // WARNING: 'this' has been destroyed now.
++        // Do not access any data members from here on.
++    }
++
++    void push(wxPaintDCInfoPtr const& info) 
++    {
++        m_stack.push_back(info);
++    }
++
++    void pop() 
++    {
++        wxASSERT(!m_stack.empty());
++        m_stack.pop_back();
++    }
++
++    wxPaintDCInfoPtr getOwnPaintDC() 
++    {
++        return m_own_paint_dc;
++    }
++    void setOwnPaintDC(wxPaintDCInfoPtr paint_dc) 
++    {
++        m_own_paint_dc = paint_dc;
++    }
++    wxPaintDCInfoPtr& top() {
++        if (!m_stack.empty()) {
++            return m_stack.back();
++        }
++        static wxPaintDCInfoPtr empty;
++        return empty;
++    }
++
++    static wxPaintDCInfoStack& ensureForWindow(wxWindow* win);
++    static wxPaintDCInfoStack* getForWindow(wxWindow* win);
++
++protected:
++    static void removeFromHash(wxWindow* win);
++
++protected:
++    wxDECLARE_NO_COPY_CLASS(wxPaintDCInfoStack);
++    wxWindow* m_win;
++    Storage   m_stack;
++    wxPaintDCInfoPtr m_own_paint_dc;
++};
++
++typedef wxSharedPtr<wxPaintDCInfoStack> wxPaintDCInfoStackPtr;
++
+ namespace
+ {
+ 
+@@ -128,7 +198,7 @@ private:
+ // all of them because we can't call BeginPaint() more than once. So we cache
+ // the first HDC created for the window in this map and then reuse it later if
+ // needed. And, of course, remove it from the map when the painting is done.
+-WX_DECLARE_HASH_MAP(wxWindow *, wxPaintDCInfo *,
++WX_DECLARE_HASH_MAP(wxWindow *, wxPaintDCInfoStackPtr,
+                     wxPointerHash, wxPointerEqual,
+                     PaintDCInfos);
+ 
+@@ -137,6 +207,36 @@ PaintDCInfos gs_PaintDCInfos;
+ } // anonymous namespace
+ 
+ // ----------------------------------------------------------------------------
++// static
++void 
++wxPaintDCInfoStack::removeFromHash(wxWindow* win)
++{
++    gs_PaintDCInfos.erase(win);
++}
++
++// ----------------------------------------------------------------------------
++// static 
++wxPaintDCInfoStack& 
++wxPaintDCInfoStack::ensureForWindow(wxWindow* win)
++{
++    wxPaintDCInfoStackPtr& ptr = gs_PaintDCInfos[win];
++    if (!ptr) 
++    {
++        ptr.reset(new wxPaintDCInfoStack(win));
++    }
++    return *ptr;
++}
++
++// ----------------------------------------------------------------------------
++// static 
++wxPaintDCInfoStack*
++wxPaintDCInfoStack::getForWindow(wxWindow* win)
++{
++    PaintDCInfos::const_iterator it = gs_PaintDCInfos.find(win);
++    return (it != gs_PaintDCInfos.end()) ? it->second.get() : NULL;
++}
++
++// ----------------------------------------------------------------------------
+ // global variables
+ // ----------------------------------------------------------------------------
+ 
+@@ -264,6 +364,9 @@ wxIMPLEMENT_ABSTRACT_CLASS(wxPaintDCImpl, wxClientDCImpl);
+ wxPaintDCImpl::wxPaintDCImpl( wxDC *owner ) :
+    wxClientDCImpl( owner )
+ {
++    // Assuming that constructing this way will not set the m_window member.
++    // Otherwise we will end up popping from the dc info stack when we shouldn't.
++    wxASSERT(!m_window);
+ }
+ 
+ wxPaintDCImpl::wxPaintDCImpl( wxDC *owner, wxWindow *window ) :
+@@ -285,16 +388,23 @@ wxPaintDCImpl::wxPaintDCImpl( wxDC *owner, wxWindow *window ) :
+ 
+     wxDidCreatePaintDC = true;
+ 
+-
+     m_window = window;
+ 
+-    // do we have a DC for this window in the cache?
+-    m_hDC = FindDCInCache(m_window);
+-    if ( !m_hDC )
+-    {
+-        // not in cache, create a new one
+-        wxPaintDCInfoOur* const info = new wxPaintDCInfoOur(m_window);
+-        gs_PaintDCInfos[m_window] = info;
++    wxPaintDCInfoStack& dcstack = wxPaintDCInfoStack::ensureForWindow(m_window);
++
++    // Do we already have an active HDC for this window?
++    wxPaintDCInfoPtr info = dcstack.top();
++    if (info.get()) {
++        // Yes we do - push this as if it were an external DC.
++        // we always pop the stack in the DTOR so must add something.
++        // the external DC impl will also save/restore the DC state.
++        dcstack.push(wxPaintDCInfoPtr(new wxPaintDCInfoExternal(info->GetHDC())));
++        m_hDC = info->GetHDC();
++    }
++    else {
++        info.reset(new wxPaintDCInfoOur(m_window));
++        dcstack.push(info);
++        dcstack.setOwnPaintDC(info);
+         m_hDC = info->GetHDC();
+     }
+ 
+@@ -317,33 +427,55 @@ wxPaintDCImpl::~wxPaintDCImpl()
+         SelectOldObjects(m_hDC);
+         m_hDC = 0;
+     }
++    if (m_window) {
++        // If we are currently using a 'real' paint DC then this must hang around 
++        // until wxPaintDCImpl::EndPaint is called.  Otherwise it looks like it
++        // could break wxNcPaintEvent.
++        wxPaintDCInfoStack* dcstack = wxPaintDCInfoStack::getForWindow(m_window);
++        if (dcstack) {
++            wxPaintDCInfoPtr& pinfo = dcstack->top();
++            if (pinfo) {
++                if (pinfo != dcstack->getOwnPaintDC()) {
++                    dcstack->pop();
++                }
++            }
++        }
++    }
+ }
+ 
+ 
+ /* static */
+ wxPaintDCInfo *wxPaintDCImpl::FindInCache(wxWindow *win)
+ {
+-    PaintDCInfos::const_iterator it = gs_PaintDCInfos.find( win );
+-
+-    return it != gs_PaintDCInfos.end() ? it->second : NULL;
++    wxPaintDCInfoStack* dcstack = wxPaintDCInfoStack::getForWindow(win);
++    return (dcstack) ? dcstack->top().get() : NULL;
+ }
+ 
+ /* static */
+ WXHDC wxPaintDCImpl::FindDCInCache(wxWindow* win)
+ {
+-    wxPaintDCInfo* const info = FindInCache(win);
+-
+-    return info ? info->GetHDC() : 0;
++    wxPaintDCInfoStack* dcstack = wxPaintDCInfoStack::getForWindow(win);
++    if (dcstack) {
++        wxPaintDCInfoPtr pinfo = dcstack->top();
++        if (pinfo) {
++            return pinfo->GetHDC();
++        }
++    }
++    return 0;
+ }
+ 
+ /* static */
+ void wxPaintDCImpl::EndPaint(wxWindow *win)
+ {
+-    wxPaintDCInfo *info = FindInCache(win);
+-    if ( info )
+-    {
+-        gs_PaintDCInfos.erase(win);
+-        delete info;
++    // If the dc on the top of the stack is a real paint DC then end it.
++    wxPaintDCInfoStack* dcstack = wxPaintDCInfoStack::getForWindow(win);
++    if (dcstack) {
++        wxPaintDCInfoPtr& pinfo = dcstack->top();
++        if (pinfo) {
++            if (pinfo == dcstack->getOwnPaintDC()) {
++                dcstack->pop();
++            }
++        }
+     }
+ }
+ 
+@@ -377,6 +509,11 @@ wxPaintDCExImpl::wxPaintDCExImpl(wxDC *owner, wxWindow *window, WXHDC dc)
+ 
+     m_window = window;
+     m_hDC = dc;
++
++    if (m_window) {
++        wxPaintDCInfoStack& dcstack = wxPaintDCInfoStack::ensureForWindow(m_window);
++        dcstack.push(wxPaintDCInfoPtr(new wxPaintDCInfoExternal((HDC)dc)));
++    }
+ }
+ 
+ wxPaintDCExImpl::~wxPaintDCExImpl()

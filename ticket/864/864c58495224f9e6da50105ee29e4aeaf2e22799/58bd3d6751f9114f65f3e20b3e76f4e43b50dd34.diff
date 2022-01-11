@@ -1,0 +1,144 @@
+Index: src/osx/cocoa/window.mm
+===================================================================
+--- src/osx/cocoa/window.mm	(revision 58236)
++++ src/osx/cocoa/window.mm	(working copy)
+@@ -74,9 +72,12 @@
+ 
+ long wxOSXTranslateCocoaKey(unsigned short code, int unichar )
+ {
+-    long retval = code;
++    long retval = unichar;
+     switch( unichar )
+     {
++        case 127 :
++            retval = WXK_BACK;
++            break;
+         case NSUpArrowFunctionKey :
+             retval = WXK_UP;
+             break;
+@@ -115,7 +116,7 @@
+             break;
+ 
+         default :
+-            if ( unichar >= NSF1FunctionKey && unichar >= NSF24FunctionKey )
++            if ( unichar >= NSF1FunctionKey && unichar <= NSF24FunctionKey )
+                 retval = WXK_F1 + (unichar - NSF1FunctionKey );
+             break;
+     }
+@@ -144,11 +145,14 @@
+     }
+     
+     int unichar = chars.Length() > 0 ? chars[0] : 0;
++    int keyval = wxOSXTranslateCocoaKey( [nsEvent keyCode], unichar ) ;
++    if ( keyval == unichar && ( wxevent.GetEventType() == wxEVT_KEY_UP || wxevent.GetEventType() == wxEVT_KEY_DOWN ) )
++        keyval = wxToupper( keyval ) ;
+     
+ #if wxUSE_UNICODE
+     wxevent.m_uniChar = unichar;
+ #endif
+-    wxevent.m_keyCode = wxOSXTranslateCocoaKey( [nsEvent keyCode], unichar ) ;
++    wxevent.m_keyCode = keyval;
+ //    wxevent.m_rawCode = keymessage;
+     wxevent.m_rawFlags = modifiers;
+     
+@@ -715,7 +711,41 @@
+ {
+     wxKeyEvent wxevent(wxEVT_KEY_DOWN);
+     SetupKeyEvent( wxevent, event );
+-    return GetWXPeer()->HandleWindowEvent(wxevent);
++    bool handled = GetWXPeer()->HandleWindowEvent(wxevent);
++
++#if wxUSE_ACCEL
++    if ( !handled )
++    {
++        wxWindow *ancestor = GetWXPeer();
++        while (ancestor)
++        {
++            int command = ancestor->GetAcceleratorTable()->GetCommand( wxevent );
++            if (command != -1)
++            {
++                wxEvtHandler * const handler = ancestor->GetEventHandler();
++
++                wxCommandEvent command_event( wxEVT_COMMAND_MENU_SELECTED, command );
++                handled = handler->ProcessEvent( command_event );
++
++                if ( !handled )
++                {
++                    // accelerators can also be used with buttons, try them too
++                    command_event.SetEventType(wxEVT_COMMAND_BUTTON_CLICKED);
++                    handled = handler->ProcessEvent( command_event );
++                }
++
++                break;
++            }
++
++            if (ancestor->IsTopLevel())
++                break;
++
++            ancestor = ancestor->GetParent();
++        }
++    }
++#endif // wxUSE_ACCEL
++
++    return handled ;
+ }
+ 
+ bool wxWidgetCocoaImpl::DoHandleMouseEvent(NSEvent *event)
+Index: src/osx/cocoa/nonownedwnd.mm
+===================================================================
+--- src/osx/cocoa/nonownedwnd.mm	(revision 58236)
++++ src/osx/cocoa/nonownedwnd.mm	(working copy)
+@@ -67,6 +67,7 @@
+     wxNonOwnedWindowCocoaImpl* impl;
+ }
+ 
++- (BOOL)performKeyEquivalent:(NSEvent *)event;
+ - (void)setImplementation: (wxNonOwnedWindowCocoaImpl *) theImplementation;
+ - (wxNonOwnedWindowCocoaImpl*) implementation;
+ 
+@@ -74,6 +75,22 @@
+ 
+ @implementation wxNSWindow
+ 
++- (BOOL)performKeyEquivalent:(NSEvent *)event
++{
++    // We need to get this event to the current focus, so pretend it's a key event
++    BOOL handled = NO;
++    if ([event modifierFlags] & NSCommandKeyMask) {
++        NSResponder *r = [self firstResponder];
++        while (r != NULL && r != self && !handled) {
++            handled = [r performKeyEquivalent:event];
++            r = [r nextResponder];
++        }
++    }
++    if (!handled)
++        handled = [super performKeyEquivalent:event];
++    return handled;
++}
++
+ - (void)setImplementation: (wxNonOwnedWindowCocoaImpl *) theImplementation
+ {
+     impl = theImplementation;
+Index: include/wx/osx/cocoa/private.h
+===================================================================
+--- include/wx/osx/cocoa/private.h	(revision 58236)
++++ include/wx/osx/cocoa/private.h	(working copy)
+@@ -219,6 +219,7 @@
+         - (void)mouseExited:(NSEvent *)event;\
+         - (void)keyDown:(NSEvent *)event;\
+         - (void)keyUp:(NSEvent *)event;\
++        - (BOOL)performKeyEquivalent:(NSEvent *)event;\
+         - (void)flagsChanged:(NSEvent *)event;\
+         - (BOOL) becomeFirstResponder;\
+         - (BOOL) resignFirstResponder;
+@@ -298,6 +299,10 @@
+             if ( !impl->DoHandleKeyEvent(event) )\
+                 [super keyUp:event];\
+         }\
++        - (BOOL)performKeyEquivalent:(NSEvent *)event\
++        {\
++            return impl->DoHandleKeyEvent(event) || [super performKeyEquivalent:event];\
++        }\
+         -(void)flagsChanged:(NSEvent *)event\
+         {\
+             if ( !impl->DoHandleKeyEvent(event) )\

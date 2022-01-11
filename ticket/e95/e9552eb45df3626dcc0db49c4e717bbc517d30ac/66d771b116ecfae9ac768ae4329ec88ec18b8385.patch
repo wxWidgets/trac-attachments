@@ -1,0 +1,141 @@
+Index: include/wx/msw/combobox.h
+===================================================================
+--- include/wx/msw/combobox.h	(revision 76117)
++++ include/wx/msw/combobox.h	(working copy)
+@@ -156,6 +156,9 @@
+     virtual wxWindow *GetEditableWindow();
+     virtual WXHWND GetEditHWND() const;
+ 
++    // see msw/textentry.h
++    virtual bool MSWAutoCompleteHandleReturnKey();
++
+     // common part of all ctors
+     void Init()
+     {
+Index: include/wx/msw/textctrl.h
+===================================================================
+--- include/wx/msw/textctrl.h	(revision 76117)
++++ include/wx/msw/textctrl.h	(working copy)
+@@ -66,6 +66,9 @@
+     virtual void SetInsertionPointEnd();
+     virtual long GetInsertionPoint() const;
+     virtual wxTextPos GetLastPosition() const;
++		
++    // see msw/textentry.h
++    virtual bool MSWAutoCompleteHandleReturnKey();
+ 
+     // implement base class pure virtuals
+     // ----------------------------------
+Index: include/wx/msw/textentry.h
+===================================================================
+--- include/wx/msw/textentry.h	(revision 76117)
++++ include/wx/msw/textentry.h	(working copy)
+@@ -84,6 +84,15 @@
+     // implement this to return the HWND of the EDIT control
+     virtual WXHWND GetEditHWND() const = 0;
+ 
++    // For some reason, controls with enabled autocomplete don't
++    // receive a WM_CHAR message when the return key is pressed,
++    // therefore we don't generate a wxCOMMAND_TEXT_ENTER event.
++    // As a workaround, we catch the KEY_DOWN event and call
++    // MSWHandleReturnKey() so the control can react accordingly
++    // if needed
++    // Returning "true" means that the event was handled
++    virtual bool MSWAutoCompleteHandleReturnKey() { return false; }
++
+ #if wxUSE_OLE
+     // Get the auto-complete object creating it if necessary. Returns NULL if
+     // creating it failed.
+Index: src/msw/combobox.cpp
+===================================================================
+--- src/msw/combobox.cpp	(revision 76117)
++++ src/msw/combobox.cpp	(working copy)
+@@ -711,4 +711,22 @@
+     return wxChoice::MSWFindItem(id, hWnd);
+ }
+ 
++bool wxComboBox::MSWAutoCompleteHandleReturnKey()
++{
++    if ( HasFlag(wxTE_PROCESS_ENTER) )
++    {
++        wxCommandEvent event(wxEVT_TEXT_ENTER, m_windowId);
++
++        const int sel = GetSelection();
++        event.SetInt(sel);
++        event.SetString(GetValue());
++        InitCommandEventWithItems(event, sel);
++        GetEventHandler()->AddPendingEvent(event);
++        return true;
++    }
++
++    return false;
++}
++
++
+ #endif // wxUSE_COMBOBOX
+Index: src/msw/textctrl.cpp
+===================================================================
+--- src/msw/textctrl.cpp	(revision 76117)
++++ src/msw/textctrl.cpp	(working copy)
+@@ -1281,6 +1281,24 @@
+     return wxTextEntry::GetLastPosition();
+ }
+ 
++bool wxTextCtrl::MSWAutoCompleteHandleReturnKey()
++{
++    if ( HasFlag(wxTE_PROCESS_ENTER) )
++    {
++        // send wxEVT_CHAR event with WXK_RETURN to trigger
++        // sending wxEVT_TEXT_ENTER event from OnChar()
++
++        wxKeyEvent char_event( wxEVT_CHAR );
++        char_event.m_keyCode = WXK_RETURN;
++        char_event.SetId( GetId() );
++        char_event.SetEventObject( this );
++        GetEventHandler()->AddPendingEvent( char_event );
++        return true;
++    }
++
++    return false;
++}
++
+ // If the return values from and to are the same, there is no
+ // selection.
+ void wxTextCtrl::GetSelection(long *from, long *to) const
+Index: src/msw/textentry.cpp
+===================================================================
+--- src/msw/textentry.cpp	(revision 76117)
++++ src/msw/textentry.cpp	(working copy)
+@@ -441,6 +441,14 @@
+         wxBIND_OR_CONNECT_HACK(m_win, wxEVT_CHAR_HOOK, wxKeyEventHandler,
+                                wxTextAutoCompleteData::OnCharHook,
+                                this);
++
++        if ( m_win )
++        {
++            wxBIND_OR_CONNECT_HACK(m_win, wxEVT_KEY_DOWN,
++                                            wxKeyEventHandler,
++                                            wxTextAutoCompleteData::OnKeyDown,
++                                            this);
++        }
+     }
+ 
+     ~wxTextAutoCompleteData()
+@@ -456,6 +464,17 @@
+             m_autoComplete->Release();
+     }
+ 
++
++    void OnKeyDown( wxKeyEvent &event )
++    {
++        if ( event.GetKeyCode()==WXK_RETURN && m_entry!=NULL )
++        {
++            if( m_entry->MSWAutoCompleteHandleReturnKey() )
++                return;
++        }
++        event.Skip();
++    };
++
+     // Must be called after creating this object to verify if initializing it
+     // succeeded.
+     bool IsOk() const

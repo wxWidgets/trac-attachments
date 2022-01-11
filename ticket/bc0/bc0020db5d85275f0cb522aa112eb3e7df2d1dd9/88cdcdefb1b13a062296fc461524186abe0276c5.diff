@@ -1,0 +1,209 @@
+Index: include/wx/defs.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/defs.h,v
+retrieving revision 1.444
+diff -b -u -2 -r1.444 defs.h
+--- include/wx/defs.h	2004/09/17 17:24:30	1.444
++++ include/wx/defs.h	2004/09/25 08:20:23
+@@ -2509,4 +2509,171 @@
+         classname& operator=(const classname&);
+ 
++/*
++Begin va_copy()
++
++Explanation:
++----
++Let's take the call:
++s.Printf("String:%s\nInt:%i", longs, myint);
++
++where longs is a wxChar* >= 1024 bytes, 
++and myint is an integer.
++
++In the first call to wxVsnprintf in wxString::PrintfV,
++wxVsnprintf returns -1 because it only processes
++1024 as instructed.
++
++In wxVsnprintf it obviously calls va_arg to get
++the string.  In most compilers, when wxVsnprintf
++calls va_arg, it increments the va_list pointer passed
++to wxVsnprintf, like so
++
++#define va_arg(ap,t)    ( *(t *)((ap += _INTSIZEOF(t)) - 
++_INTSIZEOF(t)) )
++
++However, on open watcom, when va_arg is called
++it DEREFERENCES the va_list first
++
++ #define va_arg(ap,type)     ((ap)[0]+=     ((sizeof(type)
+++sizeof(int)-1)&~(sizeof(int)-1)),     (*(type *)((ap)[0]-
++((sizeof(type)+sizeof(int)-1)&~(sizeof
++(int)-1)))))
++
++So, when wxVsnprintf is entered the second time, instead
++of going back to the longs argument on the va_arg call, 
++the va_list is dereferenced and incremented again, leading
++to wxVsnprintf trying to turn myint into a string, resulting
++in a
++bunch of garbage.
++
++----
++
++The following implements the C99 standard va_copy macro
++which copies one va_list into another va_list correctly,
++thus avoiding the above bug.
++
++Special thanks to Angela Wrobel who made these!
++*/
++#ifndef va_copy
++#  ifdef __WATCOMC__
++#    if defined(__PPC__)
++#      if defined(__NT__)
++         /* typedef char * __va_list; */
++#        define va_copy(d,s) memcpy(&(d),&(s),sizeof(va_list));
++#      else
++         /*
++         * typedef struct {
++         *   char  __gpr;
++         *   char  __fpr;
++         *   char  __reserved[2];
++         *   char *__input_arg_area;
++         *   char *__reg_save_area;
++         * } __va_list;
++         */
++#        define va_copy(d,s) memcpy(&(d),&(s),sizeof(va_list));
++#      endif
++#    elif defined(__AXP__)
++       /*
++       * typedef struct {
++       *   char *__base;
++       *   int   __offset;
++       * } __va_list; 
++       */
++#      define va_copy(d,s) memcpy(&(d),&(s),sizeof(va_list));
++#    elif defined(__HUGE__) || defined(__SW_ZU)
++       /* typedef char _WCFAR *__va_list[1]; */
++#      define va_copy(d,s) memcpy((d),(s),sizeof(va_list));
++#    else
++       /* typedef char *__va_list[1]; */
++#      define va_copy(d,s) memcpy((d),(s),sizeof(va_list));
++#    endif
++#  endif /* __WATCOMC__ */
++
++#  ifdef __BORLANDC__ 
++     /* typedef void _FAR *va_list; */
++#    define va_copy(d,s) memcpy(&(d),&(s),sizeof(va_list));
++#  endif /* __BORLANDC__ */
++
++/* Add more compiler macros here! */
++#define WXNEED_VACOPY
++
++#endif /* va_copy */
++
++
++/* If there's still no va_copy (no C99 compiler and no compiler macro) */
++#ifndef va_copy
++  /*
++  * This must be a function and it is possible to put this into
++  * a header (though its ugly)
++  * Keep in mind that it will expand to code only once and only
++  * if you didn't define a va_copy macro for your compiler.
++  */
++  static int __HWGva_copy_isarray(va_list arg, va_list *argp)
++  {
++      /*
++      * Check if a well initialized va_list argument is
++      * really referring to an array.
++      */
++      if(memcmp(&arg, &argp, sizeof(va_list)) == 0)
++      {
++          /*
++          * If the value of a name is equal to its address,
++          * we assume it is an array because a self reference
++          * is unthinkable due to the way pointer equivalence
++          * works and if an array is passed to a function, you
++          * really get the pointer to it as the value.
++          */
++          return(1);
++      } /* if */
++
++      return(0);
++
++  } /* __HWGva_copy_isarray */
++
++  /*
++  * This needs to be a function, too - just like the above function.
++  * Adding it to a block within the macro just increases code size
++  * without providing any added value.
++  */
++  static int __AWIva_copy_isarray_helper(int dummy, ...)
++  {
++      int res;
++      va_list testlist;
++
++      /* Check if an auto va_list is really defined as an
++         array type or not. */
++      va_start(testlist, dummy);
++      res=__HWGva_copy_isarray(testlist, &testlist);
++      va_end(testlist);
++
++      return (res);
++
++  } /* __AWIva_copy_isarray_helper */
++
++  /*
++  * Unfortunately, this macro throws warnings on some compilers.
++  * However, if you just implement a va_copy macro specific to your
++  * compiler as shown above, those warnings will be gone.
++  * Don't try to use typecasts to get rid of the warning, unless
++  * you know exactely what you are doing! It might work on
++  * your compiler, but on other compilers the code might not
++  * work anymore, resulting into unexpected behaviour or
++  * crashes.
++  */
++# define va_copy(dest,src) \
++      if(__AWIva_copy_isarray_helper(0,0)) \
++      { \
++          memcpy((dest), (src), sizeof(va_list)); \
++      }\
++      else\
++      {\
++          memcpy(&(dest), &(src), sizeof(va_list));\
++      } /* if */
++#endif /* va_copy */
++
++/*
++*  End va_copy()
++*/
++
+ #endif
+     /*  _WX_DEFS_H_ */
+Index: src/common/string.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/string.cpp,v
+retrieving revision 1.206
+diff -b -u -2 -r1.206 string.cpp
+--- src/common/string.cpp	2004/09/22 14:38:51	1.206
++++ src/common/string.cpp	2004/09/25 08:20:26
+@@ -1715,5 +1715,13 @@
+             wxStringBuffer tmp(*this, size + 1);
+             wxChar* buf = tmp;
++            va_list argptrcopy;
+ 
++            #ifdef WXNEED_VACOPY
++            //hack to quiet may not be initialized warnings from pre C99 compilers
++            argptrcopy = argptr;
++            #endif
++            
++            va_copy(argptrcopy, argptr);
++
+             if ( !buf )
+             {
+@@ -1722,5 +1730,5 @@
+             }
+ 
+-            len = wxVsnprintf(buf, size, pszFormat, argptr);
++            len = wxVsnprintf(buf, size, pszFormat, argptrcopy);
+ 
+             // some implementations of vsnprintf() don't NUL terminate
+
+ 	  	 

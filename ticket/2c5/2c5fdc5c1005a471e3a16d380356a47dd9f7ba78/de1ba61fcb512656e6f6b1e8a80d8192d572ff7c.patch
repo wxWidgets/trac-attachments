@@ -1,0 +1,200 @@
+Index: include/wx/fswatcher.h
+===================================================================
+--- include/wx/fswatcher.h	(revision 74622)
++++ include/wx/fswatcher.h	(working copy)
+@@ -66,6 +66,12 @@
+     wxFSWPath_Tree      // Watch a directory and all its children recursively.
+ };
+ 
++enum wxFSWWarningType
++{
++    wxFSW_WARNING_NONE,
++    wxFSW_WARNING_GENERAL,
++    wxFSW_WARNING_OVERFLOW
++};
+ 
+ /**
+  * Event containing information about file system change.
+@@ -79,14 +85,19 @@
+ public:
+     wxFileSystemWatcherEvent(int changeType = 0, int watchid = wxID_ANY) :
+         wxEvent(watchid, wxEVT_FSWATCHER),
+-        m_changeType(changeType)
++        m_changeType(changeType),
++        m_warningType(wxFSW_WARNING_NONE)
+     {
+     }
+ 
+     wxFileSystemWatcherEvent(int changeType, const wxString& errorMsg,
+                              int watchid = wxID_ANY) :
+         wxEvent(watchid, wxEVT_FSWATCHER),
+-        m_changeType(changeType), m_errorMsg(errorMsg)
++        m_changeType(changeType), 
++        m_warningType(wxFSW_WARNING_NONE),
++        m_path(),
++        m_newPath(),
++        m_errorMsg(errorMsg)
+     {
+     }
+ 
+@@ -94,7 +105,12 @@
+                              const wxFileName& path, const wxFileName& newPath,
+                              int watchid = wxID_ANY) :
+          wxEvent(watchid, wxEVT_FSWATCHER),
+-         m_changeType(changeType), m_path(path), m_newPath(newPath)
++         m_changeType(changeType), 
++         m_warningType(wxFSW_WARNING_NONE),
++         m_path(path), 
++         m_newPath(newPath),
++         m_errorMsg()
++
+     {
+     }
+ 
+@@ -146,6 +162,7 @@
+         evt->m_errorMsg = m_errorMsg.Clone();
+         evt->m_path = wxFileName(m_path.GetFullPath().Clone());
+         evt->m_newPath = wxFileName(m_newPath.GetFullPath().Clone());
++        evt->m_warningType = this->m_warningType;
+         return evt;
+     }
+ 
+@@ -168,6 +185,16 @@
+         return m_errorMsg;
+     }
+ 
++    wxFSWWarningType GetWarningType() const
++    {
++        return m_warningType;
++    }
++
++    void SetWarningType(wxFSWWarningType type) 
++    {
++        m_warningType = type;
++    }
++
+     /**
+      * Returns a wxString describing an event useful for debugging or testing
+      */
+@@ -175,6 +202,7 @@
+ 
+ protected:
+     int m_changeType;
++    wxFSWWarningType m_warningType;
+     wxFileName m_path;
+     wxFileName m_newPath;
+     wxString m_errorMsg;
+Index: interface/wx/fswatcher.h
+===================================================================
+--- interface/wx/fswatcher.h	(revision 74622)
++++ interface/wx/fswatcher.h	(working copy)
+@@ -194,7 +194,17 @@
+         Return a description of the warning or error if this is an error event.
+      */
+     wxString GetErrorDescription() const;
++    
++    /**
++        Return the warning type for this event.
++     */
++    wxFSWWarningType GetWarningType() const;
+ 
++     /**
++        Set the warning type for this event.
++     */
++    void SetWarningType(wxFSWWarningType type); 
++
+     /**
+         Returns a wxString describing an event, useful for logging, debugging
+         or testing.
+@@ -294,3 +304,26 @@
+                          wxFSW_EVENT_WARNING | wxFSW_EVENT_ERROR
+ };
+ 
++/**
++    These are the possible types warnings that can be generated
++    when watching files / directories.
++ */
++enum wxFSWWarningType
++{
++    /**
++        No warning
++     */
++    wxFSW_WARNING_NONE,
++    
++    /**
++        A non-fatal warning
++     */
++    wxFSW_WARNING_GENERAL,
++    
++    /**
++        The watcher experienced an overflow; this usually ocurrs when watching a 
++        directory tree and many files / directories are suddenly added or removed 
++        from the watched tree.
++     */
++    wxFSW_WARNING_OVERFLOW
++};
+\ No newline at end of file
+Index: src/common/fswatchercmn.cpp
+===================================================================
+--- src/common/fswatchercmn.cpp	(revision 74622)
++++ src/common/fswatchercmn.cpp	(working copy)
+@@ -65,6 +65,10 @@
+ 
+ wxString wxFileSystemWatcherEvent::ToString() const
+ {
++    if (IsError()) {
++        return wxString::Format("FSW_EVT type=%d (%s) message='%s'", m_changeType,
++            GetFSWEventChangeTypeName(m_changeType), GetErrorDescription());
++    }
+     return wxString::Format("FSW_EVT type=%d (%s) path='%s'", m_changeType,
+             GetFSWEventChangeTypeName(m_changeType), GetPath().GetFullPath());
+ }
+Index: src/msw/fswatcher.cpp
+===================================================================
+--- src/msw/fswatcher.cpp	(revision 74622)
++++ src/msw/fswatcher.cpp	(working copy)
+@@ -230,7 +230,27 @@
+     // this is our exit condition, so we return false
+     if (!count && !watch && !overlapped)
+         return false;
++    
++    // if the thread got woken up but we got an empty packet it means that
++    // there was an overflow, too many events and not all could fit in
++    // the watch buffer.  In this case, ReadDirectoryChangesW dumps the
++    // buffer.
++    if (!count && watch) {
++         wxLogTrace( wxTRACE_FSWATCHER, "[iocp] Event queue overflowed: path='%s'",
++                watch->GetPath());
++        if (watch->GetFlags() & wxFSW_EVENT_WARNING) {
++            wxFileSystemWatcherEvent overflowEvent(wxFSW_EVENT_WARNING, "Event queue overflowed");
++            overflowEvent.SetWarningType(wxFSW_WARNING_OVERFLOW);
++            overflowEvent.SetPath(watch->GetPath());
++            SendEvent(overflowEvent);
++        }
+ 
++        // overflow is not a fatal error, we still want to get future events
++        // reissue the watch
++        (void) m_service->SetUpWatch(*watch);
++        return true;
++    }  
++    
+     // in case of spurious wakeup
+     if (!count || !watch)
+         return true;
+Index: src/unix/fswatcher_inotify.cpp
+===================================================================
+--- src/unix/fswatcher_inotify.cpp	(revision 74622)
++++ src/unix/fswatcher_inotify.cpp	(working copy)
+@@ -281,6 +281,12 @@
+         {
+             wxString errMsg = GetErrorDescription(nativeFlags);
+             wxFileSystemWatcherEvent event(flags, errMsg);
++            if ((flags & wxFSW_EVENT_WARNING) && (nativeFlags & IN_Q_OVERFLOW)) {
++                event.SetWarningType(wxFSW_WARNING_OVERFLOW);
++            }
++            else if (flags & wxFSW_EVENT_WARNING) {
++                event.SetWarningType(wxFSW_WARNING_GENERAL);
++            }
+             SendEvent(event);
+             return;
+         }

@@ -1,0 +1,287 @@
+diff --git a/docs/changes.txt b/docs/changes.txt
+index 37f7217..e3370e5 100644
+--- a/docs/changes.txt
++++ b/docs/changes.txt
+@@ -452,6 +452,7 @@ All:
+ 
+ - Added wxLogFormatter to allow customizing wxLog output (Sébastien Gallou).
+ - Added "%z" support to wxDateTime::Format() and Parse() (Armel Asselin).
++- Add wxHTTP::SetPostBuffer(wxMemoryBuffer) and SetPostText() (Eran Ifrah).
+ 
+ All (GUI):
+ 
+diff --git a/include/wx/buffer.h b/include/wx/buffer.h
+index e064447..800c41b 100644
+--- a/include/wx/buffer.h
++++ b/include/wx/buffer.h
+@@ -535,6 +535,8 @@ class wxMemoryBuffer
+     size_t GetBufSize() const { return m_bufdata->m_size; }
+     size_t GetDataLen() const { return m_bufdata->m_len; }
+ 
++    bool IsEmpty() const { return GetDataLen() == 0; }
++
+     void   SetBufSize(size_t size) { m_bufdata->ResizeIfNeeded(size); }
+     void   SetDataLen(size_t len)
+     {
+@@ -542,6 +544,8 @@ class wxMemoryBuffer
+         m_bufdata->m_len = len;
+     }
+ 
++    void Clear() { SetDataLen(0); }
++
+     // Ensure the buffer is big enough and return a pointer to it
+     void *GetWriteBuf(size_t sizeNeeded)
+     {
+diff --git a/include/wx/protocol/http.h b/include/wx/protocol/http.h
+index 8d3308b..476df91 100644
+--- a/include/wx/protocol/http.h
++++ b/include/wx/protocol/http.h
+@@ -17,6 +17,7 @@
+ 
+ #include "wx/hashmap.h"
+ #include "wx/protocol/protocol.h"
++#include "wx/buffer.h"
+ 
+ class WXDLLIMPEXP_NET wxHTTP : public wxProtocol
+ {
+@@ -36,13 +37,19 @@ class WXDLLIMPEXP_NET wxHTTP : public wxProtocol
+     int GetResponse() const { return m_http_response; }
+ 
+     void SetHeader(const wxString& header, const wxString& h_data);
+-    void SetPostBuffer(const wxString& post_buf);
++    bool SetPostText(const wxString& contentType,
++                     const wxString& data,
++                     const wxMBConv& conv = wxConvUTF8);
++    bool SetPostBuffer(const wxString& contentType, const wxMemoryBuffer& data);
+     void SetProxyMode(bool on);
+ 
+     /* Cookies */
+     wxString GetCookie(const wxString& cookie) const;
+     bool HasCookies() const { return m_cookies.size() > 0; }
+ 
++    // Use the other SetPostBuffer() overload or SetPostText() instead.
++    wxDEPRECATED(void SetPostBuffer(const wxString& post_buf));
++
+ protected:
+     enum wxHTTP_Req
+     {
+@@ -80,7 +87,8 @@ class WXDLLIMPEXP_NET wxHTTP : public wxProtocol
+     bool m_read,
+          m_proxy_mode;
+     wxSockAddress *m_addr;
+-    wxString m_post_buf;
++    wxMemoryBuffer m_postBuffer;
++    wxString       m_contentType;
+     int m_http_response;
+ 
+     DECLARE_DYNAMIC_CLASS(wxHTTP)
+diff --git a/interface/wx/buffer.h b/interface/wx/buffer.h
+index f9ce483..4ef51ba 100644
+--- a/interface/wx/buffer.h
++++ b/interface/wx/buffer.h
+@@ -310,6 +310,17 @@ class wxMemoryBuffer
+     void AppendData(const void *data, size_t len);
+ 
+     /**
++        Clear the buffer contents.
++
++        The buffer won't contain any data after this method is called.
++
++        @see IsEmpty()
++
++        @since 2.9.4
++     */
++    void Clear();
++
++    /**
+         Ensure that the buffer is big enough and return a pointer to the start
+         of the empty space in the buffer. This pointer can be used to directly
+         write data into the buffer, this new data will be appended to the
+@@ -344,6 +355,15 @@ class wxMemoryBuffer
+     void* GetWriteBuf(size_t sizeNeeded);
+ 
+     /**
++        Returns true if the buffer contains no data.
++
++        @see Clear()
++
++        @since 2.9.4
++     */
++    bool IsEmpty() const;
++
++    /**
+         Ensures the buffer has at least @a size bytes available.
+     */
+     void SetBufSize(size_t size);
+diff --git a/interface/wx/protocol/http.h b/interface/wx/protocol/http.h
+index 54ffb45..fd72c12 100644
+--- a/interface/wx/protocol/http.h
++++ b/interface/wx/protocol/http.h
+@@ -110,12 +110,51 @@ class wxHTTP : public wxProtocol
+     bool HasCookies() const;
+ 
+     /**
+-        Set the data to be posted to the server.
++        Set the binary data to be posted to the server.
+ 
+-        If a non-empty string is passed to this method, the next request will
+-        be an HTTP @c POST instead of the default HTTP @c GET and the data from
+-        @a post_buf will be posted as the body of this request.
++        If a non-empty buffer is passed to this method, the next request will
++        be an HTTP @c POST instead of the default HTTP @c GET and the given @a
++        data will be posted as the body of this request.
++
++        For textual data a more convenient SetPostText() can be used instead.
++
++        @param contentType
++            The value of HTTP "Content-Type" header, e.g. "image/png".
++        @param data
++            The data to post.
++        @return
++            @true if any data was passed in or @false if the buffer was empty.
++
++        @since 2.9.4
++     */
++    bool SetPostBuffer(const wxString& contentType, const wxMemoryBuffer& data);
++
++    /**
++        Set the text to be posted to the server.
++
++        After a successful call to this method, the request will use HTTP @c
++        POST instead of the default @c GET when it's executed.
++
++        Use SetPostBuffer() if you need to post non-textual data.
++
++        @param contentType
++            The value of HTTP "Content-Type" header, e.g. "text/html;
++            charset=UTF-8".
++        @param data
++            The data to post.
++        @param conv
++            The conversion to use to convert @a data contents to a byte stream.
++            Its value should be consistent with the charset parameter specified
++            in @a contentType.
++        @return
++            @true if string was non-empty and was successfully converted using
++            the given @a conv or @false otherwise (in this case this request
++            won't be @c POST'ed correctly).
++
++        @since 2.9.4
+      */
+-    void SetPostBuffer(const wxString& post_buf);
++    bool SetPostText(const wxString& contentType,
++                     const wxString& data,
++                     const wxMBConv& conv = wxConvUTF8);
+ };
+ 
+diff --git a/src/common/http.cpp b/src/common/http.cpp
+index e238364..49f08f6 100644
+--- a/src/common/http.cpp
++++ b/src/common/http.cpp
+@@ -48,7 +48,6 @@
+     m_addr = NULL;
+     m_read = false;
+     m_proxy_mode = false;
+-    m_post_buf = wxEmptyString;
+     m_http_response = 0;
+ 
+     SetNotify(wxSOCKET_LOST_FLAG);
+@@ -193,7 +192,41 @@ wxString wxHTTP::GenerateAuthString(const wxString& user, const wxString& pass) 
+ 
+ void wxHTTP::SetPostBuffer(const wxString& post_buf)
+ {
+-    m_post_buf = post_buf;
++    // Use To8BitData() for backwards compatibility in this deprecated method.
++    // The new code should use the other overload or SetPostText() and specify
++    // the encoding to use for the text explicitly.
++    wxScopedCharBuffer scb = post_buf.To8BitData();
++    if ( scb.length() )
++    {
++        m_postBuffer.Clear();
++        m_postBuffer.AppendData(scb.data(), scb.length());
++    }
++}
++
++bool
++wxHTTP::SetPostBuffer(const wxString& contentType,
++                      const wxMemoryBuffer& data)
++{
++    m_postBuffer = data;
++    m_contentType = contentType;
++
++    return !m_postBuffer.IsEmpty();
++}
++
++bool
++wxHTTP::SetPostText(const wxString& contentType,
++                    const wxString& data,
++                    const wxMBConv& conv)
++{
++    wxScopedCharBuffer scb = data.mb_str(conv);
++    if ( !scb.length() )
++        return false;
++
++    m_postBuffer.Clear();
++    m_postBuffer.AppendData(scb.data(), scb.length());
++    m_contentType = contentType;
++
++    return true;
+ }
+ 
+ void wxHTTP::SendHeaders()
+@@ -312,8 +345,21 @@ bool wxHTTP::BuildRequest(const wxString& path, wxHTTP_Req req)
+ 
+         case wxHTTP_POST:
+             request = wxT("POST");
+-            if ( GetHeader( wxT("Content-Length") ).empty() )
+-                SetHeader( wxT("Content-Length"), wxString::Format( wxT("%lu"), (unsigned long)m_post_buf.Len() ) );
++            // Content length must be correct, so always set, possibly
++            // overriding the value set explicitly by a previous call to
++            // SetHeader("Content-Length").
++            if ( !m_postBuffer.IsEmpty() )
++            {
++                wxString len;
++                len << m_postBuffer.GetDataLen();
++
++                SetHeader(wxS("Content-Length"), len);
++            }
++
++            // However if the user had explicitly set the content type, don't
++            // override it with the content type passed to SetPostText().
++            if ( !m_contentType.empty() && GetContentType().empty() )
++                SetHeader(wxS("Content-Type"), m_contentType);
+             break;
+ 
+         default:
+@@ -346,18 +392,10 @@ bool wxHTTP::BuildRequest(const wxString& path, wxHTTP_Req req)
+     Write("\r\n", 2);
+ 
+     if ( req == wxHTTP_POST ) {
+-        // Post data can be arbitrary binary data when the "binary" content
+-        // transfer encoding is used so don't assume it's ASCII only or
+-        // NUL-terminated.
+-        {
+-            const wxScopedCharBuffer buf(m_post_buf.To8BitData());
+-            Write(buf, buf.length());
+-        } // delete the buffer before modifying the string it points to, it
+-          // wouldn't really be a problem here even if we didn't do this
+-          // because we won't use this buffer again but this will avoid any
+-          // nasty surprises in the future if this code changes
+-
+-        m_post_buf = wxEmptyString;
++        if ( !m_postBuffer.IsEmpty() )
++            Write(m_postBuffer.GetData(), m_postBuffer.GetDataLen());
++
++        m_postBuffer.Clear();
+     }
+ 
+     wxString tmp_str;
+@@ -483,7 +521,7 @@ size_t wxHTTPStream::OnSysRead(void *buffer, size_t bufsize)
+         return NULL;
+ #endif
+ 
+-    if (!BuildRequest(path, m_post_buf.empty() ? wxHTTP_GET : wxHTTP_POST))
++    if (!BuildRequest(path, m_postBuffer.IsEmpty() ? wxHTTP_GET : wxHTTP_POST))
+         return NULL;
+ 
+     inp_stream = new wxHTTPStream(this);

@@ -1,0 +1,301 @@
+Index: src/common/image.cpp
+===================================================================
+--- src/common/image.cpp	(revision 76659)
++++ src/common/image.cpp	(working copy)
+@@ -28,6 +28,13 @@
+     #include "wx/colour.h"
+ #endif
+ 
++#if _OPENMP
++    #include <omp.h>
++    #include <wx/sysopt.h>
++
++    #define OPENMP_INIT int openmp_enabled = wxSystemOptions::GetOptionInt("openmp_enabled");
++#endif
++
+ #include "wx/wfstream.h"
+ #include "wx/xpmdecod.h"
+ 
+@@ -334,7 +341,6 @@
+     unsigned char maskBlue = 0 ;
+ 
+     const unsigned char *source_data = M_IMGDATA->m_data;
+-    unsigned char *target_data = data;
+     const unsigned char *source_alpha = 0 ;
+     unsigned char *target_alpha = 0 ;
+     if (M_IMGDATA->m_hasMask)
+@@ -358,8 +364,15 @@
+         }
+     }
+ 
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+     for (long y = 0; y < height; y++)
+     {
++        unsigned char *target_data = data + y * image.GetWidth() * 3;
++        unsigned char *target_alpha = image.GetAlpha() + y * image.GetWidth();
++
+         for (long x = 0; x < width; x++)
+         {
+             unsigned long avgRed = 0 ;
+@@ -522,14 +535,20 @@
+     long x_delta = (old_width<<16) / width;
+     long y_delta = (old_height<<16) / height;
+ 
+-    unsigned char* dest_pixel = target_data;
+-
+-    long y = 0;
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+     for ( long j = 0; j < height; j++ )
+     {
++        long y = j * y_delta;
++
+         const unsigned char* src_line = &source_data[(y>>16)*old_width*3];
+         const unsigned char* src_alpha_line = source_alpha ? &source_alpha[(y>>16)*old_width] : 0 ;
+ 
++        unsigned char *dest_pixel = target_data + j * image.GetWidth() * 3;
++        unsigned char *target_alpha = image.GetAlpha() + j * image.GetWidth();
++
+         long x = 0;
+         for ( long i = 0; i < width; i++ )
+         {
+@@ -543,8 +562,6 @@
+                 *(target_alpha++) = *src_alpha_pixel ;
+             x += x_delta;
+         }
+-
+-        y += y_delta;
+     }
+ 
+     return image;
+@@ -601,23 +618,23 @@
+     ResampleBoxPrecalc(vPrecalcs, M_IMGDATA->m_height);
+     ResampleBoxPrecalc(hPrecalcs, M_IMGDATA->m_width);
+ 
+-
+     const unsigned char* src_data = M_IMGDATA->m_data;
+     const unsigned char* src_alpha = M_IMGDATA->m_alpha;
+-    unsigned char* dst_data = ret_image.GetData();
+-    unsigned char* dst_alpha = NULL;
+ 
+     if ( src_alpha )
+     {
+         ret_image.SetAlpha();
+-        dst_alpha = ret_image.GetAlpha();
+     }
+ 
+-    int averaged_pixels, src_pixel_index;
+-    double sum_r, sum_g, sum_b, sum_a;
+-
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+     for ( int y = 0; y < height; y++ )         // Destination image - Y direction
+     {
++        unsigned char* dst_data = ret_image.GetData() + y * ret_image.GetWidth()* 3;
++        unsigned char* dst_alpha = ret_image.GetAlpha() + y * ret_image.GetWidth();
++
+         // Source pixel in the Y direction
+         const BoxPrecalc& vPrecalc = vPrecalcs[y];
+ 
+@@ -627,8 +644,11 @@
+             const BoxPrecalc& hPrecalc = hPrecalcs[x];
+ 
+             // Box of pixels to average
+-            averaged_pixels = 0;
+-            sum_r = sum_g = sum_b = sum_a = 0.0;
++            int averaged_pixels = 0;
++            double sum_r = 0.0;
++            double sum_g = 0.0;
++            double sum_b = 0.0; 
++            double sum_a = 0.0;
+ 
+             for ( int j = vPrecalc.boxStart; j <= vPrecalc.boxEnd; ++j )
+             {
+@@ -635,7 +655,7 @@
+                 for ( int i = hPrecalc.boxStart; i <= hPrecalc.boxEnd; ++i )
+                 {
+                     // Calculate the actual index in our source pixels
+-                    src_pixel_index = j * M_IMGDATA->m_width + i;
++                    int src_pixel_index = j * M_IMGDATA->m_width + i;
+ 
+                     sum_r += src_data[src_pixel_index * 3 + 0];
+                     sum_g += src_data[src_pixel_index * 3 + 1];
+@@ -709,13 +729,10 @@
+     wxImage ret_image(width, height, false);
+     const unsigned char* src_data = M_IMGDATA->m_data;
+     const unsigned char* src_alpha = M_IMGDATA->m_alpha;
+-    unsigned char* dst_data = ret_image.GetData();
+-    unsigned char* dst_alpha = NULL;
+ 
+     if ( src_alpha )
+     {
+         ret_image.SetAlpha();
+-        dst_alpha = ret_image.GetAlpha();
+     }
+ 
+     wxVector<BilinearPrecalc> vPrecalcs(height);
+@@ -723,13 +740,15 @@
+     ResampleBilinearPrecalc(vPrecalcs, M_IMGDATA->m_height);
+     ResampleBilinearPrecalc(hPrecalcs, M_IMGDATA->m_width);
+ 
+-    // initialize alpha values to avoid g++ warnings about possibly
+-    // uninitialized variables
+-    double r1, g1, b1, a1 = 0;
+-    double r2, g2, b2, a2 = 0;
+-
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+     for ( int dsty = 0; dsty < height; dsty++ )
+     {
++        unsigned char* dst_data = ret_image.GetData() + dsty * ret_image.GetWidth() * 3;
++        unsigned char* dst_alpha = ret_image.GetAlpha() + dsty * ret_image.GetWidth();
++
+         // We need to calculate the source pixel to interpolate from - Y-axis
+         const BilinearPrecalc& vPrecalc = vPrecalcs[dsty];
+         const int y_offset1 = vPrecalc.offset1;
+@@ -737,7 +756,6 @@
+         const double dy = vPrecalc.dd;
+         const double dy1 = vPrecalc.dd1;
+ 
+-
+         for ( int dstx = 0; dstx < width; dstx++ )
+         {
+             // X-axis of pixel to interpolate from
+@@ -748,6 +766,8 @@
+             const double dx = hPrecalc.dd;
+             const double dx1 = hPrecalc.dd1;
+ 
++            double a1 = 0, a2 = 0;
++
+             int src_pixel_index00 = y_offset1 * M_IMGDATA->m_width + x_offset1;
+             int src_pixel_index01 = y_offset1 * M_IMGDATA->m_width + x_offset2;
+             int src_pixel_index10 = y_offset2 * M_IMGDATA->m_width + x_offset1;
+@@ -754,16 +774,16 @@
+             int src_pixel_index11 = y_offset2 * M_IMGDATA->m_width + x_offset2;
+ 
+             // first line
+-            r1 = src_data[src_pixel_index00 * 3 + 0] * dx1 + src_data[src_pixel_index01 * 3 + 0] * dx;
+-            g1 = src_data[src_pixel_index00 * 3 + 1] * dx1 + src_data[src_pixel_index01 * 3 + 1] * dx;
+-            b1 = src_data[src_pixel_index00 * 3 + 2] * dx1 + src_data[src_pixel_index01 * 3 + 2] * dx;
++            double r1 = src_data[src_pixel_index00 * 3 + 0] * dx1 + src_data[src_pixel_index01 * 3 + 0] * dx;
++            double g1 = src_data[src_pixel_index00 * 3 + 1] * dx1 + src_data[src_pixel_index01 * 3 + 1] * dx;
++            double b1 = src_data[src_pixel_index00 * 3 + 2] * dx1 + src_data[src_pixel_index01 * 3 + 2] * dx;
+             if ( src_alpha )
+                 a1 = src_alpha[src_pixel_index00] * dx1 + src_alpha[src_pixel_index01] * dx;
+ 
+             // second line
+-            r2 = src_data[src_pixel_index10 * 3 + 0] * dx1 + src_data[src_pixel_index11 * 3 + 0] * dx;
+-            g2 = src_data[src_pixel_index10 * 3 + 1] * dx1 + src_data[src_pixel_index11 * 3 + 1] * dx;
+-            b2 = src_data[src_pixel_index10 * 3 + 2] * dx1 + src_data[src_pixel_index11 * 3 + 2] * dx;
++            double r2 = src_data[src_pixel_index10 * 3 + 0] * dx1 + src_data[src_pixel_index11 * 3 + 0] * dx;
++            double g2 = src_data[src_pixel_index10 * 3 + 1] * dx1 + src_data[src_pixel_index11 * 3 + 1] * dx;
++            double b2 = src_data[src_pixel_index10 * 3 + 2] * dx1 + src_data[src_pixel_index11 * 3 + 2] * dx;
+             if ( src_alpha )
+                 a2 = src_alpha[src_pixel_index10] * dx1 + src_alpha[src_pixel_index11] * dx;
+ 
+@@ -868,13 +888,10 @@
+ 
+     const unsigned char* src_data = M_IMGDATA->m_data;
+     const unsigned char* src_alpha = M_IMGDATA->m_alpha;
+-    unsigned char* dst_data = ret_image.GetData();
+-    unsigned char* dst_alpha = NULL;
+ 
+     if ( src_alpha )
+     {
+         ret_image.SetAlpha();
+-        dst_alpha = ret_image.GetAlpha();
+     }
+ 
+     // Precalculate weights
+@@ -884,8 +901,15 @@
+     ResampleBicubicPrecalc(vPrecalcs, M_IMGDATA->m_height);
+     ResampleBicubicPrecalc(hPrecalcs, M_IMGDATA->m_width);
+ 
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+     for ( int dsty = 0; dsty < height; dsty++ )
+     {
++        unsigned char* dst_data = ret_image.GetData() + dsty * ret_image.GetWidth() * 3;
++        unsigned char* dst_alpha = ret_image.GetAlpha() + dsty * ret_image.GetWidth();
++
+         // We need to calculate the source pixel to interpolate from - Y-axis
+         const BicubicPrecalc& vPrecalc = vPrecalcs[dsty];
+ 
+@@ -961,6 +985,10 @@
+ 
+     // Horizontal blurring algorithm - average all pixels in the specified blur
+     // radius in the X or horizontal direction
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+     for ( int y = 0; y < M_IMGDATA->m_height; y++ )
+     {
+         // Variables used in the blurring algorithm
+@@ -1064,6 +1092,10 @@
+ 
+     // Vertical blurring algorithm - same as horizontal but switched the
+     // opposite direction
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+     for ( int x = 0; x < M_IMGDATA->m_width; x++ )
+     {
+         // Variables used in the blurring algorithm
+@@ -3422,10 +3454,9 @@
+ 
+     // the rotated (destination) image is always accessed sequentially via this
+     // pointer, there is no need for pointer-based arrays here
+-    unsigned char *dst = rotated.GetData();
++    //unsigned char *dst = rotated.GetData();
++    //unsigned char *alpha_dst = has_alpha ? rotated.GetAlpha() : NULL;
+ 
+-    unsigned char *alpha_dst = has_alpha ? rotated.GetAlpha() : NULL;
+-
+     // if the original image has a mask, use its RGB values as the blank pixel,
+     // else, fall back to default (black).
+     unsigned char blank_r = 0;
+@@ -3451,8 +3482,15 @@
+     // only once, instead of repeating it for each pixel.
+     if (interpolating)
+     {
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+         for (int y = 0; y < rH; y++)
+         {
++            unsigned char *dst = rotated.GetData() + y * rotated.GetWidth() * 3;
++            unsigned char *alpha_dst = rotated.GetAlpha() + y * rotated.GetWidth();
++
+             for (int x = 0; x < rW; x++)
+             {
+                 wxRealPoint src = wxRotatePoint (x + x1a, y + y1a, cos_angle, -sin_angle, p0);
+@@ -3598,8 +3636,15 @@
+     }
+     else // not interpolating
+     {
++#ifdef _OPENMP
++    OPENMP_INIT
++    #pragma omp parallel for if(openmp_enabled)
++#endif
+         for (int y = 0; y < rH; y++)
+         {
++            unsigned char *dst = rotated.GetData() + y * rotated.GetWidth() * 3;
++            unsigned char *alpha_dst = rotated.GetAlpha() + y * rotated.GetWidth();
++
+             for (int x = 0; x < rW; x++)
+             {
+                 wxRealPoint src = wxRotatePoint (x + x1a, y + y1a, cos_angle, -sin_angle, p0);

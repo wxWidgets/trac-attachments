@@ -1,0 +1,269 @@
+Index: include/wx/defs.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/defs.h,v
+retrieving revision 1.581
+diff -u -r1.581 defs.h
+--- include/wx/defs.h	2007/05/03 10:27:05	1.581
++++ include/wx/defs.h	2007/05/05 13:43:16
+@@ -1862,6 +1862,7 @@
+     wxITEM_NORMAL,
+     wxITEM_CHECK,
+     wxITEM_RADIO,
++    wxITEM_DROPDOWN,
+     wxITEM_MAX
+ };
+ 
+Index: include/wx/event.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/event.h,v
+retrieving revision 1.269
+diff -u -r1.269 event.h
+--- include/wx/event.h	2007/04/20 01:22:43	1.269
++++ include/wx/event.h	2007/05/05 13:43:16
+@@ -155,6 +155,9 @@
+     DECLARE_EVENT_TYPE(wxEVT_COMMAND_TOOL_ENTER, 17)
+     DECLARE_EVENT_TYPE(wxEVT_COMMAND_SPINCTRL_UPDATED, 18)
+ 
++    // Toolbar dropdown arrows
++    DECLARE_EVENT_TYPE(wxEVT_COMMAND_TOOL_DROPDOWN_CLICKED, 19)
++
+         // Sockets and timers send events, too
+     DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_BASE, wxEVT_SOCKET, 50)
+     DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_BASE, wxEVT_TIMER , 80)
+@@ -2988,6 +2991,7 @@
+ #define EVT_VLBOX(winid, func) wx__DECLARE_EVT1(wxEVT_COMMAND_VLBOX_SELECTED, winid, wxCommandEventHandler(func))
+ #define EVT_COMBOBOX(winid, func) wx__DECLARE_EVT1(wxEVT_COMMAND_COMBOBOX_SELECTED, winid, wxCommandEventHandler(func))
+ #define EVT_TOOL(winid, func) wx__DECLARE_EVT1(wxEVT_COMMAND_TOOL_CLICKED, winid, wxCommandEventHandler(func))
++#define EVT_TOOL_DROPDOWN(winid, func) wx__DECLARE_EVT1(wxEVT_COMMAND_TOOL_DROPDOWN_CLICKED, winid, wxCommandEventHandler(func))
+ #define EVT_TOOL_RANGE(id1, id2, func) wx__DECLARE_EVT2(wxEVT_COMMAND_TOOL_CLICKED, id1, id2, wxCommandEventHandler(func))
+ #define EVT_TOOL_RCLICKED(winid, func) wx__DECLARE_EVT1(wxEVT_COMMAND_TOOL_RCLICKED, winid, wxCommandEventHandler(func))
+ #define EVT_TOOL_RCLICKED_RANGE(id1, id2, func) wx__DECLARE_EVT2(wxEVT_COMMAND_TOOL_RCLICKED, id1, id2, wxCommandEventHandler(func))
+Index: include/wx/tbarbase.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/tbarbase.h,v
+retrieving revision 1.70
+diff -u -r1.70 tbarbase.h
+--- include/wx/tbarbase.h	2007/04/14 09:58:07	1.70
++++ include/wx/tbarbase.h	2007/05/05 13:43:16
+@@ -71,7 +71,8 @@
+                       const wxString& longHelpString = wxEmptyString)
+         : m_label(label),
+           m_shortHelpString(shortHelpString),
+-          m_longHelpString(longHelpString)
++          m_longHelpString(longHelpString),
++          m_dropdownMenu(0)
+     {
+         m_tbar = tbar;
+         m_id = toolid;
+@@ -106,9 +107,14 @@
+         m_toggled = false;
+ 
+         m_toolStyle = wxTOOL_STYLE_CONTROL;
++
++        m_dropdownMenu = 0;
+     }
+ 
+-    virtual ~wxToolBarToolBase(){}
++    virtual ~wxToolBarToolBase()
++    {
++        delete m_dropdownMenu;
++    }
+ 
+     // accessors
+     // ---------
+@@ -197,6 +203,14 @@
+     virtual void Detach() { m_tbar = (wxToolBarBase *)NULL; }
+     virtual void Attach(wxToolBarBase *tbar) { m_tbar = tbar; }
+ 
++    void SetDropdownMenu(wxMenu* menu)
++    {
++        delete m_dropdownMenu;
++        m_dropdownMenu = menu;
++    }
++
++    wxMenu* GetDropdownMenu() { return m_dropdownMenu; }
++
+ protected:
+     wxToolBarBase *m_tbar;  // the toolbar to which we belong (may be NULL)
+ 
+@@ -227,6 +241,8 @@
+     wxString m_shortHelpString;
+     wxString m_longHelpString;
+ 
++    wxMenu* m_dropdownMenu;
++
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxToolBarToolBase)
+ };
+ 
+@@ -524,6 +540,9 @@
+ 
+     // don't want toolbars to accept the focus
+     virtual bool AcceptsFocus() const { return false; }
++
++    // Set dropdown menu
++    bool SetDropdownMenu(int toolid, wxMenu* menu);
+ 
+ protected:
+     // to implement in derived classes
+Index: samples/toolbar/toolbar.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/toolbar/toolbar.cpp,v
+retrieving revision 1.63
+diff -u -r1.63 toolbar.cpp
+--- samples/toolbar/toolbar.cpp	2007/03/18 23:13:05	1.63
++++ samples/toolbar/toolbar.cpp	2007/05/05 13:43:16
+@@ -125,6 +125,7 @@
+ 
+     void OnToolLeftClick(wxCommandEvent& event);
+     void OnToolRightClick(wxCommandEvent& event);
++    void OnToolDropdown(wxCommandEvent& event);
+ 
+     void OnCombo(wxCommandEvent& event);
+ 
+@@ -245,6 +246,8 @@
+ 
+     EVT_TOOL_RCLICKED(wxID_ANY, MyFrame::OnToolRightClick)
+ 
++    EVT_TOOL_DROPDOWN(wxID_ANY, MyFrame::OnToolDropdown)
++
+     EVT_UPDATE_UI(wxID_COPY, MyFrame::OnUpdateCopyAndCut)
+     EVT_UPDATE_UI(wxID_CUT, MyFrame::OnUpdateCopyAndCut)
+ 
+@@ -385,8 +388,13 @@
+     toolBar->SetToolBitmapSize(wxSize(w, h));
+ 
+     toolBar->AddTool(wxID_NEW, _T("New"),
+-                     toolBarBitmaps[Tool_new], wxNullBitmap, wxITEM_NORMAL,
++                     toolBarBitmaps[Tool_new], wxNullBitmap, wxITEM_DROPDOWN,
+                      _T("New file"), _T("This is help for new file tool"));
++
++    wxMenu* menu = new wxMenu;
++    menu->Append(wxID_EXIT, _T("Exit"));
++    toolBar->SetDropdownMenu(wxID_NEW, menu);
++
+     toolBar->AddTool(wxID_OPEN, _T("Open"),
+                      toolBarBitmaps[Tool_open], wxNullBitmap, wxITEM_NORMAL,
+                      _T("Open file"), _T("This is help for open file tool"));
+@@ -867,4 +875,11 @@
+         m_tbar->ToggleTool(IDM_TOOLBAR_OTHER_1 +
+                             event.GetId() - IDM_TOOLBAR_TOGGLERADIOBTN1, true);
+     }
++}
++
++void MyFrame::OnToolDropdown(wxCommandEvent& event)
++{
++    wxString str;
++    str.Printf( _T("Dropdown on tool %d\n"), event.GetId());
++    m_textWindow->WriteText( str );
+ }
+Index: src/common/event.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/event.cpp,v
+retrieving revision 1.193
+diff -u -r1.193 event.cpp
+--- src/common/event.cpp	2007/04/20 01:28:03	1.193
++++ src/common/event.cpp	2007/05/05 13:43:16
+@@ -173,6 +173,7 @@
+ DEFINE_EVENT_TYPE(wxEVT_COMMAND_TOOL_RCLICKED)
+ DEFINE_EVENT_TYPE(wxEVT_COMMAND_TOOL_ENTER)
+ DEFINE_EVENT_TYPE(wxEVT_COMMAND_SPINCTRL_UPDATED)
++DEFINE_EVENT_TYPE(wxEVT_COMMAND_TOOL_DROPDOWN_CLICKED)
+ 
+ // Mouse event types
+ DEFINE_EVENT_TYPE(wxEVT_LEFT_DOWN)
+Index: src/common/tbarbase.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/tbarbase.cpp,v
+retrieving revision 1.92
+diff -u -r1.92 tbarbase.cpp
+--- src/common/tbarbase.cpp	2007/04/03 18:04:44	1.92
++++ src/common/tbarbase.cpp	2007/05/05 13:43:16
+@@ -705,4 +705,18 @@
+ 
+ #endif // WXWIN_COMPATIBILITY_2_8
+ 
++bool wxToolBarBase::SetDropdownMenu(int toolid, wxMenu* menu)
++{
++    wxToolBarToolBase* tool = FindById(toolid);
++    if (!tool)
++        return false;
++
++    if (tool->GetKind() != wxITEM_DROPDOWN)
++        return false;
++
++    tool->SetDropdownMenu(menu);
++
++    return true;
++}
++
+ #endif // wxUSE_TOOLBAR
+Index: src/msw/tbar95.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/tbar95.cpp,v
+retrieving revision 1.200
+diff -u -r1.200 tbar95.cpp
+--- src/msw/tbar95.cpp	2007/04/04 13:38:37	1.200
++++ src/msw/tbar95.cpp	2007/05/05 13:43:16
+@@ -303,6 +303,9 @@
+     // toolbar-specific post initialisation
+     ::SendMessage(GetHwnd(), TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+ 
++    if (wxApp::GetComCtl32Version() >= 471)
++        ::SendMessage(GetHwnd(), TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DRAWDDARROWS);
++
+     return true;
+ }
+ 
+@@ -958,6 +961,14 @@
+                         button.fsStyle = TBSTYLE_BUTTON;
+                         break;
+ 
++                   case wxITEM_DROPDOWN:
++                        button.fsStyle = TBSTYLE_BUTTON;
++                        if (wxApp::GetComCtl32Version() >= 580)
++                            button.fsStyle |= BTNS_DROPDOWN;
++                        else if (wxApp::GetComCtl32Version() >= 4.71)
++                            button.fsStyle |= TBSTYLE_DROPDOWN;
++                        break;
++
+                     default:
+                         wxFAIL_MSG( _T("unexpected toolbar button kind") );
+                         button.fsStyle = TBSTYLE_BUTTON;
+@@ -1200,11 +1211,34 @@
+                             WXLPARAM lParam,
+                             WXLPARAM *WXUNUSED(result))
+ {
++    LPNMHDR hdr = (LPNMHDR)lParam;
++    if (hdr->code == TBN_DROPDOWN)
++    {
++        LPNMTOOLBAR tbhdr = (LPNMTOOLBAR)lParam;
++
++        wxCommandEvent evt(wxEVT_COMMAND_TOOL_DROPDOWN_CLICKED, tbhdr->iItem);
++        ProcessEvent(evt);
++
++        // Todo: menu check
++        wxToolBarToolBase* tool = FindById(tbhdr->iItem);
++        if (!tool)
++            return true;
++        
++        wxMenu* menu = tool->GetDropdownMenu();
++        if (menu)
++        {
++            RECT r;
++            if (::SendMessage(GetHwnd(), TB_GETITEMRECT, GetToolPos(tbhdr->iItem), (LPARAM)&r))
++                PopupMenu(menu, r.left, r.bottom);
++        }        
++
++        return true;
++    }
++
+     if( !HasFlag(wxTB_NO_TOOLTIPS) )
+     {
+ #if wxUSE_TOOLTIPS
+         // First check if this applies to us
+-        NMHDR *hdr = (NMHDR *)lParam;
+ 
+         // the tooltips control created by the toolbar is sometimes Unicode, even
+         // in an ANSI application - this seems to be a bug in comctl32.dll v5
+
+ 	  	 

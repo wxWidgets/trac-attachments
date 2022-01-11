@@ -1,0 +1,274 @@
+? osxbuild
+Index: include/wx/mac/carbon/private.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/mac/carbon/private.h,v
+retrieving revision 1.22
+diff -b -u -2 -r1.22 private.h
+--- include/wx/mac/carbon/private.h	2004/11/05 12:46:20	1.22
++++ include/wx/mac/carbon/private.h	2004/12/19 19:23:25
+@@ -175,5 +175,6 @@
+ void                 wxMacSetColorTableEntry( CTabHandle newColors , int index , int red , int green ,  int blue ) ;
+ CTabHandle         wxMacCreateColorTable( int numColors ) ;
+-void wxMacCreateBitmapButton( ControlButtonContentInfo*info , const wxBitmap& bitmap , int forceType = 0 ) ;
++void wxMacCreateBitmapButton( ControlButtonContentInfo*info , bool* callerMustDisposeHandle , const wxBitmap& bitmap , int forceType = 0 ) ;
++void wxDisposeControlButtonContent( ControlButtonContentInfo* info ) ;
+ 
+ #define MAC_WXCOLORREF(a) (*((RGBColor*)&(a)))
+@@ -320,4 +321,5 @@
+     {
+         m_controlRef = NULL ;
++        m_ownsButtonContent = false ;
+     }
+     
+@@ -325,8 +327,10 @@
+     {
+         m_controlRef = control ;
++        m_ownsButtonContent = false ;
+     }
+     wxMacControl( WXWidget control )
+     {
+         m_controlRef = (ControlRef) control ;
++        m_ownsButtonContent = false ;
+     }
+     virtual ~wxMacControl()
+@@ -467,8 +471,14 @@
+     
+     virtual OSStatus SetTabEnabled( SInt16 tabNo , bool enable ) ;
++
++    virtual bool OwnsButtonContent() { return m_ownsButtonContent; }
++    virtual void SetOwnsButtonContent( bool ownsButtonContent ) { m_ownsButtonContent = ownsButtonContent; }
++    virtual void DisposeButtonContent();
++
+ protected :
+     ControlRef  m_controlRef ;
+     wxFont      m_font ;
+     long        m_windowStyle ; 
++    bool        m_ownsButtonContent ;
+ } ;
+ 
+Index: src/mac/carbon/bitmap.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/bitmap.cpp,v
+retrieving revision 1.48
+diff -b -u -2 -r1.48 bitmap.cpp
+--- src/mac/carbon/bitmap.cpp	2004/06/09 05:13:10	1.48
++++ src/mac/carbon/bitmap.cpp	2004/12/19 19:23:30
+@@ -303,7 +303,9 @@
+ }
+ 
+-void wxMacCreateBitmapButton( ControlButtonContentInfo*info , const wxBitmap& bitmap , int forceType )
++void wxMacCreateBitmapButton( ControlButtonContentInfo*info , bool* callerMustDisposeHandle , const wxBitmap& bitmap , int forceType )
+ {
+     memset( info , 0 , sizeof(ControlButtonContentInfo) ) ;
++    if ( callerMustDisposeHandle != NULL )
++        *callerMustDisposeHandle = false;
+     if ( bitmap.Ok() )
+     {
+@@ -322,4 +324,7 @@
+             {
+                 info->contentType = kControlContentCIconHandle ;
++                if ( callerMustDisposeHandle != NULL )
++                    *callerMustDisposeHandle = true;
++                
+                 if ( bitmap.GetMask() )
+                 {
+@@ -336,4 +341,6 @@
+             {
+                 info->contentType = kControlContentPictHandle ;
++                if ( callerMustDisposeHandle != NULL )
++                    *callerMustDisposeHandle = true;
+                 if ( bitmap.GetMask() )
+                 {
+@@ -353,4 +360,37 @@
+     }
+ }
++
++void wxDisposeControlButtonContent( ControlButtonContentInfo* info )
++{
++    switch ( info->contentType )
++    {
++        case kControlContentCIconHandle:
++            if ( info->u.cIconHandle != NULL )
++                DisposeCIcon( info->u.cIconHandle ) ;
++            break;
++
++        case kControlContentPictHandle:
++            if ( info->u.picture != NULL )
++                KillPicture( info->u.picture ) ;
++            break;
++
++        case kControlContentIconSuiteHandle:
++            if ( info->u.iconSuite != NULL )
++                DisposeIconSuite( info->u.iconSuite, TRUE ) ;
++            break;
++
++        case kControlContentIconRef:
++            if ( info->u.iconRef != NULL )
++                ReleaseIconRef( info->u.iconRef ) ;
++            break;
++
++        default:
++            /* Nothing to dispose of for other content types. */
++            break;
++    }
++
++    info->contentType = kControlNoContent ;
++}
++
+ 
+ wxBitmapRefData::wxBitmapRefData()
+Index: src/mac/carbon/bmpbuttn.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/bmpbuttn.cpp,v
+retrieving revision 1.33
+diff -b -u -2 -r1.33 bmpbuttn.cpp
+--- src/mac/carbon/bmpbuttn.cpp	2004/07/11 16:13:21	1.33
++++ src/mac/carbon/bmpbuttn.cpp	2004/12/19 19:23:30
+@@ -71,5 +71,6 @@
+     
+     ControlButtonContentInfo info ;
+-    wxMacCreateBitmapButton( &info , m_bmpNormal ) ;
++    bool mustDisposeButtonContent = false ;
++    wxMacCreateBitmapButton( &info , &mustDisposeButtonContent , m_bmpNormal ) ;
+ 
+     Rect bounds = wxMacGetBoundsForControl( this , pos , size ) ;
+@@ -78,4 +79,5 @@
+         (( style & wxBU_AUTODRAW ) ? kControlBevelButtonSmallBevel : kControlBevelButtonNormalBevel )  , 
+         kControlBehaviorOffsetContents , &info , 0 , 0 , 0 , m_peer->GetControlRefAddr() ) );
++    m_peer->SetOwnsButtonContent( mustDisposeButtonContent );
+     
+     
+@@ -93,8 +95,10 @@
+ 
+     ControlButtonContentInfo info ;
+-    wxMacCreateBitmapButton( &info , m_bmpNormal ) ;
++    bool mustDisposeButtonContent = false ;
++    wxMacCreateBitmapButton( &info , &mustDisposeButtonContent , m_bmpNormal ) ;
+     if ( info.contentType != kControlNoContent )
+     {
+         m_peer->SetData( kControlButtonPart , kControlBevelButtonContentTag , info ) ;
++        m_peer->SetOwnsButtonContent( mustDisposeButtonContent );
+     }
+ }
+Index: src/mac/carbon/menuitem.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/menuitem.cpp,v
+retrieving revision 1.27
+diff -b -u -2 -r1.27 menuitem.cpp
+--- src/mac/carbon/menuitem.cpp	2004/10/03 18:06:15	1.27
++++ src/mac/carbon/menuitem.cpp	2004/12/19 19:23:30
+@@ -87,5 +87,5 @@
+     {
+         ControlButtonContentInfo info ;
+-        wxMacCreateBitmapButton( &info , m_bitmap , kControlContentCIconHandle ) ;
++        wxMacCreateBitmapButton( &info , NULL , m_bitmap , kControlContentCIconHandle ) ;
+         if ( info.contentType != kControlNoContent )
+         {
+Index: src/mac/carbon/notebmac.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/notebmac.cpp,v
+retrieving revision 1.51
+diff -b -u -2 -r1.51 notebmac.cpp
+--- src/mac/carbon/notebmac.cpp	2004/10/17 01:00:31	1.51
++++ src/mac/carbon/notebmac.cpp	2004/12/19 19:23:31
+@@ -364,8 +364,14 @@
+                 }
+                 ControlButtonContentInfo info ;
+-                wxMacCreateBitmapButton( &info , *bmap , kControlContentPictHandle) ;
++                bool mustDisposeButtonContent = false;
++                wxMacCreateBitmapButton( &info , &mustDisposeButtonContent , *bmap , kControlContentPictHandle) ;
+                 IconFamilyHandle iconFamily = (IconFamilyHandle) NewHandle(0) ;
+                 OSErr err = SetIconFamilyData( iconFamily, 'PICT' , (Handle) info.u.picture ) ;
+                 wxASSERT_MSG( err == noErr , wxT("Error when adding bitmap") ) ;
++                if ( mustDisposeButtonContent )
++                {
++                    // SetIconFamilyData has copied the data (see Icons.h).  So, we can dispose of it now.
++                    wxDisposeControlButtonContent( &info );
++                }
+                 IconRef iconRef ;
+                 err = RegisterIconRefFromIconFamily( 'WXNG' , (OSType) 1, iconFamily, &iconRef ) ;
+Index: src/mac/carbon/toolbar.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/toolbar.cpp,v
+retrieving revision 1.62
+diff -b -u -2 -r1.62 toolbar.cpp
+--- src/mac/carbon/toolbar.cpp	2004/11/22 20:41:04	1.62
++++ src/mac/carbon/toolbar.cpp	2004/12/19 19:23:31
+@@ -58,4 +58,6 @@
+     ~wxToolBarTool()
+     {
++        if ( m_ownToolButtonContent )
++            DisposeToolButtonContent();
+         if ( m_controlHandle )
+             DisposeControl( m_controlHandle ) ;
+@@ -95,7 +97,21 @@
+     {
+         m_controlHandle = NULL ;
++        m_ownToolButtonContent = false;
+     }
++
++    void DisposeToolButtonContent()
++    {
++        ControlButtonContentInfo    info ;
++        Size                        dummySize ;
++        OSStatus status = GetControlData( m_controlHandle , kControlButtonPart , kControlBevelButtonContentTag , sizeof(info) , &info , &dummySize );
++        if ( status == noErr )
++            wxDisposeControlButtonContent( &info );
++    }
++
++
+     ControlRef m_controlHandle ;
+ 
++    bool m_ownToolButtonContent;
++
+     wxCoord     m_x;
+     wxCoord     m_y;
+@@ -251,5 +267,5 @@
+     
+     ControlButtonContentInfo info ;
+-    wxMacCreateBitmapButton( &info , GetNormalBitmap() ) ;
++    wxMacCreateBitmapButton( &info , &m_ownToolButtonContent , GetNormalBitmap() ) ;
+     
+     SInt16 behaviour = kControlBehaviorOffsetContents ;
+Index: src/mac/carbon/utils.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/utils.cpp,v
+retrieving revision 1.88
+diff -b -u -2 -r1.88 utils.cpp
+--- src/mac/carbon/utils.cpp	2004/12/18 10:55:19	1.88
++++ src/mac/carbon/utils.cpp	2004/12/19 19:23:31
+@@ -780,4 +780,6 @@
+ void wxMacControl::Dispose()
+ {
++    DisposeButtonContent();
++
+     ::DisposeControl( m_controlRef ) ;
+     m_controlRef = NULL ;
+@@ -801,4 +803,7 @@
+ OSStatus wxMacControl::SetData(ControlPartCode inPartCode , ResType inTag , Size inSize , const void * inData)
+ {
++    if ( inPartCode == kControlButtonPart && inTag == kControlBevelButtonContentTag )
++        DisposeButtonContent();
++
+     return ::SetControlData( m_controlRef , inPartCode , inTag , inSize , inData ) ;   
+ }
+@@ -1146,4 +1151,17 @@
+     HIViewScrollRect ( m_controlRef , &scrollarea , dx ,dy ) ;
+ #endif
++}
++
++void wxMacControl::DisposeButtonContent()
++{
++    if ( OwnsButtonContent() )
++    {
++        ControlButtonContentInfo info ;
++        OSStatus status = GetData( kControlButtonPart , kControlBevelButtonContentTag , &info );
++        if ( status == noErr )
++            wxDisposeControlButtonContent( &info );
++
++        SetOwnsButtonContent( false );
++    }
+ }
+ 
+
+ 	  	 

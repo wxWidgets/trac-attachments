@@ -1,0 +1,180 @@
+Index: include/wx/zstream.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/zstream.h,v
+retrieving revision 1.23
+diff -u -2 -r1.23 zstream.h
+--- include/wx/zstream.h	2003/09/26 20:07:15	1.23
++++ include/wx/zstream.h	2003/12/18 08:29:47
+@@ -32,10 +32,12 @@
+ // Flags
+ enum {
+-    wxZLIB_NO_HEADER = 1   // required for use in Gzip and Zip files
++    wxZLIB_NO_HEADER = 0,   // raw deflate stream, no header or checksum
++    wxZLIB_ZLIB = 1,        // zlib header and checksum
++    wxZLIB_GZIP = 2         // gzip header and checksum, requires zlib 1.2+
+ };
+ 
+ class WXDLLIMPEXP_BASE wxZlibInputStream: public wxFilterInputStream {
+  public:
+-  wxZlibInputStream(wxInputStream& stream, int flags = 0);
++  wxZlibInputStream(wxInputStream& stream, int flags = wxZLIB_ZLIB | wxZLIB_GZIP);
+   virtual ~wxZlibInputStream();
+ 
+@@ -58,5 +60,5 @@
+ class WXDLLIMPEXP_BASE wxZlibOutputStream: public wxFilterOutputStream {
+  public:
+-  wxZlibOutputStream(wxOutputStream& stream, int level = -1, int flags = 0);
++  wxZlibOutputStream(wxOutputStream& stream, int level = -1, int flags = wxZLIB_ZLIB);
+   virtual ~wxZlibOutputStream();
+ 
+Index: src/common/zstream.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/zstream.cpp,v
+retrieving revision 1.41
+diff -u -2 -r1.41 zstream.cpp
+--- src/common/zstream.cpp	2003/09/26 20:07:18	1.41
++++ src/common/zstream.cpp	2003/12/18 08:29:47
+@@ -69,6 +69,16 @@
+       m_inflate->next_out = NULL;
+ 
+-      int bits = (flags & wxZLIB_NO_HEADER) ? -MAX_WBITS : MAX_WBITS;
++      wxASSERT((flags & ~(wxZLIB_ZLIB | wxZLIB_GZIP)) == 0);
+ 
++      // when autodetecting between gzip & zlib, silently drop gzip flag
++      // if the version of zlib doesn't support it
++      if (flags == (wxZLIB_ZLIB | wxZLIB_GZIP)
++              && strcmp(zlib_version, "1.2.") < 0)
++        flags &= ~wxZLIB_GZIP;
++
++      int bits = flags ? MAX_WBITS : -MAX_WBITS;
++      if (flags & wxZLIB_GZIP)
++        bits |= (flags & wxZLIB_ZLIB) ? 0x20 : 0x10;
++
+       if (inflateInit2(m_inflate, bits) == Z_OK)
+         return;
+@@ -127,5 +137,8 @@
+     m_lasterror = wxSTREAM_EOF;
+   } else if (err != Z_OK) {
+-    wxLogError(_("Can't read from inflate stream (zlib error %d)."), err);
++    wxString msg(m_inflate->msg, *wxConvCurrent);
++    if (!msg)
++      msg.Format(_("zlib error %d"), err);
++    wxLogError(_("Can't read from inflate stream: %s\n"), msg.c_str());
+     m_lasterror = wxSTREAM_READ_ERROR;
+   }
+@@ -169,6 +182,10 @@
+         m_deflate->next_out = m_z_buffer;
+         m_deflate->avail_out = m_z_size;
++
++        wxASSERT(flags == 0 || flags == wxZLIB_ZLIB || flags == wxZLIB_GZIP);
+ 
+-        int bits = (flags & wxZLIB_NO_HEADER) ? -MAX_WBITS : MAX_WBITS;
++        int bits = flags ? MAX_WBITS : -MAX_WBITS;
++        if (flags & wxZLIB_GZIP)
++            bits |= 0x10;
+ 
+         if (deflateInit2(m_deflate, level, Z_DEFLATED, bits, 
+@@ -254,5 +271,8 @@
+   if (err != Z_OK) {
+     m_lasterror = wxSTREAM_WRITE_ERROR;
+-    wxLogError(_("Can't write to deflate stream (zlib error %d)."), err);
++    wxString msg(m_deflate->msg, *wxConvCurrent);
++    if (!msg)
++      msg.Format(_("zlib error %d"), err);
++    wxLogError(_("Can't write to deflate stream: %s\n"), msg.c_str());
+   }
+ 
+Index: docs/latex/wx/strmzlib.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/docs/latex/wx/strmzlib.tex,v
+retrieving revision 1.9
+diff -u -2 -r1.9 strmzlib.tex
+--- docs/latex/wx/strmzlib.tex	2003/09/26 20:07:22	1.9
++++ docs/latex/wx/strmzlib.tex	2003/12/18 08:29:47
+@@ -4,6 +4,6 @@
+ \section{\class{wxZlibInputStream}}\label{wxzlibinputstream}
+ 
+-This stream uncompresses all data read from it. It uses the "filtered"
+-stream to get new compressed data.
++This filter stream decompresses a stream that is in zlib or gzip format.
++Note that reading the gzip format requires zlib version 1.2.0 greater.
+ 
+ The stream is not seekable, \helpref{SeekI()}{wxinputstreamseeki} returns
+@@ -28,17 +28,21 @@
+ \membersection{wxZlibInputStream::wxZlibInputStream}
+ 
+-\func{}{wxZlibInputStream}{\param{wxInputStream\&}{ stream}, \param{int}{ flags = 0}}
++\func{}{wxZlibInputStream}{\param{wxInputStream\&}{ stream}, \param{int}{ flags = wxZLIB\_ZLIB | wxZLIB\_GZIP}}
+ 
+-{\it flags} should be omitted for normal usage. The flag {\it wxZLIB\_NO_HEADER}
+- is needed when wxZlibInputStream is used as an 'inflate' decompressor for gzip
+-or zip files.
++The {\it flags} wxZLIB\_ZLIB and wxZLIB\_GZIP specify whether the input data
++is in zlib or gzip format. If both are used, bitwise ored, then zlib will
++autodetect the stream type, this is the default.
++If {\it flags} is zero, then the data is assumed to be a raw deflate stream
++without either zlib or gzip headers.
+ 
+-{\it wxZLIB\_NO_HEADER} is currently the only flag:
++The following symbols can be use for the flags:
+ 
+ \begin{verbatim}
+ // Flags
+ enum {
+-    wxZLIB_NO_HEADER = 1   // required for use in Gzip and Zip files
+-}
++    wxZLIB_NO_HEADER = 0,   // raw deflate stream, no header or checksum
++    wxZLIB_ZLIB = 1,        // zlib header and checksum
++    wxZLIB_GZIP = 2         // gzip header and checksum, requires zlib 1.2+
++};
+ \end{verbatim}
+ 
+@@ -49,6 +53,7 @@
+ \section{\class{wxZlibOutputStream}}\label{wxzliboutputstream}
+ 
+-This stream compresses all data written to it, and passes the compressed data
+-to the "filtered" stream.
++This stream compresses all data written to it. The compressed output can be
++in zlib or gzip format.
++Note that writing the gzip format requires zlib version 1.2.0 greater.
+ 
+ The stream is not seekable, \helpref{SeekO()}{wxoutputstreamseeko} returns
+@@ -73,14 +78,15 @@
+ \membersection{wxZlibOutputStream::wxZlibOutputStream}
+ 
+-\func{}{wxZlibOutputStream}{\param{wxOutputStream\&}{ stream}, \param{int}{ level = -1}, \param{int}{ flags = 0}}
++\func{}{wxZlibOutputStream}{\param{wxOutputStream\&}{ stream}, \param{int}{ level = -1}, \param{int}{ flags = wxZLIB\_ZLIB}}
+ 
+ Creates a new write-only compressed stream. {\it level} means level of 
+-compression. It is number between 0 and 9 (including these values) where
++compression. It is a number between 0 and 9 (including these values) where
+ 0 means no compression and 9 best but slowest compression. -1 is default
+ value (currently equivalent to 6).
+ 
+-{\it flags} should be omitted for normal usage. The flag {\it wxZLIB\_NO_HEADER}
+- suppresses the generation of the zlib header and checksum, and is required
+-when wxZlibOutputStream is used as a 'deflate' compressor for gzip or zip files.
++The {\it flags} wxZLIB\_ZLIB and wxZLIB\_GZIP specify whether the output data
++will be in zlib or gzip format. wxZLIB\_ZLIB is the default.
++If {\it flags} is zero, then a raw deflate stream is output without either
++zlib or gzip headers.
+ 
+ The following symbols can be use for the compression level and flags:
+@@ -93,10 +99,11 @@
+     wxZ_BEST_SPEED = 1,
+     wxZ_BEST_COMPRESSION = 9
+-}
++};
+ 
+ // Flags
+ enum {
+-    wxZLIB_NO_HEADER = 1   // required for use in Gzip and Zip files
+-}
++    wxZLIB_NO_HEADER = 0,   // raw deflate stream, no header or checksum
++    wxZLIB_ZLIB = 1,        // zlib header and checksum
++    wxZLIB_GZIP = 2         // gzip header and checksum, requires zlib 1.2+
++};
+ \end{verbatim}
+-
+
+ 	  	 

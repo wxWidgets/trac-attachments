@@ -1,0 +1,635 @@
+---
+ include/wx/ipcbase.h   |  111 ++++++++++++++++++++++++++++++++++++++-----------
+ include/wx/msw/dde.h   |   16 ++-----
+ include/wx/sckipc.h    |   16 ++-----
+ src/common/ipcbase.cpp |   15 ++----
+ src/common/sckipc.cpp  |   70 ++++++++++++++----------------
+ src/msw/dde.cpp        |   64 +++++++++++++---------------
+ 6 files changed, 168 insertions(+), 124 deletions(-)
+
+Index: wxWidgets/include/wx/ipcbase.h
+===================================================================
+--- wxWidgets.orig/include/wx/ipcbase.h
++++ wxWidgets/include/wx/ipcbase.h
+@@ -31,10 +31,19 @@ enum wxIPCFormat
+   wxIPC_PENDATA =          10,
+   wxIPC_RIFF =             11,
+   wxIPC_WAVE =             12,
+-  wxIPC_UNICODETEXT =      13,
++  wxIPC_UTF16TEXT =        13, /* CF_UNICODE */
+   wxIPC_ENHMETAFILE =      14,
+   wxIPC_FILENAME =         15, /* CF_HDROP */
+   wxIPC_LOCALE =           16,
++  wxIPC_UTF8TEXT =         17,
++  wxIPC_UTF32TEXT =        18,
++#if SIZEOF_WCHAR_T == 2
++  wxIPC_UNICODETEXT = wxIPC_UTF16TEXT,
++#elif SIZEOF_WCHAR_T == 4
++  wxIPC_UNICODETEXT = wxIPC_UTF32TEXT,
++#else
++#  error "Unknown wchar_t size"
++#endif
+   wxIPC_PRIVATE =          20
+ };
+ 
+@@ -46,7 +55,7 @@ class WXDLLIMPEXP_BASE wxConnectionBase:
+   DECLARE_CLASS(wxConnectionBase)
+ 
+ public:
+-  wxConnectionBase(wxChar *buffer, int size); // use external buffer
++  wxConnectionBase(void *buffer, size_t size); // use external buffer
+   wxConnectionBase(); // use internal, adaptive buffer
+   wxConnectionBase(const wxConnectionBase& copy);
+   virtual ~wxConnectionBase(void);
+@@ -55,39 +64,95 @@ public:
+   bool GetConnected() { return m_connected; }
+ 
+   // Calls that CLIENT can make
+-  virtual bool Execute(const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT ) = 0;
+-  // FIXME-UTF8: review this code for compatibility implications, update
+-  //             accordingly, don' use c_str() below
+-  virtual bool Execute(const wxString& str)
+-    { return Execute(str.c_str(), -1, wxIPC_TEXT); }
+-  virtual wxChar *Request(const wxString& item, int *size = (int *) NULL, wxIPCFormat format = wxIPC_TEXT) = 0;
+-  virtual bool Poke(const wxString& item, const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT) = 0;
++  virtual bool DoExecute(const void *data, size_t size, wxIPCFormat format) = 0;
++  bool Execute(const void *data, size_t size, wxIPCFormat fmt = wxIPC_PRIVATE)
++      { return DoExecute(data, size, fmt); }
++  bool Execute(const char *s, size_t size = (size_t)-1)
++      { return DoExecute(s, size == (size_t)-1 ? strlen(s) + 1 : size, wxIPC_TEXT); }
++  bool Execute(const wchar_t *ws, size_t size = (size_t)-1)
++      { return DoExecute(ws, size == (size_t)-1 ? (wcslen(ws) + 1) * sizeof(wchar_t) : size, wxIPC_UNICODETEXT); }
++  bool Execute(const wxString& s)
++  {
++      const
++#if wxUSE_UNICODE_UTF8
++      char *
++#else
++      wxCharBuffer
++#endif
++      buf = s.utf8_str();
++      return DoExecute(buf, strlen(buf) + 1, wxIPC_UTF8TEXT);
++  }
++  bool Execute(const wxCStrData& cs)
++      { return Execute(cs.AsString()); }
++
++  virtual const void *Request(const wxString& item, size_t *size = NULL, wxIPCFormat format = wxIPC_TEXT) = 0;
++
++  virtual bool DoPoke(const wxString& item, const void *data, size_t size, wxIPCFormat format) = 0;
++  bool Poke(const wxString& item, const void *data, size_t size, wxIPCFormat fmt = wxIPC_PRIVATE)
++      { return DoPoke(item, data, size, fmt); }
++  bool Poke(const wxString& item, const char *s, size_t size = (size_t)-1)
++      { return DoPoke(item, s, size == (size_t)-1 ? strlen(s) + 1 : size, wxIPC_TEXT); }
++  bool Poke(const wxString& item, const wchar_t *ws, size_t size = (size_t)-1)
++      { return DoPoke(item, ws, size == (size_t)-1 ? (wcslen(ws) + 1) * sizeof(wchar_t) : size, wxIPC_UNICODETEXT); }
++  bool Poke(const wxString& item, const wxString s)
++  {
++      const
++#if wxUSE_UNICODE_UTF8
++      char *
++#else
++      wxCharBuffer
++#endif
++      buf = s.utf8_str();
++      return DoPoke(item, buf,  strlen(buf) + 1, wxIPC_UTF8TEXT);
++  }
++  bool Poke(const wxString& item, const wxCStrData& cs)
++      { return Poke(item, cs.AsString()); }
++
+   virtual bool StartAdvise(const wxString& item) = 0;
+   virtual bool StopAdvise(const wxString& item) = 0;
+ 
+   // Calls that SERVER can make
+-  virtual bool Advise(const wxString& item, const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT) = 0;
++  virtual bool DoAdvise(const wxString& item, const void *data, size_t size, wxIPCFormat format) = 0;
++  bool Advise(const wxString& item, const void *data, size_t size, wxIPCFormat fmt = wxIPC_PRIVATE)
++      { return DoAdvise(item, data, size, fmt); }
++  bool Advise(const wxString& item, const char *s, size_t size = (size_t)-1)
++      { return DoAdvise(item, s, size == (size_t)-1 ? strlen(s) + 1 : size, wxIPC_TEXT); }
++  bool Advise(const wxString& item, const wchar_t *ws, size_t size = (size_t)-1)
++      { return DoAdvise(item, ws, size == (size_t)-1 ? (wcslen(ws) + 1) * sizeof(wchar_t) : size, wxIPC_UNICODETEXT); }
++  bool Advise(const wxString& item, const wxString s)
++  {
++      const
++#if wxUSE_UNICODE_UTF8
++      char *
++#else
++      wxCharBuffer
++#endif
++      buf = s.utf8_str();
++      return DoAdvise(item, buf,  strlen(buf) + 1, wxIPC_UTF8TEXT);
++  }
++  bool Advise(const wxString& item, const wxCStrData& cs)
++      { return Advise(item, cs.AsString()); }
+ 
+   // Calls that both can make
+   virtual bool Disconnect(void) = 0;
+ 
+   // Callbacks to SERVER - override at will
+   virtual bool OnExecute     ( const wxString& WXUNUSED(topic),
+-                               wxChar *WXUNUSED(data),
+-                               int WXUNUSED(size),
++                               const void *WXUNUSED(data),
++                               size_t WXUNUSED(size),
+                                wxIPCFormat WXUNUSED(format) )
+                              { return false; }
+ 
+-  virtual const wxChar *OnRequest ( const wxString& WXUNUSED(topic),
+-                                    const wxString& WXUNUSED(item),
+-                                    int *WXUNUSED(size),
+-                                    wxIPCFormat WXUNUSED(format) )
+-                                  { return (wxChar *) NULL; }
++  virtual const void *OnRequest ( const wxString& WXUNUSED(topic),
++                                  const wxString& WXUNUSED(item),
++                                  size_t *size,
++                                  wxIPCFormat WXUNUSED(format) )
++                                { *size = 0; return (const void *)NULL; }
+ 
+   virtual bool OnPoke        ( const wxString& WXUNUSED(topic),
+                                const wxString& WXUNUSED(item),
+-                               wxChar *WXUNUSED(data),
+-                               int WXUNUSED(size),
++                               const void *WXUNUSED(data),
++                               size_t WXUNUSED(size),
+                                wxIPCFormat WXUNUSED(format) )
+                              { return false; }
+ 
+@@ -102,8 +167,8 @@ public:
+   // Callbacks to CLIENT - override at will
+   virtual bool OnAdvise      ( const wxString& WXUNUSED(topic),
+                                const wxString& WXUNUSED(item),
+-                               wxChar *WXUNUSED(data),
+-                               int WXUNUSED(size),
++                               const void *WXUNUSED(data),
++                               size_t WXUNUSED(size),
+                                wxIPCFormat WXUNUSED(format) )
+                              { return false; }
+ 
+@@ -113,12 +178,12 @@ public:
+ 
+   // return a buffer at least this size, reallocating buffer if needed
+   // returns NULL if using an inadequate user buffer - it can't be resized
+-  wxChar *      GetBufferAtLeast( size_t bytes );
++  void *        GetBufferAtLeast( size_t bytes );
+ 
+ protected:
+   bool          m_connected;
+ private:
+-  wxChar *      m_buffer;
++  char *        m_buffer;
+   size_t        m_buffersize;
+   bool          m_deletebufferwhendone;
+ 
+Index: wxWidgets/include/wx/msw/dde.h
+===================================================================
+--- wxWidgets.orig/include/wx/msw/dde.h
++++ wxWidgets/include/wx/msw/dde.h
+@@ -45,23 +45,19 @@ class WXDLLIMPEXP_BASE wxDDEConnection: 
+ {
+   DECLARE_DYNAMIC_CLASS(wxDDEConnection)
+ public:
+-  wxDDEConnection(wxChar *buffer, int size); // use external buffer
++  wxDDEConnection(void *buffer, size_t size); // use external buffer
+   wxDDEConnection(); // use internal buffer
+   virtual ~wxDDEConnection(void);
+ 
+   // Calls that CLIENT can make
+-  virtual bool Execute(const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT);
+-  // FIXME-UTF8: change Execute() to DoExecute() to avoid having to do this;
+-  //             don't use c_str() below after removing ANSI build
+-  virtual bool Execute(const wxString& str)
+-      { return Execute(str.c_str(), -1, wxIPC_TEXT); }
+-  virtual wxChar *Request(const wxString& item, int *size = NULL, wxIPCFormat format = wxIPC_TEXT);
+-  virtual bool Poke(const wxString& item, const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT);
++  virtual bool DoExecute(const void *data, size_t size, wxIPCFormat format);
++  virtual const void *Request(const wxString& item, size_t *size = NULL, wxIPCFormat format = wxIPC_TEXT);
++  virtual bool DoPoke(const wxString& item, const void *data, size_t size, wxIPCFormat format);
+   virtual bool StartAdvise(const wxString& item);
+   virtual bool StopAdvise(const wxString& item);
+ 
+   // Calls that SERVER can make
+-  virtual bool Advise(const wxString& item, const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT);
++  virtual bool DoAdvise(const wxString& item, const void *data, size_t size, wxIPCFormat format);
+ 
+   // Calls that both can make
+   virtual bool Disconnect(void);
+@@ -75,7 +71,7 @@ public:
+   wxDDEClient*  m_client;
+ 
+   WXHCONV       m_hConv;
+-  const wxChar* m_sendingData;
++  const void*   m_sendingData;
+   int           m_dataSize;
+   wxIPCFormat   m_dataType;
+ 
+Index: wxWidgets/include/wx/sckipc.h
+===================================================================
+--- wxWidgets.orig/include/wx/sckipc.h
++++ wxWidgets/include/wx/sckipc.h
+@@ -57,19 +57,19 @@ class WXDLLIMPEXP_NET wxTCPConnection: p
+   DECLARE_DYNAMIC_CLASS(wxTCPConnection)
+ 
+ public:
+-  wxTCPConnection(wxChar *buffer, int size);
++  wxTCPConnection(void *buffer, size_t size);
+   wxTCPConnection();
+   virtual ~wxTCPConnection();
+ 
+   // Calls that CLIENT can make
+-  virtual bool Execute(const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT);
+-  virtual wxChar *Request(const wxString& item, int *size = NULL, wxIPCFormat format = wxIPC_TEXT);
+-  virtual bool Poke(const wxString& item, const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT);
++  virtual bool DoExecute(const void *data, size_t size, wxIPCFormat format);
++  virtual const void *Request(const wxString& item, size_t *size = NULL, wxIPCFormat format = wxIPC_TEXT);
++  virtual bool DoPoke(const wxString& item, const void *data, size_t size, wxIPCFormat format);
+   virtual bool StartAdvise(const wxString& item);
+   virtual bool StopAdvise(const wxString& item);
+ 
+   // Calls that SERVER can make
+-  virtual bool Advise(const wxString& item, const wxChar *data, int size = -1, wxIPCFormat format = wxIPC_TEXT);
++  virtual bool DoAdvise(const wxString& item, const void *data, size_t size, wxIPCFormat format);
+ 
+   // Calls that both can make
+   virtual bool Disconnect(void);
+@@ -81,12 +81,6 @@ public:
+   // To enable the compressor (NOTE: not implemented!)
+   void Compress(bool on);
+ 
+-  // unhide the Execute overload from wxConnectionBase
+-  // FIXME-UTF8: change Execute() to DoExecute() to avoid having to do this;
+-  //             don't use c_str() below after removing ANSI build
+-  virtual bool Execute(const wxString& str)
+-    { return Execute(str.c_str(), -1, wxIPC_TEXT); }
+-
+ protected:
+   wxSocketBase       *m_sock;
+   wxSocketStream     *m_sockstrm;
+Index: wxWidgets/src/common/sckipc.cpp
+===================================================================
+--- wxWidgets.orig/src/common/sckipc.cpp
++++ wxWidgets/src/common/sckipc.cpp
+@@ -344,7 +344,7 @@ wxTCPConnection::wxTCPConnection () : wx
+   m_codeco   = NULL;
+ }
+ 
+-wxTCPConnection::wxTCPConnection(wxChar *buffer, int size)
++wxTCPConnection::wxTCPConnection(void *buffer, size_t size)
+        : wxConnectionBase(buffer, size)
+ {
+   m_sock     = NULL;
+@@ -393,7 +393,7 @@ bool wxTCPConnection::Disconnect ()
+   return true;
+ }
+ 
+-bool wxTCPConnection::Execute(const wxChar *data, int size, wxIPCFormat format)
++bool wxTCPConnection::DoExecute(const void *data, size_t size, wxIPCFormat format)
+ {
+   if (!m_sock->IsConnected())
+     return false;
+@@ -402,16 +402,13 @@ bool wxTCPConnection::Execute(const wxCh
+   m_codeco->Write8(IPC_EXECUTE);
+   m_codeco->Write8(format);
+ 
+-  if (size < 0)
+-    size = (wxStrlen(data) + 1) * sizeof(wxChar);    // includes final NUL
+-
+   m_codeco->Write32(size);
+   m_sockstrm->Write(data, size);
+ 
+   return true;
+ }
+ 
+-wxChar *wxTCPConnection::Request (const wxString& item, int *size, wxIPCFormat format)
++const void *wxTCPConnection::Request (const wxString& item, size_t *size, wxIPCFormat format)
+ {
+   if (!m_sock->IsConnected())
+     return NULL;
+@@ -428,11 +425,9 @@ wxChar *wxTCPConnection::Request (const 
+     return NULL;
+   else
+   {
+-    size_t s;
+-
+-    s = m_codeci->Read32();
++    size_t s = m_codeci->Read32();
+ 
+-    wxChar *data = GetBufferAtLeast( s );
++    void *data = GetBufferAtLeast( s );
+     wxASSERT_MSG(data != NULL,
+                  _T("Buffer too small in wxTCPConnection::Request") );
+     m_sockstrm->Read(data, s);
+@@ -443,7 +438,7 @@ wxChar *wxTCPConnection::Request (const 
+   }
+ }
+ 
+-bool wxTCPConnection::Poke (const wxString& item, const wxChar *data, int size, wxIPCFormat format)
++bool wxTCPConnection::DoPoke (const wxString& item, const void *data, size_t size, wxIPCFormat format)
+ {
+   if (!m_sock->IsConnected())
+     return false;
+@@ -452,9 +447,6 @@ bool wxTCPConnection::Poke (const wxStri
+   m_codeco->WriteString(item);
+   m_codeco->Write8(format);
+ 
+-  if (size < 0)
+-    size = (wxStrlen(data) + 1) * sizeof(wxChar);    // includes final NUL
+-
+   m_codeco->Write32(size);
+   m_sockstrm->Write(data, size);
+ 
+@@ -498,8 +490,8 @@ bool wxTCPConnection::StopAdvise (const 
+ }
+ 
+ // Calls that SERVER can make
+-bool wxTCPConnection::Advise (const wxString& item,
+-                              const wxChar *data, int size, wxIPCFormat format)
++bool wxTCPConnection::DoAdvise (const wxString& item,
++                                const void *data, size_t size, wxIPCFormat format)
+ {
+   if (!m_sock->IsConnected())
+     return false;
+@@ -508,9 +500,6 @@ bool wxTCPConnection::Advise (const wxSt
+   m_codeco->WriteString(item);
+   m_codeco->Write8(format);
+ 
+-  if (size < 0)
+-    size = (wxStrlen(data) + 1) * sizeof(wxChar);    // includes final NUL
+-
+   m_codeco->Write32(size);
+   m_sockstrm->Write(data, size);
+ 
+@@ -564,7 +553,7 @@ void wxTCPEventHandler::Client_OnRequest
+   {
+   case IPC_EXECUTE:
+   {
+-    wxChar *data;
++    void *data;
+     size_t size;
+     wxIPCFormat format;
+ 
+@@ -582,14 +571,10 @@ void wxTCPEventHandler::Client_OnRequest
+   }
+   case IPC_ADVISE:
+   {
+-    wxChar *data;
+-    size_t size;
+-    wxIPCFormat format;
+-
+     item = codeci->ReadString();
+-    format = (wxIPCFormat)codeci->Read8();
+-    size = codeci->Read32();
+-    data = connection->GetBufferAtLeast( size );
++    wxIPCFormat format = (wxIPCFormat)codeci->Read8();
++    size_t size = codeci->Read32();
++    void *data = connection->GetBufferAtLeast( size );
+     wxASSERT_MSG(data != NULL,
+                  _T("Buffer too small in wxTCPEventHandler::Client_OnRequest") );
+     sockstrm->Read(data, size);
+@@ -624,14 +609,10 @@ void wxTCPEventHandler::Client_OnRequest
+   }
+   case IPC_POKE:
+   {
+-    wxIPCFormat format;
+-    size_t size;
+-    wxChar *data;
+-
+     item = codeci->ReadString();
+-    format = (wxIPCFormat)codeci->Read8();
+-    size = codeci->Read32();
+-    data = connection->GetBufferAtLeast( size );
++    wxIPCFormat format = (wxIPCFormat)codeci->Read8();
++    size_t size = codeci->Read32();
++    void *data = connection->GetBufferAtLeast( size );
+     wxASSERT_MSG(data != NULL,
+                  _T("Buffer too small in wxTCPEventHandler::Client_OnRequest") );
+     sockstrm->Read(data, size);
+@@ -647,15 +628,28 @@ void wxTCPEventHandler::Client_OnRequest
+     item = codeci->ReadString();
+     format = (wxIPCFormat)codeci->Read8();
+ 
+-    int user_size = -1;
+-    const wxChar *user_data = connection->OnRequest (topic_name, item, &user_size, format);
++    size_t user_size = (size_t)-1;
++    const void *user_data = connection->OnRequest (topic_name, item, &user_size, format);
+ 
+     if (user_data)
+     {
+       codeco->Write8(IPC_REQUEST_REPLY);
+ 
+-      if (user_size == -1)
+-        user_size = (wxStrlen(user_data) + 1) * sizeof(wxChar);    // includes final NUL
++      if (user_size == (size_t)-1)
++      {
++        switch (format)
++        {
++          case wxIPC_TEXT:
++          case wxIPC_UTF8TEXT:
++            user_size = strlen((const char *)user_data) + 1;  // includes final NUL
++            break;
++          case wxIPC_UNICODETEXT:
++            user_size = (wcslen((const wchar_t *)user_data) + 1) * sizeof(wchar_t);  // includes final NUL
++            break;
++          default:
++            user_size = 0;
++        }
++      }
+ 
+       codeco->Write32(user_size);
+       sockstrm->Write(user_data, user_size);
+Index: wxWidgets/src/msw/dde.cpp
+===================================================================
+--- wxWidgets.orig/src/msw/dde.cpp
++++ wxWidgets/src/msw/dde.cpp
+@@ -498,7 +498,7 @@ bool wxDDEClient::DeleteConnection(WXHCO
+ // wxDDEConnection
+ // ----------------------------------------------------------------------------
+ 
+-wxDDEConnection::wxDDEConnection(wxChar *buffer, int size)
++wxDDEConnection::wxDDEConnection(void *buffer, size_t size)
+      : wxConnectionBase(buffer, size)
+ {
+     m_client = NULL;
+@@ -545,13 +545,9 @@ bool wxDDEConnection::Disconnect()
+     return ok;
+ }
+ 
+-bool wxDDEConnection::Execute(const wxChar *data, int size, wxIPCFormat WXUNUSED(format))
++bool wxDDEConnection::DoExecute(const void *data, size_t size, wxIPCFormat WXUNUSED(format))
+ {
+     DWORD result;
+-    if (size < 0)
+-    {
+-        size = (wxStrlen(data) + 1) * sizeof(wxChar);    // includes final NUL
+-    }
+ 
+     bool ok = DdeClientTransaction((LPBYTE)data,
+                                     size,
+@@ -572,7 +568,7 @@ bool wxDDEConnection::Execute(const wxCh
+     return ok;
+ }
+ 
+-wxChar *wxDDEConnection::Request(const wxString& item, int *size, wxIPCFormat format)
++const void *wxDDEConnection::Request(const wxString& item, size_t *size, wxIPCFormat format)
+ {
+     DWORD result;
+ 
+@@ -593,7 +589,7 @@ wxChar *wxDDEConnection::Request(const w
+ 
+     DWORD len = DdeGetData(returned_data, NULL, 0, 0);
+ 
+-    wxChar *data = GetBufferAtLeast( len );
++    void *data = GetBufferAtLeast(len);
+     wxASSERT_MSG(data != NULL,
+                  _T("Buffer too small in wxDDEConnection::Request") );
+     (void) DdeGetData(returned_data, (LPBYTE)data, len, 0);
+@@ -601,18 +597,14 @@ wxChar *wxDDEConnection::Request(const w
+     (void) DdeFreeDataHandle(returned_data);
+ 
+     if (size)
+-        *size = (int)len;
++        *size = (size_t)len;
+ 
+     return data;
+ }
+ 
+-bool wxDDEConnection::Poke(const wxString& item, const wxChar *data, int size, wxIPCFormat format)
++bool wxDDEConnection::DoPoke(const wxString& item, const void *data, size_t size, wxIPCFormat format)
+ {
+     DWORD result;
+-    if (size < 0)
+-    {
+-        size = (wxStrlen(data) + 1) * sizeof(wxChar);    // includes final NUL
+-    }
+ 
+     HSZ item_atom = DDEGetAtom(item);
+     bool ok = DdeClientTransaction((LPBYTE)data,
+@@ -669,16 +661,11 @@ bool wxDDEConnection::StopAdvise(const w
+ }
+ 
+ // Calls that SERVER can make
+-bool wxDDEConnection::Advise(const wxString& item,
+-                             const wxChar *data,
+-                             int size,
+-                             wxIPCFormat format)
++bool wxDDEConnection::DoAdvise(const wxString& item,
++                               const void *data,
++                               size_t size,
++                               wxIPCFormat format)
+ {
+-    if (size < 0)
+-    {
+-        size = (wxStrlen(data) + 1) * sizeof(wxChar);    // includes final NUL
+-    }
+-
+     HSZ item_atom = DDEGetAtom(item);
+     HSZ topic_atom = DDEGetAtom(m_topicName);
+     m_sendingData = data;  // mrf: potential for scope problems here?
+@@ -775,7 +762,7 @@ _DDECallback(WORD wType,
+                 {
+                     DWORD len = DdeGetData(hData, NULL, 0, 0);
+ 
+-                    wxChar *data = connection->GetBufferAtLeast( len );
++                    void *data = connection->GetBufferAtLeast(len);
+                     wxASSERT_MSG(data != NULL,
+                                  _T("Buffer too small in _DDECallback (XTYP_EXECUTE)") );
+ 
+@@ -804,15 +791,26 @@ _DDECallback(WORD wType,
+                 {
+                     wxString item_name = DDEStringFromAtom(hsz2);
+ 
+-                    int user_size = -1;
+-                    const wxChar *data = connection->OnRequest(connection->m_topicName,
+-                                                               item_name,
+-                                                               &user_size,
+-                                                               (wxIPCFormat)wFmt);
++                    size_t user_size = (size_t)-1;
++                    const void *data = connection->OnRequest(connection->m_topicName,
++                                                             item_name,
++                                                             &user_size,
++                                                             (wxIPCFormat)wFmt);
+                     if (data)
+                     {
+-                        if (user_size < 0)
+-                            user_size = (wxStrlen((wxChar*)data) + 1) * sizeof(wxChar);    // includes final NUL
++                      if (user_size == (size_t)-1)
++                        switch (wFmt)
++                        {
++                          case wxIPC_TEXT:
++                          case wxIPC_UTF8TEXT:
++                            user_size = strlen((const char*)data) + 1;  // includes final NUL
++                            break;
++                          case wxIPC_UNICODETEXT:
++                            user_size = (wcslen((const wchar_t*)data) + 1) * sizeof(wchar_t);  // includes final NUL
++                            break;
++                          default:
++                            user_size = 0;
++                        }
+ 
+                         HDDEDATA handle = DdeCreateDataHandle(DDEIdInst,
+                                                               (LPBYTE)data,
+@@ -837,7 +835,7 @@ _DDECallback(WORD wType,
+ 
+                     DWORD len = DdeGetData(hData, NULL, 0, 0);
+ 
+-                    wxChar *data = connection->GetBufferAtLeast( len );
++                    void *data = connection->GetBufferAtLeast(len);
+                     wxASSERT_MSG(data != NULL,
+                                  _T("Buffer too small in _DDECallback (XTYP_POKE)") );
+ 
+@@ -924,7 +922,7 @@ _DDECallback(WORD wType,
+ 
+                     DWORD len = DdeGetData(hData, NULL, 0, 0);
+ 
+-                    wxChar *data = connection->GetBufferAtLeast( len );
++                    void *data = connection->GetBufferAtLeast(len);
+                     wxASSERT_MSG(data != NULL,
+                                  _T("Buffer too small in _DDECallback (XTYP_ADVDATA)") );
+ 
+Index: wxWidgets/src/common/ipcbase.cpp
+===================================================================
+--- wxWidgets.orig/src/common/ipcbase.cpp
++++ wxWidgets/src/common/ipcbase.cpp
+@@ -25,13 +25,13 @@ IMPLEMENT_CLASS(wxServerBase, wxObject)
+ IMPLEMENT_CLASS(wxClientBase, wxObject)
+ IMPLEMENT_CLASS(wxConnectionBase, wxObject)
+ 
+-wxConnectionBase::wxConnectionBase(wxChar *buffer, int bytes)
++wxConnectionBase::wxConnectionBase(void *buffer, size_t bytes)
+     : m_connected(true),
+-      m_buffer(buffer),
++      m_buffer((char *)buffer),
+       m_buffersize(bytes),
+       m_deletebufferwhendone(false)
+ {
+-  if ( buffer == (wxChar *)NULL )
++  if ( buffer == NULL )
+   { // behave like next constructor
+     m_buffersize = 0;
+     m_deletebufferwhendone = true;
+@@ -62,10 +62,10 @@ wxConnectionBase::wxConnectionBase(const
+ wxConnectionBase::~wxConnectionBase(void)
+ {
+   if ( m_deletebufferwhendone && m_buffer )
+-   delete m_buffer;
++    delete m_buffer;
+ }
+ 
+-wxChar *wxConnectionBase::GetBufferAtLeast( size_t bytes )
++void *wxConnectionBase::GetBufferAtLeast( size_t bytes )
+ {
+   if ( m_buffersize >= bytes )
+     return m_buffer;
+@@ -75,10 +75,7 @@ wxChar *wxConnectionBase::GetBufferAtLea
+     { // we're in charge of buffer, increase it
+       if ( m_buffer )
+         delete m_buffer;
+-      // the argument specifies **byte size**, but m_buffer is of type
+-      // wxChar. Under unicode: sizeof(wxChar) > 1, so the buffer size is
+-      // bytes / sizeof(wxChar) rounded upwards.
+-      m_buffer = new wxChar[(bytes + sizeof(wxChar) - 1) / sizeof(wxChar)];
++      m_buffer = new char[bytes];
+       m_buffersize = bytes;
+       return m_buffer;
+     } // user-supplied buffer, fail
+
+ 	  	 

@@ -1,0 +1,304 @@
+Index: src/osx/window_osx.cpp
+===================================================================
+--- src/osx/window_osx.cpp	(revision 62789)
++++ src/osx/window_osx.cpp	(working copy)
+@@ -450,7 +450,6 @@
+ void wxWindowMac::DoReleaseMouse()
+ {
+     wxApp::s_captureWindow = NULL ;
+-
+     m_peer->ReleaseMouse() ;
+ }
+ 
+@@ -690,22 +689,11 @@
+ 
+ bool wxWindowMac::SetCursor(const wxCursor& cursor)
+ {
+-    if (m_cursor.IsSameAs(cursor))
+-        return false;
++    if ( ! wxWindowBase::SetCursor( cursor.IsOk() ? cursor : *wxSTANDARD_CURSOR ) )
++        return false ;
+ 
+-    if (!cursor.IsOk())
+-    {
+-        if ( ! wxWindowBase::SetCursor( *wxSTANDARD_CURSOR ) )
+-            return false ;
+-    }
+-    else
+-    {
+-        if ( ! wxWindowBase::SetCursor( cursor ) )
+-            return false ;
+-    }
+-
+     wxASSERT_MSG( m_cursor.Ok(),
+-        wxT("cursor must be valid after call to the base version"));
++        "cursor must be valid after call to the base version");
+ 
+     if ( GetPeer() != NULL )
+         GetPeer()->SetCursor( m_cursor );
+@@ -1607,42 +1595,43 @@
+     m_peer->Lower();
+ }
+ 
+-// static wxWindow *gs_lastWhich = NULL;
+-
+ bool wxWindowMac::MacSetupCursor( const wxPoint& pt )
+ {
+-    // first trigger a set cursor event
++    wxCursor nextCursor ;
+ 
+-    wxPoint clientorigin = GetClientAreaOrigin() ;
+-    wxSize clientsize = GetClientSize() ;
+-    wxCursor cursor ;
+-    if ( wxRect2DInt( clientorigin.x , clientorigin.y , clientsize.x , clientsize.y ).Contains( wxPoint2DInt( pt ) ) )
++    if ( HasCapture() )
+     {
+-        wxSetCursorEvent event( pt.x , pt.y );
++        nextCursor = m_cursor ;
++    }
++    else
++    {
++        wxPoint clientOrigin = GetClientAreaOrigin() ;
++        wxSize clientSize = GetClientSize() ;
+ 
+-        bool processedEvtSetCursor = HandleWindowEvent(event);
+-        if ( processedEvtSetCursor && event.HasCursor() )
++        if ( wxRect2DInt( clientOrigin , clientSize ).Contains( wxPoint2DInt( pt ) ) )
+         {
+-            cursor = event.GetCursor() ;
+-        }
+-        else
+-        {
+-            // the test for processedEvtSetCursor is here to prevent using m_cursor
+-            // if the user code caught EVT_SET_CURSOR() and returned nothing from
+-            // it - this is a way to say that our cursor shouldn't be used for this
+-            // point
+-            if ( !processedEvtSetCursor && m_cursor.Ok() )
+-                cursor = m_cursor ;
++            // first trigger a set cursor event
++            wxSetCursorEvent event( pt.x , pt.y );
+ 
+-            if ( !wxIsBusy() && !GetParent() )
+-                cursor = *wxSTANDARD_CURSOR ;
++            if ( HandleWindowEvent( event ) )
++            {
++                // user code handling the EVT_SET_CURSOR event but not specifying a cursor
++                // is interpreted as not wanting to use m_cursor
++                // (event.GetCursor() is !Ok() in this case,
++                //    so MacSetupCursor will return false at this level of the wxWindow hierarchy)
++                nextCursor = event.GetCursor() ;
++            }
++            else
++            {
++                nextCursor = m_cursor ;
++            }
+         }
+-
+-        if ( cursor.Ok() )
+-            cursor.MacInstall() ;
+     }
+ 
+-    return cursor.Ok() ;
++    if ( nextCursor.Ok() )
++        nextCursor.MacInstall() ;
++
++    return nextCursor.Ok() ;
+ }
+ 
+ wxString wxWindowMac::MacGetToolTipString( wxPoint &WXUNUSED(pt) )
+Index: src/osx/carbon/window.cpp
+===================================================================
+--- src/osx/carbon/window.cpp	(revision 62789)
++++ src/osx/carbon/window.cpp	(working copy)
+@@ -1103,43 +1103,17 @@
+ 
+ void wxMacControl::SetCursor(const wxCursor& cursor)
+ {
+-    wxWindowMac *mouseWin = 0 ;
+-    WindowRef window = GetControlOwner( m_controlRef ) ;
+-
+-    wxNonOwnedWindow* tlwwx = wxNonOwnedWindow::GetFromWXWindow( (WXWindow) window ) ;
+-    if ( tlwwx != NULL )
+-    {
+-        ControlPartCode part ;
+-        ControlRef control ;
+-        Point pt ;
+-#if MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_5
+-        HIPoint hiPoint ;
+-        HIGetMousePosition(kHICoordSpaceWindow, window, &hiPoint);
+-        pt.h = hiPoint.x;
+-        pt.v = hiPoint.y;
+-#else
+-        GetGlobalMouse( &pt );
+-        int x = pt.h;
+-        int y = pt.v;
+-        tlwwx->ScreenToClient(&x, &y);
+-        pt.h = x;
+-        pt.v = y;
+-#endif
+-        control = FindControlUnderMouse( pt , window , &part ) ;
+-        if ( control )
+-            mouseWin = wxFindWindowFromWXWidget( (WXWidget) control ) ;
+-    }
+-
+-    if ( mouseWin == tlwwx && !wxIsBusy() )
+-        cursor.MacInstall() ;
++    wxMacUpdateCursor();
+ }
+ 
+ void wxMacControl::CaptureMouse()
+ {
++    wxMacUpdateCursor();
+ }
+ 
+ void wxMacControl::ReleaseMouse()
+ {
++    wxMacUpdateCursor();
+ }
+ 
+ //
+Index: src/osx/carbon/nonownedwnd.cpp
+===================================================================
+--- src/osx/carbon/nonownedwnd.cpp	(revision 62789)
++++ src/osx/carbon/nonownedwnd.cpp	(working copy)
+@@ -564,6 +564,70 @@
+     }
+ }
+ 
++wxNonOwnedWindow *wxFindWindowFromWXWindow(WXWindow inWindowRef);
++wxWindow* wxFindWindowAtPoint(wxWindow* win, const wxPoint& pt);
++
++// sets (installs) cursor that is currently shown
++// recurses upward from cursorTarget, stopping at first window with a custom cursor
++// cursorPos is in cursorTarget client coordinates
++static void wxMacUpdateCursor(wxWindow* cursorTarget, wxPoint cursorPos)
++{
++    extern wxCursor gGlobalCursor;
++
++    if ( gGlobalCursor.IsOk() ) return;     // gGlobalCursor takes precedence on wxOSX
++                                            // note: if wxIsBusy(), gGlobalCursor will be set
++
++    while ( cursorTarget )
++    {
++        if ( cursorTarget->MacSetupCursor( cursorPos ) ) return;
++
++        cursorPos += cursorTarget->GetPosition();
++        cursorTarget = cursorTarget->GetParent() ;
++    }
++
++    wxSTANDARD_CURSOR->MacInstall();
++}
++
++// returns true if cursorOver is a child of a floating window or the active window
++// returns false otherwise (including when cursorOver is NULL)
++static bool WindowIsReadyForMouse(wxWindow *cursorOver)
++{
++    wxWindow *cursorTLW = wxGetTopLevelParent( cursorOver );
++
++    if ( ! cursorTLW )
++        return false;
++
++    if ( cursorTLW->GetWindowStyle() & ( wxSTAY_ON_TOP | wxFRAME_FLOAT_ON_PARENT ) )
++        return true;
++
++    wxTopLevelWindow *castTLW = wxDynamicCast( cursorTLW , wxTopLevelWindow );
++
++    return castTLW && castTLW->IsActive();
++}
++
++
++// sets (installs) cursor that is currently shown, based on
++// current mouse position and whether or not the mouse is captured
++// does not change cursor if a global cursor is set (as is done by wxBeginBusyCursor)
++void wxMacUpdateCursor()
++{
++    wxPoint cursorPos( wxGetMousePosition() );
++    wxWindow *cursorTarget = wxWindow::GetCapture();
++
++    if ( !cursorTarget )
++    {
++        wxWindow *cursorOver = wxFindWindowAtPoint( cursorPos );
++
++        if ( WindowIsReadyForMouse( cursorOver ) )
++            cursorTarget = cursorOver;
++    }
++
++    if ( cursorTarget )
++        cursorPos = cursorTarget->ScreenToClient( cursorPos );
++
++    wxMacUpdateCursor( cursorTarget, cursorPos );
++}
++
+ #define NEW_CAPTURE_HANDLING 1
+ 
+ pascal OSStatus
+@@ -738,42 +802,16 @@
+             }
+         }
+ 
++/*
+         if ( cEvent.GetKind() == kEventMouseUp && wxApp::s_captureWindow )
+         {
+             wxApp::s_captureWindow = NULL ;
+             // update cursor ?
+          }
+-
+-        // update cursor
+-
+-        wxWindow* cursorTarget = currentMouseWindow ;
+-        wxPoint cursorPoint( wxevent.m_x , wxevent.m_y ) ;
+-
+-        extern wxCursor gGlobalCursor;
+-
+-        if (!gGlobalCursor.IsOk())
+-        {
+-            while ( cursorTarget && !cursorTarget->MacSetupCursor( cursorPoint ) )
+-            {
+-                cursorTarget = cursorTarget->GetParent() ;
+-                if ( cursorTarget )
+-                    cursorPoint += cursorTarget->GetPosition();
+-            }
+-        }
+-
++*/
+     }
+     else // currentMouseWindow == NULL
+     {
+-        if (toplevelWindow && !control)
+-        {
+-           extern wxCursor gGlobalCursor;
+-           if (!gGlobalCursor.IsOk())
+-           {
+-                // update cursor when over toolbar and titlebar etc.
+-                wxSTANDARD_CURSOR->MacInstall() ;
+-           }
+-        }
+-
+         // don't mess with controls we don't know about
+         // for some reason returning eventNotHandledErr does not lead to the correct behaviour
+         // so we try sending them the correct control directly
+@@ -794,6 +832,8 @@
+         }
+     }
+ 
++    wxMacUpdateCursor();
++
+     return result ;
+ }
+ 
+Index: include/wx/osx/nonownedwnd.h
+===================================================================
+--- include/wx/osx/nonownedwnd.h	(revision 62789)
++++ include/wx/osx/nonownedwnd.h	(working copy)
+@@ -128,5 +128,11 @@
+ // list of all frames and modeless dialogs
+ extern WXDLLIMPEXP_DATA_CORE(wxWindowList) wxModelessWindows;
+ 
++#if wxOSX_USE_CARBON
++// sets (installs) cursor that is currently shown, based on
++// current mouse position and whether or not the mouse is captured
++// does not change cursor if a global cursor is set (as is done by wxBeginBusyCursor)
++void wxMacUpdateCursor();
++#endif
+ 
+ #endif // _WX_MAC_NONOWNEDWND_H_

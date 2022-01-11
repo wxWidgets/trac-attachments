@@ -1,0 +1,209 @@
+Index: include/wx/msw/filedlg.h
+===================================================================
+--- include/wx/msw/filedlg.h	(revision 50560)
++++ include/wx/msw/filedlg.h	(working copy)
+@@ -32,6 +32,7 @@
+     virtual void SetPath(const wxString& path);
+     virtual void GetPaths(wxArrayString& paths) const;
+     virtual void GetFilenames(wxArrayString& files) const;
++	virtual bool SetExtraControl(wxWindow *extra) { this->extraControl = extra; return true; }
+ 
+     virtual int ShowModal();
+ 
+@@ -40,6 +41,7 @@
+ 
+     // called from the hook procedure on CDN_INITDONE reception
+     virtual void MSWOnInitDone(WXHWND hDlg);
++	virtual void MSWOnInitDialog(/*WXHWND hDlg*/wxInitDialogEvent &);
+ 
+ protected:
+ 
+@@ -57,9 +59,12 @@
+     // treatment) was called
+     bool m_bMovedWindow;
+     int m_centreDir;        // nothing to do if 0
++	wxWindow *extraControl;
++	HWND parent;
+ 
+     DECLARE_DYNAMIC_CLASS(wxFileDialog)
+     DECLARE_NO_COPY_CLASS(wxFileDialog)
++    DECLARE_EVENT_TABLE()
+ };
+ 
+ #endif // _WX_FILEDLG_H_
+Index: src/msw/filedlg.cpp
+===================================================================
+--- src/msw/filedlg.cpp	(revision 50560)
++++ src/msw/filedlg.cpp	(working copy)
+@@ -46,6 +46,10 @@
+ #include "wx/filename.h"
+ #include "wx/tokenzr.h"
+ 
++// implemented in utils.cpp
++extern "C" WXDLLIMPEXP_BASE HWND
++wxCreateHiddenWindow(LPCTSTR *pclassname, LPCTSTR classname, WNDPROC wndproc);
++
+ // ----------------------------------------------------------------------------
+ // constants
+ // ----------------------------------------------------------------------------
+@@ -68,6 +72,16 @@
+ // resizeable
+ static wxRect gs_rectDialog(0, 0, 428, 266);
+ 
++static wxFileDialog *showingFileDlg = NULL;
++static const wxChar *
++    wxMSWFILEDLG_WNDCLASSNAME = wxT("_wxFileDialog_Internal_Class");
++static const wxChar *gs_classForFileDlgHiddenWindow = NULL;
++static wxWindow *gs_FileDlgHiddenWindow = NULL;
++
++BEGIN_EVENT_TABLE(wxFileDialog, wxFileDialogBase)
++	EVT_INIT_DIALOG(wxFileDialog::MSWOnInitDialog)
++END_EVENT_TABLE()
++
+ // ============================================================================
+ // implementation
+ // ============================================================================
+@@ -86,6 +100,14 @@
+ {
+     switch ( iMsg )
+     {
++		case WM_INITDIALOG:
++			{
++			wxInitDialogEvent evt(0);
++			evt.m_callbackUserData = (wxObject *)hDlg;
++			showingFileDlg->MSWOnInitDialog(evt);
++			}
++			break;
++
+         case WM_NOTIFY:
+             {
+                 OFNOTIFY *pNotifyCode = wx_reinterpret_cast(OFNOTIFY *, lParam);
+@@ -139,6 +161,21 @@
+     // already at the requested size.. (when centering)
+     gs_rectDialog.x =
+     gs_rectDialog.y = 0;
++/*
++#ifndef __WXWINCE__	// file dialog customization is not supported on WINCE
++	// create a hidden window to receive notification about connections
++	// status change
++	if (gs_FileDlgHiddenWindow == NULL)
++		{
++		gs_FileDlgHiddenWindow = wxCreateHiddenWindow
++			 (
++				&gs_classForFileDlgHiddenWindow,
++				wxMSWFILEDLG_WNDCLASSNAME,
++				DefWindowProcW
++			 );
++		}
++#endif
++*/
+ }
+ 
+ void wxFileDialog::GetPaths(wxArrayString& paths) const
+@@ -250,6 +287,19 @@
+     SetHWND(NULL);
+ }
+ 
++void wxFileDialog::MSWOnInitDialog(/*WXHWND hDlg*/wxInitDialogEvent &evt)
++{
++    SetHWND((HWND)evt.m_callbackUserData);
++
++	//HWND h = CreateWindow(L"BUTTON", L"Created dynamically\n\rduring WM_INITIDIALOG", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
++	//	0, 0, 150, 40, (HWND)hDlg, NULL, wxGetInstance(), NULL);
++
++	extraControl->Reparent(this);
++
++    // we shouldn't destroy this HWND
++    SetHWND(NULL);
++}
++
+ // helper used below in ShowModal(): style is used to determine whether to show
+ // the "Save file" dialog (if it contains wxFD_SAVE bit) or "Open file" one;
+ // returns true on success or false on failure in which case err is filled with
+@@ -321,6 +371,8 @@
+     *fileNameBuffer = wxT('\0');
+     *titleBuffer    = wxT('\0');
+ 
++	showingFileDlg = this;
++
+     long msw_flags = OFN_HIDEREADONLY;
+ 
+     if ( HasFdFlag(wxFD_FILE_MUST_EXIST) )
+@@ -340,6 +392,11 @@
+         msw_flags |= OFN_ENABLESIZING;
+ #endif
+     }
++	
++	if (extraControl)
++	{
++		msw_flags |= OFN_ENABLETEMPLATEHANDLE|OFN_EXPLORER|OFN_ENABLEHOOK;
++	}
+ 
+     if ( HasFdFlag(wxFD_MULTIPLE) )
+     {
+@@ -368,7 +425,47 @@
+     of.lpstrTitle        = m_message.wx_str();
+     of.lpstrFileTitle    = titleBuffer;
+     of.nMaxFileTitle     = wxMAXFILE + 1 + wxMAXEXT;
++	
++	if (extraControl)
++	{	
++		extraControl->GetSizer()->RecalcSizes();
++		const wxSize s = extraControl->GetSize();
++		//const wxSize s(100, 100);
+ 
++		HGLOBAL hgbl;
++		LPDLGTEMPLATE lpdt;
++		LPDLGITEMTEMPLATE lpdit;
++		LPWORD lpw;
++		LPWSTR lpwsz;
++		//LRESULT ret;
++		int nchar;
++
++		hgbl = GlobalAlloc(GMEM_ZEROINIT, 256);
++		wxASSERT(hgbl);
++		//if (!hgbl)
++			//return LPDLGTEMPLATE(-1);
++	 
++		lpdt = (LPDLGTEMPLATE)GlobalLock(hgbl);
++	 
++		// Define a dialog box.
++	 
++		lpdt->style = DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS;
++		lpdt->cdit = 0;         // Number of controls
++		lpdt->x  = 0;  lpdt->y  = 0;
++		lpdt->cx = s.GetWidth();	// not really needed(doesn't affect dialog size) but do it anyway.
++		lpdt->cy = s.GetHeight();
++		//lpdt->dwExtendedStyle = WS_EX_STATICEDGE;
++		
++		lpw = (LPWORD)(lpdt + 1);
++		*lpw++ = 0;             // No menu
++		*lpw++ = 0;             // Predefined dialog box class (by default)
++		*lpw++ = 0;				// No title
++		
++		GlobalUnlock(hgbl);
++
++		of.hInstance = (HINSTANCE)(LPDLGTEMPLATE)hgbl;
++	}
++
+     // Convert forward slashes to backslashes (file selector doesn't like
+     // forward slashes) and also squeeze multiple consecutive slashes into one
+     // as it doesn't like two backslashes in a row neither
+Index: src/msw/window.cpp
+===================================================================
+--- src/msw/window.cpp	(revision 50560)
++++ src/msw/window.cpp	(working copy)
+@@ -4073,10 +4073,11 @@
+     return HandleWindowEvent(event);
+ }
+ 
+-bool wxWindowMSW::HandleInitDialog(WXHWND WXUNUSED(hWndFocus))
++bool wxWindowMSW::HandleInitDialog(WXHWND hWndFocus)
+ {
+     wxInitDialogEvent event(GetId());
+     event.SetEventObject(this);
++	event.m_callbackUserData = (wxObject *)hWndFocus;
+ 
+     return HandleWindowEvent(event);
+ }
+

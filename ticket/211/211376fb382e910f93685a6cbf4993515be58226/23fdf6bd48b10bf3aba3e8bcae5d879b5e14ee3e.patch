@@ -1,0 +1,673 @@
+diff -Nur dummy/htmlbug.cpp html_bug/htmlbug.cpp
+--- dummy/htmlbug.cpp	1970-01-01 02:00:00.000000000 +0200
++++ html_bug/htmlbug.cpp	2008-12-11 15:30:10.000000000 +0200
+@@ -0,0 +1,543 @@
++#ifdef WX_PRECOMP
++#include "wx_pch.h"
++#endif
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif //__BORLANDC__
++
++#include <wx/wx.h>
++#include <wx/app.h>
++#include <wx/html/htmprint.h>
++#include <wx/print.h>
++#include <wx/textfile.h>
++#include <wx/image.h>
++
++
++
++
++ class myApp : public wxApp
++ {
++    public:
++    virtual bool OnInit( ) ;
++ };
++
++class myframe : public wxFrame
++ {
++ public:
++    myframe( ) ;
++
++ private:
++	wxTextCtrl* h_fileText ;
++
++	void showPrintPreview( wxString file ) ;
++	void OnOk( wxCommandEvent& ev ) ;
++
++	enum {
++		idText = 24433,
++	};
++
++} ;
++
++
++//DECLARE_EVENT_TYPE( EVT_TEMPLATE_SELECTED, -1)
++/***
++ ** Html DC renderer
++ * copied from src/html/htmprint.cpp
++ * addded GetTotalWidth()
++ */
++
++class WXDLLIMPEXP_HTML KalHtmlDCRenderer : public wxObject
++{
++public:
++    KalHtmlDCRenderer();
++    virtual ~KalHtmlDCRenderer();
++
++    // Following 3 methods *must* be called before any call to Render:
++
++    // Assign DC to this render
++    void SetDC(wxDC *dc, double pixel_scale = 1.0);
++
++    void SetSize(int width, int height);
++
++    void SetHtmlText(const wxString& html, const wxString& basepath = wxEmptyString, bool isdir = true);
++
++    void SetFonts(const wxString& normal_face, const wxString& fixed_face, const int *sizes = NULL);
++
++    void SetStandardFonts(int size = -1,
++                          const wxString& normal_face = wxEmptyString,
++                          const wxString& fixed_face = wxEmptyString);
++
++    int Render(int x, int y, wxArrayInt& known_pagebreaks, int from = 0,
++               int dont_render = FALSE, int to = INT_MAX);
++
++    int GetTotalHeight();
++
++	// the ONLY addition to KalHtmlDCRenderer
++    int GetTotalWidth() {
++        if (m_Cells) return m_Cells->GetMaxTotalWidth();
++          else return 0;
++    }
++
++protected:
++    wxDC *m_DC;
++    wxHtmlWinParser *m_Parser;
++    wxFileSystem *m_FS;
++    wxHtmlContainerCell *m_Cells;
++    int m_MaxWidth, m_Width, m_Height;
++
++    DECLARE_NO_COPY_CLASS(KalHtmlDCRenderer)
++};
++
++/***
++ ** KalyspoHtmlPrintout
++ */
++class KalHtmlPrintout : public wxPrintout
++{
++public:
++
++    KalHtmlPrintout( const wxString& title = _T("Kal Printout")) ;
++    virtual ~KalHtmlPrintout() ;
++
++    // ADD ONS
++    // prepares the class for printing this html document.
++    // Must be called before using the class, in fact just after constructor
++    // It can be called many times with different page nums. Each html doc is forced
++    // to fit on a page.
++    //
++    // basepath is base directory (html string would be stored there if it was in
++    // file). It is used to determine path for loading images, for example.
++    // isdir is false if basepath is filename, true if it is directory name
++    // (see wxFileSystem for detailed explanation)
++    void SetHtmlText(const wxString& html, const wxString &basepath = wxEmptyString, bool isdir = true);
++
++
++    // wxPrintout stuff:
++	//virtualize in order to derive from our
++    virtual bool OnPrintPage(int page);
++    virtual bool HasPage(int page);
++    virtual void GetPageInfo(int *minPage, int *maxPage, int *selPageFrom, int *selPageTo);
++
++// protectize on order to derive
++protected:
++    wxString m_Document ;
++    wxString m_BasePath;
++    bool m_BasePathIsDir;
++    KalHtmlDCRenderer *m_Renderer ;
++
++    void RenderPage(wxDC *dc, int page);
++};
++
++wxPrintData* g_printData = NULL ;
++wxPageSetupDialogData* g_pageSetupData = NULL ;
++
++/*************************************************************************88
++ *** IMPLEMENTATION **
++ ***************************************************************************/
++
++/*************************************************************************88
++ *** Printout **
++ ***************************************************************************/
++
++KalHtmlPrintout::KalHtmlPrintout( const wxString& title ) :
++        wxPrintout( title )
++{
++
++    m_BasePath = wxEmptyString;
++    m_BasePathIsDir = true;
++    m_Renderer = new KalHtmlDCRenderer;
++ 
++};
++
++KalHtmlPrintout::~KalHtmlPrintout()
++{
++    delete m_Renderer;
++}
++
++
++
++void KalHtmlPrintout::SetHtmlText(const wxString& html, const wxString &basepath , bool isdir )
++{
++	m_Document = html ;
++
++    m_BasePath = basepath;
++    m_BasePathIsDir = isdir;
++}
++
++bool KalHtmlPrintout::OnPrintPage(int page)
++{
++    wxDC *dc = GetDC();
++    if (dc && dc->Ok())
++    {
++        if (HasPage(page))
++            RenderPage(dc, page);
++
++        return true;
++    }
++    else return false;
++}
++
++void KalHtmlPrintout::GetPageInfo(int *minPage, int *maxPage, int *selPageFrom, int *selPageTo)
++{
++    *minPage = ( signed int ) 1;
++    *maxPage = ( signed int ) 1 ;
++    *selPageFrom = ( signed int ) 1;
++    *selPageTo = ( signed int ) 1 ;
++}
++
++bool KalHtmlPrintout::HasPage(int pageNum)
++{
++    return pageNum > 0 && (unsigned) pageNum <= 1;
++}
++
++/* Code taken from src/html/htmprint.cpp */
++void KalHtmlPrintout::RenderPage(wxDC *dc, int page)
++{
++    wxBusyCursor wait;
++
++    int pageWidth, pageHeight, mm_w, mm_h, dc_w, dc_h;
++    double ppmm_w, ppmm_h;
++
++    GetPageSizePixels(&pageWidth, &pageHeight);
++    GetPageSizeMM(&mm_w, &mm_h);
++    /* from mm to LU1 */
++    ppmm_w = ( (double) pageWidth / (double) mm_w);
++    ppmm_h = ( (double) pageHeight / (double) mm_h);
++    //wxDisplaySize(&scr_w, &scr_h);
++
++    //Get Screen/Printer Resolution
++    int ppiPrinterX, ppiPrinterY;
++    GetPPIPrinter(&ppiPrinterX, &ppiPrinterY);
++    wxUnusedVar(ppiPrinterX);
++    int ppiScreenX, ppiScreenY;
++    GetPPIScreen(&ppiScreenX, &ppiScreenY);
++    wxUnusedVar(ppiScreenX);
++
++    wxASSERT_MSG( page<= (int) 1 , _T("ERROR RederPage: Asked for a too big page"));
++    // for each page
++    //calc scale initialize DC
++
++    // Get page size in device units (zoom here)
++    dc->GetSize(&dc_w, &dc_h);
++
++    double scale1X,scale1Y;
++    // Scale from logical units1 to device
++    scale1X = (double)dc_w / (double)pageWidth;
++    scale1Y = (double)dc_h / (double)pageHeight;
++
++
++    /*
++     A hack to force the selected html data to FIT on to the selected DC
++    eff_height : height of efficient space in logical units 1
++    html_height : totoal height of the html to be rendered in logical units 1
++    */
++
++    int eff_height = (int) (ppmm_h * (mm_h )) ;
++    int eff_width = (int) (ppmm_w * (mm_w )) ;
++
++     //DP 1
++    m_Renderer->SetDC(dc, (double)ppiPrinterY / (double)ppiScreenY );
++    // Renderer needs width to calculate height !!
++    m_Renderer->SetSize( eff_width, eff_height );
++    m_Renderer->SetHtmlText(m_Document, m_BasePath, m_BasePathIsDir);
++
++    int html_height = m_Renderer->GetTotalHeight() ;
++    wxCHECK_RET( html_height > 0 , _T("  KalPrinting:: RenderPage : html height is not gt 0") );
++    int html_width = wxDynamicCast(m_Renderer, KalHtmlDCRenderer)->GetTotalWidth() ;
++    if ( html_width <=0 ) {
++        wxLogWarning (_T(" ** RenderPage html_width = %d. Falling back to maximum (%d)"), html_width, eff_width ) ;
++        html_width = eff_width ;
++    }
++    wxCHECK_RET( html_width, _T("  RenderPage : html width is not gt 0") );
++
++    m_Renderer->SetSize( html_width, html_height );
++    //TOCHECK :: Do we need to actually reset html text ?
++    m_Renderer->SetHtmlText( m_Document, m_BasePath, m_BasePathIsDir);
++
++    /* Calculate the scales for html_* (LU2) to fit inside eff_* (LU1)*/
++    // Convert from LU2 (html_height) to LU1 eff_height
++    double m_pageFitScaleX = (double)eff_width / (double) html_width ;
++    double m_pageFitScaleY = (double)eff_height / (double)html_height ;
++
++   //Keep html page aspect ratio
++   // if ( m_keepAspectRatio ) {
++        m_pageFitScaleX = m_pageFitScaleY = wxMin( m_pageFitScaleX, m_pageFitScaleY ) ;
++   // }
++
++    /* Margins */
++
++    int myMarginLeftLU1,myMarginTopLU1 ; /* LU1 */
++    //Compute xtra space to deside for alignment  in LU1
++    int xtraX = eff_width - (int) ((html_width) * m_pageFitScaleX) ;
++    //wxASSERT (xtraX>=0) ;
++    if ( xtraX < 0 ) {
++        //html_width > eff_width
++        wxLogDebug(_T("  RenderPage html_width is gt eff_width. Truncating. xtraX=%d"), xtraX );
++        xtraX = 0 ;
++    }
++	/* align center */
++    xtraX = xtraX * ( (float) 1 / 2 ) ;
++    myMarginLeftLU1 = (int) /*(m_MarginLeft * ppmm_w) +*/ xtraX ;
++
++    //int xtraY = eff_height / m_pageFitScaleY - html_height ;
++    int xtraY = eff_height - (int) (( html_height) * m_pageFitScaleY) ;
++    //wxASSERT(xtraY>=0) ;
++    if ( xtraY < 0 ) {
++        //html_width > eff_width
++        wxLogDebug(_T("  RenderPage html_height is gt eff_height. Truncating") );
++        xtraY = 0 ;
++    }
++    xtraY = xtraY * ( (float) 1 / 2 ) ;
++    myMarginTopLU1 = (int) /*(m_MarginTop * ppmm_h) + */ xtraY ;
++
++    wxLogDebug( _T("  RenderPage xtraX = %d, xtraY = %d"), xtraX, xtraY ) ;
++
++    // Till here from previous OnPrepare
++
++    //m_Renderer->SetDC(dc, (double)ppiPrinterY / (double)ppiScreenY);
++
++
++    //if (m_drawMarginRect) {
++        dc->SetUserScale( scale1X, scale1Y );
++        /* Draw the margin rectangle in LU1 */
++        dc->SetBrush(*wxTRANSPARENT_BRUSH);
++        dc->SetPen( * wxThePenList->FindOrCreatePen( *wxLIGHT_GREY, 1, wxDOT_DASH ));
++        dc->DrawRectangle( (int) (myMarginLeftLU1),
++                           (int) (myMarginTopLU1 ) ,
++                    (int)  (eff_width - 2*myMarginLeftLU1),
++                    (int) ( eff_height - 2*myMarginTopLU1) ) ;
++    //}
++
++
++    dc->SetUserScale( scale1X * m_pageFitScaleX, scale1Y * m_pageFitScaleY );
++    dc->SetBackgroundMode(wxTRANSPARENT);
++
++    wxArrayInt dummy;
++    //MODA SCALE Convert LU1 to LU2 we draw on LU2
++    m_Renderer->Render( myMarginLeftLU1 / m_pageFitScaleX,
++                        ( myMarginTopLU1) / m_pageFitScaleY,
++                         dummy, 0 );
++                         //m_PageBreaks, m_PageBreaks[page-1], false, m_PageBreaks[page]-m_PageBreaks[page-1]);
++
++
++   wxLogDebug(_T("  RenderPage html_height=%d, eff_height=%d, dc_h=%d, \n   html_width=%d, eff_width=%d, dc_w=%d"),
++                html_height, eff_height, dc_h, html_width, eff_width, dc_w );
++   wxLogDebug(_T("  RenderPage/t m_pageFitScaleY=%lf, m_pageFitScaleX=%lf "), m_pageFitScaleY, m_pageFitScaleX );
++
++
++}
++
++
++/*************************************************************************88
++ *** APLL **
++ ***************************************************************************/
++
++IMPLEMENT_APP( myApp )
++ bool myApp::OnInit()
++ {
++
++        wxApp::SetAppName( _("htmltest" ) );
++        
++	/*** initialize print structs ***/
++	  g_printData = new wxPrintData;
++    // You could set an initial paper size here
++      g_printData->SetPaperId(wxPAPER_A4);    // for everyone else
++     g_pageSetupData = new wxPageSetupDialogData;
++     // copy over initial paper size from print record
++     (*g_pageSetupData) = *g_printData;
++
++	 wxImage::AddHandler( new wxPNGHandler ) ;
++
++        wxFrame* myf = new myframe  ;
++        myf->Show() ;
++
++        return true ;
++ }
++
++
++
++/*************************************************************************88
++ *** Frame **
++ ***************************************************************************/
++
++myframe::myframe() :
++	wxFrame( NULL, wxID_ANY, _("html test") ) 
++{
++	
++	wxSizer* szMain = new wxBoxSizer( wxVERTICAL ) ;
++
++	h_fileText = new wxTextCtrl( this, idText, _T("./tpl_small.htm") ) ;
++	szMain->Add( h_fileText, 0, wxEXPAND | wxALL, 5 ) ;
++
++	wxButton* OKbt = new wxButton( this, wxID_OK, _T("Preview") ) ;
++	szMain->Add( OKbt, 0, wxALL, 5 ) ;
++
++	wxTextCtrl* debugText = new wxTextCtrl( this, wxID_ANY, _T(""), wxDefaultPosition, wxSize(500, 400 ), wxTE_MULTILINE | wxTE_READONLY ) ;
++	szMain->Add( debugText, 1, wxEXPAND | wxALL, 5 );
++
++	wxLogTextCtrl* txLog = new wxLogTextCtrl( debugText  ) ;
++	wxLog* oldLog = wxLog::SetActiveTarget( txLog ) ;
++	wxDELETE( oldLog ) ;
++
++	SetSizerAndFit( szMain ) ;
++
++	Connect( wxID_OK, wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler( myframe::OnOk ) ) ;
++
++}
++
++void myframe::OnOk( wxCommandEvent& ev )
++{
++	wxTextFile      tfile;
++    wxString out ;
++    wxString line ;
++
++    if ( ! tfile.Open( h_fileText->GetValue() ) ) {
++        wxString str;
++        str.Printf (_("Could open selected template file [%s]") ,h_fileText->GetValue().c_str() );
++        return ;
++    }
++
++    for ( line = tfile.GetFirstLine(); !tfile.Eof(); line = tfile.GetNextLine() )
++    {
++        out+=line ;// do something with the current line in str
++    }
++
++	showPrintPreview( out ) ;
++}
++
++void myframe::showPrintPreview( wxString file )
++{
++	/*** Create printout */
++    KalHtmlPrintout* kalPrintout = new KalHtmlPrintout( ) ;
++	kalPrintout->SetHtmlText( file ) ;
++
++
++	/*** Create Preview ***/
++    //Read Print Dialog data (pages, # copies ..
++    wxPrintDialogData printDialogData(* g_printData);
++    // PrintPreview takes ownership of kalypsPrintout
++     wxPrintPreview *preview = (wxPrintPreview*) new wxPrintPreview( kalPrintout, NULL , & printDialogData);
++    if (!preview->Ok()) {
++            delete preview;
++            return;
++    }
++
++	/*** Create preview frame ***/
++    wxPreviewFrame* frameP = new wxPreviewFrame( preview, this, _("Print Preview") );
++
++    frameP->Initialize() ;
++    //frameP->SetIcon( wxIcon(wxART_PRINT) );
++    frameP->Show() ;
++}
++
++
++
++//--------------------------------------------------------------------------------
++// KalHtmlDCRenderer
++//--------------------------------------------------------------------------------
++
++
++KalHtmlDCRenderer::KalHtmlDCRenderer() : wxObject()
++{
++    m_DC = NULL;
++    m_Width = m_Height = 0;
++    m_Cells = NULL;
++    m_Parser = new wxHtmlWinParser();
++    m_FS = new wxFileSystem();
++    m_Parser->SetFS(m_FS);
++}
++
++
++
++KalHtmlDCRenderer::~KalHtmlDCRenderer()
++{
++    if (m_Cells) delete m_Cells;
++    if (m_Parser) delete m_Parser;
++    if (m_FS) delete m_FS;
++}
++
++
++
++void KalHtmlDCRenderer::SetDC(wxDC *dc, double pixel_scale)
++{
++    m_DC = dc;
++    m_Parser->SetDC(m_DC, pixel_scale);
++}
++
++
++
++void KalHtmlDCRenderer::SetSize(int width, int height)
++{
++    m_Width = width;
++    m_Height = height;
++}
++
++
++void KalHtmlDCRenderer::SetHtmlText(const wxString& html, const wxString& basepath, bool isdir)
++{
++    if (m_DC == NULL) return;
++
++    if (m_Cells != NULL) delete m_Cells;
++
++    m_FS->ChangePathTo(basepath, isdir);
++    m_Cells = (wxHtmlContainerCell*) m_Parser->Parse(html);
++    m_Cells->SetIndent(0, wxHTML_INDENT_ALL, wxHTML_UNITS_PIXELS);
++    m_Cells->Layout(m_Width);
++}
++
++
++void KalHtmlDCRenderer::SetFonts(const wxString& normal_face, const wxString& fixed_face,
++                                const int *sizes)
++{
++    m_Parser->SetFonts(normal_face, fixed_face, sizes);
++    if (m_DC == NULL && m_Cells != NULL)
++        m_Cells->Layout(m_Width);
++}
++
++void KalHtmlDCRenderer::SetStandardFonts(int size,
++                                        const wxString& normal_face,
++                                        const wxString& fixed_face)
++{
++    m_Parser->SetStandardFonts(size, normal_face, fixed_face);
++    if (m_DC == NULL && m_Cells != NULL)
++        m_Cells->Layout(m_Width);
++}
++
++int KalHtmlDCRenderer::Render(int x, int y,
++                             wxArrayInt& known_pagebreaks,
++                             int from, int dont_render, int to)
++{
++    int pbreak, hght;
++
++    if (m_Cells == NULL || m_DC == NULL) return 0;
++
++    pbreak = (int)(from + m_Height);
++    while (m_Cells->AdjustPagebreak(&pbreak, known_pagebreaks)) {}
++    hght = pbreak - from;
++    if(to < hght)
++        hght = to;
++
++    if (!dont_render)
++    {
++        wxHtmlRenderingInfo rinfo;
++        wxDefaultHtmlRenderingStyle rstyle;
++        rinfo.SetStyle(&rstyle);
++        m_DC->SetBrush(*wxWHITE_BRUSH);
++        m_DC->SetClippingRegion(x, y, m_Width, hght);
++        m_Cells->Draw(*m_DC,
++                      x, (y - from),
++                      y, pbreak + (y /*- from*/),
++                      rinfo);
++        m_DC->DestroyClippingRegion();
++    }
++
++    if (pbreak < m_Cells->GetHeight()) return pbreak;
++    else return GetTotalHeight();
++}
++
++
++int KalHtmlDCRenderer::GetTotalHeight()
++{
++    if (m_Cells) return m_Cells->GetHeight();
++    else return 0;
++}
+diff -Nur dummy/Makefile html_bug/Makefile
+--- dummy/Makefile	1970-01-01 02:00:00.000000000 +0200
++++ html_bug/Makefile	2008-12-11 15:03:58.000000000 +0200
+@@ -0,0 +1,34 @@
++
++CC = g++
++CFLAGS += -O2 -g -Wall
++INCS = `wx-config --cflags`
++
++LIBS = `wx-config --libs`
++OBJS = htmlbug.o
++DEFS = 
++
++###########################################################################
++
++# it is first and executed by default
++default: htmlbug
++
++all: htmlbug
++
++##### libraries
++
++htmlbug: $(OBJS) 
++	$(CC) $(CFLAGS) -o htmbug $(OBJS) $(LIBS) 
++
++# Make the o's out of cpp's
++# $< she who initiated the implicit actions
++# $* prefix shared by taget and deps
++# c.o  c <= depends on <= o
++.cpp.o: $*.h
++	$(CC) $(CFLAGS) $(DEFS) $(INCS) -c $< -o $@
++
++
++# Clean target
++clean:
++	rm -f *.[o] 
++
++
+diff -Nur dummy/p1.htm html_bug/p1.htm
+--- dummy/p1.htm	1970-01-01 02:00:00.000000000 +0200
++++ html_bug/p1.htm	2008-11-20 12:45:32.000000000 +0200
+@@ -0,0 +1,25 @@
++<html>
++<head>
++	<title> Kalypso Printout </title>
++</head>
++
++<body>
++<!-- template vars " = @
++"WIDTH"
++"HEIGHT"
++"IMAGE"
++"IMAGEDESC"
++"IMAGEDATE"
++!-->
++<table cellspacing=10 cellpadding=0>
++<tr>
++<td>
++<div align="center">
++<img src="@IMAGE@" width="@WIDTH@" height="@HEIGHT@"></img><br>@IMAGEDATE@ @IMAGEDESC@
++</div>
++</td>
++</tr>
++</table>
++</body>
++</html>
++
+diff -Nur dummy/tpl_big.htm html_bug/tpl_big.htm
+--- dummy/tpl_big.htm	1970-01-01 02:00:00.000000000 +0200
++++ html_bug/tpl_big.htm	2008-12-11 15:09:41.000000000 +0200
+@@ -0,0 +1,25 @@
++<html>
++<head>
++	<title> Kal Printout Big</title>
++</head>
++
++<body>
++<!-- template vars " = @
++"WIDTH"
++"HEIGHT"
++"IMAGE"
++"IMAGEDESC"
++"IMAGEDATE"
++!-->
++<table cellspacing=10 cellpadding=0>
++<tr>
++<td>
++<div align="center">
++<img src="tst.png" width="850" height="450"></img><br> image 850x450
++</div>
++</td>
++</tr>
++</table>
++</body>
++</html>
++
+diff -Nur dummy/tpl_small.htm html_bug/tpl_small.htm
+--- dummy/tpl_small.htm	1970-01-01 02:00:00.000000000 +0200
++++ html_bug/tpl_small.htm	2008-12-11 15:09:10.000000000 +0200
+@@ -0,0 +1,25 @@
++<html>
++<head>
++	<title> Kal Printout Small</title>
++</head>
++
++<body>
++<!-- template vars " = @
++"WIDTH"
++"HEIGHT"
++"IMAGE"
++"IMAGEDESC"
++"IMAGEDATE"
++!-->
++<table cellspacing=10 cellpadding=0>
++<tr>
++<td>
++<div align="center">
++<img src="tst.png" width="150" height="150"></img><br> image 150x150
++</div>
++</td>
++</tr>
++</table>
++</body>
++</html>
++
+Binary files dummy/tst.png and html_bug/tst.png differ

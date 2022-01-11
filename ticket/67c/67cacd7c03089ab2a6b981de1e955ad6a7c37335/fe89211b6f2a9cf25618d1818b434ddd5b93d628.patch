@@ -1,0 +1,326 @@
+// wxWindows Patch
+// Generated from TIP update on 6/5/2002
+// Submitted 6/5/2002
+// Robert Cavanaugh
+// Description:
+// The wxString Find() method does not allow for 
+// searching for strings in a backwards direction or
+// in a case-insensitive manner. Also, the method
+// depends on a wxChar() method which appears to be
+// pretty inefficient. I have added an implementation
+// of the Boyer-Moore fast searching algorithm and
+// flags to allow selection of direction and case
+// sensitivity. I am currently using this new 
+// method for Find and Replace in a dedicated text
+// editor in my application and the response times
+// are very satisfactory
+diff -rbu2 Patched/wxWindows/docs/latex/wx/wxstring.tex Tip/wxWindows/docs/latex/wx/wxstring.tex
+--- Patched/wxWindows/docs/latex/wx/wxstring.tex	2002-06-05 14:14:02.000000000 -0600
++++ Tip/wxWindows/docs/latex/wx/wxstring.tex	2002-05-07 10:35:00.000000000 -0600
+@@ -576,8 +576,4 @@
+ Searches for the given string. Returns the starting index, or -1 if not found.
+ 
+-\constfunc{int}{Find}{\param{const char*}{ sz}, \param{bool}{ caseSensitive}, \param{bool}{ fromEnd}}
+-
+-Searches for the given string with options for direction and case sensitivity. Returns the starting index, or -1 if not found.
+-
+ \membersection{wxString::First}\label{wxstringfirst}
+ 
+diff -rbu2 Patched/wxWindows/include/wx/string.h Tip/wxWindows/include/wx/string.h
+--- Patched/wxWindows/include/wx/string.h	2002-06-05 13:36:26.000000000 -0600
++++ Tip/wxWindows/include/wx/string.h	2002-05-17 13:56:02.000000000 -0600
+@@ -4,7 +4,4 @@
+ // Author:      Vadim Zeitlin
+ // Modified by:
+-//              Robert Cavanaugh:
+-//              Added Boyer-Moore fast search algorithm
+-//              additional version of Find()
+ // Created:     29/01/98
+ // RCS-ID:      $Id: string.h,v 1.140 2002/05/08 14:11:40 GD Exp $
+@@ -216,32 +213,4 @@
+ };
+ 
+-
+-// Added 12/12/2001 Robert Cavanaugh
+-
+-// ---------------------------------------------------------------------------
+-// Boyer-Moore fast search algorithm data
+-// ---------------------------------------------------------------------------
+-
+-// Boyer-Moore fast search algorithms skip table size
+-#define wxBM_MAXCHAR    256
+-
+-// Boyer-Moore skip table structure
+-struct WXDLLEXPORT wxBmSearchData
+-{
+-    int      skip[wxBM_MAXCHAR];
+-    bool     CaseSensitive;
+-
+-    void Init()
+-    {
+-        // Initialize public members
+-        for(int i=0; i<wxBM_MAXCHAR; i++)
+-        {
+-            skip[i] = 0;
+-        }
+-        CaseSensitive = FALSE;
+-    }
+-};
+-
+-   
+ // ---------------------------------------------------------------------------
+ // This is (yet another one) String class for C++ programmers. It doesn't use
+@@ -721,21 +690,10 @@
+       // add nCount copies chPad in the beginning or at the end (default)
+   wxString& Pad(size_t nCount, wxChar chPad = wxT(' '), bool bFromRight = TRUE);
+-   // searching and replacing
+-  // Boyer-Moore fast search algorithm internal functions
+-protected:
+-    void            SetFindPattern(const wxChar *lpszPattern, wxBmSearchData* SData ) const;
+-    const wxChar*   BmSearch( const wxChar* p, const wxChar* s, int slen, wxBmSearchData* SData ) const;
+-    const wxChar*   BmSearchIC( const wxChar* p, const wxChar* s, int slen, wxBmSearchData* SData ) const;
+-    const wxChar*   FindForward( const wxChar *pat, const wxChar* s, int slen, wxBmSearchData* SData ) const;
+-    const wxChar*   FindBackward( const wxChar *pat, const wxChar* s, int slen, wxBmSearchData* SData ) const;
+ 
+-public:
++  // searching and replacing
+       // searching (return starting index, or -1 if not found)
+   int Find(wxChar ch, bool bFromEnd = FALSE) const;   // like strchr/strrchr
+       // searching (return starting index, or -1 if not found)
+   int Find(const wxChar *pszSub) const;               // like strstr
+-      // searching (return index or -1 if not found), add options for
+-      // Find function expanded to allow case sensitvity, search from end
+-  int Find(const wxChar *pszSub, bool bCaseSensitive, bool bFromEnd) const;
+       // replace first (or all of bReplaceAll) occurences of substring with
+       // another string, returns the number of replacements made
+diff -rbu2 Patched/wxWindows/src/common/string.cpp Tip/wxWindows/src/common/string.cpp
+--- Patched/wxWindows/src/common/string.cpp	2002-06-05 13:45:26.000000000 -0600
++++ Tip/wxWindows/src/common/string.cpp	2002-05-17 13:56:22.000000000 -0600
+@@ -3,7 +3,5 @@
+ // Purpose:     wxString class
+ // Author:      Vadim Zeitlin
+-// Modified by: Robert Cavanaugh
+-//              Added Boyer-Moore fast search algorithm
+-//              addeded new features to Find()
++// Modified by:
+ // Created:     29/01/98
+ // RCS-ID:      $Id: string.cpp,v 1.158 2002/05/08 14:11:40 GD Exp $
+@@ -1180,216 +1178,4 @@
+ }
+ 
+-// Added 12/12/2001 Robert Cavanaugh
+-
+-// Boyer-Moore fast search algorithm
+-
+-// Set up the predictor table for Boyer-Moore searching
+-// This fills the skip table based in the input pattern
+-void wxString::SetFindPattern(const wxChar *pattern, wxBmSearchData* SData) const
+-{
+-    // Only process if the data has been instantiated
+-    if(SData)
+-    {
+-        // Get the length of the pattern to be matched
+-        int len = wxStrlen( pattern );
+-
+-        // fill the skip table with the maximum shift value
+-        for( int i=0; i<wxBM_MAXCHAR; i++ )
+-        {
+-            SData->skip[i] = len;
+-        }
+-
+-        // Fill the shift table and adjust the skip table
+-        // based on the pattern
+-
+-        for( i=0; i<len; i++ )
+-        {
+-            SData->skip[(*(pattern + i))] = len - (i+1);
+-        }
+-    }
+-}
+-
+-// Find the first occurence in the string or return NULL
+-const wxChar* wxString::BmSearch( const wxChar* p, const wxChar* s, int len, wxBmSearchData* SData ) const
+-{
+-    // Build the skip table
+-    SetFindPattern( p, SData);
+-
+-    // Set up the compare values
+-    int patlen = wxStrlen(p);
+-    int ptct = len - 1;
+-    wxChar  c1, c2;
+-
+-    // Find the first occurence
+-    while(ptct < len )
+-    {
+-        int count = 0;
+-        while(count < patlen)
+-        {
+-            c1 = *(s + ptct - count);
+-            c2 = *(p + patlen - 1 - count);
+-            if(c1 != c2)
+-            {
+-                break;
+-            }
+-            else
+-            {
+-                count++;
+-            }
+-        }
+-        // Pattern matched
+-        if (count == patlen)
+-        {
+-            return (const wxChar*)(s + ptct - count + 1);
+-        }
+-        else
+-        {
+-            ptct += SData->skip[*(s + ptct - count)];
+-        }
+-    }
+-    return (wxChar*) NULL;
+-}
+-
+-// Find the first occurence in the string case insensitive or return NULL
+-const wxChar* wxString::BmSearchIC( const wxChar* p, const wxChar* s, int len, wxBmSearchData* SData ) const
+-{
+-    // Build the skip table
+-    SetFindPattern( p, SData);
+-
+-    // Set up the compare values
+-    int patlen = wxStrlen(p);
+-    int ptct = patlen - 1;
+-    wxChar  c1, c2;
+-
+-    // Find the first occurence
+-    while(ptct < len )
+-    {
+-        int count = 0;
+-        while(count < patlen)
+-        {
+-            // Force upper case compare (could have been lower case as well)
+-            c1 = wxToupper(*(s + ptct - count));
+-            c2 = wxToupper(*(p + patlen - 1 - count));
+-            if(c1 != c2)
+-            {
+-                break;
+-            }
+-            else
+-            {
+-                count++;
+-            }
+-        }
+-        // Pattern matched
+-        if (count == patlen)
+-        {
+-            return (const wxChar*)(s + ptct - count + 1);
+-        }
+-        else
+-        {
+-            ptct += SData->skip[*(s + ptct - count)];
+-        }
+-    }
+-    return (wxChar*) NULL;
+-}
+-
+-// Find first occurence forward from cursor
+-const wxChar* wxString::FindForward( const wxChar* p, const wxChar* s, int slen, wxBmSearchData *SData ) const
+-{
+-    // Call the appropriate routine based on input flags
+-    if(SData->CaseSensitive)
+-    {
+-        return BmSearch( p, s, slen, SData );
+-    }
+-    else
+-    {
+-        return BmSearchIC( p, s, slen, SData );
+-    }
+-}
+-
+-// Find first occurence behind cursor
+-const wxChar* wxString::FindBackward( const wxChar* p, const wxChar* s, int len, wxBmSearchData *SData ) const
+-{
+-
+-    // Set up to search backwards
+-    wxChar* newpsz = NULL;
+-    wxChar* psz = NULL;
+-    wxChar* news = (wxChar*) s;
+-    int     newlen = len;
+-
+-    // Call the appropriate routine based on input flags
+-    if(SData->CaseSensitive)
+-    {
+-        while( psz < (s + len) )
+-        {
+-            psz = (wxChar*)BmSearch( p, news, newlen, SData );
+-            if( psz != NULL )
+-            {
+-                newpsz = psz;
+-                news = psz + 1;
+-                newlen = wxStrlen(news);
+-            }
+-            else
+-            {
+-                break;
+-            }
+-        }
+-    }
+-    else
+-    {
+-        while( psz < (s + len) )
+-        {
+-            psz = (wxChar*)BmSearchIC( p, news, newlen, SData );
+-            if( psz != NULL )
+-            {
+-                newpsz = psz;
+-                news = psz + 1;
+-                newlen = wxStrlen(news);
+-            }
+-            else
+-            {
+-                break;
+-            }
+-        }
+-    }
+-    return (const wxChar*)newpsz;
+-}
+-
+-// find a sub-string with options
+-int wxString::Find(const wxChar* pszSub, bool bCaseSensitive, bool bFromEnd) const
+-{
+-    const wxChar *psz;
+-    size_t len = wxStrlen(m_pchData);
+-    int Result;
+-
+-    // Instantiate the search data
+-    wxBmSearchData *SData = new wxBmSearchData();
+-    SData->CaseSensitive = bCaseSensitive;
+-
+-    // Check which direction
+-    if(bFromEnd)
+-    {
+-        psz = FindBackward( pszSub, m_pchData, len, SData );
+-    }
+-    else
+-    {
+-        psz = FindForward( pszSub, m_pchData, len, SData );
+-    }
+-
+-    // Compute the position from the pointers
+-    if(psz == NULL)
+-    {
+-        Result = wxNOT_FOUND;
+-    }
+-    else
+-    {
+-        Result = psz - (const wxChar*) m_pchData;
+-    }
+-
+-    // Clean up memory and exit
+-    delete SData;
+-    return Result;
+-}
+-
+-
+ // ----------------------------------------------------------------------------
+ // conversion to numbers
+
+ 	  	 

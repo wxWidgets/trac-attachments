@@ -1,0 +1,136 @@
+Index: src/common/intl.cpp
+===================================================================
+--- src/common/intl.cpp	(Revision 49107)
++++ src/common/intl.cpp	(Arbeitskopie)
+@@ -70,6 +70,7 @@
+ #include "wx/apptrait.h"
+ #include "wx/stdpaths.h"
+ #include "wx/hashset.h"
++#include "wx/filesys.h"
+ 
+ #if defined(__WXMAC__)
+     #include  "wx/mac/private.h"  // includes mac headers
+@@ -907,12 +908,9 @@
+                 ofsHashTable;   //        +18:  offset of hash table start
+     };
+ 
+-    // all data is stored here, NULL if no data loaded
+-    size_t8 *m_pData;
++    // all data is stored here
++    wxMemoryBuffer m_data;
+ 
+-    // amount of memory pointed to by m_pData.
+-    size_t32 m_nSize;
+-
+     // data description
+     size_t32          m_numStrings;   // number of strings in this domain
+     wxMsgTableEntry  *m_pOrigTable,   // pointer to original   strings
+@@ -935,12 +933,12 @@
+ 
+         // this check could fail for a corrupt message catalog
+         size_t32 ofsString = Swap(ent->ofsString);
+-        if ( ofsString + Swap(ent->nLen) > m_nSize)
++        if ( ofsString + Swap(ent->nLen) > m_data.GetDataLen())
+         {
+             return NULL;
+         }
+ 
+-        return (const char *)(m_pData + ofsString);
++        return (const char *)((char*)m_data.GetData() + ofsString);
+     }
+ 
+     bool m_bSwapped;   // wrong endianness?
+@@ -1003,13 +1001,10 @@
+ 
+ wxMsgCatalogFile::wxMsgCatalogFile()
+ {
+-    m_pData = NULL;
+-    m_nSize = 0;
+ }
+ 
+ wxMsgCatalogFile::~wxMsgCatalogFile()
+ {
+-    delete [] m_pData;
+ }
+ 
+ // return the directories to search for message catalogs under the given
+@@ -1105,6 +1100,7 @@
+                             wxPluralFormsCalculatorPtr& rPluralFormsCalculator)
+ {
+   wxString searchPath;
++  wxFileSystem fileSys;
+ 
+ #if wxUSE_FONTMAP
+   // first look for the catalog for this language and the current locale:
+@@ -1146,7 +1142,7 @@
+   wxFileName fn(szName);
+   fn.SetExt(_T("mo"));
+   wxString strFullName;
+-  if ( !wxFindFileInPath(&strFullName, searchPath, fn.GetFullPath()) ) {
++  if ( !fileSys.FindFileInPath(&strFullName, searchPath, fn.GetFullPath()) ) {
+     wxLogVerbose(_("catalog file for domain '%s' not found."), szName);
+     wxLogTrace(TRACE_I18N, _T("Catalog \"%s.mo\" not found"), szName);
+     return false;
+@@ -1156,29 +1152,24 @@
+   wxLogVerbose(_("using catalog '%s' from '%s'."), szName, strFullName.c_str());
+   wxLogTrace(TRACE_I18N, _T("Using catalog \"%s\"."), strFullName.c_str());
+ 
+-  wxFile fileMsg(strFullName);
+-  if ( !fileMsg.IsOpened() )
++  wxFSFile *fileMsg = fileSys.OpenFile(strFullName);
++  if ( !fileMsg )
+     return false;
+ 
+-  // get the file size (assume it is less than 4Gb...)
+-  wxFileOffset lenFile = fileMsg.Length();
+-  if ( lenFile == wxInvalidOffset )
+-    return false;
++  wxInputStream *fileStream = fileMsg->GetStream();
++  m_data.SetDataLen(0);
+ 
+-  size_t nSize = wx_truncate_cast(size_t, lenFile);
+-  wxASSERT_MSG( nSize == lenFile + size_t(0), _T("message catalog bigger than 4GB?") );
+-
+-  // read the whole file in memory
+-  m_pData = new size_t8[nSize];
+-  if ( fileMsg.Read(m_pData, nSize) != lenFile ) {
+-    wxDELETEA(m_pData);
+-    return false;
++  while ( !fileStream->Eof() ) {
++    fileStream->Read(m_data.GetAppendBuf(4096), 4096);
++    m_data.UngetAppendBuf(fileStream->LastRead());
+   }
+ 
++  delete fileMsg;
++
+   // examine header
+-  bool bValid = nSize + (size_t)0 > sizeof(wxMsgCatalogHeader);
++  bool bValid = m_data.GetDataLen() + (size_t)0 > sizeof(wxMsgCatalogHeader);
+ 
+-  wxMsgCatalogHeader *pHeader = (wxMsgCatalogHeader *)m_pData;
++  const wxMsgCatalogHeader *pHeader = (wxMsgCatalogHeader *)m_data.GetData();
+   if ( bValid ) {
+     // we'll have to swap all the integers if it's true
+     m_bSwapped = pHeader->magic == MSGCATALOG_MAGIC_SW;
+@@ -1191,17 +1182,15 @@
+     // it's either too short or has incorrect magic number
+     wxLogWarning(_("'%s' is not a valid message catalog."), strFullName.c_str());
+ 
+-    wxDELETEA(m_pData);
+     return false;
+   }
+ 
+   // initialize
+   m_numStrings  = Swap(pHeader->numStrings);
+-  m_pOrigTable  = (wxMsgTableEntry *)(m_pData +
++  m_pOrigTable  = (wxMsgTableEntry *)((char*)m_data.GetData() +
+                    Swap(pHeader->ofsOrigTable));
+-  m_pTransTable = (wxMsgTableEntry *)(m_pData +
++  m_pTransTable = (wxMsgTableEntry *)((char*)m_data.GetData() +
+                    Swap(pHeader->ofsTransTable));
+-  m_nSize = (size_t32)nSize;
+ 
+   // now parse catalog's header and try to extract catalog charset and
+   // plural forms formula from it:
+
+ 	  	 

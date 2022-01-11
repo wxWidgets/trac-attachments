@@ -1,0 +1,199 @@
+diff --git a/src/aui/auibar.cpp b/src/aui/auibar.cpp
+index e5b9fc6..d9ca6d7 100644
+--- a/src/aui/auibar.cpp
++++ b/src/aui/auibar.cpp
+@@ -89,7 +89,15 @@ static wxColor GetBaseColor()
+     return baseColour;
+ }
+ 
++static int GetBitmapHeight(const wxBitmap& bmp)
++{
++    return bmp.GetHeight() / bmp.GetScaleFactor();
++}
+ 
++static int GetBitmapWidth(const wxBitmap& bmp)
++{
++    return bmp.GetWidth() / bmp.GetScaleFactor();
++}
+ 
+ class ToolbarCommandCapture : public wxEvtHandler
+ {
+@@ -279,11 +287,11 @@ void wxAuiDefaultToolBarArt::DrawButton(
+     {
+         bmpX = rect.x +
+                 (rect.width/2) -
+-                (item.GetBitmap().GetWidth()/2);
++                (GetBitmapWidth(item.GetBitmap())/2);
+ 
+         bmpY = rect.y +
+                 ((rect.height-textHeight)/2) -
+-                (item.GetBitmap().GetHeight()/2);
++                (GetBitmapHeight(item.GetBitmap())/2);
+ 
+         textX = rect.x + (rect.width/2) - (textWidth/2) + 1;
+         textY = rect.y + rect.height - textHeight - 1;
+@@ -294,9 +302,9 @@ void wxAuiDefaultToolBarArt::DrawButton(
+ 
+         bmpY = rect.y +
+                 (rect.height/2) -
+-                (item.GetBitmap().GetHeight()/2);
++                (GetBitmapHeight(item.GetBitmap())/2);
+ 
+-        textX = bmpX + 3 + item.GetBitmap().GetWidth();
++        textX = bmpX + 3 + GetBitmapWidth(item.GetBitmap());
+         textY = rect.y +
+                  (rect.height/2) -
+                  (textHeight/2);
+@@ -400,10 +408,10 @@ void wxAuiDefaultToolBarArt::DrawDropDownButton(
+     {
+         bmpX = buttonRect.x +
+                 (buttonRect.width/2) -
+-                (item.GetBitmap().GetWidth()/2);
++                (GetBitmapWidth(item.GetBitmap())/2);
+         bmpY = buttonRect.y +
+                 ((buttonRect.height-textHeight)/2) -
+-                (item.GetBitmap().GetHeight()/2);
++                (GetBitmapHeight(item.GetBitmap())/2);
+ 
+         textX = rect.x + (rect.width/2) - (textWidth/2) + 1;
+         textY = rect.y + rect.height - textHeight - 1;
+@@ -414,9 +422,9 @@ void wxAuiDefaultToolBarArt::DrawDropDownButton(
+ 
+         bmpY = rect.y +
+                 (rect.height/2) -
+-                (item.GetBitmap().GetHeight()/2);
++                (GetBitmapHeight(item.GetBitmap())/2);
+ 
+-        textX = bmpX + 3 + item.GetBitmap().GetWidth();
++        textX = bmpX + 3 + GetBitmapWidth(item.GetBitmap());
+         textY = rect.y +
+                  (rect.height/2) -
+                  (textHeight/2);
+@@ -553,8 +561,8 @@ wxSize wxAuiDefaultToolBarArt::GetToolSize(
+     if (!item.GetBitmap().IsOk() && !(m_flags & wxAUI_TB_TEXT))
+         return wxSize(16,16);
+ 
+-    int width = item.GetBitmap().GetWidth();
+-    int height = item.GetBitmap().GetHeight();
++    int width = GetBitmapWidth(item.GetBitmap());
++    int height = GetBitmapHeight(item.GetBitmap());
+ 
+     if (m_flags & wxAUI_TB_TEXT)
+     {
+@@ -977,7 +985,13 @@ wxAuiToolBarItem* wxAuiToolBar::AddTool(int tool_id,
+         // no disabled bitmap specified, we need to make one
+         if (item.m_bitmap.IsOk())
+         {
+-            item.m_disabledBitmap = item.m_bitmap.ConvertToDisabled();
++            // Convert the image to disabled
++            // It seems that m_bitmap.ConvertToDisabled() looses the scale
++            // factor, so use this kind of conversion
++            wxImage img = item.m_bitmap.ConvertToImage();
++            img = img.ConvertToDisabled();
++            // Keep the original m_bitmap scale factor
++            item.m_disabledBitmap = wxBitmap(img, -1, item.m_bitmap.GetScaleFactor());
+         }
+     }
+     m_items.Add(item);
+diff --git a/src/xrc/xmlres.cpp b/src/xrc/xmlres.cpp
+index 8e91c6c..724283f 100644
+--- a/src/xrc/xmlres.cpp
++++ b/src/xrc/xmlres.cpp
+@@ -48,6 +48,14 @@
+ #include <limits.h>
+ #include <locale.h>
+ 
++#ifdef __WXOSX__
++#if wxOSX_USE_CARBON
++#include "wx/osx/uma.h"
++#else
++#include "wx/osx/private.h"
++#endif
++#endif
++
+ namespace
+ {
+ 
+@@ -1818,7 +1826,39 @@ wxBitmap wxXmlResourceHandlerImpl::GetBitmap(const wxXmlNode* node,
+     wxString name = GetParamValue(node);
+     if (name.empty()) return wxNullBitmap;
+ #if wxUSE_FILESYSTEM
+-    wxFSFile *fsfile = GetCurFileSystem().OpenFile(name, wxFS_READ | wxFS_SEEKABLE);
++    // Set the default type to "ANY"
++    wxBitmapType type = wxBITMAP_TYPE_ANY;
++    // Default scale
++    double scale = 1.0;
++    wxFSFile *fsfile = NULL;
++#ifdef __WXOSX__
++    if(wxOSXGetMainScreenContentScaleFactor() > 1.9) 
++    {
++        // Retina display, try to load a @2x file 
++        wxString file2x = name.BeforeLast('.');
++        wxString ext = name.AfterLast('.');
++        file2x << "@2x" << "." << ext;
++        
++        if(ext == "png")
++        {
++            fsfile = GetCurFileSystem().OpenFile(file2x, wxFS_READ | wxFS_SEEKABLE);
++            if(fsfile) 
++            {
++                // We found a @2x file, set the scale and type to png
++                type = wxBITMAP_TYPE_PNG;
++                scale = 2.0;
++            } 
++        }
++    }
++    
++    // Could not find a @2x image (or we don't need to) - load the default 
++    if(fsfile == NULL)
++    {
++        fsfile = GetCurFileSystem().OpenFile(name, wxFS_READ | wxFS_SEEKABLE);
++    }
++#else
++    fsfile = GetCurFileSystem().OpenFile(name, wxFS_READ | wxFS_SEEKABLE);
++#endif
+     if (fsfile == NULL)
+     {
+         ReportParamError
+@@ -1828,12 +1868,31 @@ wxBitmap wxXmlResourceHandlerImpl::GetBitmap(const wxXmlNode* node,
+         );
+         return wxNullBitmap;
+     }
++
+     wxImage img(*(fsfile->GetStream()));
++#ifdef __WXOSX__
++    if((scale == 2.0) && (type == wxBITMAP_TYPE_PNG))
++    {
++        delete fsfile;
++        if (!img.IsOk())
++        {
++            ReportParamError
++            (
++                node->GetName(),
++                wxString::Format("cannot create bitmap from \"%s\"", name)
++            );
++            return wxNullBitmap;
++        }
++        if (!(size == wxDefaultSize)) img.Rescale(size.x, size.y);
++        return wxBitmap(img, -1, scale);
++    }
++#endif
+     delete fsfile;
++    if (!(size == wxDefaultSize)) img.Rescale(size.x, size.y);
++    return wxBitmap(img);
++    
+ #else
+     wxImage img(name);
+-#endif
+-
+     if (!img.IsOk())
+     {
+         ReportParamError
+@@ -1845,6 +1904,7 @@ wxBitmap wxXmlResourceHandlerImpl::GetBitmap(const wxXmlNode* node,
+     }
+     if (!(size == wxDefaultSize)) img.Rescale(size.x, size.y);
+     return wxBitmap(img);
++#endif
+ }
+ 
+ 

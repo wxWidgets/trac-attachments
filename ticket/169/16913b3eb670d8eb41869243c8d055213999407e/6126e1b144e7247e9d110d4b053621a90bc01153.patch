@@ -1,0 +1,157 @@
+Index: src/msw/frame.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/frame.cpp,v
+retrieving revision 1.182
+diff -u -r1.182 frame.cpp
+--- src/msw/frame.cpp	2004/11/23 12:53:34	1.182
++++ src/msw/frame.cpp	2004/12/07 16:35:20
+@@ -931,12 +931,23 @@
+ 
+         case WM_COMMAND:
+             {
+-                WORD id, cmd;
+-                WXHWND hwnd;
+-                UnpackCommand((WXWPARAM)wParam, (WXLPARAM)lParam,
+-                              &id, &hwnd, &cmd);
++                // Do not handle WM_COMMAND events, if the frame is disabled.
++                // This prevents an infinite loop if a WM_COMMAND handler called by 
++                // a menu item selection displays a modal dialog. MSWWindowProc would 
++                // then be called with the same event again and handling the event.
++                // As a result, while still visible, the same dialog would be created 
++                // over and over again until system resources are depleted.
++                if (IsEnabled())
++                {
++                    WORD id, cmd;
++                    WXHWND hwnd;
++                    UnpackCommand((WXWPARAM)wParam, (WXLPARAM)lParam,
++                                  &id, &hwnd, &cmd);
+ 
+-                processed = HandleCommand(id, cmd, (WXHWND)hwnd);
++                    processed = HandleCommand(id, cmd, (WXHWND)hwnd);
++                }
++                else
++                    processed = true;
+             }
+             break;
+ 
+Index: src/common/event.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/event.cpp,v
+retrieving revision 1.152
+diff -u -r1.152 event.cpp
+--- src/common/event.cpp	2004/09/13 18:03:44	1.152
++++ src/common/event.cpp	2004/12/05 10:42:21
+@@ -1106,6 +1106,10 @@
+     wxENTER_CRIT_SECT( *m_eventsLocker);
+ #endif
+ 
++#ifdef __WXMSW__
++    wxList::compatibility_iterator lastPendingNode = m_pendingEvents->GetLast();
++#endif
++
+     wxList::compatibility_iterator node = m_pendingEvents->GetFirst();
+     while ( node )
+     {
+@@ -1125,6 +1129,15 @@
+         wxENTER_CRIT_SECT( m_eventsLocker);
+ #else
+         wxENTER_CRIT_SECT( *m_eventsLocker);
++#endif
++
++#ifdef __WXMSW__
++        // On Windows, we have to leave the loop once we have processed all events that
++        // were present at the start of ProcessPendingEvents. Otherwise it is possible
++        // that events waiting in the message queue won't be processed ever, thus blocking
++        // the user interface.
++        if (node == lastPendingNode)
++            break;
+ #endif
+ 
+         node = m_pendingEvents->GetFirst();
+Index: src/msw/window.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/window.cpp,v
+retrieving revision 1.532
+diff -u -r1.532 window.cpp
+--- src/msw/window.cpp	2004/11/22 22:19:34	1.532
++++ src/msw/window.cpp	2004/12/05 13:57:15
+@@ -5815,7 +5815,8 @@
+     static LRESULT CALLBACK MsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+     {
+         MSG *msg = (MSG*)lParam;
+-        if ( msg->message == WM_NULL )
++        // Only process the message if it is actually removed from the message queue,
++        // this prevents that the same event will be processed multiple times.
++        if ( msg->message == WM_NULL && wParam == PM_REMOVE)
+         {
+             wxTheApp->ProcessPendingEvents();
+         }
+Index: src/msw/evtloop.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/evtloop.cpp,v
+retrieving revision 1.26
+diff -u -r1.26 evtloop.cpp
+--- src/msw/evtloop.cpp	2004/11/17 13:42:14	1.26
++++ src/msw/evtloop.cpp	2004/12/07 17:40:40
+@@ -44,12 +44,12 @@
+ #if wxUSE_THREADS
+     #include "wx/thread.h"
+ 
+-    // define the array of MSG strutures
+-    WX_DECLARE_OBJARRAY(MSG, wxMsgArray);
++    // define the list of MSG strutures
++    WX_DECLARE_LIST(MSG, wxMsgList);
+ 
+-    #include "wx/arrimpl.cpp"
++    #include "wx/listimpl.cpp"
+ 
+-    WX_DEFINE_OBJARRAY(wxMsgArray);
++    WX_DEFINE_LIST(wxMsgList);
+ #endif // wxUSE_THREADS
+ 
+ // ----------------------------------------------------------------------------
+@@ -337,7 +337,7 @@
+                   wxT("only the main thread can process Windows messages") );
+ 
+     static bool s_hadGuiLock = true;
+-    static wxMsgArray s_aSavedMessages;
++    static wxMsgList s_aSavedMessages;
+ 
+     // if a secondary thread owning the mutex is doing GUI calls, save all
+     // messages for later processing - we can't process them right now because
+@@ -350,7 +350,8 @@
+         // the message will be processed twice
+         if ( !wxIsWaitingForThread() || msg.message != WM_COMMAND )
+         {
+-            s_aSavedMessages.Add(msg);
++            MSG* pMsg = new MSG(msg);
++            s_aSavedMessages.Append(pMsg);
+         }
+ 
+         return true;
+@@ -366,14 +367,17 @@
+         {
+             s_hadGuiLock = true;
+ 
+-            size_t count = s_aSavedMessages.Count();
+-            for ( size_t n = 0; n < count; n++ )
++            wxMsgList::compatibility_iterator node = s_aSavedMessages.GetFirst();
++            while (node)
+             {
+-                MSG& msg = s_aSavedMessages[n];
+-                ProcessMessage(&msg);
+-            }
++                MSG* pMsg = node->GetData();
++                s_aSavedMessages.Erase(node);
++
++                ProcessMessage(pMsg);
++                delete pMsg;
+ 
+-            s_aSavedMessages.Empty();
++                node = s_aSavedMessages.GetFirst();
++            }
+         }
+     }
+ #endif // wxUSE_THREADS
+
+ 	  	 

@@ -1,0 +1,90 @@
+Index: include/wx/msw/webview_ie.h
+===================================================================
+--- include/wx/msw/webview_ie.h	(revision 69822)
++++ include/wx/msw/webview_ie.h	(working copy)
+@@ -288,6 +288,8 @@
+     bool CanExecCommand(wxString command) const;
+     void ExecCommand(wxString command);
+     IHTMLDocument2* GetDocument() const;
++    //Toggles control features see INTERNETFEATURELIST for values.
++    bool EnableControlFeature(long flag, bool enable = true);
+ 
+     wxDECLARE_DYNAMIC_CLASS(wxWebViewIE);
+ };
+Index: src/msw/webview_ie.cpp
+===================================================================
+--- src/msw/webview_ie.cpp	(revision 69822)
++++ src/msw/webview_ie.cpp	(working copy)
+@@ -83,6 +83,9 @@
+ 
+     m_container = new wxActiveXContainer(this, IID_IWebBrowser2, m_webBrowser);
+ 
++    EnableControlFeature(21 /* FEATURE_DISABLE_NAVIGATION_SOUNDS */);
++    EnableControlFeature(19 /* FEATURE_TABBED_BROWSING */);
++
+     LoadURL(url);
+     return true;
+ }
+@@ -760,6 +763,47 @@
+     return document;
+ }
+ 
++bool wxWebViewIE::EnableControlFeature(long flag, bool enable)
++{
++#if wxUSE_DYNLIB_CLASS
++    typedef HRESULT (WINAPI *CoInternetSetFeatureEnabled_t)(DWORD, DWORD, BOOL);
++    typedef HRESULT (WINAPI *CoInternetIsFeatureEnabled_t)(DWORD, DWORD);
++
++    static CoInternetSetFeatureEnabled_t s_pfnCoInternetSetFeatureEnabled = NULL;
++    static CoInternetIsFeatureEnabled_t s_pfnCoInternetIsFeatureEnabled = NULL;
++
++    wxLogNull nolog;
++    wxDynamicLibrary dll(wxT("urlmon.dll"));
++    if ( dll.IsLoaded() )
++    {
++        s_pfnCoInternetSetFeatureEnabled =
++            (CoInternetSetFeatureEnabled_t)dll.GetSymbol(wxT("CoInternetSetFeatureEnabled"));
++        s_pfnCoInternetIsFeatureEnabled =
++            (CoInternetIsFeatureEnabled_t)dll.GetSymbol(wxT("CoInternetIsFeatureEnabled"));
++    }
++
++    if (!s_pfnCoInternetSetFeatureEnabled || !s_pfnCoInternetIsFeatureEnabled)
++        return false;
++
++    HRESULT hr = s_pfnCoInternetIsFeatureEnabled(flag, 0x2/* SET_FEATURE_ON_PROCESS */);
++    if((hr == S_OK && enable) || (hr == S_FALSE && !enable))
++        return true;
++
++    hr = s_pfnCoInternetSetFeatureEnabled(flag, 0x2/* SET_FEATURE_ON_PROCESS */, (enable ? TRUE : FALSE));
++    if ( FAILED(hr) )
++    {
++        wxLogApiError(wxT("CoInternetSetFeatureEnabled"), hr);
++        return false;
++    }
++
++    return true;
++#else
++    wxUnusedVar(flag);
++    wxUnusedVar(enable);
++    return false;
++#endif // wxUSE_DYNLIB_CLASS/!wxUSE_DYNLIB_CLASS
++}
++
+ void wxWebViewIE::onActiveXEvent(wxActiveXEvent& evt)
+ {
+     if (m_webBrowser == NULL) return;
+@@ -1008,9 +1052,14 @@
+         case DISPID_NEWWINDOW3:
+         {
+             wxString url = evt[4].GetString();
++            //Let the user know if a new tab or window is requested
++            //ATM flag = 0 if new window or flag = 1 if new tab.
++            long flag = (evt[2].GetLong() & 0x00020000 /* NWMF_FORCETAB */ || evt[2].GetLong() & 0x00080000/* NWMF_SUGGESTTAB */);
+ 
+             wxWebViewEvent event(wxEVT_COMMAND_WEB_VIEW_NEWWINDOW,
+                                  GetId(), url, wxEmptyString);
++            //ATM use extra long but should be SetFlag or something similar.
++            event.SetExtraLong(flag);
+             event.SetEventObject(this);
+             HandleWindowEvent(event);
+ 

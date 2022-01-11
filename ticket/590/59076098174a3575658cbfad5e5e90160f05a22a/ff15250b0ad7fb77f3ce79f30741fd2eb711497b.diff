@@ -1,0 +1,169 @@
+diff --git a/include/wx/fswatcher.h b/include/wx/fswatcher.h
+index 3065671..cb31a78 100644
+--- a/include/wx/fswatcher.h
++++ b/include/wx/fswatcher.h
+@@ -44,14 +44,14 @@ enum
+     wxFSW_EVENT_RENAME = 0x04,
+     wxFSW_EVENT_MODIFY = 0x08,
+     wxFSW_EVENT_ACCESS = 0x10,
++    wxFSW_EVENT_ATTRIB = 0x20, // Currently this is wxGTK-only
+ 
+     // error events
+-    wxFSW_EVENT_WARNING = 0x20,
+-    wxFSW_EVENT_ERROR = 0x40,
+-
++    wxFSW_EVENT_WARNING = 0x40,
++    wxFSW_EVENT_ERROR = 0x80,
+     wxFSW_EVENT_ALL = wxFSW_EVENT_CREATE | wxFSW_EVENT_DELETE |
+                          wxFSW_EVENT_RENAME | wxFSW_EVENT_MODIFY |
+-                         wxFSW_EVENT_ACCESS |
++                         wxFSW_EVENT_ACCESS | wxFSW_EVENT_ATTRIB |
+                          wxFSW_EVENT_WARNING | wxFSW_EVENT_ERROR
+ };
+ 
+diff --git a/interface/wx/fswatcher.h b/interface/wx/fswatcher.h
+index 77f2e15..5745feb 100644
+--- a/interface/wx/fswatcher.h
++++ b/interface/wx/fswatcher.h
+@@ -249,6 +249,13 @@ enum wxFSWFlags
+     wxFSW_EVENT_ACCESS = 0x10,
+ 
+     /**
++        The item's metadata was changed, e.g.\ its permissions or timestamps.
++
++        This event is currently only detected under Linux.
++     */
++    wxFSW_EVENT_ATTRIB = 0x20,
++
++    /**
+         A warning condition arose.
+ 
+         This is something that probably needs to be shown to the user in an
+@@ -257,7 +264,7 @@ enum wxFSWFlags
+         more events will still be coming in the future, unlike for the error
+         condition below.
+      */
+-    wxFSW_EVENT_WARNING = 0x20,
++    wxFSW_EVENT_WARNING = 0x40,
+ 
+     /**
+         An error condition arose.
+@@ -266,11 +273,11 @@ enum wxFSWFlags
+         and the program can stop watching the directories currently being
+         monitored.
+     */
+-    wxFSW_EVENT_ERROR = 0x40,
++    wxFSW_EVENT_ERROR = 0x80,
+ 
+     wxFSW_EVENT_ALL = wxFSW_EVENT_CREATE | wxFSW_EVENT_DELETE |
+                          wxFSW_EVENT_RENAME | wxFSW_EVENT_MODIFY |
+-                         wxFSW_EVENT_ACCESS |
++                         wxFSW_EVENT_ACCESS | wxFSW_EVENT_ATTRIB |
+                          wxFSW_EVENT_WARNING | wxFSW_EVENT_ERROR
+ };
+ 
+diff --git a/samples/fswatcher/fswatcher.cpp b/samples/fswatcher/fswatcher.cpp
+index 7d3d081..3fde2ba 100644
+--- a/samples/fswatcher/fswatcher.cpp
++++ b/samples/fswatcher/fswatcher.cpp
+@@ -535,6 +535,8 @@ static wxString GetFSWEventChangeTypeName(int changeType)
+         return "MODIFY";
+     case wxFSW_EVENT_ACCESS:
+         return "ACCESS";
++    case wxFSW_EVENT_ATTRIB: // Currently this is wxGTK-only
++        return "ATTRIBUTE";
+     }
+ 
+     return "INVALID_TYPE";
+diff --git a/src/common/fswatchercmn.cpp b/src/common/fswatchercmn.cpp
+index 14c16bb..1fbf26b9 100644
+--- a/src/common/fswatchercmn.cpp
++++ b/src/common/fswatchercmn.cpp
+@@ -40,6 +40,8 @@ static wxString GetFSWEventChangeTypeName(int type)
+         return "MODIFY";
+     case wxFSW_EVENT_ACCESS:
+         return "ACCESS";
++    case wxFSW_EVENT_ATTRIB: // Currently this is wxGTK-only
++        return "ATTRIBUTE";
+     }
+ 
+     // should never be reached!
+diff --git a/src/unix/fswatcher_inotify.cpp b/src/unix/fswatcher_inotify.cpp
+index f7bcc03..6f02d70 100644
+--- a/src/unix/fswatcher_inotify.cpp
++++ b/src/unix/fswatcher_inotify.cpp
+@@ -490,6 +490,7 @@ protected:
+         static const int flag_mapping[][2] = {
+             { wxFSW_EVENT_ACCESS, IN_ACCESS },
+             { wxFSW_EVENT_MODIFY, IN_MODIFY },
++            { wxFSW_EVENT_ATTRIB, IN_ATTRIB },
+             { wxFSW_EVENT_RENAME, IN_MOVE   },
+             { wxFSW_EVENT_CREATE, IN_CREATE },
+             { wxFSW_EVENT_DELETE, IN_DELETE|IN_DELETE_SELF|IN_MOVE_SELF }
+@@ -511,7 +512,7 @@ protected:
+         static const int flag_mapping[][2] = {
+             { IN_ACCESS,        wxFSW_EVENT_ACCESS }, // generated during read!
+             { IN_MODIFY,        wxFSW_EVENT_MODIFY },
+-            { IN_ATTRIB,        0 },
++            { IN_ATTRIB,        wxFSW_EVENT_ATTRIB },
+             { IN_CLOSE_WRITE,   0 },
+             { IN_CLOSE_NOWRITE, 0 },
+             { IN_OPEN,          0 },
+diff --git a/tests/fswatcher/fswatchertest.cpp b/tests/fswatcher/fswatchertest.cpp
+index caca07b..5b238a4 100644
+--- a/tests/fswatcher/fswatchertest.cpp
++++ b/tests/fswatcher/fswatchertest.cpp
+@@ -439,6 +439,7 @@ private:
+ #endif // !wxHAS_KQUEUE
+ 
+ #ifdef wxHAS_INOTIFY
++        CPPUNIT_TEST( TestEventAttribute );
+         CPPUNIT_TEST( TestSingleWatchtypeEvent );
+ #endif // wxHAS_INOTIFY
+ 
+@@ -451,6 +452,7 @@ private:
+     void TestEventModify();
+     void TestEventAccess();
+ #ifdef wxHAS_INOTIFY
++    void TestEventAttribute();
+     void TestSingleWatchtypeEvent();
+ #endif // wxHAS_INOTIFY
+ #if !defined(__VISUALC__) || wxCHECK_VISUALC_VERSION(7)
+@@ -646,6 +648,37 @@ void FileSystemWatcherTestCase::TestEventAccess()
+ 
+ #ifdef wxHAS_INOTIFY
+ // ----------------------------------------------------------------------------
++// TestEventAttribute
++// ----------------------------------------------------------------------------
++void FileSystemWatcherTestCase::TestEventAttribute()
++{
++    wxLogDebug("TestEventAttribute()");
++
++    class EventTester : public EventHandler
++    {
++    public:
++        virtual void GenerateEvent()
++        {
++            CPPUNIT_ASSERT(eg.TouchFile());
++        }
++
++        virtual wxFileSystemWatcherEvent ExpectedEvent()
++        {
++            wxFileSystemWatcherEvent event(wxFSW_EVENT_ATTRIB);
++            event.SetPath(eg.m_file);
++            event.SetNewPath(eg.m_file);
++            return event;
++        }
++    };
++
++    // we need to create a file to touch
++    EventGenerator::Get().CreateFile();
++
++    EventTester tester;
++    tester.Run();
++}
++
++// ----------------------------------------------------------------------------
+ // TestSingleWatchtypeEvent: Watch only wxFSW_EVENT_ACCESS
+ // ----------------------------------------------------------------------------
+ void FileSystemWatcherTestCase::TestSingleWatchtypeEvent()

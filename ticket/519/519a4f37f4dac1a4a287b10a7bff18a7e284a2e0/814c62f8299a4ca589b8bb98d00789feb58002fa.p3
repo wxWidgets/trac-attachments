@@ -1,0 +1,221 @@
+--- src/common/event-svn.cpp	2008-01-08 15:32:54.000000000 +0100
++++ src/common/event.cpp	2008-01-08 18:17:24.000000000 +0100
+@@ -1014,6 +1014,43 @@
+ 
+ 
+ // ----------------------------------------------------------------------------
++// wxEventConnectionRef
++// ----------------------------------------------------------------------------
++
++// Below functions are mostly short but kept in cpp file to simplify setting 
++// breakpoints (GDB)
++wxEventConnectionRef::wxEventConnectionRef(wxEvtHandler *src, wxEvtHandler *sink) 
++    : m_src(src), m_sink(sink), m_refCount(1) 
++{ 
++    wxASSERT( m_sink );
++    m_sink->AddNode( this );
++}
++
++wxEventConnectionRef::~wxEventConnectionRef() 
++{ 
++}
++
++void wxEventConnectionRef::OnObjectDestroy( )
++{
++    if( m_src )
++        m_src->OnSinkDestroyed( m_sink );
++    // It is safe to delete this tracker object here 
++    delete this;
++}
++
++void wxEventConnectionRef::DecRef( ) 
++{ 
++    if( !--m_refCount )
++    {
++        // The sink holds the only external pointer to this object
++        if( m_sink )
++            m_sink->RemoveNode(this);
++        delete this;
++    }
++}
++
++
++// ----------------------------------------------------------------------------
+ // wxEvtHandler
+ // ----------------------------------------------------------------------------
+ 
+@@ -1052,6 +1089,19 @@
+         {
+             wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)*it;
+ 
++            // Remove ourselves from sink destructor notifications 
++            // (this has usually been been done, in wxTrackable destructor)
++            wxEvtHandler *eventSink = entry->m_eventSink;
++            if( eventSink )
++            {
++	            wxEventConnectionRef *pecr = FindRefInTrackerList( eventSink );
++	            if( pecr )
++	            {
++	                eventSink->RemoveNode( pecr );
++	                delete pecr;
++	            }
++            }
++            
+             if (entry->m_callbackUserData)
+                 delete entry->m_callbackUserData;
+             delete entry;
+@@ -1347,6 +1397,16 @@
+ 
+     // Insert at the front of the list so most recent additions are found first
+     m_dynamicEvents->Insert( (wxObject*) entry );
++    
++    // Make sure we get to know when a sink is destroyed 
++    if( eventSink )
++    {
++        wxEventConnectionRef *pecr = FindRefInTrackerList( eventSink );
++        if( pecr )
++            pecr->IncRef( );
++        else
++            pecr = new wxEventConnectionRef(this,eventSink);
++    }
+ }
+ 
+ bool wxEvtHandler::Disconnect( int id, int lastId, wxEventType eventType,
+@@ -1357,6 +1417,14 @@
+     if (!m_dynamicEvents)
+         return false;
+ 
++    // Remove connection from tracker node (wxEventConnectionRef)
++    if( eventSink )
++    {
++        wxEventConnectionRef *pecr = FindRefInTrackerList( eventSink );
++        if( pecr )
++            pecr->DecRef( );
++    }
++
+     wxList::compatibility_iterator node = m_dynamicEvents->GetFirst();
+     while (node)
+     {
+@@ -1447,6 +1515,47 @@
+     return m_clientData;
+ }
+ 
++// A helper func to find an wxEventConnectionRef object 
++wxEventConnectionRef* wxEvtHandler::FindRefInTrackerList( wxEvtHandler *eventSink )
++{
++    wxASSERT(eventSink);
++    for( wxTrackerNode *ptn=eventSink->GetFirst(); ptn; ptn=ptn->m_nxt )
++    {
++        // Only want wxEventConnectionRef nodes here 
++        if( ptn->GetType()!=wxTrackerNode::EventConnectionRef )
++            continue;
++        wxEventConnectionRef *pecr = static_cast<wxEventConnectionRef*>(ptn);
++        if( pecr && pecr->m_src==this )
++        {
++            wxASSERT( pecr->m_sink==eventSink );
++            return pecr;
++        }
++    }
++    return NULL;
++}
++
++void wxEvtHandler::OnSinkDestroyed( wxEvtHandler *sink )
++{
++    wxASSERT(m_dynamicEvents);
++    
++    // remove all connections with this sink
++    wxList::compatibility_iterator node = m_dynamicEvents->GetFirst(), node_nxt;
++    while (node)
++    {
++        wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)node->GetData();
++        node_nxt = node->GetNext();
++        
++        if( entry->m_eventSink==sink )
++        {
++            if (entry->m_callbackUserData)
++                delete entry->m_callbackUserData;
++            m_dynamicEvents->Erase( node );
++            delete entry;
++        }
++        node = node_nxt;
++    }
++}
++
+ #endif // wxUSE_BASE
+ 
+ #if wxUSE_GUI
+--- include/wx/event-svn.h	2008-01-08 14:23:19.000000000 +0100
++++ include/wx/event.h	2008-01-08 15:50:46.000000000 +0100
+@@ -24,6 +24,7 @@
+ 
+ #include "wx/dynarray.h"
+ #include "wx/thread.h"
++#include "wx/tracker.h"
+ 
+ // ----------------------------------------------------------------------------
+ // forward declarations
+@@ -2256,10 +2283,43 @@
+ };
+ 
+ // ----------------------------------------------------------------------------
++// wxEventConnectionRef: A class that represents all connections between two event 
++// handlers and enables automatic disconnect when an event handler sink goes 
++// out of scope. Each connection/disconnect increases/decreases ref count, and
++// when zero the node goes out of scope. 
++// ----------------------------------------------------------------------------
++
++struct wxEventConnectionRef : public wxTrackerNode {
++
++    wxEventConnectionRef() : m_src(0), m_sink(0), m_refCount(0) { }
++    wxEventConnectionRef( wxEvtHandler *src, wxEvtHandler *sink );
++    virtual ~wxEventConnectionRef();
++        
++    // The sink is being destroyed 
++    virtual void OnObjectDestroy( );
++    virtual wxTrackerNodeType GetType( ){ return EventConnectionRef; } 
++    
++    void IncRef( ) { m_refCount++; }
++    void DecRef( );
++
++protected:   
++    wxEvtHandler *m_src, *m_sink;
++    int m_refCount;
++    
++    friend class wxEvtHandler;
++    
++private:
++    // It makes no sense to copy objects of this class 
++    wxEventConnectionRef& operator = (const wxEventConnectionRef& other) { wxASSERT(0); return *this; } 
++};
++
++
++
++// ----------------------------------------------------------------------------
+ // wxEvtHandler: the base class for all objects handling wxWidgets events
+ // ----------------------------------------------------------------------------
+ 
+-class WXDLLIMPEXP_BASE wxEvtHandler : public wxObject
++class WXDLLIMPEXP_BASE wxEvtHandler : public wxObject, public wxTrackableBase
+ {
+ public:
+     wxEvtHandler();
+@@ -2359,6 +2419,7 @@
+ 
+     // Avoid problems at exit by cleaning up static hash table gracefully
+     void ClearEventHashTable() { GetEventHashTable().Clear(); }
++    void OnSinkDestroyed( wxEvtHandler *sink );
+ 
+ private:
+     static const wxEventTableEntry sm_eventTableEntries[];
+@@ -2425,6 +2486,9 @@
+     virtual void DoSetClientData( void *data );
+     virtual void *DoGetClientData() const;
+ 
++    // Search tracker objects for event connection with this sink
++    wxEventConnectionRef *FindRefInTrackerList( wxEvtHandler *eventSink );
++
+ private:
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxEvtHandler)
+ };
+
+ 	  	 

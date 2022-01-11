@@ -1,0 +1,796 @@
+? samples/taskbar/.DS_Store
+? samples/taskbar/Carbon_MachO.app
+? samples/taskbar/Carbon_MachO_Shlb.app
+? samples/taskbar/Carbon_MachO_Shlb_Debug.app
+? samples/taskbar/Carbon_MachODebug.app
+? samples/taskbar/TaskbarM8 Data
+? samples/taskbar/TaskbarM8.mcp
+Index: include/wx/mac/carbon/taskbarosx.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/mac/carbon/taskbarosx.h,v
+retrieving revision 1.11
+diff -b -u -2 -r1.11 taskbarosx.h
+--- include/wx/mac/carbon/taskbarosx.h	2005/09/23 12:49:36	1.11
++++ include/wx/mac/carbon/taskbarosx.h	2005/12/03 06:15:56
+@@ -18,42 +18,26 @@
+ class WXDLLEXPORT wxTaskBarIcon : public wxTaskBarIconBase
+ {
++    DECLARE_DYNAMIC_CLASS_NO_COPY(wxTaskBarIcon)
+ public:
+-        //type of taskbar item to create 
+-    //TODO:  currently only DOCK is implemented
++    //type of taskbar item to create (currently only DOCK is implemented)
+         enum wxTaskBarIconType
+-        {
+-                DOCK,
+-                STATUSITEM,
+-                MENUEXTRA
++    {   DOCK
++//    ,   CUSTOM_STATUSITEM
++//    ,   STATUSITEM 
++//    ,   MENUEXTRA 
++    ,   DEFAULT_TYPE = DOCK
+         };
+         
+-    wxTaskBarIcon(const wxTaskBarIconType& nType = DOCK);
++    wxTaskBarIcon(wxTaskBarIconType iconType = DEFAULT_TYPE);
+     virtual ~wxTaskBarIcon();
+ 
+-    inline bool IsOk() const { return true; }
+-    inline bool IsIconInstalled() const { return m_iconAdded; }
+-    
+-    //TODO: not tested extensively
++    bool IsIconInstalled() const;
+     bool SetIcon(const wxIcon& icon, const wxString& tooltip = wxEmptyString);
+     bool RemoveIcon();
+-    //TODO: end not tested extensively
+-    
+-    //pops up the menu
+     bool PopupMenu(wxMenu *menu);
+ 
+-    //internal functions - don't call       
+-    wxMenu* GetCurrentMenu();
+-    wxMenu* DoCreatePopupMenu();
+-
+ protected:
+-    wxTaskBarIconType m_nType;
+-    void* m_pEventHandlerRef;
+-    wxMenu* m_pMenu;
+-    WXHMENU m_theLastMenu;
+-    bool m_iconAdded;
+-    
+-    void OnRightDown(wxTaskBarIconEvent& evt);
+-    
+-    DECLARE_DYNAMIC_CLASS(wxTaskBarIcon)
++    class wxTaskBarIconImpl* m_impl;    
++    friend class wxTaskBarIconImpl;
+ };
+ #endif
+Index: src/mac/carbon/taskbar.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/taskbar.cpp,v
+retrieving revision 1.24
+diff -b -u -2 -r1.24 taskbar.cpp
+--- src/mac/carbon/taskbar.cpp	2005/05/31 09:20:19	1.24
++++ src/mac/carbon/taskbar.cpp	2005/12/03 06:15:56
+@@ -1,3 +1,3 @@
+-/////////////////////////////////////////////////////////////////////////////
++///////////////////////////////////////////////////////////////////////////////
+ // Name:        taskbar.cpp
+ // Purpose:     wxTaskBarIcon OSX Implementation
+@@ -8,6 +8,14 @@
+ // Copyright:   (c) 2004 Ryan Norton
+ // Licence:     wxWindows licence
+-/////////////////////////////////////////////////////////////////////////////
++///////////////////////////////////////////////////////////////////////////////
+ 
++//=============================================================================
++// Declarations
++//=============================================================================
++
++//-----------------------------------------------------------------------------
++// Includes
++//-----------------------------------------------------------------------------
++
+ #include "wx/wxprec.h"
+ 
+@@ -21,60 +29,203 @@
+ #include "wx/dcmemory.h"
+ 
+-IMPLEMENT_DYNAMIC_CLASS(wxTaskBarIcon, wxEvtHandler)
++//-----------------------------------------------------------------------------
++//
++//  wxTaskBarIconImpl
++//
++//  Superclass of wxTaskBarIcon implementations
++//-----------------------------------------------------------------------------
++
++class wxTaskBarIconImpl 
++{
++public:
++    wxTaskBarIconImpl(wxTaskBarIcon* parent);
++    virtual ~wxTaskBarIconImpl();
++
++    virtual bool IsIconInstalled() const = 0;
++    virtual bool SetIcon(const wxIcon& icon, const wxString& tooltip) = 0;
++    virtual bool RemoveIcon() = 0;
++    virtual bool PopupMenu(wxMenu *menu) = 0;
++    
++    wxMenu* CreatePopupMenu()
++    {   return m_parent->CreatePopupMenu(); }
++    
++    wxTaskBarIcon*       m_parent;
++    class wxTaskBarIconWindow* m_menuEventWindow;
++};
++
++//-----------------------------------------------------------------------------
++//
++//  wxTaskBarIconWindow
++//
++//  Event handler for menus
++//  NB: Since wxWindows in mac HAVE to have parents we need this to be
++//  a top level window...
++//-----------------------------------------------------------------------------
++
++class wxTaskBarIconWindow : public wxTopLevelWindow
++{
++public:
++    wxTaskBarIconWindow(wxTaskBarIconImpl* impl) 
++        : wxTopLevelWindow(NULL, -1, wxT("")), m_impl(impl) 
++    {
++        Connect(-1, wxEVT_COMMAND_MENU_SELECTED, 
++                wxCommandEventHandler(wxTaskBarIconWindow::OnMenuEvent)
++               );
++    }
+ 
++    void OnMenuEvent(wxCommandEvent& event) 
++    {
++        m_impl->m_parent->ProcessEvent(event);
++    }
++private:
++    wxTaskBarIconImpl* m_impl;
++};
++
++//-----------------------------------------------------------------------------
++//
++//  wxDockBarIconImpl
++//
++//-----------------------------------------------------------------------------
++
++class wxDockTaskBarIcon : public wxTaskBarIconImpl
++{
++public:
++    wxDockTaskBarIcon(wxTaskBarIcon* parent);
++    virtual ~wxDockTaskBarIcon();
++    
++    virtual bool IsIconInstalled() const;
++    virtual bool SetIcon(const wxIcon& icon, const wxString& tooltip);
++    virtual bool RemoveIcon();
++    virtual bool PopupMenu(wxMenu *menu);
++
++    wxMenu* DoCreatePopupMenu();
++
++    EventHandlerRef     m_eventHandlerRef;
++    EventHandlerUPP     m_eventupp;
++    wxMenu*             m_pMenu;
++    MenuRef             m_theLastMenu;
++    bool                m_iconAdded;
++    wxWindow*           m_eventWindow;
++};
++
++// Forward declarations for utility functions for dock implementation
+ pascal OSStatus wxDockEventHandler( EventHandlerCallRef inHandlerCallRef,
+-                                    EventRef inEvent, void* pData)
++                                    EventRef inEvent, void* pData);
++wxMenu* wxDeepCopyMenu(wxMenu* menu);
++                                    
++
++//=============================================================================
++//
++// Implementation
++//
++//=============================================================================
++
++//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++//
++//  wxTaskBarIconImpl
++//
++//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++
++//-----------------------------------------------------------------------------
++// wxTaskBarIconImpl Constructor
++//
++// Initializes members and creates the event window
++//-----------------------------------------------------------------------------
++wxTaskBarIconImpl::wxTaskBarIconImpl(wxTaskBarIcon* parent) 
++    : m_parent(parent), m_menuEventWindow(new wxTaskBarIconWindow(this))
++{
++}
++
++//-----------------------------------------------------------------------------
++// wxTaskBarIconImpl Destructor
++//
++// Cleans up the event window
++//-----------------------------------------------------------------------------
++wxTaskBarIconImpl::~wxTaskBarIconImpl()
+ {
+-    wxTaskBarIcon*& pTB = (wxTaskBarIcon*&) pData;
++    delete m_menuEventWindow;
++}
+ 
++//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++//
++//  wxDockTaskBarIcon
++//
++//  OS X DOCK implementation of wxTaskBarIcon using carbon
++//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++
++//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++// wxDockEventHandler
++//
++// This is the global mac/carbon event handler for the dock.
++// We need this for two reasons:
++// 1) To handle wxTaskBarIcon menu events (see below for why)
++// 2) To handle events from the dock when it requests a menu
++//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++pascal OSStatus wxDockEventHandler( EventHandlerCallRef inHandlerCallRef,
++                                    EventRef inEvent, void* pData)
++{
++    // Get the parameters we want from the event
++    wxDockTaskBarIcon* pTB = (wxDockTaskBarIcon*) pData;
+     const UInt32 eventClass = GetEventClass(inEvent);
+     const UInt32 eventKind = GetEventKind(inEvent);
+             
++    //
++    // Handle wxTaskBar menu events (note that this is a global event handler
++    // so it will actually get called by all commands/menus)
++    //  
+     if (eventClass == kEventClassCommand && eventKind == kEventCommandProcess) 
+     {
+-        //TODO:	This is a complete copy of 
+-        //static pascal OSStatus wxMacAppCommandEventHandler( EventHandlerCallRef handler , EventRef event , void *data )
+-
+-        if (! pTB->GetCurrentMenu() )
++        // if we have no taskbar menu quickly pass it back to wxApp
++        if (! pTB->m_pMenu )
+         {
+             return eventNotHandledErr;
+         }
+                 
+-        MenuRef hMenu = MAC_WXHMENU(pTB->GetCurrentMenu()->GetHMenu());
++        //
++        // This is the real reason why we need this. Normally menus
++        // get handled in wxMacAppEventHandler
++        //
++        // pascal OSStatus wxMacAppEventHandler(EventHandlerCallRef handler, 
++        //                                      EventRef event, void *data)
++        //
++        // However, in the case of a taskbar menu call 
++        // command.menu.menuRef IS NULL!
++        // Which causes the wxApp handler just to skip it.
++        //
++        MenuRef taskbarMenuRef = MAC_WXHMENU(pTB->m_pMenu->GetHMenu());
+         OSStatus result = eventNotHandledErr ;
+-
+-        HICommand command ;
+         OSErr err;
+     
+-        err =    GetEventParameter(inEvent, kEventParamDirectObject, typeHICommand, 	
+-                            NULL, sizeof(HICommand), NULL, &command);
+-        wxASSERT(err == noErr);
+-                
++        // Get the HICommand from the event
++        HICommand command;
++        err = GetEventParameter(inEvent, kEventParamDirectObject,
++                                typeHICommand, NULL, 
++                                sizeof(HICommand), NULL, &command);
++        if(err == noErr)
++        {       
++            //
++            // Obtain the REAL menuRef and the menuItemIndex in the real menuRef
++            //
++            // NOTE: menuRef is generally used here for submenus, as 
++            // GetMenuItemRefCon could give an incorrect wxMenuItem if we pass 
++            // just the top level wxTaskBar menu
++            //
+         MenuItemIndex menuItemIndex;
+-        err = GetIndMenuItemWithCommandID(hMenu, command.commandID, 1, NULL, &menuItemIndex);
+-        wxASSERT(err == noErr);
+-                
+-                    
+-        MenuCommand id = command.commandID ;
+-        wxMenuItem* item = NULL;
+-        
+-        // for items we don't really control
+-        if ( id == kHICommandPreferences )
++            MenuRef menuRef;
++            err = GetIndMenuItemWithCommandID(taskbarMenuRef, 
++                                              command.commandID, 
++                                              1, &menuRef, &menuItemIndex);
++            if(err == noErr)
+         {
+-            id = wxApp::s_macPreferencesMenuItemId ;
++                MenuCommand id = command.commandID;
++                wxMenuItem* item = NULL;
+         
+-            wxMenuBar* mbar = wxMenuBar::MacGetInstalledMenuBar() ;
++                if (id != 0) // Get the wxMenuItem reference from the MenuRef
++                    GetMenuItemRefCon(menuRef, menuItemIndex, (UInt32*) &item);
+             
+-            if ( mbar )
+-            {
+-                wxMenu* menu = NULL ;
+-                item = mbar->FindItem( id , &menu ) ;
+-            }
+-        }
+-        else if (id != 0)
+-            GetMenuItemRefCon( hMenu , menuItemIndex , (UInt32*) &item ) ;
+-
+         if ( item )
+         {
++                    // Handle items that are checkable
++                    // FIXME: Doesn't work (at least on 10.2)!
+             if (item->IsCheckable())
+             {
+@@ -82,19 +233,30 @@
+             }
+ 
+-            item->GetMenu()->SendEvent( id , item->IsCheckable() ? item->IsChecked() : -1 ) ;
+-            result = noErr ;
++                    // Send the wxEvent to the wxMenu
++                    item->GetMenu()->SendEvent(id, 
++                                               item->IsCheckable() ? 
++                                                    item->IsChecked() : -1 
++                                               );
++                    err = noErr; //We successfully handled the event
++                }
+         }
++        }//end if noErr on getting HICommand from event        
+     
+-        return result ;
++        return err; //Return whether we handled the event or not
+     }
+     
+-    wxASSERT(eventClass == kEventClassApplication && eventKind == kEventAppGetDockTileMenu);
++    // We better have a kEventClassApplication/kEventAppGetDockTileMenu combo here,
++    // otherwise something is truly funky     
++    wxASSERT(eventClass == kEventClassApplication && 
++             eventKind == kEventAppGetDockTileMenu);	    	
+ 		    	
+ 	//process the right click events
++    //NB: This may result in double or even triple-creation of the menus
++    //We need to do this for 2.4 compat, however
+ 	wxTaskBarIconEvent downevt(wxEVT_TASKBAR_RIGHT_DOWN,NULL);
+-	pTB->ProcessEvent(downevt);
++    pTB->m_parent->ProcessEvent(downevt);
+ 		
+ 	wxTaskBarIconEvent upevt(wxEVT_TASKBAR_RIGHT_UP,NULL);
+-	pTB->ProcessEvent(upevt);
++    pTB->m_parent->ProcessEvent(upevt);
+ 
+     //create popup menu
+@@ -114,5 +276,5 @@
+ 
+         //set the actual dock menu
+-        err = SetEventParameter((EventRef) inEvent, kEventParamMenuRef, 
++        err = SetEventParameter(inEvent, kEventParamMenuRef, 
+                     typeMenuRef, sizeof(MenuRef), 
+                      &hMenu);
+@@ -124,10 +286,70 @@
+         return eventNotHandledErr;
+ }
++
++//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++// wxDeepCopyMenu
++//
++// Performs a top-to-bottom copy of the input menu and all of its
++// submenus.
++//
++// This is mostly needed for 2.4 compatability. However wxPython and others
++// still use this way of setting the taskbarmenu.
++//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
++wxMenu* wxDeepCopyMenu(wxMenu* menu)
++{
++    if(!menu)
++        return menu;
+ 
+-DEFINE_ONE_SHOT_HANDLER_GETTER( wxDockEventHandler );
++    //
++    // NB:  Here we have to perform a deep copy of the menu,
++    // copying each and every menu item from menu to m_pMenu.
++    // Other implementations use wxWindow::PopupMenu here, 
++    // which idle execution until the user selects something,
++    // but since the mac handles this internally, we can't - 
++    // and have no way at all to idle it while the dock menu
++    // is being shown before menu goes out of scope (it may
++    // not be on the heap, and may expire right after this function
++    // is done - we need it to last until the carbon event is triggered - 
++    // that's when the user right clicks).
++    //
++    // Also, since there is no equal (assignment) operator 
++    // on either wxMenu or wxMenuItem, we have to do all the
++    // dirty work ourselves.
++    //
++
++    //Perform a deep copy of the menu
++    wxMenuItemList& theList = menu->GetMenuItems();
++    wxMenuItemList::compatibility_iterator theNode = theList.GetFirst();
++    
++    //create the main menu
++    wxMenu* m_pMenu = new wxMenu(menu->GetTitle());
+ 
+-wxTaskBarIcon::wxTaskBarIcon(const wxTaskBarIconType& nType)
+-    : m_nType(nType), m_pEventHandlerRef(NULL), m_pMenu(NULL), 
+-        m_theLastMenu((WXHMENU)GetApplicationDockTileMenu()), m_iconAdded(false) 
++    while(theNode != NULL)
++    {
++        wxMenuItem* theItem = theNode->GetData();
++        m_pMenu->Append(new wxMenuItem(m_pMenu, //parent menu
++                                        theItem->GetId(), //id
++                                        theItem->GetText(), //text label
++                                        theItem->GetHelp(), //status bar help string
++                                        theItem->GetKind(), //menu flags - checkable, separator, etc.
++                                        wxDeepCopyMenu(theItem->GetSubMenu()) //submenu
++                                        ));
++        theNode = theNode->GetNext();
++    }
++    
++    return m_pMenu;
++}
++
++//-----------------------------------------------------------------------------
++// wxDockTaskBarIcon Constructor
++//
++// Initializes the dock implementation of wxTaskBarIcon.
++//
++// Here we create some mac-specific event handlers and UPPs.
++//-----------------------------------------------------------------------------
++wxDockTaskBarIcon::wxDockTaskBarIcon(wxTaskBarIcon* parent) 
++    :   wxTaskBarIconImpl(parent),
++        m_eventHandlerRef(NULL), m_pMenu(NULL), 
++        m_theLastMenu(GetApplicationDockTileMenu()), m_iconAdded(false) 
+ {
+     //Register the events that will return the dock menu
+@@ -135,21 +357,27 @@
+                                     { kEventClassApplication, kEventAppGetDockTileMenu } };
+     
++    m_eventupp = NewEventHandlerUPP(wxDockEventHandler);
++    wxASSERT(m_eventupp != NULL);
++                                              
+ #ifdef __WXDEBUG__
+     OSStatus err =
+ #endif
+     InstallApplicationEventHandler(
+-            GetwxDockEventHandlerUPP(),
++            m_eventupp,
+             GetEventTypeCount(tbEventList), tbEventList, 
+-            this, (&(EventHandlerRef&)m_pEventHandlerRef));
+-            
++            this, &m_eventHandlerRef);
+     wxASSERT(err == noErr);
+-    
+-    Connect(wxEVT_TASKBAR_RIGHT_DOWN, wxTaskBarIconEventHandler(wxTaskBarIcon::OnRightDown));
+ }
+ 
+-wxTaskBarIcon::~wxTaskBarIcon()
++//-----------------------------------------------------------------------------
++// wxDockTaskBarIcon Destructor
++//
++// Cleans up mac events and restores the old icon to the dock
++//-----------------------------------------------------------------------------
++wxDockTaskBarIcon::~wxDockTaskBarIcon()
+ {
+-    //clean up event handler
+-    RemoveEventHandler((EventHandlerRef&)m_pEventHandlerRef);
++    //clean up event handler and event UPP
++    RemoveEventHandler(m_eventHandlerRef);
++    DisposeEventHandlerUPP(m_eventupp);
+ 
+     //restore old icon and menu to the dock
+@@ -157,25 +385,49 @@
+ }
+ 
+-wxMenu* wxTaskBarIcon::GetCurrentMenu()
++//-----------------------------------------------------------------------------
++// wxDockTaskBarIcon::DoCreatePopupMenu
++//
++// Helper function that handles a request from the dock event handler 
++// to get the menu for the dock
++//-----------------------------------------------------------------------------
++wxMenu* wxDockTaskBarIcon::DoCreatePopupMenu()
+ {
+-    return m_pMenu;
+-}
+-
+-wxMenu* wxTaskBarIcon::DoCreatePopupMenu()
+-{    
++    // Get the menu from the parent
+     wxMenu* theNewMenu = CreatePopupMenu();
+     
+     if (theNewMenu)
+     {
++        if(m_pMenu)	
+         delete m_pMenu;
+         m_pMenu = theNewMenu;
+-        m_pMenu->SetEventHandler(this);
++        m_pMenu->SetInvokingWindow(m_menuEventWindow);
+     }
+     
++    //
++    // the return here can be one of three things 
++    // (in order of priority):
++    // 1) User passed a menu from CreatePopupMenu override
++    // 2) menu sent to and copied from PopupMenu
++    // 3) If neither (1) or (2), then NULL
++    //
+     return m_pMenu;
+ }
+ 
+-// Operations:
+-bool wxTaskBarIcon::SetIcon(const wxIcon& icon, const wxString& tooltip)
++//-----------------------------------------------------------------------------
++// wxDockTaskBarIcon::IsIconInstalled
++//
++// Returns whether or not the dock is not using the default image
++//-----------------------------------------------------------------------------
++bool wxDockTaskBarIcon::IsIconInstalled() const
++{   
++    return m_iconAdded; 
++}
++
++//-----------------------------------------------------------------------------
++// wxDockTaskBarIcon::SetIcon
++//
++// Sets the icon for the dock CGImage functions and SetApplicationDockTileImage
++//-----------------------------------------------------------------------------
++bool wxDockTaskBarIcon::SetIcon(const wxIcon& icon, const wxString& tooltip)
+ {
+     wxBitmap bmp( icon ) ;
+@@ -223,5 +475,10 @@
+ }
+     
+-bool wxTaskBarIcon::RemoveIcon()
++//-----------------------------------------------------------------------------
++// wxDockTaskBarIcon::RemoveIcon
++//
++// Restores the old image for the dock via RestoreApplicationDockTileImage
++//-----------------------------------------------------------------------------
++bool wxDockTaskBarIcon::RemoveIcon()
+ {
+     if(m_pMenu)
+@@ -236,65 +493,84 @@
+     
+     //restore the old menu to the dock
+-    SetApplicationDockTileMenu(MAC_WXHMENU(m_theLastMenu));
++    SetApplicationDockTileMenu(m_theLastMenu);
+ 
+     return !(m_iconAdded = !(err == noErr));
+ }
+     
+-bool wxTaskBarIcon::PopupMenu(wxMenu *menu)
++//-----------------------------------------------------------------------------
++// wxDockTaskBarIcon::PopupMenu
++//
++// 2.4 and wxPython method that "pops of the menu in the taskbar".
++//
++// In reality because of the way the dock menu works in carbon 
++// we just save the menu, and if the user didn't override CreatePopupMenu
++// return the menu passed here, thus sort of getting the same effect.
++//-----------------------------------------------------------------------------
++bool wxDockTaskBarIcon::PopupMenu(wxMenu *menu)
+ {
+     wxASSERT(menu != NULL);
+ 
+     if (m_pMenu)
+-    {
+         delete m_pMenu;
+-        m_pMenu = NULL;
+-    }
+     
+-    //
+-    // NB:  Here we have to perform a deep copy of the menu,
+-    // copying each and every menu item from menu to m_pMenu.
+-    // Other implementations use wxWindow::PopupMenu here, 
+-    // which idle execution until the user selects something,
+-    // but since the mac handles this internally, we can't - 
+-    // and have no way at all to idle it while the dock menu
+-    // is being shown before menu goes out of scope (it may
+-    // not be on the heap, and may expire right after this function
+-    // is done - we need it to last until the carbon event is triggered - 
+-    // that's when the user right clicks).
+-    //
+-    // Also, since there is no equal (assignment) operator 
+-    // on either wxMenu or wxMenuItem, we have to do all the
+-    // dirty work ourselves.
+-    //
++    //start copy of menu
++    m_pMenu = wxDeepCopyMenu(menu);
+    
+-    //Perform a deep copy of the menu
+-    wxMenuItemList& theList = menu->GetMenuItems();
+-    wxMenuItemList::compatibility_iterator theNode = theList.GetFirst();
++    //finish up
++    m_pMenu->SetInvokingWindow(m_menuEventWindow);
++    return true;
++}
+     
+-    //create the main menu
+-    m_pMenu = new wxMenu(menu->GetTitle());
++//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++//
++//  wxTaskBarIcon
++//
++//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+     
+-    while(theNode != NULL)
+-    {
+-        wxMenuItem* theItem = theNode->GetData();
+-        m_pMenu->Append(new wxMenuItem(	m_pMenu, //parent menu
+-                                        theItem->GetId(), //id
+-                                        theItem->GetText(), //text label
+-                                        theItem->GetHelp(), //status bar help string
+-                                        theItem->GetKind(), //menu flags - checkable, separator, etc.
+-                                        theItem->GetSubMenu() //submenu
+-                                        ));
+-        theNode = theNode->GetNext();
+-    }
++IMPLEMENT_DYNAMIC_CLASS(wxTaskBarIcon, wxEvtHandler)
+     
+-    m_pMenu->SetEventHandler(this);
+-    return true;
++//-----------------------------------------------------------------------------
++// wxTaskBarIcon Constructor
++//
++// Creates the backend
++//
++// Note that we only support DOCK currently as others require cocoa and
++// also some require hacks and other such things. (MenuExtras are
++// actually seperate programs that also require a special undocumented id 
++// hack and other such fun stuff).
++//-----------------------------------------------------------------------------
++wxTaskBarIcon::wxTaskBarIcon(wxTaskBarIconType nType)
++{
++    wxASSERT_MSG(nType == DOCK, 
++                       wxT("Only the DOCK implementation of wxTaskBarIcon")
++                       wxT("on mac carbon is currently supported!"));
++    m_impl = new wxDockTaskBarIcon(this);
+ }
+ 
+-//Skip the event so that popupmenu isn't called in parent, avoiding double-creation of the menus
+-void wxTaskBarIcon::OnRightDown(wxTaskBarIconEvent& evt)
++//-----------------------------------------------------------------------------
++// wxTaskBarIcon Destructor
++//
++// Destroys the backend
++//-----------------------------------------------------------------------------
++wxTaskBarIcon::~wxTaskBarIcon()
+ {
+-    evt.Skip();
++    delete m_impl;
+ }
++
++//-----------------------------------------------------------------------------
++// wxTaskBarIcon::SetIcon
++// wxTaskBarIcon::RemoveIcon
++// wxTaskBarIcon::PopupMenu
++//
++// Just calls the backend version of the said function.
++//-----------------------------------------------------------------------------
++bool wxTaskBarIcon::IsIconInstalled() const
++{   return m_impl->IsIconInstalled(); }
++bool wxTaskBarIcon::SetIcon(const wxIcon& icon, const wxString& tooltip)
++{   return m_impl->SetIcon(icon, tooltip);  }
++bool wxTaskBarIcon::RemoveIcon()
++{   return m_impl->RemoveIcon();    }    
++bool wxTaskBarIcon::PopupMenu(wxMenu *menu)
++{   return m_impl->PopupMenu(menu); }
+ 
+ #endif //wxHAS_TASK_BAR_ICON
+Index: samples/taskbar/tbtest.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/taskbar/tbtest.cpp,v
+retrieving revision 1.30
+diff -b -u -2 -r1.30 tbtest.cpp
+--- samples/taskbar/tbtest.cpp	2005/01/23 23:07:44	1.30
++++ samples/taskbar/tbtest.cpp	2005/12/03 06:15:56
+@@ -54,5 +54,4 @@
+ 
+ 
+-
+ MyDialog::MyDialog(wxWindow* parent, const wxWindowID id, const wxString& title,
+     const wxPoint& pos, const wxSize& size, const long windowStyle):
+@@ -109,6 +108,10 @@
+     PU_RESTORE = 10001,
+     PU_NEW_ICON,
++    PU_OLD_ICON,
+     PU_EXIT,
+-    PU_CHECKMARK
++    PU_CHECKMARK,
++    PU_SUB1,
++    PU_SUB2,
++    PU_SUBMAIN
+ };
+ 
+@@ -118,7 +121,10 @@
+     EVT_MENU(PU_EXIT,    MyTaskBarIcon::OnMenuExit)
+     EVT_MENU(PU_NEW_ICON,MyTaskBarIcon::OnMenuSetNewIcon)
++    EVT_MENU(PU_OLD_ICON,MyTaskBarIcon::OnMenuSetOldIcon)
+     EVT_MENU(PU_CHECKMARK,MyTaskBarIcon::OnMenuCheckmark)
+     EVT_UPDATE_UI(PU_CHECKMARK,MyTaskBarIcon::OnMenuUICheckmark)
+     EVT_TASKBAR_LEFT_DCLICK  (MyTaskBarIcon::OnLeftButtonDClick)
++    EVT_MENU(PU_SUB1, MyTaskBarIcon::OnMenuSub)
++    EVT_MENU(PU_SUB2, MyTaskBarIcon::OnMenuSub)
+ END_EVENT_TABLE()
+ 
+@@ -139,4 +145,5 @@
+        check =!check;
+ }
++
+ void MyTaskBarIcon::OnMenuUICheckmark(wxUpdateUIEvent &event)
+ {
+@@ -152,14 +159,43 @@
+ }
+ 
++void MyTaskBarIcon::OnMenuSetOldIcon(wxCommandEvent&)
++{
++    if(IsIconInstalled())
++    {
++        RemoveIcon();
++    }
++    else
++    {
++        wxMessageBox(wxT("wxTaskBarIcon Sample - icon already is the old version"));
++    }
++}
++
++void MyTaskBarIcon::OnMenuSub(wxCommandEvent&)
++{
++    wxMessageBox(wxT("You clicked on a submenu!"));
++}
++
+ // Overridables
+ wxMenu *MyTaskBarIcon::CreatePopupMenu()
+ {
++    // Try creating menus different ways
++    // TODO: Probably try calling SetBitmap with some XPMs here
+     wxMenu *menu = new wxMenu;
+-    
+     menu->Append(PU_RESTORE, _T("&Restore TBTest"));
+-    menu->Append(PU_NEW_ICON,_T("&Set New Icon"));
+-    menu->Append(PU_CHECKMARK,  _T("Checkmark"),wxT( "" ), wxITEM_CHECK );
++    menu->AppendSeparator();
++    menu->Append(PU_OLD_ICON, _T("&Restore Old Icon"));    
++    menu->Append(PU_NEW_ICON, _T("&Set New Icon"));
++    menu->AppendSeparator();
++    menu->Append(PU_CHECKMARK, _T("Checkmark"),wxT(""), wxITEM_CHECK);
++    menu->AppendSeparator();
++    wxMenu *submenu = new wxMenu;
++    submenu->Append(PU_SUB1, _T("One submenu"));
++    submenu->AppendSeparator();
++    submenu->Append(PU_SUB2, _T("Another submenu"));
++    menu->Append(PU_SUBMAIN, _T("Submenu"), submenu);
++#ifndef __WXMAC_OSX__ /*Mac has built-in quit menu*/
++    menu->AppendSeparator();
+     menu->Append(PU_EXIT,    _T("E&xit"));
+-
++#endif
+     return menu;
+ }
+Index: samples/taskbar/tbtest.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/taskbar/tbtest.h,v
+retrieving revision 1.16
+diff -b -u -2 -r1.16 tbtest.h
+--- samples/taskbar/tbtest.h	2005/01/23 23:07:45	1.16
++++ samples/taskbar/tbtest.h	2005/12/03 06:15:56
+@@ -25,6 +25,8 @@
+     void OnMenuExit(wxCommandEvent&);
+     void OnMenuSetNewIcon(wxCommandEvent&);
++    void OnMenuSetOldIcon(wxCommandEvent&);
+        void OnMenuCheckmark(wxCommandEvent&);
+        void OnMenuUICheckmark(wxUpdateUIEvent&);
++    void OnMenuSub(wxCommandEvent&);
+     virtual wxMenu *CreatePopupMenu();
+ 
+
+ 	  	 

@@ -1,0 +1,309 @@
+Index: src/common/containr.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/containr.cpp,v
+retrieving revision 1.35
+diff -u -r1.35 containr.cpp
+--- src/common/containr.cpp	2004/12/22 07:22:24	1.35
++++ src/common/containr.cpp	2004/12/28 14:50:36
+@@ -153,6 +153,111 @@
+     }
+ }
+ 
++// --------------------------------------------------------------------
++// The following four functions are used to find other radio buttons 
++// within the same group. Used by wxSetFocusToChild on wxMSW
++// --------------------------------------------------------------------
++
++#ifdef __WXMSW__
++
++wxRadioButton* wxGetPreviousButtonInGroup(wxRadioButton *btn)
++{
++    if ( btn->HasFlag(wxRB_GROUP) || btn->HasFlag(wxRB_SINGLE) )
++        return NULL;
++
++    const wxWindowList& siblings = btn->GetParent()->GetChildren();
++    wxWindowList::compatibility_iterator nodeThis = siblings.Find(btn);
++    wxCHECK_MSG( nodeThis, NULL, _T("radio button not a child of its parent?") );
++
++    // Iterate over all previous siblings until we find the next radio button
++    wxWindowList::compatibility_iterator nodeBefore = nodeThis->GetPrevious();
++    wxRadioButton *prevBtn = 0;
++    while (nodeBefore)
++    {
++        prevBtn = wxDynamicCast(nodeBefore->GetData(), wxRadioButton);
++        if (prevBtn)
++            break;
++
++        nodeBefore = nodeBefore->GetPrevious();
++    }
++    
++    if (!prevBtn || prevBtn->HasFlag(wxRB_SINGLE))
++    {
++        // no more buttons in group
++        return NULL;
++    }
++    else
++        return prevBtn;
++}
++
++wxRadioButton* wxGetNextButtonInGroup(wxRadioButton *btn)
++{
++    if (btn->HasFlag(wxRB_SINGLE))
++        return NULL;
++
++    const wxWindowList& siblings = btn->GetParent()->GetChildren();
++    wxWindowList::compatibility_iterator nodeThis = siblings.Find(btn);
++    wxCHECK_MSG( nodeThis, NULL, _T("radio button not a child of its parent?") );
++
++    // Iterate over all previous siblings until we find the next radio button
++    wxWindowList::compatibility_iterator nodeNext = nodeThis->GetNext();
++    wxRadioButton *nextBtn = 0;
++    while (nodeNext)
++    {
++        nextBtn = wxDynamicCast(nodeNext->GetData(), wxRadioButton);
++        if (nextBtn)
++            break;
++
++        nodeNext = nodeNext->GetNext();
++    }
++
++    if ( !nextBtn || nextBtn->HasFlag(wxRB_GROUP) || nextBtn->HasFlag(wxRB_SINGLE) )
++    {
++        // no more buttons or the first button of the next group
++        return NULL;
++    }
++    else
++        return nextBtn;
++}
++
++wxRadioButton* wxGetFirstButtonInGroup(wxRadioButton *btn)
++{
++    while (true)
++    {
++        wxRadioButton* prevBtn = wxGetPreviousButtonInGroup(btn);
++        if (!prevBtn)
++            return btn;
++        
++        btn = prevBtn;
++    }
++}
++
++wxRadioButton* wxGetSelectedButtonInGroup(wxRadioButton *btn)
++{
++    // Find currently selected button
++    if (btn->GetValue())
++        return btn;
++
++    if (btn->HasFlag(wxRB_SINGLE))
++        return NULL;
++
++    wxRadioButton *selBtn;
++
++    // First check all previous buttons
++    for (selBtn = wxGetPreviousButtonInGroup(btn); selBtn; selBtn = wxGetPreviousButtonInGroup(selBtn))
++        if (selBtn->GetValue())
++            return selBtn;
++
++    // Now all following buttons
++    for (selBtn = wxGetNextButtonInGroup(btn); selBtn; selBtn = wxGetNextButtonInGroup(selBtn))
++        if (selBtn->GetValue())
++            return selBtn;
++
++    return NULL;
++}
++
++#endif __WXMSW__
++
+ // ----------------------------------------------------------------------------
+ // Keyboard handling - this is the place where the TAB traversal logic is
+ // implemented. As this code is common to all ports, this ensures consistent
+@@ -224,6 +329,12 @@
+ 
+         if ( winFocus )
+         {
++#ifdef __WXMSW__
++            // If we are in a radio button group, start from the first item in the 
++            // group
++            if ( event.IsFromTab() && wxIsKindOf(winFocus, wxRadioButton ) )
++                winFocus = wxGetFirstButtonInGroup((wxRadioButton*)winFocus);
++#endif
+             // ok, we found the focus - now is it our child?
+             start_node = children.Find( winFocus );
+         }
+@@ -291,14 +402,40 @@
+ 
+         wxWindow *child = node->GetData();
+ 
+-#if defined(__WXMSW__)
+-        bool is_not_msw_rb = !m_winLastFocused ||
+-                                !wxIsKindOf(m_winLastFocused,wxRadioButton);
++#ifdef __WXMSW__
++        bool canSelectRadioButton = true;
++        if (!event.IsFromTab())
++        {
++            // If navigating using cursor keys, make sure not to navigate out of a radio button group.
++            if (m_winLastFocused && wxIsKindOf(m_winLastFocused, wxRadioButton))
++            {
++                if (!wxIsKindOf(child, wxRadioButton))
++                {
++                    child = forward ? 
++                                wxGetNextButtonInGroup((wxRadioButton*)m_winLastFocused) : 
++                                wxGetPreviousButtonInGroup((wxRadioButton*)m_winLastFocused);
++                    if (!child)
++                    {
++                        event.Skip(false);
++                        return;
++                    }
++                }
++            }
++        }
++        else
++        {
++            // If navigating using tabs, skip all but the first radio button in a group.
++            if (wxIsKindOf(child, wxRadioButton))
++            {
++                if (wxGetPreviousButtonInGroup((wxRadioButton*)child))
++                    canSelectRadioButton = false;
++            }
++        }
+ #else
+-        static const bool is_not_msw_rb = true;
++        static bool canSelectRadioButton = true;
+ #endif
+ 
+-        if ( child->AcceptsFocusFromKeyboard() && is_not_msw_rb )
++        if ( child->AcceptsFocusFromKeyboard() && canSelectRadioButton)
+         {
+             // if we're setting the focus to a child panel we should prevent it
+             // from giving it to the child which had the focus the last time
+@@ -310,28 +447,11 @@
+             // we need to hop to the next activated
+             // radio button, not just the next radio
+             // button under MSW
+-            if (wxIsKindOf(child,wxRadioButton))
++            if (wxIsKindOf(child, wxRadioButton) && event.IsFromTab())
+             {
+-                wxRadioButton *rb = (wxRadioButton*) child;
+-                if (!rb->GetValue())
+-                {
+-                    for (;;)
+-                    {
+-                        wxWindowList::compatibility_iterator node = children.Find( child );
+-                        if (forward)
+-                            node = node->GetNext();
+-                        else
+-                            node = node->GetPrevious();
+-                        if (!node)
+-                            return; // this would probably an error
+-                        child = node->GetData();
+-                        if (!wxIsKindOf(child,wxRadioButton))
+-                            continue;
+-                        rb = (wxRadioButton*) child;
+-                        if (rb->GetValue())
+-                            break;
+-                    }
+-                }
++                wxRadioButton *rb = wxGetSelectedButtonInGroup((wxRadioButton*)child);
++                if (rb)
++                    child = rb;
+             }
+ #endif // __WXMSW__
+ 
+@@ -475,6 +595,18 @@
+ 
+         if ( child->AcceptsFocusFromKeyboard() && !child->IsTopLevel() )
+         {
++#ifdef __WXMSW__
++            // If a radiobutton is the first focusable child, search for the 
++            // selected radiobutton in the same group
++            wxRadioButton* btn = wxDynamicCast(child, wxRadioButton);
++            if (btn)
++            {
++                wxRadioButton* selected = wxGetSelectedButtonInGroup(btn);
++                if (selected)
++                    child = selected;
++            }
++#endif
++
+             wxLogTrace(_T("focus"),
+                        _T("SetFocusToChild() => first child (0x%08lx)."),
+                        (unsigned long)child->GetHandle());
+Index: include/wx/event.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/event.h,v
+retrieving revision 1.214
+diff -u -r1.214 event.h
+--- include/wx/event.h	2004/12/05 16:30:49	1.214
++++ include/wx/event.h	2004/12/28 14:27:16
+@@ -1771,7 +1771,7 @@
+ public:
+     wxNavigationKeyEvent()
+         : wxEvent(0, wxEVT_NAVIGATION_KEY),
+-          m_flags(IsForward),    // defaults are for TAB
++          m_flags(IsForward | FromTab),    // defaults are for TAB
+           m_focus((wxWindow *)NULL)
+         {
+             m_propagationLevel = wxEVENT_PROPAGATE_NONE;
+@@ -1796,6 +1796,13 @@
+     void SetWindowChange(bool bIs)
+         { if ( bIs ) m_flags |= WinChange; else m_flags &= ~WinChange; }
+ 
++    // Set to true under MSW if the event was generated using the tab key.
++    // This is required for proper navogation over radio buttons
++    bool IsFromTab() const
++        { return (m_flags & FromTab) != 0; }
++    void SetFromTab(bool bIs)
++        { if ( bIs ) m_flags |= FromTab; else m_flags &= ~FromTab; }
++
+     // the child which has the focus currently (may be NULL - use
+     // wxWindow::FindFocus then)
+     wxWindow* GetCurrentFocus() const { return m_focus; }
+@@ -1810,10 +1817,11 @@
+     {
+         IsBackward = 0x0000,
+         IsForward = 0x0001,
+-        WinChange = 0x0002
++        WinChange = 0x0002,
++        FromTab = 0x0004
+     };
+ 
+-    long m_flags;
++    long m_flags;
+     wxWindow *m_focus;
+ 
+ private:
+Index: src/msw/window.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/window.cpp,v
+retrieving revision 1.546
+diff -u -r1.546 window.cpp
+--- src/msw/window.cpp	2004/12/22 23:27:49	1.546
++++ src/msw/window.cpp	2004/12/28 13:15:23
+@@ -1842,7 +1842,8 @@
+             }
+ 
+             bool bForward = true,
+-                 bWindowChange = false;
++                 bWindowChange = false,
++                 bFromTab = false;
+ 
+             // should we process this message specially?
+             bool bProcess = true;
+@@ -1856,6 +1857,7 @@
+                         // Ctrl-Tab cycles thru notebook pages
+                         bWindowChange = bCtrlDown;
+                         bForward = !bShiftDown;
++                        bFromTab = true;
+                     }
+                     break;
+ 
+@@ -1967,6 +1969,7 @@
+                 wxNavigationKeyEvent event;
+                 event.SetDirection(bForward);
+                 event.SetWindowChange(bWindowChange);
++                event.SetFromTab(bFromTab);
+                 event.SetEventObject(this);
+ 
+                 if ( GetEventHandler()->ProcessEvent(event) )
+
+ 	  	 

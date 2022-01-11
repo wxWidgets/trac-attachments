@@ -1,0 +1,154 @@
+# HG changeset patch
+# User rk
+# Date 1285925483 -7200
+# Node ID 1e521e9a506615c0f42b21e8fd21e57d6cf33e7d
+# Parent  316127a175fceb68c1dc4b90f0ee062c87f17d7e
+Extended the drag-and-drop code of wxDataViewCtrl to let the client decide if he wants to copy or move the dragged objects.
+Using the modifier keys while dragging works as expected now.
+
+diff -r 316127a175fc -r 1e521e9a5066 include/wx/dataview.h
+--- a/include/wx/dataview.h	Thu Sep 30 17:56:48 2010 +0200
++++ b/include/wx/dataview.h	Fri Oct 01 11:31:23 2010 +0200
+@@ -24,6 +24,9 @@
+ #include "wx/weakref.h"
+ #include "wx/vector.h"
+ #include "wx/dataobj.h"
++#if wxUSE_DRAG_AND_DROP
++#include "wx/dnd.h"
++#endif
+ 
+ class WXDLLIMPEXP_FWD_CORE wxImageList;
+ 
+@@ -740,7 +743,9 @@ public:
+ #if wxUSE_DRAG_AND_DROP
+         , m_dataObject(NULL),
+         m_dataBuffer(NULL),
+-        m_dataSize(0)
++        m_dataSize(0),
++        m_dragFlags(0),
++        m_dropEffect(wxDragNone)
+ #endif
+         { }
+ 
+@@ -758,7 +763,9 @@ public:
+         , m_dataObject(event.m_dataObject),
+         m_dataFormat(event.m_dataFormat),
+         m_dataBuffer(event.m_dataBuffer),
+-        m_dataSize(event.m_dataSize)
++        m_dataSize(event.m_dataSize),
++        m_dragFlags(event.m_dragFlags),
++        m_dropEffect(event.m_dropEffect)
+ #endif
+         { }
+ 
+@@ -800,6 +807,10 @@ public:
+     size_t GetDataSize() const { return m_dataSize; }
+     void SetDataBuffer( void* buf ) { m_dataBuffer = buf;}
+     void *GetDataBuffer() const { return m_dataBuffer; }
++    void SetDragFlags( int flags ) { m_dragFlags = flags; }
++    int GetDragFlags() const { return m_dragFlags; }
++    void SetDropEffect( wxDragResult effect ) { m_dropEffect = effect; }
++    wxDragResult GetDropEffect() const { return m_dropEffect; }
+ #endif // wxUSE_DRAG_AND_DROP
+ 
+     virtual wxEvent *Clone() const { return new wxDataViewEvent(*this); }
+@@ -820,6 +831,9 @@ protected:
+     wxDataFormat        m_dataFormat;
+     void*               m_dataBuffer;
+     size_t              m_dataSize;
++
++    int                 m_dragFlags;
++    wxDragResult        m_dropEffect;
+ #endif // wxUSE_DRAG_AND_DROP
+ 
+ private:
+diff -r 316127a175fc -r 1e521e9a5066 interface/wx/dataview.h
+--- a/interface/wx/dataview.h	Thu Sep 30 17:56:48 2010 +0200
++++ b/interface/wx/dataview.h	Fri Oct 01 11:31:23 2010 +0200
+@@ -2697,6 +2697,32 @@ public:
+     void *GetDataBuffer() const;
+ 
+     /**
++        This can be used inside a wxEVT_COMMAND_DATAVIEW_ITEM_BEGIN_DRAG handler in order
++        to configure the drag operation. Valid values are wxDrag_CopyOnly (default),
++        wxDrag_AllowMove (allow the data to be moved) and wxDrag_DefaultMove.
++        
++        @see GetDropEffect()
++    */
++    void SetDragFlags( int flags );
++
++    /**
++        Used internally.
++    */
++    int GetDragFlags() const;
++
++    /**
++        Used internally. Sets the effect of a drop operation.
++    */
++    void SetDropEffect( wxDragResult effect );
++
++    /**
++        Returns the effect the user requested to happen to the dropped data
++        (copy, move, link). This function can be used inside wxEVT_COMMAND_DATAVIEW_ITEM_DROP_POSSIBLE and
++        wxEVT_COMMAND_DATAVIEW_ITEM_DROP handlers.
++    */
++    wxDragResult GetDropEffect() const;
++
++    /**
+         Return the first row that will be displayed.
+     */
+     int GetCacheFrom() const;
+diff -r 316127a175fc -r 1e521e9a5066 samples/dataview/dataview.cpp
+--- a/samples/dataview/dataview.cpp	Thu Sep 30 17:56:48 2010 +0200
++++ b/samples/dataview/dataview.cpp	Fri Oct 01 11:31:23 2010 +0200
+@@ -840,6 +840,7 @@ void MyFrame::OnBeginDrag( wxDataViewEve
+     wxTextDataObject *obj = new wxTextDataObject;
+     obj->SetText( node->m_title );
+     event.SetDataObject( obj );
++    event.SetDragFlags(wxDrag_AllowMove);
+ }
+ 
+ void MyFrame::OnDropPossible( wxDataViewEvent &event )
+@@ -874,7 +875,11 @@ void MyFrame::OnDrop( wxDataViewEvent &e
+     wxTextDataObject obj;
+     obj.SetData( wxDF_UNICODETEXT, event.GetDataSize(), event.GetDataBuffer() );
+ 
+-    wxLogMessage( "Text dropped: %s", obj.GetText() );
++    static wxChar const* const effect_strings[] = { wxT("error"), wxT("none"),
++                                                    wxT("copy"), wxT("move"),
++                                                    wxT("link"), wxT("cancel") };
++    wxDragResult const effect = event.GetDropEffect();
++    wxLogMessage( "Text dropped: %s, effect: %s", obj.GetText(), effect_strings[effect] );
+ }
+ 
+ #endif // wxUSE_DRAG_AND_DROP
+diff -r 316127a175fc -r 1e521e9a5066 src/generic/datavgen.cpp
+--- a/src/generic/datavgen.cpp	Thu Sep 30 17:56:48 2010 +0200
++++ b/src/generic/datavgen.cpp	Fri Oct 01 11:31:23 2010 +0200
+@@ -1394,6 +1394,7 @@ wxDragResult wxDataViewMainWindow::OnDra
+     event.SetItem( item );
+     event.SetModel( model );
+     event.SetDataFormat( format );
++    event.SetDropEffect( def );
+     if (!m_owner->HandleWindowEvent( event ))
+     {
+         RemoveDropHint();
+@@ -1470,6 +1471,7 @@ wxDragResult wxDataViewMainWindow::OnDat
+     event.SetDataFormat( format );
+     event.SetDataSize( obj->GetSize() );
+     event.SetDataBuffer( obj->GetData() );
++    event.SetDropEffect( def );
+     if (!m_owner->HandleWindowEvent( event ))
+         return wxDragNone;
+ 
+@@ -3560,7 +3562,9 @@ void wxDataViewMainWindow::OnMouse( wxMo
+ 
+             wxDataViewDropSource drag( this, drag_item_row );
+             drag.SetData( *obj );
+-            /* wxDragResult res = */ drag.DoDragDrop();
++            // if the client who handled the event did not set the drag flags
++            // wxDrag_CopyOnly will be the default.
++            /* wxDragResult res = */ drag.DoDragDrop(event.GetDragFlags());
+             delete obj;
+         }
+         return;

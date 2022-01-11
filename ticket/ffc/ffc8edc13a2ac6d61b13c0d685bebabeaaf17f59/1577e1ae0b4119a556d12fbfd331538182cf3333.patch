@@ -1,0 +1,800 @@
+Index: include/wx/scrolwin.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/scrolwin.h,v
+retrieving revision 1.35
+diff -u -r1.35 scrolwin.h
+--- include/wx/scrolwin.h	2006/09/12 09:12:52	1.35
++++ include/wx/scrolwin.h	2006/09/13 02:00:24
+@@ -75,6 +75,17 @@
+     virtual void GetScrollPixelsPerUnit(int *pixelsPerUnitX,
+                                         int *pixelsPerUnitY) const;
+ 
++    void SetAllowNonIncrementScrolling(bool allow)
++    {
++        m_allowNonIncrementScrolling = allow;
++        AdjustScrollbars();
++    }
++
++    bool GetAllowNonIncrementScrolling()
++    {
++        return m_allowNonIncrementScrolling;
++    }
++
+     // Enable/disable Windows scrolling in either direction. If true, wxWidgets
+     // scrolls the canvas and only a bit of the canvas is invalidated; no
+     // Clear() is necessary. If false, the whole canvas is invalidated and a
+@@ -213,15 +224,16 @@
+ 
+     int                   m_xScrollPixelsPerLine;
+     int                   m_yScrollPixelsPerLine;
+-    int                   m_xScrollPosition;
+-    int                   m_yScrollPosition;
+-    int                   m_xScrollLines;
+-    int                   m_yScrollLines;
++    int                   m_xScrollPixelPosition;
++    int                   m_yScrollPixelPosition;
+     int                   m_xScrollLinesPerPage;
+     int                   m_yScrollLinesPerPage;
++    int                   m_xMaxScrollPixelPosition;
++    int                   m_yMaxScrollPixelPosition;
+ 
+     bool                  m_xScrollingEnabled;
+     bool                  m_yScrollingEnabled;
++    bool                  m_allowNonIncrementScrolling;
+ 
+ #if wxUSE_MOUSEWHEEL
+     int m_wheelRotation;
+
+Index: src/generic/grid.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/generic/grid.cpp,v
+retrieving revision 1.389
+diff -u -r1.389 grid.cpp
+--- src/generic/grid.cpp	2006/09/05 20:47:05	1.389
++++ src/generic/grid.cpp	2006/09/13 02:02:31
+@@ -416,22 +416,6 @@
+ // in these hash tables is the number of rows/columns)
+ static const int GRID_HASH_SIZE = 100;
+ 
+-#if 0
+-// ----------------------------------------------------------------------------
+-// private functions
+-// ----------------------------------------------------------------------------
+-
+-static inline int GetScrollX(int x)
+-{
+-    return (x + GRID_SCROLL_LINE_X - 1) / GRID_SCROLL_LINE_X;
+-}
+-
+-static inline int GetScrollY(int y)
+-{
+-    return (y + GRID_SCROLL_LINE_Y - 1) / GRID_SCROLL_LINE_Y;
+-}
+-#endif
+-
+ // ============================================================================
+ // implementation
+ // ============================================================================
+@@ -4125,6 +4109,7 @@
+     m_colMinWidths(GRID_HASH_SIZE),
+     m_rowMinHeights(GRID_HASH_SIZE)
+ {
++    SetAllowNonIncrementScrolling(true);
+     Create();
+     SetBestFittingSize(size);
+ }
+@@ -4566,10 +4551,12 @@
+     if ( y >= h )
+         y = wxMax( h - 1, 0 );
+ 
+-    // do set scrollbar parameters
+-    SetScrollbars( m_scrollLineX, m_scrollLineY,
+-                   GetScrollX(w), GetScrollY(h), x, y,
+-                   GetBatchCount() != 0);
++    int oldScrollX, oldScrollY;
++    GetScrollPixelsPerUnit(&oldScrollX, &oldScrollY);
++    if ( oldScrollX != m_scrollLineX || oldScrollY != m_scrollLineY )
++        SetScrollRate( m_scrollLineX, m_scrollLineY );
++    m_gridWin -> SetVirtualSize(w, h);
++    AdjustScrollbars();
+ 
+     // if our OnSize() hadn't been called (it would if we have scrollbars), we
+     // still must reposition the children
+Index: src/generic/scrlwing.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/generic/scrlwing.cpp,v
+retrieving revision 1.81
+diff -u -r1.81 scrlwing.cpp
+--- src/generic/scrlwing.cpp	2006/09/12 09:48:27	1.81
++++ src/generic/scrlwing.cpp	2006/09/13 02:02:32
+@@ -60,6 +60,27 @@
+ #endif
+ #endif
+ 
++// divide a by b and round up any remainder
++// return 0 if the divisor is 0
++inline int DivideAndRoundUp(int a, int divisor)
++{
++   if (a <= 0 || divisor <= 0)
++       return 0;
++   return ((a - 1) / divisor) + 1;
++}
++
++// force the value into the given range
++inline int MakeBetween(int value, int lower, int upper)
++{
++   if (value < lower)
++      return lower;
++   else if (value > upper)
++      return upper;
++   else
++      return value;
++
++}
++
+ /*
+     TODO PROPERTIES
+         style wxHSCROLL | wxVSCROLL
+@@ -287,15 +308,16 @@
+ 
+     m_xScrollPixelsPerLine =
+     m_yScrollPixelsPerLine =
+-    m_xScrollPosition =
+-    m_yScrollPosition =
+-    m_xScrollLines =
+-    m_yScrollLines =
++    m_xScrollPixelPosition =
++    m_yScrollPixelPosition =
+     m_xScrollLinesPerPage =
+-    m_yScrollLinesPerPage = 0;
++    m_yScrollLinesPerPage =
++    m_xMaxScrollPixelPosition =
++    m_yMaxScrollPixelPosition = 0;
+ 
+     m_xScrollingEnabled =
+     m_yScrollingEnabled = true;
++    m_allowNonIncrementScrolling = false;
+ 
+     m_scaleX =
+     m_scaleY = 1.0;
+@@ -335,28 +357,28 @@
+                                    int yPos,
+                                    bool noRefresh)
+ {
+-    int xpos, ypos;
++    int oldW, oldH;
++    m_targetWindow->GetVirtualSize(&oldW, &oldH);
++    int w = noUnitsX * pixelsPerUnitX;
++    int h = noUnitsY * pixelsPerUnitY;
++    int newPosX = xPos * pixelsPerUnitX;
++    int newPosY = yPos * pixelsPerUnitY;
+ 
+-    CalcUnscrolledPosition(xPos, yPos, &xpos, &ypos);
+     bool do_refresh =
+     (
+-      (noUnitsX != 0 && m_xScrollLines == 0) ||
+-      (noUnitsX < m_xScrollLines && xpos > pixelsPerUnitX * noUnitsX) ||
+-
+-      (noUnitsY != 0 && m_yScrollLines == 0) ||
+-      (noUnitsY < m_yScrollLines && ypos > pixelsPerUnitY * noUnitsY) ||
+-      (xPos != m_xScrollPosition) ||
+-      (yPos != m_yScrollPosition)
++       (newPosX != m_xScrollPixelPosition) ||
++       (newPosY != m_yScrollPixelPosition) ||
++       (w != oldW) ||
++       (h != oldH) ||
++       (pixelsPerUnitX != m_xScrollPixelsPerLine) ||
++       (pixelsPerUnitY != m_yScrollPixelsPerLine)
+     );
+ 
+     m_xScrollPixelsPerLine = pixelsPerUnitX;
+     m_yScrollPixelsPerLine = pixelsPerUnitY;
+-    m_xScrollPosition = xPos;
+-    m_yScrollPosition = yPos;
++    m_xScrollPixelPosition = newPosX;
++    m_yScrollPixelPosition = newPosY;
+ 
+-    int w = noUnitsX * pixelsPerUnitX;
+-    int h = noUnitsY * pixelsPerUnitY;
+-
+     // For better backward compatibility we set persisting limits
+     // here not just the size.  It makes SetScrollbars 'sticky'
+     // emulating the old non-autoscroll behaviour.
+@@ -463,13 +485,20 @@
+     int orient = event.GetOrientation();
+     if (orient == wxHORIZONTAL)
+     {
+-        m_xScrollPosition += nScrollInc;
+-        m_win->SetScrollPos(wxHORIZONTAL, m_xScrollPosition);
++        m_xScrollPixelPosition += nScrollInc;
++        int scrollPos = 0;
++        if (m_xScrollPixelsPerLine)
++            GetViewStart( &scrollPos, NULL);
++        m_win->SetScrollPos(wxHORIZONTAL, scrollPos);
++               
+     }
+     else
+     {
+-        m_yScrollPosition += nScrollInc;
+-        m_win->SetScrollPos(wxVERTICAL, m_yScrollPosition);
++        m_yScrollPixelPosition += nScrollInc;
++        int scrollPos = 0;
++        if (m_yScrollPixelsPerLine)
++            GetViewStart( NULL, &scrollPos);
++        m_win->SetScrollPos(wxVERTICAL, scrollPos);
+     }
+ 
+     bool needsRefresh = false;
+@@ -479,7 +508,7 @@
+     {
+        if ( m_xScrollingEnabled )
+        {
+-           dx = -m_xScrollPixelsPerLine * nScrollInc;
++           dx = -nScrollInc;
+        }
+        else
+        {
+@@ -490,7 +519,7 @@
+     {
+         if ( m_yScrollingEnabled )
+         {
+-            dy = -m_yScrollPixelsPerLine * nScrollInc;
++            dy = -nScrollInc;
+         }
+         else
+         {
+@@ -517,24 +546,32 @@
+     if (event.GetEventType() == wxEVT_SCROLLWIN_TOP)
+     {
+             if (orient == wxHORIZONTAL)
+-                nScrollInc = - m_xScrollPosition;
++                nScrollInc = - m_xScrollPixelPosition;
+             else
+-                nScrollInc = - m_yScrollPosition;
++                nScrollInc = - m_yScrollPixelPosition;
+     } else
+     if (event.GetEventType() == wxEVT_SCROLLWIN_BOTTOM)
+     {
+             if (orient == wxHORIZONTAL)
+-                nScrollInc = m_xScrollLines - m_xScrollPosition;
++                nScrollInc =
++                        m_xMaxScrollPixelPosition - m_xScrollPixelPosition;
+             else
+-                nScrollInc = m_yScrollLines - m_yScrollPosition;
++                nScrollInc =
++                        m_yMaxScrollPixelPosition - m_yScrollPixelPosition;
+     } else
+     if (event.GetEventType() == wxEVT_SCROLLWIN_LINEUP)
+     {
+-            nScrollInc = -1;
++            if (orient == wxHORIZONTAL)
++                nScrollInc = -m_xScrollPixelsPerLine;
++            else
++                nScrollInc = -m_yScrollPixelsPerLine;
+     } else
+     if (event.GetEventType() == wxEVT_SCROLLWIN_LINEDOWN)
+     {
+-            nScrollInc = 1;
++            if (orient == wxHORIZONTAL)
++                nScrollInc = m_xScrollPixelsPerLine;
++            else
++                nScrollInc = m_yScrollPixelsPerLine;
+     } else
+     if (event.GetEventType() == wxEVT_SCROLLWIN_PAGEUP)
+     {
+@@ -554,51 +591,32 @@
+         (event.GetEventType() == wxEVT_SCROLLWIN_THUMBRELEASE))
+     {
+             if (orient == wxHORIZONTAL)
+-                nScrollInc = pos - m_xScrollPosition;
++                nScrollInc = pos * m_xScrollPixelsPerLine - m_xScrollPixelPosition;
+             else
+-                nScrollInc = pos - m_yScrollPosition;
++                nScrollInc = pos * m_yScrollPixelsPerLine - m_yScrollPixelPosition;
+     }
+ 
+     if (orient == wxHORIZONTAL)
+     {
+         if (m_xScrollPixelsPerLine > 0)
+         {
+-            if ( m_xScrollPosition + nScrollInc < 0 )
+-            {
+-                // As -ve as we can go
+-                nScrollInc = -m_xScrollPosition;
+-            }
+-            else // check for the other bound
+-            {
+-                const int posMax = m_xScrollLines - m_xScrollLinesPerPage;
+-                if ( m_xScrollPosition + nScrollInc > posMax )
+-                {
+-                    // As +ve as we can go
+-                    nScrollInc = posMax - m_xScrollPosition;
+-                }
+-            }
++            int newPos = MakeBetween(m_xScrollPixelPosition + nScrollInc,
++                                     0, m_xMaxScrollPixelPosition);
++            nScrollInc = newPos - m_xScrollPixelPosition;
+         }
+         else
++        {
++            // VZ: why do we do this? (FIXME)
+             m_targetWindow->Refresh(true, GetScrollRect());
++        }
+     }
+     else
+     {
+         if ( m_yScrollPixelsPerLine > 0 )
+         {
+-            if ( m_yScrollPosition + nScrollInc < 0 )
+-            {
+-                // As -ve as we can go
+-                nScrollInc = -m_yScrollPosition;
+-            }
+-            else // check for the other bound
+-            {
+-                const int posMax = m_yScrollLines - m_yScrollLinesPerPage;
+-                if ( m_yScrollPosition + nScrollInc > posMax )
+-                {
+-                    // As +ve as we can go
+-                    nScrollInc = posMax - m_yScrollPosition;
+-                }
+-            }
++            int newPos = MakeBetween(m_yScrollPixelPosition + nScrollInc,
++                                     0, m_yMaxScrollPixelPosition);
++            nScrollInc = newPos - m_yScrollPixelPosition;
+         }
+         else
+         {
+@@ -629,8 +647,8 @@
+     int w = 0, h = 0;
+     int oldw, oldh;
+ 
+-    int oldXScroll = m_xScrollPosition;
+-    int oldYScroll = m_yScrollPosition;
++    int oldXScroll = m_xScrollPixelPosition;
++    int oldYScroll = m_yScrollPixelPosition;
+ 
+     // VZ: at least under Windows this loop is useless because when scrollbars
+     //     [dis]appear we get a WM_SIZE resulting in another call to
+@@ -644,108 +662,105 @@
+     do
+     {
+         iterationCount ++;
++        
++        GetTargetSize(&w, &h);
++        wxSize virtualSize = m_targetWindow->GetVirtualSize();
++        const int wVirt = virtualSize.GetWidth();
++        const int hVirt = virtualSize.GetHeight();
+ 
+-        GetTargetSize(&w, 0);
+-
+         // scroll lines per page: if 0, no scrolling is needed
+         int linesPerPage;
++        int lineCount;
++        int linePosition;
+ 
+-        if ( m_xScrollPixelsPerLine == 0 )
++        if ( m_xScrollPixelsPerLine == 0 || w >= wVirt)
+         {
+             // scrolling is disabled
+-            m_xScrollLines = 0;
+-            m_xScrollPosition = 0;
+-            linesPerPage = 0;
++            m_xScrollPixelPosition =
++            m_xMaxScrollPixelPosition =
++            linesPerPage =
++            lineCount =
++            linePosition = 0;
+         }
+-        else // might need scrolling
++        else
+         {
+-            // Round up integer division to catch any "leftover" client space.
+-            const int wVirt = m_targetWindow->GetVirtualSize().GetWidth();
+-            m_xScrollLines = (wVirt + m_xScrollPixelsPerLine - 1) / m_xScrollPixelsPerLine;
+-
+             // Calculate page size i.e. number of scroll units you get on the
+             // current client window.
+             linesPerPage = w / m_xScrollPixelsPerLine;
+-
+-            // Special case. When client and virtual size are very close but
+-            // the client is big enough, kill scrollbar.
+-            if ((linesPerPage < m_xScrollLines) && (w >= wVirt)) ++linesPerPage;
+-
+-            if (linesPerPage >= m_xScrollLines)
++            if ( linesPerPage < 1 )
++                linesPerPage = 1;
++            if (m_allowNonIncrementScrolling)
+             {
+-                // we're big enough to not need scrolling
+-                linesPerPage =
+-                m_xScrollLines =
+-                m_xScrollPosition = 0;
++                m_xMaxScrollPixelPosition = wVirt - w;
++                if (m_xMaxScrollPixelPosition < 0)
++                    m_xMaxScrollPixelPosition = 0;
+             }
+-            else // we do need a scrollbar
++            else
+             {
+-                if ( linesPerPage < 1 )
+-                    linesPerPage = 1;
+-
+-                // Correct position if greater than extent of canvas minus
+-                // the visible portion of it or if below zero
+-                const int posMax = m_xScrollLines - linesPerPage;
+-                if ( m_xScrollPosition > posMax )
+-                    m_xScrollPosition = posMax;
+-                else if ( m_xScrollPosition < 0 )
+-                    m_xScrollPosition = 0;
++                 m_xMaxScrollPixelPosition = DivideAndRoundUp(
++                           wVirt - (linesPerPage * m_xScrollPixelsPerLine),
++                           m_xScrollPixelsPerLine) * m_xScrollPixelsPerLine;
+             }
++            lineCount = DivideAndRoundUp(m_xMaxScrollPixelPosition,
++                     m_xScrollPixelsPerLine) + linesPerPage;
++            // Correct position if greater than extent of canvas minus
++            // the visible portion of it or if below zero
++            m_xScrollPixelPosition = MakeBetween(oldXScroll, 0,
++                        m_xMaxScrollPixelPosition);
++            if (!m_allowNonIncrementScrolling)
++                m_xScrollPixelPosition -=
++                     m_xScrollPixelPosition % m_xScrollPixelsPerLine;
++            GetViewStart( &linePosition, NULL);
+         }
+ 
+-        m_win->SetScrollbar(wxHORIZONTAL, m_xScrollPosition,
+-                            linesPerPage, m_xScrollLines);
++        m_win->SetScrollbar(wxHORIZONTAL, linePosition,
++                     linesPerPage, lineCount);
+ 
+         // The amount by which we scroll when paging
+         SetScrollPageSize(wxHORIZONTAL, linesPerPage);
+-
+-        GetTargetSize(0, &h);
+ 
+-        if ( m_yScrollPixelsPerLine == 0 )
++        if ( m_yScrollPixelsPerLine == 0 || h >= hVirt)
+         {
+             // scrolling is disabled
+-            m_yScrollLines = 0;
+-            m_yScrollPosition = 0;
+-            linesPerPage = 0;
++            m_yScrollPixelPosition =
++            m_yMaxScrollPixelPosition =
++            linesPerPage =
++            lineCount =
++            linePosition = 0;
+         }
+-        else // might need scrolling
++        else
+         {
+-            // Round up integer division to catch any "leftover" client space.
+-            const int hVirt = m_targetWindow->GetVirtualSize().GetHeight();
+-            m_yScrollLines = ( hVirt + m_yScrollPixelsPerLine - 1 ) / m_yScrollPixelsPerLine;
+-
+             // Calculate page size i.e. number of scroll units you get on the
+             // current client window.
+             linesPerPage = h / m_yScrollPixelsPerLine;
+-
+-            // Special case. When client and virtual size are very close but
+-            // the client is big enough, kill scrollbar.
+-            if ((linesPerPage < m_yScrollLines) && (h >= hVirt)) ++linesPerPage;
+-
+-            if (linesPerPage >= m_yScrollLines)
++            if ( linesPerPage < 1 )
++                linesPerPage = 1;
++            if (m_allowNonIncrementScrolling)
+             {
+-                // we're big enough to not need scrolling
+-                linesPerPage =
+-                m_yScrollLines =
+-                m_yScrollPosition = 0;
++                m_yMaxScrollPixelPosition = hVirt - h;
++                if (m_yMaxScrollPixelPosition < 0)
++                    m_yMaxScrollPixelPosition = 0;
+             }
+-            else // we do need a scrollbar
++            else
+             {
+-                if ( linesPerPage < 1 )
+-                    linesPerPage = 1;
+-
+-                // Correct position if greater than extent of canvas minus
+-                // the visible portion of it or if below zero
+-                const int posMax = m_yScrollLines - linesPerPage;
+-                if ( m_yScrollPosition > posMax )
+-                    m_yScrollPosition = posMax;
+-                else if ( m_yScrollPosition < 0 )
+-                    m_yScrollPosition = 0;
++                 m_yMaxScrollPixelPosition = DivideAndRoundUp(
++                           hVirt - (linesPerPage * m_yScrollPixelsPerLine),
++                           m_yScrollPixelsPerLine) * m_yScrollPixelsPerLine;
+             }
++            lineCount = DivideAndRoundUp(m_yMaxScrollPixelPosition,
++                           m_yScrollPixelsPerLine) + linesPerPage;
++            // Correct position if greater than extent of canvas minus
++            // the visible portion of it or if below zero
++            m_yScrollPixelPosition = MakeBetween(oldYScroll, 0,
++                        m_yMaxScrollPixelPosition);
++            if (!m_allowNonIncrementScrolling)
++                m_yScrollPixelPosition -=
++                     m_yScrollPixelPosition % m_yScrollPixelsPerLine;
++            GetViewStart( NULL, &linePosition);
+         }
+ 
+-        m_win->SetScrollbar(wxVERTICAL, m_yScrollPosition,
+-                            linesPerPage, m_yScrollLines);
++        m_win->SetScrollbar(wxVERTICAL, linePosition,
++                            linesPerPage, lineCount);
+ 
+         // The amount by which we scroll when paging
+         SetScrollPageSize(wxVERTICAL, linesPerPage);
+@@ -791,19 +806,19 @@
+     }
+ #endif // Motif
+ 
+-    if (oldXScroll != m_xScrollPosition)
++    if (oldXScroll != m_xScrollPixelPosition)
+     {
+        if (m_xScrollingEnabled)
+-            m_targetWindow->ScrollWindow( m_xScrollPixelsPerLine * (oldXScroll - m_xScrollPosition), 0,
++            m_targetWindow->ScrollWindow(oldXScroll - m_xScrollPixelPosition, 0,
+                                           GetScrollRect() );
+        else
+             m_targetWindow->Refresh(true, GetScrollRect());
+     }
+ 
+-    if (oldYScroll != m_yScrollPosition)
++    if (oldYScroll != m_yScrollPixelPosition )
+     {
+         if (m_yScrollingEnabled)
+-            m_targetWindow->ScrollWindow( 0, m_yScrollPixelsPerLine * (oldYScroll-m_yScrollPosition),
++            m_targetWindow->ScrollWindow( 0, oldYScroll - m_yScrollPixelPosition,
+                                           GetScrollRect() );
+         else
+             m_targetWindow->Refresh(true, GetScrollRect());
+@@ -813,26 +828,15 @@
+ void wxScrollHelper::DoPrepareDC(wxDC& dc)
+ {
+     wxPoint pt = dc.GetDeviceOrigin();
+-    dc.SetDeviceOrigin( pt.x - m_xScrollPosition * m_xScrollPixelsPerLine,
+-                        pt.y - m_yScrollPosition * m_yScrollPixelsPerLine );
++    dc.SetDeviceOrigin( pt.x - m_xScrollPixelPosition,
++                        pt.y - m_yScrollPixelPosition );
+     dc.SetUserScale( m_scaleX, m_scaleY );
+ }
+ 
+ void wxScrollHelper::SetScrollRate( int xstep, int ystep )
+ {
+-    int old_x = m_xScrollPixelsPerLine * m_xScrollPosition;
+-    int old_y = m_yScrollPixelsPerLine * m_yScrollPosition;
+-
+     m_xScrollPixelsPerLine = xstep;
+     m_yScrollPixelsPerLine = ystep;
+-
+-    int new_x = m_xScrollPixelsPerLine * m_xScrollPosition;
+-    int new_y = m_yScrollPixelsPerLine * m_yScrollPosition;
+-
+-    m_win->SetScrollPos( wxHORIZONTAL, m_xScrollPosition );
+-    m_win->SetScrollPos( wxVERTICAL, m_yScrollPosition );
+-    m_targetWindow->ScrollWindow( old_x - new_x, old_y - new_y );
+-
+     AdjustScrollbars();
+ }
+ 
+@@ -867,52 +871,34 @@
+ {
+     if (!m_targetWindow)
+         return;
++    int xPixels = x_pos * m_xScrollPixelsPerLine;
++    int yPixels = y_pos * m_yScrollPixelsPerLine;
+ 
+-    if (((x_pos == -1) || (x_pos == m_xScrollPosition)) &&
+-        ((y_pos == -1) || (y_pos == m_yScrollPosition))) return;
+-
+-    int w = 0, h = 0;
+-    GetTargetSize(&w, &h);
+-
+     if ((x_pos != -1) && (m_xScrollPixelsPerLine))
+     {
+-        int old_x = m_xScrollPosition;
+-        m_xScrollPosition = x_pos;
+-
+-        // Calculate page size i.e. number of scroll units you get on the
+-        // current client window
+-        int noPagePositions = (int) ( (w/(double)m_xScrollPixelsPerLine) + 0.5 );
+-        if (noPagePositions < 1) noPagePositions = 1;
+-
+-        // Correct position if greater than extent of canvas minus
+-        // the visible portion of it or if below zero
+-        m_xScrollPosition = wxMin( m_xScrollLines-noPagePositions, m_xScrollPosition );
+-        m_xScrollPosition = wxMax( 0, m_xScrollPosition );
+-
+-        if (old_x != m_xScrollPosition) {
+-            m_win->SetScrollPos( wxHORIZONTAL, m_xScrollPosition );
+-            m_targetWindow->ScrollWindow( (old_x-m_xScrollPosition)*m_xScrollPixelsPerLine, 0,
++        int old_x = m_xScrollPixelPosition;
++        m_xScrollPixelPosition =
++               MakeBetween(xPixels, 0, m_xMaxScrollPixelPosition);
++        if (old_x != m_xScrollPixelPosition)
++        {
++            int scrollPos;
++            GetViewStart( &scrollPos, NULL);
++            m_win->SetScrollPos( wxHORIZONTAL, scrollPos );
++            m_targetWindow->ScrollWindow( old_x - m_xScrollPixelPosition, 0,
+                                           GetScrollRect() );
+         }
+     }
+     if ((y_pos != -1) && (m_yScrollPixelsPerLine))
+     {
+-        int old_y = m_yScrollPosition;
+-        m_yScrollPosition = y_pos;
+-
+-        // Calculate page size i.e. number of scroll units you get on the
+-        // current client window
+-        int noPagePositions = (int) ( (h/(double)m_yScrollPixelsPerLine) + 0.5 );
+-        if (noPagePositions < 1) noPagePositions = 1;
+-
+-        // Correct position if greater than extent of canvas minus
+-        // the visible portion of it or if below zero
+-        m_yScrollPosition = wxMin( m_yScrollLines-noPagePositions, m_yScrollPosition );
+-        m_yScrollPosition = wxMax( 0, m_yScrollPosition );
+-
+-        if (old_y != m_yScrollPosition) {
+-            m_win->SetScrollPos( wxVERTICAL, m_yScrollPosition );
+-            m_targetWindow->ScrollWindow( 0, (old_y-m_yScrollPosition)*m_yScrollPixelsPerLine,
++        int old_y = m_yScrollPixelPosition;
++        m_yScrollPixelPosition =
++               MakeBetween(yPixels, 0, m_yMaxScrollPixelPosition);
++        if (old_y != m_yScrollPixelPosition)
++        {
++            int scrollPos;
++            GetViewStart( NULL, &scrollPos);
++            m_win->SetScrollPos( wxVERTICAL, scrollPos );
++            m_targetWindow->ScrollWindow( 0, old_y - m_yScrollPixelPosition,
+                                           GetScrollRect() );
+         }
+     }
+@@ -928,77 +914,25 @@
+ void wxScrollHelper::GetViewStart (int *x, int *y) const
+ {
+     if ( x )
+-        *x = m_xScrollPosition;
++        *x = DivideAndRoundUp(m_xScrollPixelPosition, m_xScrollPixelsPerLine);
+     if ( y )
+-        *y = m_yScrollPosition;
++        *y = DivideAndRoundUp(m_yScrollPixelPosition, m_yScrollPixelsPerLine);
+ }
+ 
+ void wxScrollHelper::DoCalcScrolledPosition(int x, int y, int *xx, int *yy) const
+ {
+     if ( xx )
+-    {
+-        if ((m_xScrollLines == 0) || (m_xScrollPixelsPerLine == 0))
+-        {
+-            // nothing to do
+-            *xx = x;
+-        }
+-        else
+-        {
+-#ifdef __WXGTK__
+-            if (m_win->GetLayoutDirection() == wxLayout_RightToLeft)
+-            {
+-                int w = 0, h = 0;
+-                GetTargetSize(&w, &h);
+-
+-                // Calculate page size i.e. number of scroll units you get on the
+-                // current client window
+-                int noPagePositions = w/m_xScrollPixelsPerLine;
+-                if (noPagePositions < 1) noPagePositions = 1;
+-                *xx = x - ((m_xScrollLines - noPagePositions - m_xScrollPosition) * m_xScrollPixelsPerLine);
+-            }
+-            else
+-#endif
+-            {
+-                *xx = x - m_xScrollPosition * m_xScrollPixelsPerLine;
+-            }
+-        }
+-    }
++        *xx = x - m_xScrollPixelPosition;
+     if ( yy )
+-        *yy = y - m_yScrollPosition * m_yScrollPixelsPerLine;
++        *yy = y - m_yScrollPixelPosition;
+ }
+ 
+ void wxScrollHelper::DoCalcUnscrolledPosition(int x, int y, int *xx, int *yy) const
+ {
+     if ( xx )
+-    {
+-        if ((m_xScrollLines == 0) || (m_xScrollPixelsPerLine == 0))
+-        {
+-            // nothing to do
+-            *xx = x;
+-        }
+-        else
+-        {
+-#ifdef __WXGTK__
+-            if (m_win->GetLayoutDirection() == wxLayout_RightToLeft)
+-            {
+-                int w = 0, h = 0;
+-                GetTargetSize(&w, &h);
+-
+-                // Calculate page size i.e. number of scroll units you get on the
+-                // current client window
+-                int noPagePositions = w/m_xScrollPixelsPerLine;
+-                if (noPagePositions < 1) noPagePositions = 1;
+-                *xx = x + ((m_xScrollLines - noPagePositions - m_xScrollPosition) * m_xScrollPixelsPerLine);
+-            }
+-            else
+-#endif
+-            {
+-                *xx = x + m_xScrollPosition * m_xScrollPixelsPerLine;
+-            }
+-        }
+-    }
++        *xx = x + m_xScrollPixelPosition;
+     if ( yy )
+-        *yy = y + m_yScrollPosition * m_yScrollPixelsPerLine;
++        *yy = y + m_yScrollPixelPosition;
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -1132,8 +1066,8 @@
+         szy = -1;
+     }
+ 
+-    int xScrollOld = m_xScrollPosition,
+-        yScrollOld = m_yScrollPosition;
++    int xScrollOld = m_xScrollPixelPosition,
++        yScrollOld = m_yScrollPixelPosition;
+ 
+     int dsty;
+     switch ( event.GetKeyCode() )
+@@ -1175,18 +1109,21 @@
+             // not for us
+             event.Skip();
+     }
++   
++    int scrollX, scrollY;
++    GetViewStart( &scrollX, &scrollY);
+ 
+-    if ( m_xScrollPosition != xScrollOld )
++    if ( m_xScrollPixelPosition != xScrollOld )
+     {
+-        wxScrollWinEvent event(wxEVT_SCROLLWIN_THUMBTRACK, m_xScrollPosition,
++        wxScrollWinEvent event(wxEVT_SCROLLWIN_THUMBTRACK, scrollX,
+                                wxHORIZONTAL);
+         event.SetEventObject(m_win);
+         m_win->GetEventHandler()->ProcessEvent(event);
+     }
+ 
+-    if ( m_yScrollPosition != yScrollOld )
++    if ( m_yScrollPixelPosition != yScrollOld )
+     {
+-        wxScrollWinEvent event(wxEVT_SCROLLWIN_THUMBTRACK, m_yScrollPosition,
++        wxScrollWinEvent event(wxEVT_SCROLLWIN_THUMBTRACK, scrollY,
+                                wxVERTICAL);
+         event.SetEventObject(m_win);
+         m_win->GetEventHandler()->ProcessEvent(event);
+@@ -1249,15 +1186,16 @@
+         else // we're lower or to the right of the window
+         {
+             wxSize size = m_targetWindow->GetClientSize();
++            wxSize virtualSize = m_targetWindow->GetVirtualSize();
+             if ( pt.x > size.x )
+             {
+                 orient = wxHORIZONTAL;
+-                pos = m_xScrollLines;
++                pos = DivideAndRoundUp(virtualSize.GetWidth(), m_xScrollPixelsPerLine);
+             }
+             else if ( pt.y > size.y )
+             {
+                 orient = wxVERTICAL;
+-                pos = m_yScrollLines;
++                pos = DivideAndRoundUp(virtualSize.GetHeight(), m_yScrollPixelsPerLine);
+             }
+             else // this should be impossible
+             {
+
+ 	  	 

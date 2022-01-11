@@ -1,0 +1,267 @@
+Index: wxWidgets/include/wx/ribbon/page.h
+===================================================================
+--- wxWidgets/include/wx/ribbon/page.h	(revision 74058)
++++ wxWidgets/include/wx/ribbon/page.h	(working copy)
+@@ -56,6 +56,9 @@
+     virtual bool Layout();
+     virtual bool ScrollLines(int lines);
+     bool ScrollPixels(int pixels);
++    void SetScrollEntireSection(bool sections = true);
++    bool GetScrollEntireSection();
++    bool ScrollSections(int sections);
+ 
+     wxOrientation GetMajorAxis() const;
+ 
+@@ -93,6 +96,7 @@
+     int m_scroll_amount_limit;
+     int m_size_in_major_axis_for_children;
+     bool m_scroll_buttons_visible;
++    bool m_scroll_entire_section;
+ 
+ #ifndef SWIG
+     DECLARE_CLASS(wxRibbonPage)
+Index: wxWidgets/interface/wx/ribbon/page.h
+===================================================================
+--- wxWidgets/interface/wx/ribbon/page.h	(revision 74058)
++++ wxWidgets/interface/wx/ribbon/page.h	(working copy)
+@@ -148,6 +148,7 @@
+     
+         @see GetMajorAxis()
+         @see ScrollPixels()
++        @see ScrollSections()
+     */
+     virtual bool ScrollLines(int lines);
+   
+@@ -165,10 +166,43 @@
+     
+         @see GetMajorAxis()
+         @see ScrollLines()
++        @see ScrollSections()
+     */
+     bool ScrollPixels(int pixels);
+ 
+     /**
++        Indicates that, if the scroll buttons are visible and clicked, that
++        the page should scroll enough so that a partially visible child section
++        becomes fully visible or that the next child section that is not 
++        visible at all will become fully visible. This option is not enabled by 
++        default, in which case the scroll buttons tend to scroll only a few 
++        pixels per click.
++    
++        @return @true if the page scrolled at least one pixel in the given
++            direction, @false if it did not scroll.
++    */
++    void SetScrollEntireSection(bool sections = true);
++    
++    /**
++        Indicates whether the default scrolling mode is to scroll by an entire
++        child section per click.
++    
++        @see SetScrollEntireSection()
++    */
++    bool GetScrollEntireSection();
++    
++    /**
++        Scroll the page by an entire child section. The sections value should 
++        be 1 or -1. This will scroll enough to uncover a partially visible child
++        section or totally uncover the next child section that may not be visible
++        at all.
++    
++        @see SetScrollEntireSection()
++        @see GetScrollEntireSection()
++    */
++    bool ScrollSections(int sections);
++    
++    /**
+         Get the direction in which ribbon panels are stacked within the page.
+     
+         This is controlled by the style of the containing wxRibbonBar, meaning
+Index: wxWidgets/samples/ribbon/ribbondemo.cpp
+===================================================================
+--- wxWidgets/samples/ribbon/ribbondemo.cpp	(revision 74058)
++++ wxWidgets/samples/ribbon/ribbondemo.cpp	(working copy)
+@@ -282,6 +282,7 @@
+ 
+     {
+         wxRibbonPage* home = new wxRibbonPage(m_ribbon, wxID_ANY, wxT("Examples"), ribbon_xpm);
++        home->SetScrollEntireSection();
+         wxRibbonPanel *toolbar_panel = new wxRibbonPanel(home, wxID_ANY, wxT("Toolbar"), 
+                                             wxNullBitmap, wxDefaultPosition, wxDefaultSize, 
+                                             wxRIBBON_PANEL_NO_AUTO_MINIMISE |
+Index: wxWidgets/src/ribbon/page.cpp
+===================================================================
+--- wxWidgets/src/ribbon/page.cpp	(revision 74058)
++++ wxWidgets/src/ribbon/page.cpp	(working copy)
+@@ -135,11 +135,25 @@
+         {
+         case wxRIBBON_SCROLL_BTN_DOWN:
+         case wxRIBBON_SCROLL_BTN_RIGHT:
+-            m_sibling->ScrollLines(1);
++            if (m_sibling->GetScrollEntireSection())
++            {
++                m_sibling->ScrollSections(1);
++            }
++            else
++            {
++                m_sibling->ScrollLines(1);
++            }
+             break;
+         case wxRIBBON_SCROLL_BTN_UP:
+         case wxRIBBON_SCROLL_BTN_LEFT:
+-            m_sibling->ScrollLines(-1);
++            if (m_sibling->GetScrollEntireSection())
++            {
++                m_sibling->ScrollSections(-1);
++            }
++            else
++            {
++                m_sibling->ScrollLines(-1);
++            }
+             break;
+         default:
+             break;
+@@ -161,6 +175,7 @@
+     m_scroll_right_btn = NULL;
+     m_scroll_amount = 0;
+     m_scroll_buttons_visible = false;
++    m_scroll_entire_section = false;
+ }
+ 
+ wxRibbonPage::wxRibbonPage(wxRibbonBar* parent,
+@@ -205,6 +220,7 @@
+     m_size_calc_array_size = 0;
+     m_scroll_amount = 0;
+     m_scroll_buttons_visible = false;
++    m_scroll_entire_section = false;
+ 
+     SetBackgroundStyle(wxBG_STYLE_CUSTOM);
+ 
+@@ -336,6 +352,128 @@
+     return true;
+ }
+ 
++void wxRibbonPage::SetScrollEntireSection(bool sections)
++{
++    m_scroll_entire_section = sections;
++}
++
++bool wxRibbonPage::GetScrollEntireSection()
++{
++    return m_scroll_entire_section;
++}
++
++bool wxRibbonPage::ScrollSections(int sections)
++{
++    // Determine by how many pixels to scroll. If something on the page
++    // is partially visible, scroll to make it fully visible. Otherwise
++    // find the next item that will become visible and scroll to make it
++    // fully visible. The ScrollPixel call will correct if we scroll too
++    // much if the available width is smaller than the items.
++
++    // Scroll at minimum the same amount as ScrollLines(1):
++    int minscroll = sections * 8;
++    // How many pixels to scroll:
++    int pixels = 0;
++
++    // Determine the scroll position, that is, the page border where items 
++    // are appearing.
++    int scrollpos = 0;
++
++    wxOrientation major_axis = GetMajorAxis();
++    int gap = 0;
++
++    int width = 0;
++    int height = 0;
++    int x = 0;
++    int y = 0;
++    GetSize(&width, &height);
++    GetPosition(&x, &y);
++    if(major_axis == wxHORIZONTAL)
++    {
++        gap = m_art->GetMetric(wxRIBBON_ART_PANEL_X_SEPARATION_SIZE);
++        if (sections >= 1) 
++        {
++            scrollpos = width - m_art->GetMetric(wxRIBBON_ART_PAGE_BORDER_RIGHT_SIZE);
++        }
++        else
++        {
++            scrollpos = m_art->GetMetric(wxRIBBON_ART_PAGE_BORDER_LEFT_SIZE);
++        }
++    }
++    else
++    {
++        gap = m_art->GetMetric(wxRIBBON_ART_PANEL_Y_SEPARATION_SIZE);
++        if (sections >= 1) 
++        {
++            scrollpos = width - m_art->GetMetric(wxRIBBON_ART_PAGE_BORDER_BOTTOM_SIZE);
++        }
++        else
++        {
++            scrollpos = m_art->GetMetric(wxRIBBON_ART_PAGE_BORDER_TOP_SIZE);
++        }
++    }
++
++    // Find the child that is partially shown or just beyond the scroll position
++    wxWindowList::compatibility_iterator node = (sections >= 1) ? GetChildren().GetFirst() : GetChildren().GetLast();
++
++    for(;
++        node;
++        node = (sections >= 1) ? node->GetNext() : node->GetPrevious())
++    {
++        wxWindow* child = node->GetData();
++        child->GetSize(&width, &height);
++        child->GetPosition(&x, &y);
++        int pos0 = 0;
++        int pos1 = 0;
++        if (major_axis == wxHORIZONTAL)
++        {
++           pos0 = x;
++           pos1 = x + width + gap;
++        }
++        else
++        {
++           pos0 = y;
++           pos1 = y + height + gap;
++        }
++        if (scrollpos >= pos0 && scrollpos <= pos1)
++        {
++            // This section is partially visible, scroll to make it fully visible.
++            if (sections >= 1) 
++            {
++                pixels += pos1 - scrollpos;
++            }
++            else
++            {
++                pixels += pos0 - scrollpos;
++            }
++            if (abs(pixels) >= abs(minscroll))
++                break;
++        }
++        if (scrollpos <= pos0 && sections >= 1)
++        {
++            // This section is next, scroll the entire section width
++            pixels += (pos1 - pos0);
++            break;
++        }
++        if (scrollpos >= pos1 && sections <= -1)
++        {
++            // This section is next, scroll the entire section width
++            pixels += (pos0 - pos1);
++            break;
++        }
++    }
++    // Do a final safety sanity check, should not be necessary, but will not hurt either.
++    if (pixels == 0) 
++    {
++        pixels = minscroll;
++    }
++    if (pixels * minscroll < 0) 
++    {
++        pixels = -pixels;
++    }
++   return ScrollPixels(pixels);
++}
++
+ void wxRibbonPage::SetSizeWithScrollButtonAdjustment(int x, int y, int width, int height)
+ {
+     if(m_scroll_buttons_visible)

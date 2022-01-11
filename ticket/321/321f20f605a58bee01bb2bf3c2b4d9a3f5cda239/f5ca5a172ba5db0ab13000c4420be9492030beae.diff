@@ -1,0 +1,223 @@
+Index: samples/minimal/minimal.cpp
+===================================================================
+--- samples/minimal/minimal.cpp	(revision 76365)
++++ samples/minimal/minimal.cpp	(working copy)
+@@ -67,6 +67,8 @@
+     // event handlers (these functions should _not_ be virtual)
+     void OnQuit(wxCommandEvent& event);
+     void OnAbout(wxCommandEvent& event);
++    void OnCheck(wxCommandEvent& event);
++    void OnButton(wxCommandEvent& event);
+ 
+ private:
+     // any class wishing to process wxWidgets events must use this macro
+@@ -99,6 +101,8 @@
+ wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
+     EVT_MENU(Minimal_Quit,  MyFrame::OnQuit)
+     EVT_MENU(Minimal_About, MyFrame::OnAbout)
++    EVT_CHECKBOX(wxID_ANY, MyFrame::OnCheck)
++    EVT_BUTTON(wxID_ANY, MyFrame::OnButton)
+ wxEND_EVENT_TABLE()
+ 
+ // Create a new application object: this macro will allow wxWidgets to create
+@@ -167,6 +171,18 @@
+     SetMenuBar(menuBar);
+ #endif // wxUSE_MENUS
+ 
++    wxPanel *panel = new wxPanel(this);
++
++    wxSizer *sizer = new wxBoxSizer(wxVERTICAL);
++
++    wxCheckBox *checkBox = new wxCheckBox(panel, wxID_ANY, "Use Full-screen API (10.7+, Cocoa-only)");
++    checkBox->SetValue( EnableFullScreenView(true) );
++    sizer->Add(checkBox);
++
++    sizer->Add(new wxButton(panel, wxID_ANY, "Toggle Full-screen"));
++
++    panel->SetSizerAndFit(sizer);
++
+ #if wxUSE_STATUSBAR
+     // create a status bar just for fun (by default with 1 pane only)
+     CreateStatusBar(2);
+@@ -198,3 +214,13 @@
+                  wxOK | wxICON_INFORMATION,
+                  this);
+ }
++
++void MyFrame::OnButton(wxCommandEvent& WXUNUSED(event))
++{
++    ShowFullScreen( !IsFullScreen() );
++}
++
++void MyFrame::OnCheck(wxCommandEvent& event)
++{
++    EnableFullScreenView(event.IsChecked());
++}
+Index: include/wx/osx/carbon/private.h
+===================================================================
+--- include/wx/osx/carbon/private.h	(revision 76365)
++++ include/wx/osx/carbon/private.h	(working copy)
+@@ -1008,6 +1008,8 @@
+ 
+     virtual bool IsFullScreen() const;
+ 
++    virtual bool EnableFullScreenView(bool enable);
++
+     virtual bool ShowFullScreen(bool show, long style);
+ 
+     virtual void ShowWithoutActivating();
+Index: include/wx/osx/cocoa/private.h
+===================================================================
+--- include/wx/osx/cocoa/private.h	(revision 76365)
++++ include/wx/osx/cocoa/private.h	(working copy)
+@@ -239,6 +239,8 @@
+ 
+     virtual bool IsFullScreen() const;
+ 
++    virtual bool EnableFullScreenView(bool enable);
++
+     virtual bool ShowFullScreen(bool show, long style);
+ 
+     virtual void ShowWithoutActivating();
+Index: include/wx/osx/core/private.h
+===================================================================
+--- include/wx/osx/core/private.h	(revision 76365)
++++ include/wx/osx/core/private.h	(working copy)
+@@ -867,6 +867,8 @@
+ 
+     virtual void ShowWithoutActivating() { Show(true); }
+ 
++    virtual bool EnableFullScreenView(bool enable) = 0;
++
+     virtual bool ShowFullScreen(bool show, long style)= 0;
+ 
+     virtual void RequestUserAttention(int flags) = 0;
+Index: include/wx/osx/toplevel.h
+===================================================================
+--- include/wx/osx/toplevel.h	(revision 76365)
++++ include/wx/osx/toplevel.h	(working copy)
+@@ -64,6 +64,7 @@
+     virtual bool IsActive();
+ 
+     virtual void ShowWithoutActivating();
++    virtual bool EnableFullScreenView(bool enable);
+     virtual bool ShowFullScreen(bool show, long style = wxFULLSCREEN_ALL) ;
+     virtual bool IsFullScreen() const ;
+ 
+Index: include/wx/toplevel.h
+===================================================================
+--- include/wx/toplevel.h	(revision 76365)
++++ include/wx/toplevel.h	(working copy)
+@@ -182,6 +182,8 @@
+     // set the frame icons
+     virtual void SetIcons(const wxIconBundle& icons) { m_icons = icons; }
+ 
++    virtual bool EnableFullScreenView(bool WXUNUSED(enable) ) { return false; }
++
+     // maximize the window to cover entire screen
+     virtual bool ShowFullScreen(bool show, long style = wxFULLSCREEN_ALL) = 0;
+ 
+Index: src/osx/carbon/nonownedwnd.cpp
+===================================================================
+--- src/osx/carbon/nonownedwnd.cpp	(revision 76365)
++++ src/osx/carbon/nonownedwnd.cpp	(working copy)
+@@ -1536,6 +1536,11 @@
+     return m_macFullScreenData != NULL ;
+ }
+ 
++bool wxNonOwnedWindowCarbonImpl::EnableFullScreenView(bool enable)
++{
++    return false;
++}
++
+ bool wxNonOwnedWindowCarbonImpl::ShowFullScreen(bool show, long style)
+ {
+     if ( show )
+Index: src/osx/cocoa/nonownedwnd.mm
+===================================================================
+--- src/osx/cocoa/nonownedwnd.mm	(revision 76365)
++++ src/osx/cocoa/nonownedwnd.mm	(working copy)
+@@ -91,6 +91,16 @@
+ 
+ }
+ 
++static bool IsUsingFullScreenApi(WXWindow macWindow)
++{
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_7
++    return [macWindow respondsToSelector:@selector(toggleFullScreen:)]
++        && ([macWindow collectionBehavior] & NSWindowCollectionBehaviorFullScreenPrimary);
++#else
++    return false;
++#endif
++}
++
+ //
+ // wx category for NSWindow (our own and wrapped instances)
+ //
+@@ -924,11 +934,50 @@
+ 
+ bool wxNonOwnedWindowCocoaImpl::IsFullScreen() const
+ {
++    if ( IsUsingFullScreenApi(m_macWindow) )
++    {
++        return [m_macWindow styleMask] & NSFullScreenWindowMask;
++    }
++
+     return m_macFullScreenData != NULL ;
+ }
+ 
++bool wxNonOwnedWindowCocoaImpl::EnableFullScreenView(bool enable)
++{
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_7
++    if ( [ m_macWindow respondsToSelector:@selector(setCollectionBehavior:) ] )
++    {
++        NSUInteger collectionBehavior = [m_macWindow collectionBehavior];
++        if (enable)
++        {
++            collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
++        }
++        else
++        {
++            collectionBehavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
++        }
++        [m_macWindow setCollectionBehavior: collectionBehavior];
++
++        return true;
++    }
++
++#else
++    return false;
++#endif
++}
++
+ bool wxNonOwnedWindowCocoaImpl::ShowFullScreen(bool show, long WXUNUSED(style))
+ {
++    if ( IsUsingFullScreenApi(m_macWindow) )
++    {
++        if (show != IsFullScreen())
++        {
++            [m_macWindow toggleFullScreen: nil];
++        }
++
++        return true;
++    }
++
+     if ( show )
+     {
+         FullScreenData *data = (FullScreenData *)m_macFullScreenData ;
+Index: src/osx/toplevel_osx.cpp
+===================================================================
+--- src/osx/toplevel_osx.cpp	(revision 76365)
++++ src/osx/toplevel_osx.cpp	(working copy)
+@@ -190,6 +190,11 @@
+     SendSizeEvent();
+ }
+ 
++bool wxTopLevelWindowMac::EnableFullScreenView(bool enable)
++{
++    return m_nowpeer->EnableFullScreenView(enable);
++}
++
+ bool wxTopLevelWindowMac::ShowFullScreen(bool show, long style)
+ {
+     return m_nowpeer->ShowFullScreen(show, style);

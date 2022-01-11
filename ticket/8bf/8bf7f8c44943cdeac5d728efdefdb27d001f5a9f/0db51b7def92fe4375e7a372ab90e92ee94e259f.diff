@@ -1,0 +1,351 @@
+--- C:\Pristine-wxWidgets-2.8.4\src\common\imagxpm.cpp  2006-05-02 11:38:26.000000000 -0500
++++ C:\wxWidgets-2.8.4\src\common\imagxpm.cpp   2007-07-02 21:45:59.969000000 -0500
+@@ -6,4 +6,18 @@
+ // Copyright:   (c) 2001 Vaclav Slavik
+ // Licence:     wxWindows licence
++// Modified:    Dave Silvia, 2007
++//     1)       Redesigned determination of symbolic names for colors to
++//              remove problem of repeated (several times in many places)
++//              symbolic names. Added DecToRadix code to handle generation
++//              of symbolic names.
++//     2)       Changed many occurrences of char to unsigned char where they
++//              were being used for RGB values (char won't hold the full
++//              of RGB values). Changed related types to match.
++//
++//              Above two changes were implemented to fix gross scrambling of
++//              xpm images generated from other image formats. An image of
++//              any complexity, or size, or range and number of colors
++//              (especially range and number of colors) would not be reproduced
++//              properly in xpm format.
+ /////////////////////////////////////////////////////////////////////////////
+ 
+@@ -103,8 +117,160 @@
+ }
+ 
++// DecToRadix code:
++// DecToRadix is a utility function:
++//
++//    char *DecToRadix(int decimal_val,int radix,int padded_size)
++//
++// generates a character string from a decimal (base/radix 10) to
++// the argument radix. If a padding size is given, the returned
++// buffer is padded on the left with the radix '0' element value.
++// That is, if the padding size is 6 and the number of generated
++// value characters is 4, 2 '0' element characters will be added to
++// the left of the generated value. Any radix may be used. SaveFile()
++// uses radix 64, giving a maximum of 4 characters for the RGB value
++// symbol (not the RGB value itself) of XPM files. This is the same
++// number of characters per pixel as traditional XPM symbol generators
++// have as a maximum, but they use a radix of 92 (non-standard) and don't
++// usually just use an integer iterator to generate symbols. Integer iterator
++// method is simpler to implement, and uses more straightforward code whilst
++// still guaranteeing unique symbols for each color in the XPM file.
++static unsigned char Radix2[]="01";
++static unsigned char Radix8[]="01234567";
++static unsigned char Radix16[]="0123456789ABCDEF";
++static unsigned char Radix36[]="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
++static unsigned char Radix64[]=
++"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++#define radix2 2
++#define radix8 8
++#define radix16 16
++#define radix36 36
++#define radix64 64
++static int theRadix2=radix2;
++static int theRadix8=radix8;
++static int theRadix16=radix16;
++static int theRadix36=radix36;
++static int theRadix64=radix64;
++// BufSize is large enough to contain binary representation
++// of the maximum int (at least for now). As such, it is more
++// than adequate for any other radix.
++#define BufSize 128
++static int bufSize=BufSize;
++// NOTE: all defines for constant numeric values have a corresponding
++//       int to which they are assigned. This is useful in debuggers
++//       which can display int values but not #define constants. Therefore
++//       the #define macro name is only used in places where it is actually
++//       required, i.e., case statements in switches.
+ 
++static char *
++DecToRadix(int dec,int radix,int padToSize=0)
++{
++    static char buf[BufSize];
++    // clear any values that are in the buffer from previous call
++    // to this function.
++    memset(buf,0x00,bufSize);
++    // assign radixArray a zero to keep compilers from complaining
++    // about possible uninitialized variable use.
++    unsigned char *radixArray=0;
++    // assign the character array of the given radix
++    switch(radix)
++    {
++        case radix2:
++            radixArray=Radix2;
++            break;
++        case radix8:
++            radixArray=Radix8;
++            break;
++        case radix16:
++            radixArray=Radix16;
++            break;
++        case radix36:
++            radixArray=Radix36;
++            break;
++        case radix64:
++            radixArray=Radix64;
++            break;
++    }
++    // if dec is zero, just assign it, pad as needed and return
++    if(dec == 0)
++    {
++        *buf=radixArray[0];
++        char *bufPtr=buf;
++        for(int i=1; i < padToSize; i++)
++        {
++            ++bufPtr;
++            // in the highly unlikely event of buffer overrun...
++            if(bufPtr >= buf+bufSize)
++            {
++                wxString msg;
++                msg.Printf(wxT("%s: File: %s Line: %d\nBuffer Overrun!"),
++                    __FUNCTION__,__FILE__,__LINE__);
++                wxMessageBox(msg,wxT("Buffer Overrun!"),wxCENTRE|wxICON_ERROR|wxOK);
++                return(NULL);
++            }
++            *bufPtr=radixArray[0];
++        }
++        return(buf);
++    }
++    // generator:
++    // the modulo of the decimal number divided by the radix
++    // is added to the buffer on each loop iteration. The integer
++    // part is then assigned to the decimal number and the process
++    // repeated until the decimal number equals zero.
++    int intPart=0,modPart=0;
++    // move to the end of the buffer. -2: one byte to compensate
++    // for the buffer numbering starting at 0 and one to leave a
++    // null byte at the end
++    int bufPos=bufSize-2;
++    intPart=dec/radix;modPart=dec%radix;
++    while(dec)
++    {
++        // in the highly unlikely event of buffer underrun...
++        if(bufPos < 0)
++        {
++            wxString msg;
++            msg.Printf(wxT("%s: File: %s Line: %d\nBuffer Underrun!"),
++                __FUNCTION__,__FILE__,__LINE__);
++            wxMessageBox(msg,wxT("Buffer Underrun!"),wxCENTRE|wxICON_ERROR|wxOK);
++            return(NULL);
++        }
++        buf[bufPos--]=radixArray[modPart];
++        dec=intPart;
++        intPart=dec/radix;modPart=dec%radix;
++    }
++    // do any necessary padding, then move the generated
++    // content to the beginning of the buffer as needed.
++    // check for underrun (though highly improbable)
++    if(bufPos >= 0)
++    {
++        int curSize=(int)strlen(&buf[bufPos+1]);
++        for(int i=curSize; i < padToSize; i++)
++        {
++            if(bufPos >= 0)
++            {
++                buf[bufPos--]=radixArray[0];
++            }
++        }
++        if(bufPos >= 0)
++        {
++            memmove(buf,&buf[bufPos+1],strlen(&buf[bufPos+1]));
++            buf[bufPos+1]=0x00;
++        }
++        // in the highly unlikely event of buffer underrun...
++        else
++        {
++            wxString msg;
++            msg.Printf(wxT("%s: File: %s Line: %d\nBuffer Underrun!"),
++                __FUNCTION__,__FILE__,__LINE__);
++            wxMessageBox(msg,wxT("Buffer Underrun!"),wxCENTRE|wxICON_ERROR|wxOK,wxTheApp->GetTopWindow());
++            return(NULL);
++        }
++    }
++    return(buf);
++}
++#if 0
++// %02x is much simpler
+ static char hexArray[] = "0123456789ABCDEF";
+ 
+-static void DecToHex(int dec, char *buf)
++static void DecToHex(int dec, unsigned char *buf)
+ {
+     int firstDigit = (int)(dec/16.0);
+@@ -114,40 +280,51 @@
+     buf[2] = 0;
+ }
+-
++#endif
+ 
+ bool wxXPMHandler::SaveFile(wxImage * image,
+-                            wxOutputStream& stream, bool WXUNUSED(verbose))
++        wxOutputStream& stream, bool WXUNUSED(verbose))
+ {
++    char *symBufPtr=0;
++    wxImageHistogram histogram;
++    image->ComputeHistogram(histogram);
+     wxString tmp;
+     char tmp_c;
++    int i, j;
++    static int theRadix=theRadix64;
+ 
+     // 1. count colours:
+-    #define MaxCixels  92
+-    static const char Cixel[MaxCixels+1] =
+-                         " .XoO+@#$%&*=-;:>,<1234567890qwertyuipasdfghjk"
+-                         "lzxcvbnmMNBVCZASDFGHJKLPIUYTREWQ!~^/()_`'][{}|";
+-    int chars_per_pixel;
+-    int cols;
+-    int i, j, k;
+-
+-    cols = image->CountColours();
+-    chars_per_pixel = 1;
+-    for ( k = MaxCixels; cols > k; k *= MaxCixels)
+-        chars_per_pixel++;
++    int numColors=image->CountColours();
++    // 1a. determine number of characters needed
++    // we'll always have at least 1 char-per-pixel
++    int chars_per_pixel=1;
++    // we raise i by 1 power successively on each iteration
++    // of the loop until its value is >= numColors. The power
++    // at this point is the value of chars_per_pixel.
++    for(i=theRadix; i < numColors; i*=theRadix,chars_per_pixel++);
++
++    // we have an iterator that is incremented for each character combination
++    // for use in the symbol of chars_per_pixel length. It starts at 1 because
++    // 0th element in any radix is reserved for "Black"
++    int charValIterator=1;
++    char *symbols_data = new char[numColors * (chars_per_pixel+1)];
++    char **symbols = new char*[numColors];
+ 
+     // 2. write the header:
+-    wxString sName;
++    wxString xpmArrayName;
+     if ( image->HasOption(wxIMAGE_OPTION_FILENAME) )
+     {
+-        wxSplitPath(image->GetOption(wxIMAGE_OPTION_FILENAME),
+-                    NULL, &sName, NULL);
+-        sName << wxT("_xpm");
++        wxSplitPath(image->GetOption(wxIMAGE_OPTION_FILENAME),NULL, &xpmArrayName, NULL);
++        xpmArrayName+=wxT("_xpm");
+     }
+ 
+-    if ( !sName.empty() )
+-        sName = wxString(wxT("/* XPM */\nstatic char *")) + sName;
++    if ( !xpmArrayName.empty() )
++    {
++        xpmArrayName = wxString(wxT("/* XPM */\nstatic char *")) + xpmArrayName;
++    }
+     else
+-        sName = wxT("/* XPM */\nstatic char *xpm_data");
+-    stream.Write( (const char*) sName.ToAscii(), sName.Len() );
++    {
++        xpmArrayName = wxT("/* XPM */\nstatic char *xpm_data");
++    }
++    stream.Write( (const char*) xpmArrayName.ToAscii(), xpmArrayName.Len() );
+ 
+     char tmpbuf[200];
+@@ -155,26 +332,24 @@
+     //     (<101 bytes the string, neither %i can expand into more than 10 chars)
+     sprintf(tmpbuf,
+-               "[] = {\n"
+-               "/* columns rows colors chars-per-pixel */\n"
+-               "\"%i %i %i %i\",\n",
+-               image->GetWidth(), image->GetHeight(), cols, chars_per_pixel);
++        "[] = {\n"
++        "/* columns rows colors chars-per-pixel */\n"
++        "\"%i %i %i %i\",\n",
++        image->GetWidth(), image->GetHeight(), numColors,chars_per_pixel);
+     stream.Write(tmpbuf, strlen(tmpbuf));
+ 
+     // 3. create color symbols table:
+-    wxImageHistogram histogram;
+-    image->ComputeHistogram(histogram);
+-
+-    char *symbols_data = new char[cols * (chars_per_pixel+1)];
+-    char **symbols = new char*[cols];
+ 
+-    // 2a. find mask colour:
++    // 3a. find mask colour:
+     unsigned long mask_key = 0x1000000 /*invalid RGB value*/;
+     if (image->HasMask())
+-        mask_key = (image->GetMaskRed() << 16) |
+-                   (image->GetMaskGreen() << 8) | image->GetMaskBlue();
++    {
++        mask_key=((unsigned long)(image->GetMaskRed())) << 16;
++        mask_key+=((unsigned long)(image->GetMaskGreen())) << 8;
++        mask_key+=(unsigned long)(image->GetMaskBlue());
++    }
+ 
+-    // 2b. generate colour table:
++    // 3b. generate colour table:
+     for (wxImageHistogram::iterator entry = histogram.begin();
+-         entry != histogram.end(); ++entry )
++         entry != histogram.end(); entry++ )
+     {
+         unsigned long index = entry->second.index;
+@@ -182,28 +357,25 @@
+         char *sym = symbols[index];
+ 
+-        k = index % MaxCixels;
+-        sym[0] = Cixel[k];
+-        for (j = 1; j < chars_per_pixel; j++)
++        unsigned long key = entry->first;
++        symBufPtr=DecToRadix(charValIterator++,theRadix,chars_per_pixel);
++        if(!symBufPtr) return(false);
++        memcpy(sym,symBufPtr,chars_per_pixel);
++        sym[chars_per_pixel]=0x00;
++        if(key == 0)
+         {
+-            k = ((index - k) / MaxCixels) % MaxCixels;
+-            sym[j] = Cixel[k];
++            symBufPtr=DecToRadix(key,theRadix,chars_per_pixel);
++            if(!symBufPtr) return(false);
++            memcpy(sym,symBufPtr,chars_per_pixel);
++            sym[chars_per_pixel]=0x00;
++            sprintf(tmpbuf,"\"%s c #%06X\",\n",sym,key);
+         }
+-        sym[j] = '\0';
+-
+-        unsigned long key = entry->first;
+-
+-        if (key == 0)
+-            sprintf( tmpbuf, "\"%s c Black\",\n", sym);
+         else if (key == mask_key)
++        {
++            memset(sym,0x20,chars_per_pixel);
+             sprintf( tmpbuf, "\"%s c None\",\n", sym);
++        }
+         else
+         {
+-            char rbuf[3];
+-            DecToHex( (unsigned char)(key >> 16), rbuf );
+-            char gbuf[3];
+-            DecToHex( (unsigned char)(key >> 8), gbuf );
+-            char bbuf[3];
+-            DecToHex( (unsigned char)(key), bbuf );
+-            sprintf( tmpbuf, "\"%s c #%s%s%s\",\n", sym, rbuf, gbuf, bbuf );
++            sprintf(tmpbuf,"\"%s c #%06X\",\n",sym,key);
+         }
+         stream.Write( tmpbuf, strlen(tmpbuf) );
+@@ -219,5 +391,7 @@
+         for (i = 0; i < image->GetWidth(); i++, data += 3)
+         {
+-            unsigned long key = (data[0] << 16) | (data[1] << 8) | (data[2]);
++            unsigned long key=((unsigned long)data[0]) << 16;
++            key+=((unsigned long)data[1]) << 8;
++            key+=((unsigned long)data[2]);
+             stream.Write(symbols[histogram[key].index], chars_per_pixel);
+         }
+
+ 	  	 

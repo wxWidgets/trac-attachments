@@ -1,0 +1,232 @@
+ include/wx/mimetype.h          |  3 +++
+ include/wx/msw/mimetype.h      | 16 ++++++++++++++--
+ include/wx/osx/core/mimetype.h |  3 +++
+ include/wx/unix/mimetype.h     |  3 +--
+ interface/wx/mimetype.h        | 13 +++++++++++++
+ samples/exec/exec.cpp          | 14 +++++++++++---
+ src/common/mimecmn.cpp         |  7 +++++++
+ src/msw/mimetype.cpp           | 28 +++++++---------------------
+ src/osx/core/mimetype.cpp      |  4 ++++
+ 9 files changed, 63 insertions(+), 28 deletions(-)
+
+diff --git a/include/wx/mimetype.h b/include/wx/mimetype.h
+index 07c3880..c95d777 100644
+--- a/include/wx/mimetype.h
++++ b/include/wx/mimetype.h
+@@ -353,6 +353,9 @@ public:
+     // dtor (not virtual, shouldn't be derived from)
+     ~wxFileType();
+ 
++    wxString
++    GetExpandedCommand(const wxString& verb,
++                       const wxFileType::MessageParameters& params) const;
+ private:
+     // default ctor is private because the user code never creates us
+     wxFileType();
+diff --git a/include/wx/msw/mimetype.h b/include/wx/msw/mimetype.h
+index aa3880f..fdd50e1 100644
+--- a/include/wx/msw/mimetype.h
++++ b/include/wx/msw/mimetype.h
+@@ -42,9 +42,18 @@ public:
+     bool GetIcon(wxIconLocation *iconLoc) const;
+     bool GetDescription(wxString *desc) const;
+     bool GetOpenCommand(wxString *openCmd,
+-                        const wxFileType::MessageParameters& params) const;
++                        const wxFileType::MessageParameters& params) const
++    {
++        *openCmd = GetExpandedCommand(wxT("open"), params);
++        return !openCmd->empty();
++    }
++
+     bool GetPrintCommand(wxString *printCmd,
+-                         const wxFileType::MessageParameters& params) const;
++                         const wxFileType::MessageParameters& params) const
++    {
++        *printCmd = GetExpandedCommand(wxT("print"), params);
++        return !printCmd->empty();
++    }
+ 
+     size_t GetAllCommands(wxArrayString * verbs, wxArrayString * commands,
+                           const wxFileType::MessageParameters& params) const;
+@@ -76,6 +85,9 @@ public:
+     // explicitly.
+     void MSWSuppressNotifications(bool supress);
+ 
++    wxString
++    GetExpandedCommand(const wxString & verb,
++                       const wxFileType::MessageParameters& params) const;
+ private:
+     // helper function: reads the command corresponding to the specified verb
+     // from the registry (returns an empty string if not found)
+diff --git a/include/wx/osx/core/mimetype.h b/include/wx/osx/core/mimetype.h
+index 7f92a99..2a97b3c 100644
+--- a/include/wx/osx/core/mimetype.h
++++ b/include/wx/osx/core/mimetype.h
+@@ -105,6 +105,9 @@ public:
+     bool SetDefaultIcon(const wxString& strIcon = wxEmptyString, int index = 0);
+     bool Unassociate(wxFileType *ft);
+ 
++    wxString
++    GetExpandedCommand(const wxString& verb,
++                       const wxFileType::MessageParameters& params) const;
+ private:
+ 
+     // All that is needed to query type info - UTI and pointer to the manager
+diff --git a/include/wx/unix/mimetype.h b/include/wx/unix/mimetype.h
+index df76534..27b303b 100644
+--- a/include/wx/unix/mimetype.h
++++ b/include/wx/unix/mimetype.h
+@@ -157,11 +157,10 @@ public:
+     bool SetCommand(const wxString& cmd, const wxString& verb, bool overwriteprompt = true);
+     bool SetDefaultIcon(const wxString& strIcon = wxEmptyString, int index = 0);
+ 
+-private:
+     wxString
+     GetExpandedCommand(const wxString & verb,
+                        const wxFileType::MessageParameters& params) const;
+-
++private:
+     wxMimeTypesManagerImpl *m_manager;
+     wxArrayInt              m_index; // in the wxMimeTypesManagerImpl arrays
+ };
+diff --git a/interface/wx/mimetype.h b/interface/wx/mimetype.h
+index 0b220ca..4861457 100644
+--- a/interface/wx/mimetype.h
++++ b/interface/wx/mimetype.h
+@@ -376,6 +376,19 @@ public:
+     bool GetPrintCommand(wxString* command,
+                          const MessageParameters& params) const;
+ 
++
++    /**
++        The returned string is the command which must be executed (see wxExecute()) in order to
++        open/print/edit the file of the given type.
++        If the string is empty, the lookup for the @ verb failed.
++
++        The name of the file is retrieved from the MessageParameters class.
++
++        @since 3.1.0
++    */
++    wxString GetExpandedCommand(const wxString& verb,
++                                const wxFileType::MessageParameters& params) const;
++
+     /**
+        Returns the number of commands for this mime type, and fills the verbs
+        and commands arrays with the command information.
+diff --git a/samples/exec/exec.cpp b/samples/exec/exec.cpp
+index 53f8535..ae59f17 100644
+--- a/samples/exec/exec.cpp
++++ b/samples/exec/exec.cpp
+@@ -50,6 +50,7 @@
+     #include "wx/sizer.h"
+ #endif
+ 
++#include "wx/filename.h"
+ #include "wx/txtstrm.h"
+ #include "wx/numdlg.h"
+ #include "wx/textdlg.h"
+@@ -1078,7 +1079,7 @@ void MyFrame::OnFileExec(wxCommandEvent& WXUNUSED(event))
+     if ( !AskUserForFileName() )
+         return;
+ 
+-    wxString ext = gs_lastFile.AfterLast(wxT('.'));
++    wxString ext = wxFileName(gs_lastFile).GetExt();
+     wxFileType *ft = wxTheMimeTypesManager->GetFileTypeFromExtension(ext);
+     if ( !ft )
+     {
+@@ -1088,8 +1089,15 @@ void MyFrame::OnFileExec(wxCommandEvent& WXUNUSED(event))
+     }
+ 
+     wxString cmd;
+-    bool ok = ft->GetOpenCommand(&cmd,
+-                                 wxFileType::MessageParameters(gs_lastFile));
++    bool ok = false;
++    const wxFileType::MessageParameters params(gs_lastFile);
++#ifdef __WXMSW__
++    // try editor, for instance Notepad if extension is .xml
++    cmd = ft->GetExpandedCommand(wxT("edit"), params);
++    ok = !cmd.empty();
++#endif
++    if (!ok) // else try viewer
++        ok = ft->GetOpenCommand(&cmd, params);
+     delete ft;
+     if ( !ok )
+     {
+diff --git a/src/common/mimecmn.cpp b/src/common/mimecmn.cpp
+index c6904c3..ae86108 100644
+--- a/src/common/mimecmn.cpp
++++ b/src/common/mimecmn.cpp
+@@ -428,6 +428,13 @@ wxFileType::GetPrintCommand(wxString *printCmd,
+     return m_impl->GetPrintCommand(printCmd, params);
+ }
+ 
++wxString
++wxFileType::GetExpandedCommand(const wxString& verb,
++                               const wxFileType::MessageParameters& params) const
++{
++    return m_impl->GetExpandedCommand(verb, params);
++}
++
+ 
+ size_t wxFileType::GetAllCommands(wxArrayString *verbs,
+                                   wxArrayString *commands,
+diff --git a/src/msw/mimetype.cpp b/src/msw/mimetype.cpp
+index a94214c..380a280 100644
+--- a/src/msw/mimetype.cpp
++++ b/src/msw/mimetype.cpp
+@@ -338,33 +338,19 @@ wxString wxFileTypeImpl::GetCommand(const wxString& verb) const
+     return command;
+ }
+ 
+-bool
+-wxFileTypeImpl::GetOpenCommand(wxString *openCmd,
+-                               const wxFileType::MessageParameters& params)
+-                               const
++
++wxString
++wxFileTypeImpl::GetExpandedCommand(const wxString & verb,
++                                   const wxFileType::MessageParameters& params) const
+ {
+-    wxString cmd = GetCommand(wxT("open"));
++    wxString cmd = GetCommand(verb);
+ 
+     // Some viewers don't define the "open" verb but do define "show" one, try
+     // to use it as a fallback.
+-    if ( cmd.empty() )
++    if ( cmd.empty() && (verb == wxT("open")) )
+         cmd = GetCommand(wxT("show"));
+ 
+-    *openCmd = wxFileType::ExpandCommand(cmd, params);
+-
+-    return !openCmd->empty();
+-}
+-
+-bool
+-wxFileTypeImpl::GetPrintCommand(wxString *printCmd,
+-                                const wxFileType::MessageParameters& params)
+-                                const
+-{
+-    wxString cmd = GetCommand(wxT("print"));
+-
+-    *printCmd = wxFileType::ExpandCommand(cmd, params);
+-
+-    return !printCmd->empty();
++    return wxFileType::ExpandCommand(cmd, params);
+ }
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/src/osx/core/mimetype.cpp b/src/osx/core/mimetype.cpp
+index 7d5de4b..635b24c 100644
+--- a/src/osx/core/mimetype.cpp
++++ b/src/osx/core/mimetype.cpp
+@@ -699,6 +699,10 @@ bool wxFileTypeImpl::Unassociate(wxFileType *WXUNUSED(ft))
+     return false;
+ }
+ 
++wxString wxFileTypeImpl::GetExpandedCommand(const wxString& WXUNUSED(verb), const wxFileType::MessageParameters& WXUNUSED(params)) const
++{
++    return wxEmptyString;
++}
+ 
+ #endif // wxUSE_MIMETYPE
+ 

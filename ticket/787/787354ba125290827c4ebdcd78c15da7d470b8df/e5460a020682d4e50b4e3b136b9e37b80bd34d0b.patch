@@ -1,0 +1,302 @@
+Index: docs/latex/wx/stdpaths.tex
+===================================================================
+--- docs/latex/wx/stdpaths.tex	(revision 49914)
++++ docs/latex/wx/stdpaths.tex	(working copy)
+@@ -280,3 +280,26 @@
+ is set during program configuration if using GNU autotools and so it is enough
+ to pass its value defined in \texttt{config.h} to this function.
+ 
++
++\membersection{wxStandardPaths::SetUsedAppInfo}\label{wxstandardpathssetusedappinfo}
++
++\func{void}{SetUsedAppInfo}{\param{int }{info}}
++
++This controls what application information is used when constructing paths that
++need to use the application information, such as the application data directory,
++the plugins directory on Unix, etc.  By default, the correct information is
++used on each platform:
++
++\begin{itemize}
++    \item Unix: \tt{AppInfo_AppName}
++    \item Windows: \tt{AppInfo_AppName | AppInfo_AppVendor}
++    \item Mac: \tt{AppInfo_AppName | AppInfo_AppVendor}
++\end{itemize}
++
++Valid values are:
++
++\begin{itemize}
++    \item AppInfo_None
++    \item AppInfo_AppName
++    \item AppInfo_VendorName
++\end{itemize}
+Index: include/wx/msw/stdpaths.h
+===================================================================
+--- include/wx/msw/stdpaths.h	(revision 49914)
++++ include/wx/msw/stdpaths.h	(working copy)
+@@ -19,6 +19,13 @@
+ class WXDLLIMPEXP_BASE wxStandardPaths : public wxStandardPathsBase
+ {
+ public:
++    wxStandardPaths()
++    {
++        SetUsedAppInfo(AppInfo_AppName | AppInfo_VendorName);
++    }
++    
++    ~wxStandardPaths() { }
++
+     // implement base class pure virtuals
+     virtual wxString GetExecutablePath() const;
+     virtual wxString GetConfigDir() const;
+Index: include/wx/stdpaths.h
+===================================================================
+--- include/wx/stdpaths.h	(revision 49914)
++++ include/wx/stdpaths.h	(working copy)
+@@ -38,6 +38,15 @@
+         // end of enum marker
+         ResourceCat_Max
+     };
++    
++    // Which components should be used with some of the returned
++    // paths that use AppendAppInfo
++    enum
++    {
++        AppInfo_None = 0x00,
++        AppInfo_AppName = 0x01,
++        AppInfo_VendorName = 0x02,
++    };
+ 
+ 
+     // return the global standard paths object
+@@ -126,13 +135,31 @@
+     virtual wxString GetTempDir() const;
+ 
+ 
++    // ctor for the base class
++    wxStandardPathsBase();
++   
+     // virtual dtor for the base class
+     virtual ~wxStandardPathsBase();
++    
++    // Information used by AppendAppInfo
++    void SetUsedAppInfo(int info)
++    {
++        m_usedAppInfo = info;
++    }
++    
++    int GetUsedAppInfo() const { return m_usedAppInfo; }
++    
+ 
+ protected:
+-    // append "/appname" suffix if the app name is set (doesn't append the
+-    // slash if dir already ends with a slash or dot)
+-    static wxString AppendAppName(const wxString& dir);
++    // append the path component, with a leading path seperator if a 
++    // path seperator or dot (.) is not already at the end of dir
++    static wxString AppendPathComponent(const wxString& dir, const wxString& component);
++
++    // This function will append the correct application information to the directory
++    wxString AppendAppInfo(const wxString& dir) const;
++    
++    // Information that should be used by AppendAppInfo
++    int m_usedAppInfo;
+ };
+ 
+ #if wxUSE_STDPATHS
+Index: src/common/stdpbase.cpp
+===================================================================
+--- src/common/stdpbase.cpp	(revision 49914)
++++ src/common/stdpbase.cpp	(working copy)
+@@ -77,6 +77,15 @@
+     return gs_stdPaths;
+ }
+ 
++wxStandardPathsBase::wxStandardPathsBase()
++{
++    // Set the default information that is used when
++    // forming some paths (by AppendAppInfo).
++    // Derived classes can call this in their constructors
++    // to set the platform-specific settings
++    SetUsedAppInfo(AppInfo_AppName);
++}
++
+ wxStandardPathsBase::~wxStandardPathsBase()
+ {
+     // nothing to do here
+@@ -104,23 +113,42 @@
+ }
+ 
+ /* static */
+-wxString wxStandardPathsBase::AppendAppName(const wxString& dir)
++wxString wxStandardPathsBase::AppendPathComponent(const wxString& dir, const wxString& component)
+ {
+     wxString subdir(dir);
+ 
+     // empty string indicates that an error has occurred, don't touch it then
+     if ( !subdir.empty() )
+     {
+-        const wxString appname = wxTheApp->GetAppName();
+-        if ( !appname.empty() )
++        if ( !component.empty() )
+         {
+             const wxChar ch = *(subdir.end() - 1);
+             if ( !wxFileName::IsPathSeparator(ch) && ch != _T('.') )
+                 subdir += wxFileName::GetPathSeparator();
+ 
+-            subdir += appname;
++            subdir += component;
+         }
+     }
+ 
+     return subdir;
+ }
++
++
++wxString wxStandardPathsBase::AppendAppInfo(const wxString& dir) const
++{
++    wxString subdir(dir);
++
++    // Append vendor name if it is okay to do so
++    if(m_usedAppInfo & AppInfo_VendorName)
++    {
++        subdir = AppendPathComponent(subdir, wxTheApp->GetVendorName());
++    }
++
++    if(m_usedAppInfo & AppInfo_AppName)
++    {
++        subdir = AppendPathComponent(subdir, wxTheApp->GetAppName());
++    }
++    
++    return subdir;
++}
++
+Index: src/mac/corefoundation/stdpaths_cf.cpp
+===================================================================
+--- src/mac/corefoundation/stdpaths_cf.cpp	(revision 49914)
++++ src/mac/corefoundation/stdpaths_cf.cpp	(working copy)
+@@ -58,12 +58,14 @@
+                  : m_bundle(CFBundleGetMainBundle())
+ {
+     CFRetain(m_bundle);
++    SetUsedAppInfo(AppInfo_AppName | AppInfo_VendorName);
+ }
+ 
+ wxStandardPathsCF::wxStandardPathsCF(wxCFBundleRef bundle)
+                  : m_bundle(bundle)
+ {
+     CFRetain(m_bundle);
++    SetUsedAppInfo(AppInfo_AppName | AppInfo_VendorName);
+ }
+ 
+ wxStandardPathsCF::~wxStandardPathsCF()
+@@ -179,18 +181,18 @@
+ wxString wxStandardPathsCF::GetLocalDataDir() const
+ {
+ #ifdef __WXMAC__
+-    return AppendAppName(wxMacFindFolder((short)kLocalDomain, kApplicationSupportFolderType, kCreateFolder));
++    return AppendAppInfo(wxMacFindFolder((short)kLocalDomain, kApplicationSupportFolderType, kCreateFolder));
+ #else
+-    return AppendAppName(wxT("/Library/Application Support"));
++    return AppendAppInfo(wxT("/Library/Application Support"));
+ #endif
+ }
+ 
+ wxString wxStandardPathsCF::GetUserDataDir() const
+ {
+ #ifdef __WXMAC__
+-    return AppendAppName(wxMacFindFolder((short)kUserDomain, kApplicationSupportFolderType, kCreateFolder));
++    return AppendAppInfo(wxMacFindFolder((short)kUserDomain, kApplicationSupportFolderType, kCreateFolder));
+ #else
+-    return AppendAppName(wxFileName::GetHomeDir() + _T("/Library/Application Support"));
++    return AppendAppInfo(wxFileName::GetHomeDir() + _T("/Library/Application Support"));
+ #endif
+ }
+ 
+Index: src/msw/stdpaths.cpp
+===================================================================
+--- src/msw/stdpaths.cpp	(revision 49914)
++++ src/msw/stdpaths.cpp	(working copy)
+@@ -281,7 +281,7 @@
+ 
+ wxString wxStandardPaths::GetConfigDir() const
+ {
+-    return AppendAppName(DoGetDirectory(CSIDL_COMMON_APPDATA));
++    return AppendAppInfo(DoGetDirectory(CSIDL_COMMON_APPDATA));
+ }
+ 
+ wxString wxStandardPaths::GetUserConfigDir() const
+@@ -298,12 +298,12 @@
+ 
+ wxString wxStandardPaths::GetUserDataDir() const
+ {
+-    return AppendAppName(GetUserConfigDir());
++    return AppendAppInfo(GetUserConfigDir());
+ }
+ 
+ wxString wxStandardPaths::GetUserLocalDataDir() const
+ {
+-    return AppendAppName(DoGetDirectory(CSIDL_LOCAL_APPDATA));
++    return AppendAppInfo(DoGetDirectory(CSIDL_LOCAL_APPDATA));
+ }
+ 
+ wxString wxStandardPaths::GetPluginsDir() const
+Index: src/os2/stdpaths.cpp
+===================================================================
+--- src/os2/stdpaths.cpp	(revision 49914)
++++ src/os2/stdpaths.cpp	(working copy)
+@@ -82,7 +82,7 @@
+ 
+ wxString wxStandardPaths::GetUserDataDir() const
+ {
+-    return AppendAppName(wxFileName::GetHomeDir() + _T("\\."));
++    return AppendAppInfo(wxFileName::GetHomeDir() + _T("\\."));
+ }
+ 
+ wxString wxStandardPaths::GetPluginsDir() const
+Index: src/unix/stdpaths.cpp
+===================================================================
+--- src/unix/stdpaths.cpp	(revision 49914)
++++ src/unix/stdpaths.cpp	(working copy)
+@@ -75,12 +75,12 @@
+ 
+ wxString wxStandardPaths::GetDataDir() const
+ {
+-   return AppendAppName(GetInstallPrefix() + _T("/sys$share"));
++   return AppendAppInfo(GetInstallPrefix() + _T("/sys$share"));
+ }
+ 
+ wxString wxStandardPaths::GetLocalDataDir() const
+ {
+-   return AppendAppName(_T("/sys$manager"));
++   return AppendAppInfo(_T("/sys$manager"));
+ }
+ 
+ wxString wxStandardPaths::GetUserDataDir() const
+@@ -187,22 +187,22 @@
+ 
+ wxString wxStandardPaths::GetDataDir() const
+ {
+-   return AppendAppName(GetInstallPrefix() + _T("/share"));
++   return AppendAppInfo(GetInstallPrefix() + _T("/share"));
+ }
+ 
+ wxString wxStandardPaths::GetLocalDataDir() const
+ {
+-   return AppendAppName(_T("/etc"));
++   return AppendAppInfo(_T("/etc"));
+ }
+ 
+ wxString wxStandardPaths::GetUserDataDir() const
+ {
+-   return AppendAppName(wxFileName::GetHomeDir() + _T("/."));
++   return AppendAppInfo(wxFileName::GetHomeDir() + _T("/."));
+ }
+ 
+ wxString wxStandardPaths::GetPluginsDir() const
+ {
+-    return AppendAppName(GetInstallPrefix() + _T("/lib"));
++    return AppendAppInfo(GetInstallPrefix() + _T("/lib"));
+ }
+ 
+ wxString
+
+ 	  	 

@@ -1,0 +1,66 @@
+--- sound.cpp.vadz	2017-11-08 08:54:58.834048000 +0100
++++ sound.cpp	2017-11-08 12:03:37.612332000 +0100
+@@ -276,7 +276,7 @@
+ {
+ public:
+     wxSoundAsyncPlaybackThread(wxSoundSyncOnlyAdaptor *adaptor,
+-                              wxSoundData *data, unsigned flags)
++                               wxSoundData *data, unsigned flags)
+         : wxThread(), m_adapt(adaptor), m_data(data), m_flags(flags) {}
+     virtual ExitCode Entry();
+ 
+@@ -328,7 +328,9 @@
+     // player thread holds this mutex and releases it after it finishes
+     // playing, so that the main thread knows when it can play sound
+     wxMutex m_mutexRightToPlay;
+-    wxSoundPlaybackStatus m_status;
++    // We must have our own playback status information, because wxSound::Play
++    // will end before we are finished playing
++    volatile wxSoundPlaybackStatus m_status;
+ #endif
+ };
+ 
+@@ -337,12 +339,14 @@
+ wxThread::ExitCode wxSoundAsyncPlaybackThread::Entry()
+ {
+     wxMutexLocker locker(m_adapt->m_mutexRightToPlay);
++    wxLogTrace(wxT("sound"), wxT("starting async playback"));
++    m_adapt->m_status.m_playing = true;
+     m_adapt->m_backend->Play(m_data, m_flags & ~wxSOUND_ASYNC,
+                              &m_adapt->m_status);
+ 
+     m_data->DecRef();
+     m_adapt->m_status.m_playing = false;
+-    wxLogTrace(wxT("sound"), wxT("terminated async playback thread"));
++    wxLogTrace(wxT("sound"), wxT("terminating async playback thread"));
+     return 0;
+ }
+ #endif
+@@ -355,8 +359,9 @@
+     {
+ #if wxUSE_THREADS
+         wxMutexLocker locker(m_mutexRightToPlay);
+-        m_status.m_playing = true;
+-        m_status.m_stopRequested = false;
++        // wx_const_cast's are required to cast away volatile-ness
++        wx_const_cast(wxSoundPlaybackStatus &, m_status) =
++            *wx_const_cast(const wxSoundPlaybackStatus*, status);
+         data->IncRef();
+         wxThread *th = new wxSoundAsyncPlaybackThread(this, data, flags);
+         th->Create();
+@@ -382,10 +387,13 @@
+     wxLogTrace(wxT("sound"), wxT("asking audio to stop"));
+ 
+ #if wxUSE_THREADS
+-    wxMutexLocker locker(m_mutexRightToPlay);
+     // tell the player thread (if running) to stop playback ASAP:
+     m_status.m_stopRequested = true;
+-
++    
++    // acquire the mutex to be sure no sound is being played (the
++    // effect of this is that calling thread will wait until playback
++    // thread reacts to our request to interrupt playback):
++    wxMutexLocker lock(m_mutexRightToPlay);
+     wxLogTrace(wxT("sound"), wxT("audio was stopped"));
+ #endif
+ }

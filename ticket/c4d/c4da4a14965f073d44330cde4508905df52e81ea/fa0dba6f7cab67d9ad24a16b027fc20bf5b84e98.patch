@@ -1,0 +1,244 @@
+Index: configure.in
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/configure.in,v
+retrieving revision 1.1157
+diff -bu2 -r1.1157 configure.in
+--- configure.in
++++ configure.in
+@@ -4420,6 +4420,38 @@
+ fi
+ 
+-
+ if test "$wxUSE_UNICODE" = yes; then
++
++    dnl our wxVsnprintf() implementation needs to use the system swprintf() in Unicode
++    dnl builds so let's check if swprintf() is declared as C99 imposes:
++    dnl     int swprintf(wchar_t *s, size_t n, const wchar_t *format, ...);
++    dnl or rather as:
++    dnl     int swprintf(wchar_t *s, const wchar_t *format, ...);
++    AC_CHECK_FUNCS(swprintf)
++
++    if test "$ac_cv_func_swprintf" = "yes"; then
++        AC_CACHE_CHECK([if swprintf declaration is broken], wx_cv_func_broken_swprintf_decl,
++            [
++                AC_TRY_COMPILE(
++                    [
++                        #include <stdio.h>
++                        #include <stdarg.h>
++                        #include <wchar.h>
++                    ],
++                    [
++                        wchar_t *buf;
++                        const wchar_t *fmt = L"test";
++                        swprintf(buf, 10u, fmt);
++                    ],
++                    wx_cv_func_broken_swprintf_decl=no,
++                    wx_cv_func_broken_swprintf_decl=yes
++                )
++            ]
++        )
++
++        if test "$wx_cv_func_broken_swprintf_decl" = "yes"; then
++            AC_DEFINE(HAVE_BROKEN_SWPRINTF_DECL)
++        fi
++    fi
++
+     dnl also look if we have wide char IO functions
+     AC_CHECK_FUNCS(wputc wputchar putws fputws wprintf vswprintf)
+Index: setup.h.in
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/setup.h.in,v
+retrieving revision 1.221
+diff -bu2 -r1.221 setup.h.in
+--- setup.h.in
++++ setup.h.in
+@@ -1060,5 +1060,12 @@
+ #undef HAVE_WPRINTF
+ 
+-/* Define this if you have wprintf() and related functions */
++/* Define this if you have swprintf() */
++#undef HAVE_SWPRINTF
++
++/* Define if you have a _broken_ swprintf() declaration in the header,
++ * without a 'size_t max' parameter as second argument */
++#undef HAVE_BROKEN_SWPRINTF_DECL
++
++/* Define this if you have vswprintf() and related functions */
+ #undef HAVE_VSWPRINTF
+ 
+Index: include/wx/wxchar.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/wxchar.h,v
+retrieving revision 1.194
+diff -bu2 -r1.194 include/wx/wxchar.h
+--- include/wx/wxchar.h
++++ include/wx/wxchar.h
+@@ -2,9 +2,9 @@
+  * Name:        wx/wxchar.h
+  * Purpose:     Declarations common to wx char/wchar_t usage (wide chars)
+- * Author:      Joel Farley, Ove Kåven
++ * Author:      Joel Farley, Ove Kï¿½en
+  * Modified by: Vadim Zeitlin, Robert Roebling, Ron Lee
+  * Created:     1998/06/12
+  * RCS-ID:      $Id: wxchar.h,v 1.194 2006/06/27 14:24:53 VZ Exp $
+- * Copyright:   (c) 1998-2002 Joel Farley, Ove Kåven, Robert Roebling, Ron Lee
++ * Copyright:   (c) 1998-2002 Joel Farley, Ove Kï¿½en, Robert Roebling, Ron Lee
+  * Licence:     wxWindows licence
+  */
+@@ -929,4 +929,15 @@
+             #endif
+         #endif
++    #else
++        // the only exception on Windows is VC++ 8.0; it provides a new family
++        // of printf() functions with positional parameter support which should
++        // behave mostly identic to our wxVsnprintf() implementation
++        #if defined(__VISUALC__) && __VISUALC__ >= 1400
++            #if wxUSE_UNICODE
++                #define wxVsnprintf_    _vsprintf_p
++            #else
++                #define wxVsnprintf_    _vswprintf_p
++            #endif
++        #endif
+     #endif
+ #endif  // !defined( wxVsnprintf_ ) && wxUSE_PRINTF_POS_PARAMS
+Index: src/common/wxchar.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/wxchar.cpp,v
+retrieving revision 1.119
+diff -bu2 -r1.119 src/common/wxchar.cpp
+--- src/common/wxchar.cpp
++++ src/common/wxchar.cpp
+@@ -186,4 +186,56 @@
+ #define wxMAX_SVNPRINTF_ARGUMENTS         16
+ #define wxMAX_SVNPRINTF_FLAGBUFFER_LEN    32
++#define wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN   512
++
++
++// wxVsnprintf() needs to use a *system* implementation of swnprintf()
++// in order to perform some internal tasks.
++// NB: we cannot just use wxSnprintf() because for some systems it maybe
++//     implemented later in this file using wxVsnprintf() and that would
++//     result in an endless recursion and thus in a stack overflow
++#if wxUSE_UNICODE
++
++    #if defined(__WXWINCE__) || ( defined(__VISUALC__) && __VISUALC__ <= 1200 )
++        #define HAVE_BROKEN_SWPRINTF_DECL
++    #endif
++
++
++    // problem: on some systems swprintf takes the 'max' argument while on others
++    //          it doesn't
++    #if defined(HAVE_BROKEN_SWPRINTF_DECL)
++
++        // like when using sprintf(), since 'max' is not used, wxVsnprintf() should
++        // always ensure that 'buff' is big enough for all common needs
++        #define system_sprintf(buff, max, flags, data)      \
++            ::swprintf(buff, flags, data)
++    #else
++
++        #if !defined(HAVE_SWPRINTF)
++            #error wxVsnprintf() needs a system swprintf() implementation!
++        #endif
++
++        #define system_sprintf(buff, max, flags, data)      \
++            ::swprintf(buff, max, flags, data)
++    #endif
++
++#else
++
++    #if defined(HAVE_SNPRINTF)
++
++        #define system_sprintf(buff, max, flags, data)      \
++            ::snprintf(buff, max, flags, data)
++
++    #else       // NB: at least sprintf() should *always* be available
++
++        // since 'max' is not used in this case, wxVsnprintf() should always ensure
++        // that 'buff' is big enough for all common needs
++        // (see wxMAX_SVNPRINTF_FLAGBUFFER_LEN and wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN)
++        #define system_sprintf(buff, max, flags, data)      \
++            ::sprintf(buff, flags, data)
++
++    #endif
++#endif
++
++
+ 
+ // the conversion specifiers accepted by wxVsnprintf_
+@@ -613,10 +665,6 @@
+ 
+     // replace * with the actual integer given as width
+-#if wxUSE_UNICODE
+     int maxlen = (m_szFlags + wxMAX_SVNPRINTF_FLAGBUFFER_LEN - pwidth) / sizeof(wxChar);
+-    int offset = ::swprintf(pwidth, maxlen, L"%d", abs(width));
+-#else
+-    int offset = ::sprintf(pwidth, "%d", abs(width));
+-#endif
++    int offset = system_sprintf(pwidth, maxlen, wxT("%d"), abs(width));
+ 
+     // restore after the expanded * what was following it
+@@ -712,15 +760,7 @@
+     // note that this buffer is used only to hold results of number formatting,
+     // %s directly writes user's string in buf, without using szScratch
+-#define wxSCRATCH_BUFFER_SIZE       512
+-
+-    wxChar szScratch[wxSCRATCH_BUFFER_SIZE];
++    wxChar szScratch[wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN];
+     size_t lenScratch = 0, lenCur = 0;
+ 
+-#if wxUSE_UNICODE
+-#define system_sprintf(buff, flags, data)      ::swprintf(buff, wxSCRATCH_BUFFER_SIZE, flags, data)
+-#else
+-#define system_sprintf                         ::sprintf
+-#endif
+-
+ #define APPEND_CH(ch) \
+                 { \
+@@ -742,31 +782,31 @@
+     {
+         case wxPAT_INT:
+-            lenScratch = system_sprintf(szScratch, m_szFlags, p->pad_int);
++            lenScratch = system_sprintf(szScratch, wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN, m_szFlags, p->pad_int);
+             break;
+ 
+         case wxPAT_LONGINT:
+-            lenScratch = system_sprintf(szScratch, m_szFlags, p->pad_longint);
++            lenScratch = system_sprintf(szScratch, wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN, m_szFlags, p->pad_longint);
+             break;
+ 
+ #if SIZEOF_LONG_LONG
+         case wxPAT_LONGLONGINT:
+-            lenScratch = system_sprintf(szScratch, m_szFlags, p->pad_longlongint);
++            lenScratch = system_sprintf(szScratch, wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN, m_szFlags, p->pad_longlongint);
+             break;
+ #endif // SIZEOF_LONG_LONG
+ 
+         case wxPAT_SIZET:
+-            lenScratch = system_sprintf(szScratch, m_szFlags, p->pad_sizet);
++            lenScratch = system_sprintf(szScratch, wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN, m_szFlags, p->pad_sizet);
+             break;
+ 
+         case wxPAT_LONGDOUBLE:
+-            lenScratch = system_sprintf(szScratch, m_szFlags, p->pad_longdouble);
++            lenScratch = system_sprintf(szScratch, wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN, m_szFlags, p->pad_longdouble);
+             break;
+ 
+         case wxPAT_DOUBLE:
+-            lenScratch = system_sprintf(szScratch, m_szFlags, p->pad_double);
++            lenScratch = system_sprintf(szScratch, wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN, m_szFlags, p->pad_double);
+             break;
+ 
+         case wxPAT_POINTER:
+-            lenScratch = system_sprintf(szScratch, m_szFlags, p->pad_pointer);
++            lenScratch = system_sprintf(szScratch, wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN, m_szFlags, p->pad_pointer);
+             break;
+ 
+@@ -924,5 +964,5 @@
+ #if wxUSE_STRUTILS
+             {
+-                wxASSERT(lenScratch >= 0 && lenScratch < wxSCRATCH_BUFFER_SIZE);
++                wxASSERT(lenScratch >= 0 && lenScratch < wxMAX_SVNPRINTF_SCRATCHBUFFER_LEN);
+                 if (lenMax < lenScratch)
+                 {
+
+ 	  	 

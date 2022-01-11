@@ -1,0 +1,870 @@
+Index: src/aui/floatpane.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/aui/floatpane.cpp,v
+retrieving revision 1.24
+diff -u -r1.24 floatpane.cpp
+@@ -36,27 +36,17 @@
+ #include "wx/msw/private.h"
+ #endif
+ 
+-IMPLEMENT_CLASS(wxAuiFloatingFrame, wxAuiFloatingFrameBaseClass)
++IMPLEMENT_CLASS(wxAuiFloatingFrameHandler, wxEvtHandler)
+ 
+-wxAuiFloatingFrame::wxAuiFloatingFrame(wxWindow* parent,
+-                wxAuiManager* owner_mgr,
+-                const wxAuiPaneInfo& pane,
+-                wxWindowID id /*= wxID_ANY*/,
+-                long style /*=wxRESIZE_BORDER | wxSYSTEM_MENU | wxCAPTION |
+-                              wxFRAME_NO_TASKBAR | wxFRAME_FLOAT_ON_PARENT | 
+-                              wxCLIP_CHILDREN
+-                           */)
+-                : wxAuiFloatingFrameBaseClass(parent, id, wxEmptyString,
+-                        pane.floating_pos, pane.floating_size,
+-                        style | 
+-                        (pane.HasCloseButton()?wxCLOSE_BOX:0) |
+-                        (pane.HasMaximizeButton()?wxMAXIMIZE_BOX:0) |
+-                        (pane.IsFixed()?0:wxRESIZE_BORDER)
+-                        )
++
++wxAuiFloatingFrameHandler::wxAuiFloatingFrameHandler(wxFrame* frame,
++                wxAuiManager* owner_mgr)
+ {
++    m_frame_window = frame;
++    m_frame_window->PushEventHandler(this);
+     m_owner_mgr = owner_mgr;
+     m_moving = false;
+-    m_mgr.SetManagedWindow(this);
++    m_mgr.SetManagedWindow(frame);
+     m_solid_drag = true;
+     
+     // find out if the system supports solid window drag.
+@@ -66,24 +56,22 @@
+     SystemParametersInfo(38 /*SPI_GETDRAGFULLWINDOWS*/, 0, &b, 0);
+     m_solid_drag = b ? true : false;
+ #endif
+-    
+-    SetExtraStyle(wxWS_EX_PROCESS_IDLE);
+ }
+ 
+-wxAuiFloatingFrame::~wxAuiFloatingFrame()
++wxAuiFloatingFrameHandler::~wxAuiFloatingFrameHandler()
+ {
+     // if we do not do this, then we can crash...
+-    if(m_owner_mgr && m_owner_mgr->m_action_window == this)
++    if(m_owner_mgr && m_owner_mgr->m_action_window == m_frame_window)
+     {
+         m_owner_mgr->m_action_window = NULL;
+     }
+     m_mgr.UnInit();
+ }
+ 
+-void wxAuiFloatingFrame::SetPaneWindow(const wxAuiPaneInfo& pane)
++void wxAuiFloatingFrameHandler::SetPaneWindow(const wxAuiPaneInfo& pane)
+ {
+     m_pane_window = pane.window;
+-    m_pane_window->Reparent(this);
++    m_pane_window->Reparent(m_frame_window);
+ 
+     wxAuiPaneInfo contained_pane = pane;
+     contained_pane.Dock().Center().Show().
+@@ -96,16 +84,16 @@
+     
+     // if the frame window's max size is greater than the min size
+     // then set the max size to the min size as well
+-    wxSize cur_max_size = GetMaxSize();
++    wxSize cur_max_size = m_frame_window->GetMaxSize();
+     if (cur_max_size.IsFullySpecified() &&
+           (cur_max_size.x < pane.min_size.x ||
+            cur_max_size.y < pane.min_size.y)
+        )
+     {
+-        SetMaxSize(pane_min_size);
++        m_frame_window->SetMaxSize(pane_min_size);
+     }
+     
+-    SetMinSize(pane.window->GetMinSize());
++    m_frame_window->SetMinSize(pane.window->GetMinSize());
+ 
+     m_mgr.AddPane(m_pane_window, contained_pane);
+     m_mgr.Update();
+@@ -115,16 +103,18 @@
+         // because SetSizeHints() calls Fit() too (which sets the window
+         // size to its minimum allowed), we keep the size before calling
+         // SetSizeHints() and reset it afterwards...
+-        wxSize tmp = GetSize();
+-        GetSizer()->SetSizeHints(this);
+-        SetSize(tmp);
++        wxSize tmp = m_frame_window->GetSize();
++        wxSizer *sizer = m_frame_window->GetSizer();
++        if (sizer)
++           sizer->SetSizeHints(m_frame_window);
++        m_frame_window->SetSize(tmp);
+     }
+ 
+-    SetTitle(pane.caption);
++    m_frame_window->SetTitle(pane.caption);
+ 
+     if (pane.floating_size != wxDefaultSize)
+     {
+-        SetSize(pane.floating_size);
++        m_frame_window->SetSize(pane.floating_size);
+     }
+         else
+     {
+@@ -141,29 +131,44 @@
+                 size.x += m_owner_mgr->m_art->GetMetric(wxAUI_DOCKART_GRIPPER_SIZE);
+         }
+ 
+-        SetClientSize(size);
++        m_frame_window->SetClientSize(size);
++        // Make sure that SetClientSize generates a frame-size event.
++        m_owner_mgr->OnFloatingPaneResized(m_pane_window,
++           m_frame_window->GetSize());
+     }
+ }
+ 
+-wxAuiManager* wxAuiFloatingFrame::GetOwnerManager() const
++wxAuiManager* wxAuiFloatingFrameHandler::GetOwnerManager() const
+ {
+     return m_owner_mgr;
+ }
+ 
++wxFrame *wxAuiFloatingFrameHandler::GetFrame()
++{
++   return m_frame_window;
++}
+ 
+-void wxAuiFloatingFrame::OnSize(wxSizeEvent& event)
++
++
++void wxAuiFloatingFrameHandler::OnSize(wxSizeEvent& event)
+ {
++    // Don't get an event on "Restore" so poll here ...
++    if (!m_frame_window->IsMaximized())
++       m_owner_mgr->OnFloatingPaneMaximized(m_pane_window, false);
++    if (!m_frame_window->IsIconized())
++       m_owner_mgr->OnFloatingPaneMinimized(m_pane_window, false);
++       
+     m_owner_mgr->OnFloatingPaneResized(m_pane_window, event.GetSize());
+ }
+ 
+-void wxAuiFloatingFrame::OnClose(wxCloseEvent& evt)
++void wxAuiFloatingFrameHandler::OnClose(wxCloseEvent& evt)
+ {
+     m_owner_mgr->OnFloatingPaneClosed(m_pane_window, evt);
+     if (!evt.GetVeto())
+-        Destroy();
++        m_frame_window->Destroy();
+ }
+ 
+-void wxAuiFloatingFrame::OnMoveEvent(wxMoveEvent& event)
++void wxAuiFloatingFrameHandler::OnMoveEvent(wxMoveEvent& event)
+ {
+     if (!m_solid_drag)
+     {
+@@ -179,7 +184,7 @@
+     }
+     
+     
+-    wxRect win_rect = GetRect();
++    wxRect win_rect = m_frame_window->GetRect();
+ 
+     if (win_rect == m_last_rect)
+         return;
+@@ -250,7 +255,7 @@
+     OnMoving(event.GetRect(), dir);
+ }
+ 
+-void wxAuiFloatingFrame::OnIdle(wxIdleEvent& event)
++void wxAuiFloatingFrameHandler::OnIdle(wxIdleEvent& event)
+ {
+     if (m_moving)
+     {
+@@ -266,26 +271,39 @@
+     }
+ }
+ 
+-void wxAuiFloatingFrame::OnMoveStart()
++void wxAuiFloatingFrameHandler::OnMoveStart()
+ {
++    // Stop the main window gaining focus and drawing over the top of us...
++    m_save_float_on_parent = 0!= (m_frame_window->GetWindowStyle() &
++        (wxSTAY_ON_TOP | wxFRAME_FLOAT_ON_PARENT) );
++    if (!m_save_float_on_parent)
++    {
++       m_frame_window->SetWindowStyle( m_frame_window->GetWindowStyle() | wxSTAY_ON_TOP);
++    }
+     // notify the owner manager that the pane has started to move
+     m_owner_mgr->OnFloatingPaneMoveStart(m_pane_window);
+ }
+ 
+-void wxAuiFloatingFrame::OnMoving(const wxRect& WXUNUSED(window_rect), wxDirection dir)
++void wxAuiFloatingFrameHandler::OnMoving(const wxRect& WXUNUSED(window_rect), wxDirection dir)
+ {
+     // notify the owner manager that the pane is moving
+     m_owner_mgr->OnFloatingPaneMoving(m_pane_window, dir);
+     m_lastDirection = dir;
+ }
+ 
+-void wxAuiFloatingFrame::OnMoveFinished()
++void wxAuiFloatingFrameHandler::OnMoveFinished()
+ {
++    // Restore falg if required ...
++    if (!m_save_float_on_parent)
++    {
++       m_frame_window->SetWindowStyle( m_frame_window->GetWindowStyle() & ~wxSTAY_ON_TOP);
++    }
++
+     // notify the owner manager that the pane has finished moving
+     m_owner_mgr->OnFloatingPaneMoved(m_pane_window, m_lastDirection);
+ }
+ 
+-void wxAuiFloatingFrame::OnActivate(wxActivateEvent& event)
++void wxAuiFloatingFrameHandler::OnActivate(wxActivateEvent& event)
+ {
+     if (event.GetActive())
+     {
+@@ -293,23 +311,58 @@
+     }
+ }
+ 
++void wxAuiFloatingFrameHandler::OnFindManager(wxAuiManagerEvent& evt)
++{
++    evt.SetManager(&m_mgr);
++}
++
++void wxAuiFloatingFrameHandler::OnMaximize(wxMaximizeEvent &WXUNUSED(evt))
++{
++   // Maximized removes minimized ...
++   m_owner_mgr->OnFloatingPaneMinimized(m_pane_window, false);
++
++   m_owner_mgr->OnFloatingPaneMaximized(m_pane_window,
++                    m_frame_window->IsMaximized());
++}
++
++void wxAuiFloatingFrameHandler::OnMinimize(wxIconizeEvent &WXUNUSED(evt))
++{
++   m_owner_mgr->OnFloatingPaneMaximized(m_pane_window, false);
++
++   m_owner_mgr->OnFloatingPaneMinimized(m_pane_window,
++                    m_frame_window->IsIconized());
++}
++
++void wxAuiFloatingFrameHandler::OnRemoveEventHandler(wxAuiManagerEvent &WXUNUSED(evt))
++{
++   m_frame_window->RemoveEventHandler(this);
++   m_mgr.UnInit();
++   delete this;
++}
++
++
++
+ // utility function which determines the state of the mouse button
+ // (independant of having a wxMouseEvent handy) - utimately a better
+ // mechanism for this should be found (possibly by adding the
+ // functionality to wxWidgets itself)
+-bool wxAuiFloatingFrame::isMouseDown()
++bool wxAuiFloatingFrameHandler::isMouseDown()
+ {
+     return wxGetMouseState().LeftDown();
+ }
+ 
+ 
+-BEGIN_EVENT_TABLE(wxAuiFloatingFrame, wxAuiFloatingFrameBaseClass)
+-    EVT_SIZE(wxAuiFloatingFrame::OnSize)
+-    EVT_MOVE(wxAuiFloatingFrame::OnMoveEvent)
+-    EVT_MOVING(wxAuiFloatingFrame::OnMoveEvent)
+-    EVT_CLOSE(wxAuiFloatingFrame::OnClose)
+-    EVT_IDLE(wxAuiFloatingFrame::OnIdle)
+-    EVT_ACTIVATE(wxAuiFloatingFrame::OnActivate)
++BEGIN_EVENT_TABLE(wxAuiFloatingFrameHandler, wxEvtHandler)
++    EVT_SIZE(wxAuiFloatingFrameHandler::OnSize)
++    EVT_MOVE(wxAuiFloatingFrameHandler::OnMoveEvent)
++    EVT_MOVING(wxAuiFloatingFrameHandler::OnMoveEvent)
++    EVT_CLOSE(wxAuiFloatingFrameHandler::OnClose)
++    EVT_IDLE(wxAuiFloatingFrameHandler::OnIdle)
++    EVT_ACTIVATE(wxAuiFloatingFrameHandler::OnActivate)
++    EVT_AUI_FIND_MANAGER(wxAuiFloatingFrameHandler::OnFindManager)
++    EVT_MAXIMIZE(wxAuiFloatingFrameHandler::OnMaximize)
++    EVT_ICONIZE(wxAuiFloatingFrameHandler::OnMinimize)
++    EVT_AUI_REMOVE_EVENT_HANDLER(wxAuiFloatingFrameHandler::OnRemoveEventHandler)
+ END_EVENT_TABLE()
+ 
+ 
+Index: src/aui/framemanager.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/aui/framemanager.cpp,v
+retrieving revision 1.102
+diff -u -r1.102 framemanager.cpp
+@@ -58,6 +58,7 @@
+ DEFINE_EVENT_TYPE(wxEVT_AUI_PANE_RESTORE)
+ DEFINE_EVENT_TYPE(wxEVT_AUI_RENDER)
+ DEFINE_EVENT_TYPE(wxEVT_AUI_FIND_MANAGER)
++DEFINE_EVENT_TYPE(wxEVT_AUI_REMOVE_EVENT_HANDLER)
+ 
+ #ifdef __WXMAC__
+     // a few defines to avoid nameclashes
+@@ -515,10 +516,56 @@
+ }
+ 
+ // creates a floating frame for the windows
+-wxAuiFloatingFrame* wxAuiManager::CreateFloatingFrame(wxWindow* parent,
+-                                                      const wxAuiPaneInfo& pane_info)
++wxAuiFloatingFrameHandler* wxAuiManager::CreateFloatingFrame(wxWindow* parent,
++                                          const wxAuiPaneInfo& pane_info)
+ {
+-    return new wxAuiFloatingFrame(parent, this, pane_info);
++
++   long style = wxRESIZE_BORDER | wxSYSTEM_MENU | wxCAPTION |
++                wxFRAME_NO_TASKBAR |
++                wxCLIP_CHILDREN |
++                (pane_info.HasCloseButton()?wxCLOSE_BOX:0) |
++                (pane_info.HasMaximizeButton()?wxMAXIMIZE_BOX:0) |
++                (pane_info.HasMinimizeButton()?wxMINIMIZE_BOX:0) |
++                (pane_info.IsFixed()?0:wxRESIZE_BORDER);
++
++   wxFrame *frame = 0;
++
++   if (pane_info.WantFullFrame())
++   {
++       if (pane_info.IsFloatMaximized())
++          style |= wxMAXIMIZE;
++       else if (pane_info.IsFloatMinimized())
++          style |= wxICONIZE;
++
++
++#if wxUSE_MDI
++        if (parent->IsKindOf(CLASSINFO(wxMDIParentFrame)) &&
++              pane_info.IsMDIChild() )
++        {
++            frame = new wxMDIChildFrame(static_cast<wxMDIParentFrame*>(parent),
++              wxID_ANY, wxEmptyString, pane_info.floating_pos,
++              pane_info.floating_size, style);
++        }
++        else
++#endif
++         frame = new wxFrame(parent, wxID_ANY, wxEmptyString,
++              pane_info.floating_pos, pane_info.floating_size, style);
++
++       if (pane_info.IsFloatMaximized())
++          frame->Maximize();
++       else if (pane_info.IsFloatMinimized())
++          frame->Iconize();
++   }
++   else
++   {
++       style |= wxFRAME_FLOAT_ON_PARENT;
++       frame = new wxAuiFloatingFrameBaseClass(parent, wxID_ANY, wxEmptyString,
++              pane_info.floating_pos, pane_info.floating_size, style);
++   }
++
++   frame->SetExtraStyle(wxWS_EX_PROCESS_IDLE);
++
++   return new wxAuiFloatingFrameHandler(frame, this);
+ }
+ 
+ // GetPane() looks up a wxAuiPaneInfo structure based
+@@ -776,7 +823,22 @@
+     if (m_frame)
+     {
+         m_frame->RemoveEventHandler(this);
++
++
++        int i, pane_count;
++        for (i = 0, pane_count = m_panes.GetCount(); i < pane_count; ++i)
++        {
++            wxAuiPaneInfo& p = m_panes.Item(i);
++            if (p.frame)
++            {
++               wxAuiManagerEvent evt(wxEVT_AUI_REMOVE_EVENT_HANDLER);
++               p.frame->GetEventHandler()->ProcessEvent(evt);
++            }
++        }
++
++       m_frame = NULL;
+     }
++
+ }
+ 
+ // GetManagedWindow() returns the window pointer being managed
+@@ -2264,8 +2326,23 @@
+     {
+         wxAuiPaneInfo& p = m_panes.Item(i);
+ 
+-        if (!p.IsFloating() && p.frame)
++        // Should we delete the old frame?
++        if (!p.frame)
++           continue;
++
++        bool delete_frame = !p.IsFloating();
++#if wxUSE_MDI
++        // Look for change of state between MDI Child and normal floating
++        delete_frame = delete_frame ||
++           (p.frame->IsKindOf(CLASSINFO(wxMDIChildFrame)))!=p.IsMDIChild();
++#endif
++
++        if (delete_frame)
+         {
++            // Clear any stray floating frame flags on a dock operation
++            if (!p.IsFloating())
++               p.MDIChild(false).FloatMaximized(false).FloatMinimized(false);
++
+             // because the pane is no longer in a floating, we need to
+             // reparent it to m_frame and destroy the floating frame
+ 
+@@ -2323,26 +2400,26 @@
+             {
+                 // we need to create a frame for this
+                 // pane, which has recently been floated
+-                wxAuiFloatingFrame* frame = CreateFloatingFrame(m_frame, p);
+-
++                wxAuiFloatingFrameHandler* frame = CreateFloatingFrame(m_frame, p);
+                 // on MSW and Mac, if the owner desires transparent dragging, and
+                 // the dragging is happening right now, then the floating
+                 // window should have this style by default
+                 if (m_action == actionDragFloatingPane &&
+                     (m_flags & wxAUI_MGR_TRANSPARENT_DRAG))
+-                        frame->SetTransparent(150);
++                        frame->GetFrame()->SetTransparent(150);
+ 
+                 frame->SetPaneWindow(p);
+-                p.frame = frame;
++                p.frame = frame->GetFrame();
+ 
+-                if (p.IsShown() && !frame->IsShown())
+-                    frame->Show();
++                if (p.IsShown() && !frame->GetFrame()->IsShown())
++                    frame->GetFrame()->Show();
+             }
+              else
+             {
+                 // frame already exists, make sure it's position
+                 // and size reflect the information in wxAuiPaneInfo
+-                if (p.frame->GetPosition() != p.floating_pos)
++                if (p.frame->GetPosition() != p.floating_pos &&
++                      !p.frame->IsMaximized() && !p.frame->IsIconized() )
+                 {
+                     p.frame->SetSize(p.floating_pos.x, p.floating_pos.y,
+                                      p.floating_size.x, p.floating_size.y,
+@@ -2354,6 +2431,15 @@
+                     //p.frame->Move(p.floating_pos.x, p.floating_pos.y);
+                 */
+                 }
++                // do it last so that we "remember" our restore position
++                if (p.IsFloatMaximized() != p.frame->IsMaximized())
++                {
++                   p.frame->Maximize(p.IsFloatMaximized());
++                }
++                if (p.IsFloatMinimized() != p.frame->IsIconized())
++                {
++                   p.frame->Iconize(p.IsFloatMinimized());
++                }
+ 
+                 if (p.frame->IsShown() != p.IsShown())
+                     p.frame->Show(p.IsShown());
+@@ -2607,6 +2693,7 @@
+ const int auiNewRowPixels = 40;
+ const int auiLayerInsertPixels = 40;
+ const int auiLayerInsertOffset = 5;
++const int auiMDIDragOutPixels = 5;
+ 
+ bool wxAuiManager::DoDrop(wxAuiDockInfoArray& docks,
+                           wxAuiPaneInfoArray& panes,
+@@ -2631,6 +2718,48 @@
+     if (drop.IsToolbar())
+         layer_insert_offset = 0;
+ 
++#if wxUSE_MDI
++    if (drop.WantFullFrame() && m_frame->IsKindOf(CLASSINFO(wxMDIParentFrame)))
++    {
++        wxMDIParentFrame *mdi_frame = static_cast<wxMDIParentFrame *>(m_frame);
++        wxWindow* client_window = mdi_frame->GetClientWindow();
++
++        // pt and rect are W.R.T. mdi_frame
++        wxRect rect = client_window->GetRect();
++
++       if (rect.Contains(pt) )
++       {
++          // The MSW client window has a client area offset becuase it has a
++          //  border. We can't easily get this offset directly...
++          int cli_x=0,cli_y=0;
++          client_window->ClientToScreen(&cli_x,&cli_y);
++
++          int rect_x=rect.x,rect_y=rect.y;
++          mdi_frame->ClientToScreen(&rect_x,&rect_y);
++
++          wxPoint client_area_offset = wxPoint(cli_x-rect_x,cli_y-rect_y);
++
++
++          // Drag-out case
++          wxRect inner_rect(rect);
++          inner_rect.Deflate(auiMDIDragOutPixels,auiMDIDragOutPixels);
++          if (!inner_rect.Contains(pt) )
++          {
++             target.MDIChild(0).FloatingPosition(
++                mdi_frame->ClientToScreen(pt)-offset );
++             return true;
++          }
++
++
++          // Convert pt to offset client-area coordinates ...
++          wxPoint mdi_pt = pt-wxPoint(rect.x,rect.y) - client_area_offset;
++
++          target.MDIChild().FloatingPosition(mdi_pt-offset);
++          return true;
++       }
++    }
++#endif
++
+ 
+     if (pt.x < layer_insert_offset &&
+         pt.x > layer_insert_offset-auiLayerInsertPixels)
+@@ -3219,6 +3348,12 @@
+         return rect;
+     }
+ 
++    // Special case of dragging out of MDI ...
++    if (GetPane(pane_window).IsMDIChild() && !hint.IsMDIChild())
++    {
++       return wxRect(hint.floating_pos,hint.floating_size);
++    }
++
+     panes.Add(hint);
+ 
+     wxSizer* sizer = LayoutAll(panes, docks, uiparts, true);
+@@ -3337,7 +3472,7 @@
+ 
+     // calculate the offset from the upper left-hand corner
+     // of the frame to the mouse pointer
+-    wxPoint frame_pos = pane.frame->GetPosition();
++    wxPoint frame_pos = pane.frame->GetScreenPosition();
+     wxPoint action_offset(pt.x-frame_pos.x, pt.y-frame_pos.y);
+ 
+     // no hint for toolbar floating windows
+@@ -3440,10 +3575,11 @@
+ 
+     // calculate the offset from the upper left-hand corner
+     // of the frame to the mouse pointer
+-    wxPoint frame_pos = pane.frame->GetPosition();
+-    wxPoint action_offset(pt.x-frame_pos.x, pt.y-frame_pos.y);
++    wxPoint frame_pos = pane.frame->GetScreenPosition();
++    wxPoint action_offset = pt - pane.frame->GetScreenPosition();
+ 
+ 
++    bool was_mdi = pane.IsMDIChild();
+     // if a key modifier is pressed while dragging the frame,
+     // don't dock the window
+     if (!wxGetKeyState(WXK_CONTROL) && !wxGetKeyState(WXK_ALT))
+@@ -3456,7 +3592,12 @@
+     // position (that we store)
+     if (pane.IsFloating())
+     {
+-        pane.floating_pos = pane.frame->GetPosition();
++        // If we do not change our MDI status, then we can simply read the
++        //  new position as the result of the move.  Otherwise, we must look
++        //  at the drop results because there is a change in reference frame
++        //  when swapping in and out of MDI mode.
++        if (pane.IsMDIChild() == was_mdi)
++           pane.floating_pos = pane.frame->GetPosition();
+ 
+         if (m_flags & wxAUI_MGR_TRANSPARENT_DRAG)
+             pane.frame->SetTransparent(255);
+@@ -3477,10 +3618,32 @@
+     wxAuiPaneInfo& pane = GetPane(wnd);
+     wxASSERT_MSG(pane.IsOk(), wxT("Pane window not found"));
+ 
+-    pane.floating_size = size;
++    if (!pane.IsFloatMaximized() && !pane.IsFloatMinimized())
++       pane.floating_size = size;
+ }
+ 
++void wxAuiManager::OnFloatingPaneMaximized(wxWindow* window,bool maximized)
++{
++    // try to find the pane
++    wxAuiPaneInfo& pane = GetPane(window);
++    wxASSERT_MSG(pane.IsOk(), wxT("Pane window not found"));
++
++    pane.FloatMaximized(maximized);
++}
+ 
++void wxAuiManager::OnFloatingPaneMinimized(wxWindow* window,bool minimized)
++{
++    // try to find the pane
++    wxAuiPaneInfo& pane = GetPane(window);
++    wxASSERT_MSG(pane.IsOk(), wxT("Pane window not found"));
++
++    pane.FloatMinimized(minimized);
++}
++
++
++
++
++
+ void wxAuiManager::OnFloatingPaneClosed(wxWindow* wnd, wxCloseEvent& evt)
+ {
+     // try to find the pane
+@@ -3656,24 +3819,22 @@
+ 
+ void wxAuiManager::OnFindManager(wxAuiManagerEvent& evt)
+ {
++    // Initialise to 0 ...
++    evt.SetManager(NULL);
++
+     // get the window we are managing, if none, return NULL
+     wxWindow* window = GetManagedWindow();
+     if (!window)
+     {
+-        evt.SetManager(NULL);
+-        return;
+-    }
+-    
+-    // if we are managing a child frame, get the 'real' manager
+-    if (window->IsKindOf(CLASSINFO(wxAuiFloatingFrame)))
+-    {
+-        wxAuiFloatingFrame* float_frame = static_cast<wxAuiFloatingFrame*>(window);
+-        evt.SetManager(float_frame->GetOwnerManager());
+         return;
+     }
+-        
+-    // return pointer to ourself
+-    evt.SetManager(this);
++
++    // See it this window wants to overwrite ...
++    window->ProcessEvent(evt);
++
++    // No? ok, it must be us..
++    if (!evt.GetManager())
++       evt.SetManager(this);
+ }
+ 
+ void wxAuiManager::OnSetCursor(wxSetCursorEvent& event)
+@@ -3798,17 +3959,26 @@
+                   part->type == wxAuiDockUIPart::typeGripper)
+         {
+             // if we are managing a wxAuiFloatingFrame window, then
+-            // we are an embedded wxAuiManager inside the wxAuiFloatingFrame.
++            // we are an embedded wxAuiManager - our "root" manager should
++            //  do all the work.
+             // We want to initiate a toolbar drag in our owner manager
+             wxWindow* managed_wnd = GetManagedWindow();
++            wxAuiManager* owner_mgr = 0;
++
++            // Find the "root" manager ...
++            if (managed_wnd)
++            {
++               wxAuiManagerEvent evt(wxEVT_AUI_FIND_MANAGER);
++               managed_wnd->ProcessEvent(evt);
++               owner_mgr = evt.GetManager();
++            }
+             
++            // Are we managed by someone else?
+             if (part->pane && 
+                 part->pane->window &&
+                 managed_wnd &&
+-                managed_wnd->IsKindOf(CLASSINFO(wxAuiFloatingFrame)))
++                owner_mgr != this && owner_mgr!=0 )
+             {
+-                wxAuiFloatingFrame* floating_frame = (wxAuiFloatingFrame*)managed_wnd;
+-                wxAuiManager* owner_mgr = floating_frame->GetOwnerManager();
+                 owner_mgr->StartPaneDrag(part->pane->window,
+                                              wxPoint(event.m_x - part->rect.x,
+                                                      event.m_y - part->rect.y));
+@@ -4201,6 +4371,7 @@
+         pane.state |= wxAuiPaneInfo::actionPane;
+ 
+         wxPoint pt = event.GetPosition();
++
+         DoDrop(m_docks, m_panes, pane, pt, m_action_offset);
+ 
+         // if DoDrop() decided to float the pane, set up
+Index: include/wx/aui/floatpane.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/aui/floatpane.h,v
+retrieving revision 1.13
+diff -u -r1.13 floatpane.h
+@@ -21,6 +21,7 @@
+ #if wxUSE_AUI
+ 
+ #include "wx/frame.h"
++#include "wx/aui/framemanager.h"
+ 
+ #if defined( __WXMSW__ ) || defined( __WXMAC__ ) ||  defined( __WXGTK__ )
+ #include "wx/minifram.h"
+@@ -29,20 +30,16 @@
+ #define wxAuiFloatingFrameBaseClass wxFrame
+ #endif
+ 
+-class WXDLLIMPEXP_AUI wxAuiFloatingFrame : public wxAuiFloatingFrameBaseClass
++
++
++class WXDLLIMPEXP_AUI wxAuiFloatingFrameHandler : public wxEvtHandler
+ {
+ public:
+-    wxAuiFloatingFrame(wxWindow* parent,
+-                   wxAuiManager* owner_mgr,
+-                   const wxAuiPaneInfo& pane,
+-                   wxWindowID id = wxID_ANY,
+-                   long style = wxRESIZE_BORDER | wxSYSTEM_MENU | wxCAPTION |
+-                                wxFRAME_NO_TASKBAR | wxFRAME_FLOAT_ON_PARENT | 
+-                                wxCLIP_CHILDREN
+-                   );
+-    virtual ~wxAuiFloatingFrame();
++    wxAuiFloatingFrameHandler(wxFrame* frame, wxAuiManager* owner_mgr);
++    virtual ~wxAuiFloatingFrameHandler();
+     void SetPaneWindow(const wxAuiPaneInfo& pane);
+     wxAuiManager* GetOwnerManager() const;
++    wxFrame *GetFrame();
+     
+ protected:
+     virtual void OnMoveStart();
+@@ -55,10 +52,17 @@
+     void OnMoveEvent(wxMoveEvent& event);
+     void OnIdle(wxIdleEvent& event);
+     void OnActivate(wxActivateEvent& event);
++    void OnFindManager(wxAuiManagerEvent& evt);
++    void OnMaximize(wxMaximizeEvent &evt);
++    void OnMinimize(wxIconizeEvent &evt);
++    void OnRemoveEventHandler(wxAuiManagerEvent &evt);
++
+     static bool isMouseDown();
+     
+ private:
++    wxFrame*  m_frame_window;  // The frame around the pane window
+     wxWindow* m_pane_window;    // pane window being managed
++    bool m_save_float_on_parent;
+     bool m_solid_drag;          // true if system uses solid window drag
+     bool m_moving;
+     wxRect m_last_rect;
+@@ -72,7 +76,7 @@
+ 
+ #ifndef SWIG
+     DECLARE_EVENT_TABLE()
+-    DECLARE_CLASS(wxAuiFloatingFrame)
++    DECLARE_CLASS(wxAuiFloatingFrameHandler)
+ #endif // SWIG
+ };
+ 
+Index: include/wx/aui/framemanager.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/aui/framemanager.h,v
+retrieving revision 1.44
+diff -u -r1.44 framemanager.h
+@@ -240,6 +240,9 @@
+     bool IsMovable() const { return HasFlag(optionMovable); }
+     bool IsDestroyOnClose() const { return HasFlag(optionDestroyOnClose); }
+     bool IsMaximized() const { return HasFlag(optionMaximized); }
++    bool IsMDIChild() const { return HasFlag(optionMDIChild); }
++    bool IsFloatMaximized() const { return HasFlag(optionFloatMaximized); }
++    bool IsFloatMinimized() const { return HasFlag(optionFloatMinimized); }
+     bool HasCaption() const { return HasFlag(optionCaption); }
+     bool HasGripper() const { return HasFlag(optionGripper); }
+     bool HasBorder() const { return HasFlag(optionPaneBorder); }
+@@ -248,6 +251,7 @@
+     bool HasMinimizeButton() const { return HasFlag(buttonMinimize); }
+     bool HasPinButton() const { return HasFlag(buttonPin); }
+     bool HasGripperTop() const { return HasFlag(optionGripperTop); }
++    bool WantFullFrame() const { return HasFlag(optionFloatFullFrame); }
+ 
+ #ifdef SWIG
+     %typemap(out) wxAuiPaneInfo& { $result = $self; Py_INCREF($result); }
+@@ -275,6 +279,8 @@
+     wxAuiPaneInfo& FloatingPosition(int x, int y) { floating_pos.x = x; floating_pos.y = y; return *this; }
+     wxAuiPaneInfo& FloatingSize(const wxSize& size) { floating_size = size; return *this; }
+     wxAuiPaneInfo& FloatingSize(int x, int y) { floating_size.Set(x,y); return *this; }
++    wxAuiPaneInfo& FloatMaximized(bool maximized) {  return SetFlag(optionFloatMaximized, maximized); }
++    wxAuiPaneInfo& FloatMinimized(bool maximized) {  return SetFlag(optionFloatMinimized, maximized); }
+     wxAuiPaneInfo& Fixed() { return SetFlag(optionResizable, false); }
+     wxAuiPaneInfo& Resizable(bool resizable = true) { return SetFlag(optionResizable, resizable); }
+     wxAuiPaneInfo& Dock() { return SetFlag(optionFloating, false); }
+@@ -297,6 +303,13 @@
+     wxAuiPaneInfo& LeftDockable(bool b = true) { return SetFlag(optionLeftDockable, b); }
+     wxAuiPaneInfo& RightDockable(bool b = true) { return SetFlag(optionRightDockable, b); }
+     wxAuiPaneInfo& Floatable(bool b = true) { return SetFlag(optionFloatable, b); }
++    wxAuiPaneInfo& FloatFullFrame(bool b = true)
++    {
++       if (b)
++          SetFlag(buttonMaximize|buttonMinimize,true);
++       return SetFlag(optionFloatFullFrame, b);
++    }
++    wxAuiPaneInfo& MDIChild(bool b = true) { if (b) SetFlag(optionFloating,true); return SetFlag(optionMDIChild, b); }
+     wxAuiPaneInfo& Movable(bool b = true) { return SetFlag(optionMovable, b); }
+ 
+     wxAuiPaneInfo& Dockable(bool b = true)
+@@ -375,6 +388,10 @@
+         optionActive          = 1 << 14,
+         optionGripperTop      = 1 << 15,
+         optionMaximized       = 1 << 16,
++        optionFloatFullFrame  = 1 << 17,
++        optionMDIChild        = 1 << 18,
++        optionFloatMaximized  = 1 << 19,
++        optionFloatMinimized  = 1 << 20,
+ 
+         buttonClose           = 1 << 21,
+         buttonMaximize        = 1 << 22,
+@@ -417,11 +434,11 @@
+ 
+ 
+ 
+-class WXDLLIMPEXP_AUI wxAuiFloatingFrame;
++class WXDLLIMPEXP_AUI wxAuiFloatingFrameHandler;
+ 
+ class WXDLLIMPEXP_AUI wxAuiManager : public wxEvtHandler
+ {
+-friend class wxAuiFloatingFrame;
++friend class wxAuiFloatingFrameHandler;
+ 
+ public:
+ 
+@@ -482,7 +499,7 @@
+ 
+ public:
+ 
+-    virtual wxAuiFloatingFrame* CreateFloatingFrame(wxWindow* parent, const wxAuiPaneInfo& p);
++    virtual wxAuiFloatingFrameHandler* CreateFloatingFrame(wxWindow* parent, const wxAuiPaneInfo& p);
+ 
+     void StartPaneDrag(
+                  wxWindow* pane_window,
+@@ -549,6 +566,8 @@
+     void OnFloatingPaneActivated(wxWindow* window);
+     void OnFloatingPaneClosed(wxWindow* window, wxCloseEvent& evt);
+     void OnFloatingPaneResized(wxWindow* window, const wxSize& size);
++    void OnFloatingPaneMaximized(wxWindow* window,bool maximized);
++    void OnFloatingPaneMinimized(wxWindow* window,bool minimized);
+     void Render(wxDC* dc);
+     void Repaint(wxDC* dc = NULL);
+     void ProcessMgrEvent(wxAuiManagerEvent& event);
+@@ -806,6 +825,7 @@
+     DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_AUI, wxEVT_AUI_PANE_RESTORE, 0)
+     DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_AUI, wxEVT_AUI_RENDER, 0)
+     DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_AUI, wxEVT_AUI_FIND_MANAGER, 0)
++    DECLARE_EXPORTED_EVENT_TYPE(WXDLLIMPEXP_AUI, wxEVT_AUI_REMOVE_EVENT_HANDLER, 0)
+ END_DECLARE_EVENT_TYPES()
+ 
+ typedef void (wxEvtHandler::*wxAuiManagerEventFunction)(wxAuiManagerEvent&);
+@@ -825,6 +845,8 @@
+    wx__DECLARE_EVT0(wxEVT_AUI_RENDER, wxAuiManagerEventHandler(func))
+ #define EVT_AUI_FIND_MANAGER(func) \
+    wx__DECLARE_EVT0(wxEVT_AUI_FIND_MANAGER, wxAuiManagerEventHandler(func))
++#define EVT_AUI_REMOVE_EVENT_HANDLER(func) \
++   wx__DECLARE_EVT0(wxEVT_AUI_REMOVE_EVENT_HANDLER, wxAuiManagerEventHandler(func))
+ 
+ #else
+ 
+@@ -834,6 +856,7 @@
+ %constant wxEventType wxEVT_AUI_PANE_RESTORE;
+ %constant wxEventType wxEVT_AUI_RENDER;
+ %constant wxEventType wxEVT_AUI_FIND_MANAGER;
++%constant wxEventType wxEVT_AUI_REMOVE_EVENT_HANDLER;
+ 
+ %pythoncode {
+     EVT_AUI_PANE_BUTTON = wx.PyEventBinder( wxEVT_AUI_PANE_BUTTON )
+@@ -842,6 +865,7 @@
+     EVT_AUI_PANE_RESTORE = wx.PyEventBinder( wxEVT_AUI_PANE_RESTORE )
+     EVT_AUI_RENDER = wx.PyEventBinder( wxEVT_AUI_RENDER )
+     EVT_AUI_FIND_MANAGER = wx.PyEventBinder( wxEVT_AUI_FIND_MANAGER )
++    EVT_AUI_REMOVE_EVENT_HANDLER = wx.PyEventBinder( wxEVT_AUI_REMOVE_EVENT_HANDLER )
+ }
+ #endif // SWIG
+ 
+
+ 	  	 

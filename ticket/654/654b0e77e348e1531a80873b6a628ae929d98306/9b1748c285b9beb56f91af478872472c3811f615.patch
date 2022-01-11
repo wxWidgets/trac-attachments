@@ -1,0 +1,161 @@
+Index: include/wx/dynlib.h
+===================================================================
+--- include/wx/dynlib.h	(revision 76075)
++++ include/wx/dynlib.h	(working copy)
+@@ -347,6 +347,14 @@
+     // string on others:
+     static wxString GetPluginsDirectory();
+ 
++#if ( defined(__WINDOWS__) || (defined(__UNIX__) && defined(_GNU_SOURCE)) )
++    // Return the load address of the module containing the given
++    // address or NULL if not found.
++    //
++    // If name output parameter is non-NULL, fill it with the
++    // name of this module on success.
++    static void* GetModuleFromAddress(const void* addr, wxString* name = NULL);
++#endif // __WINDOWS__ || __UNIX__
+ 
+ #ifdef __WINDOWS__
+     // return the handle (HMODULE/HINSTANCE) of the DLL with the given name
+@@ -365,6 +373,12 @@
+     // common part of GetSymbol() and HasSymbol()
+     void *DoGetSymbol(const wxString& name, bool *success = 0) const;
+ 
++#ifdef __WINDOWS__
++    // Check for presence of GetModuleHandleEx() in kernel32.dll and return
++    // it's address. Common part of MSWGetModuleHandle and GetModuleFromAddress
++    static void* CheckForGetModuleHandleEx();
++#endif
++
+ #ifdef wxHAVE_DYNLIB_ERROR
+     // log the error after a dlxxx() function failure
+     static void Error();
+Index: src/msw/dlmsw.cpp
+===================================================================
+--- src/msw/dlmsw.cpp	(revision 76075)
++++ src/msw/dlmsw.cpp	(working copy)
+@@ -297,7 +297,45 @@
+     return dlls;
+ }
+ 
++// function pointer type for GetModuleHandleEx()
++typedef BOOL (WINAPI *GetModuleHandleEx_t)(DWORD, LPCTSTR, HMODULE *);
++
+ /* static */
++void* wxDynamicLibrary::GetModuleFromAddress(const void* addr, wxString* name)
++{
++    GetModuleHandleEx_t pfnGetModuleHandleEx = 
++        (GetModuleHandleEx_t) CheckForGetModuleHandleEx();
++
++    if ( pfnGetModuleHandleEx ) {
++        // flags are GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT |
++        //           GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
++        HMODULE hmod;
++        if ( !pfnGetModuleHandleEx(6, (LPCTSTR)addr, &hmod) || !hmod )
++        {
++            wxLogLastError(wxT("GetModuleFromAddress"));
++            return NULL;
++        }
++
++        // GetModuleFileName could also return extended-length paths
++        // (paths prepended with "//?/", maximum length is 32767 charachters)
++        // so, in principle, MAX_PATH could be unsufficient.
++        TCHAR libname[MAX_PATH];
++        DWORD n_characters = GetModuleFileName(hmod, libname, MAX_PATH);
++        if ( n_characters == 0 ) {
++            wxLogLastError(wxT("GetModuleFromAddress"));
++            return NULL;
++        }
++        libname[MAX_PATH-1] = TEXT('\0');
++        *name = libname;
++
++        // in Windows HMODULE is actually the base address of the module
++        return (void *) hmod;
++    }
++
++    return NULL;
++}
++
++/* static */
+ WXHMODULE wxDynamicLibrary::MSWGetModuleHandle(const wxString& name, void *addr)
+ {
+     // we want to use GetModuleHandleEx() instead of usual GetModuleHandle()
+@@ -304,13 +342,30 @@
+     // because the former works correctly for comctl32.dll while the latter
+     // returns NULL when comctl32.dll version 6 is used under XP (note that
+     // GetModuleHandleEx() is only available under XP and later, coincidence?)
++    GetModuleHandleEx_t pfnGetModuleHandleEx =
++        (GetModuleHandleEx_t) CheckForGetModuleHandleEx();
+ 
++    // get module handle from its address
++    if ( pfnGetModuleHandleEx )
++    {
++        // flags are GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT |
++        //           GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
++        HMODULE hmod;
++        if ( pfnGetModuleHandleEx(6, (LPCTSTR)addr, &hmod) && hmod )
++            return hmod;
++    }
++
++    return ::GetModuleHandle(name.t_str());
++}
++
++/* static */
++void* wxDynamicLibrary::CheckForGetModuleHandleEx()
++{
+     // check if we can use GetModuleHandleEx
+-    typedef BOOL (WINAPI *GetModuleHandleEx_t)(DWORD, LPCTSTR, HMODULE *);
+-
+     static const GetModuleHandleEx_t INVALID_FUNC_PTR = (GetModuleHandleEx_t)-1;
+ 
+     static GetModuleHandleEx_t s_pfnGetModuleHandleEx = INVALID_FUNC_PTR;
++
+     if ( s_pfnGetModuleHandleEx == INVALID_FUNC_PTR )
+     {
+         wxDynamicLibrary dll(wxT("kernel32.dll"), wxDL_VERBATIM);
+@@ -319,18 +374,7 @@
+ 
+         // dll object can be destroyed, kernel32.dll won't be unloaded anyhow
+     }
+-
+-    // get module handle from its address
+-    if ( s_pfnGetModuleHandleEx )
+-    {
+-        // flags are GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT |
+-        //           GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+-        HMODULE hmod;
+-        if ( s_pfnGetModuleHandleEx(6, (LPCTSTR)addr, &hmod) && hmod )
+-            return hmod;
+-    }
+-
+-    return ::GetModuleHandle(name.t_str());
++    return s_pfnGetModuleHandleEx;
+ }
+ 
+ #endif // wxUSE_DYNLIB_CLASS
+Index: src/unix/dlunix.cpp
+===================================================================
+--- src/unix/dlunix.cpp	(revision 76075)
++++ src/unix/dlunix.cpp	(working copy)
+@@ -280,5 +280,21 @@
+     return dlls;
+ }
+ 
++#ifdef _GNU_SOURCE
++/* static */
++void* wxDynamicLibrary::GetModuleFromAddress(const void* addr, wxString* name)
++{
++    Dl_info di = {};
++
++    if ( dladdr(addr, &di) == 0 ) {
++        return NULL;
++    }
++    if ( name != NULL ) {
++        *name = di.dli_fname;
++    }
++    return di.dli_fbase;
++}
++#endif // _GNU_SOURCE
++
+ #endif // wxUSE_DYNLIB_CLASS
+ 

@@ -1,0 +1,126 @@
+--- include/wx/filesys.h	2005/09/23 12:48:39	1.31
++++ include/wx/filesys.h	2006/02/11 11:04:59
+@@ -181,6 +181,9 @@
+     wxString FindFirst(const wxString& spec, int flags = 0);
+     wxString FindNext();
+ 
++    // find a file in a list of directories, returns false if not found
++    bool FindFileInPath(wxString *pStr, const wxChar *pszPath, const wxChar *pszFile);
++
+     // Adds FS handler.
+     // In fact, this class is only front-end to the FS handlers :-)
+     static void AddHandler(wxFileSystemHandler *handler);
+--- src/common/filesys.cpp	2005/09/23 12:52:53	1.61
++++ src/common/filesys.cpp	2006/02/11 10:56:33
+@@ -22,8 +22,8 @@
+ #include "wx/mimetype.h"
+ #include "wx/filename.h"
+ #include "wx/log.h"
++#include "wx/tokenzr.h"
+ 
+-
+ //--------------------------------------------------------------------------------
+ // wxFileSystemHandler
+ //--------------------------------------------------------------------------------
+@@ -442,8 +442,36 @@
+     if (m_FindFileHandler == NULL) return wxEmptyString;
+     else return m_FindFileHandler -> FindNext();
+ }
+-
+ 
++// find a file in a list of directories, returns false if not found
++bool wxFileSystem::FindFileInPath(wxString *pStr, const wxChar *pszPath, const wxChar *pszFile)
++{
++    // we assume that it's not empty
++    wxCHECK_MSG( !wxIsEmpty(pszFile), false,
++                _T("empty file name in wxFileSystem::FindFileInPath"));
++
++    // skip path separator in the beginning of the file name if present
++    if ( wxIsPathSeparator(*pszFile) )
++       pszFile++;
++
++    wxStringTokenizer tokenizer(pszPath, wxPATH_SEP);
++    while(tokenizer.HasMoreTokens())
++    {
++        wxString strFile = tokenizer.GetNextToken();
++        if ( !wxEndsWithPathSeparator(strFile) )
++            strFile += wxFILE_SEP_PATH;
++        strFile += pszFile;
++
++        wxFSFile *file = OpenFile(strFile);
++        if ( file != NULL ) {
++            delete file;
++            *pStr = strFile;
++            return true;
++        }
++    }
++    	
++    return false;
++}
+ 
+ void wxFileSystem::AddHandler(wxFileSystemHandler *handler)
+ {
+--- src/common/intl.cpp	2006/01/18 16:45:37	1.177
++++ src/common/intl.cpp	2006/02/11 11:04:14
+@@ -77,6 +77,7 @@
+ #include "wx/ptr_scpd.h"
+ #include "wx/app.h"
+ #include "wx/apptrait.h"
++#include "wx/filesys.h"
+ 
+ #if defined(__WXMAC__)
+   #include  "wx/mac/private.h"  // includes mac headers
+@@ -1113,11 +1114,13 @@
+                szName, searchPath.c_str());
+   wxLogTrace(TRACE_I18N, _T("Looking for \"%s.mo\" in \"%s\""),
+              szName, searchPath.c_str());
+-
++  
+   wxFileName fn(szName);
+   fn.SetExt(_T("mo"));
+   wxString strFullName;
+-  if ( !wxFindFileInPath(&strFullName, searchPath, fn.GetFullPath()) ) {
++  
++  wxFileSystem filesystem;
++  if ( !filesystem.FindFileInPath(&strFullName, searchPath, fn.GetFullPath()) ) {
+     wxLogVerbose(_("catalog file for domain '%s' not found."), szName);
+     wxLogTrace(TRACE_I18N, _T("Catalog \"%s.mo\" not found"), szName);
+     return false;
+@@ -1127,24 +1130,26 @@
+   wxLogVerbose(_("using catalog '%s' from '%s'."), szName, strFullName.c_str());
+   wxLogTrace(TRACE_I18N, _T("Using catalog \"%s\"."), strFullName.c_str());
+ 
+-  wxFile fileMsg(strFullName);
+-  if ( !fileMsg.IsOpened() )
++  wxFSFile *fileMsg = filesystem.OpenFile(strFullName);
++  if ( fileMsg == NULL )
+     return false;
+-
++  
+   // get the file size (assume it is less than 4Gb...)
+-  wxFileOffset lenFile = fileMsg.Length();
+-  if ( lenFile == wxInvalidOffset )
++  wxFileOffset nSize = fileMsg->GetStream()->GetLength();
++  if ( nSize == wxInvalidOffset ) {
++    delete fileMsg;
+     return false;
+-
+-  size_t nSize = wx_truncate_cast(size_t, lenFile);
+-  wxASSERT_MSG( nSize == lenFile + size_t(0), _T("message catalog bigger than 4GB?") );
++  }
+ 
+   // read the whole file in memory
+   m_pData = new size_t8[nSize];
+-  if ( fileMsg.Read(m_pData, nSize) != lenFile ) {
++  if ( fileMsg->GetStream()->Read(m_pData, (size_t)nSize).LastRead() != (size_t)nSize ) {
++    delete fileMsg;
+     wxDELETEA(m_pData);
+     return false;
+   }
++
++  delete fileMsg;
+ 
+   // examine header
+   bool bValid = nSize + (size_t)0 > sizeof(wxMsgCatalogHeader);
+
+ 	  	 

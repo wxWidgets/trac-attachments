@@ -1,0 +1,370 @@
+From 01b8a501f6d8eaeaa0d7c1a206c307fd0f0205c3 Mon Sep 17 00:00:00 2001
+From: Roger Sanders <sanders_roger@hotmail.com>
+Date: Sun, 27 Sep 2015 07:24:27 +1000
+Subject: [PATCH] Fixed memory corruption from incorrect use of wxSizer
+
+---
+ include/wx/sizer.h        | 15 +++++++++++++++
+ include/wx/window.h       | 16 ++++++++++++++--
+ interface/wx/window.h     |  4 +---
+ src/common/gbsizer.cpp    |  2 +-
+ src/common/sizer.cpp      | 41 ++++++++++++++++++++++++-----------------
+ src/common/wincmn.cpp     | 26 ++++++++++++++++++++++++++
+ src/common/wrapsizer.cpp  | 33 +++++++++++++++++----------------
+ src/generic/collpaneg.cpp |  8 ++++----
+ 8 files changed, 102 insertions(+), 43 deletions(-)
+
+diff --git a/include/wx/sizer.h b/include/wx/sizer.h
+index 5fdcf1b..58e968c 100644
+--- a/include/wx/sizer.h
++++ b/include/wx/sizer.h
+@@ -746,6 +746,21 @@ protected:
+     // itself
+     virtual wxSizerItem* DoInsert(size_t index, wxSizerItem *item);
+ 
++    // Proxy methods for the private containing sizer methods we have access to
++    // on the wxWindowBase class due to friendship. This allows derived classes
++    // to access these methods too.
++    static void AddContainingSizerForWindow( wxWindow *window, wxSizer *sizer )
++        { window->AddContainingSizer(sizer); }
++    static void RemoveContainingSizerForWindow( wxWindow *window, wxSizer *sizer )
++        { window->RemoveContainingSizer(sizer); }
++
++    // If you want an "invisible" wxSizer that performs part of a layout
++    // operation within another sizer, override this method to make the items
++    // that are added to this sizer think they're really part of the parent
++    // "controlling" sizer. Used by the wxWrapSizer class.
++    virtual wxSizer* GetControllingSizer()
++        { return this; }
++
+ private:
+     wxDECLARE_CLASS(wxSizer);
+ };
+diff --git a/include/wx/window.h b/include/wx/window.h
+index 51f6163..26f847a 100644
+--- a/include/wx/window.h
++++ b/include/wx/window.h
+@@ -1430,8 +1430,12 @@ public:
+ 
+     wxSizer *GetSizer() const { return m_windowSizer; }
+ 
+-    // Track if this window is a member of a sizer
+-    void SetContainingSizer(wxSizer* sizer);
++    // Replaced with internal AddContainingSizer/RemoveContainingSizer methods
++    // to prevent memory corruption on sizer misuse. There was never a good
++    // reason to call this function externally! Get the containing sizer and
++    // call its Detach method instead.
++    wxDEPRECATED( void SetContainingSizer(wxSizer* sizer) );
++
+     wxSizer *GetContainingSizer() const { return m_containingSizer; }
+ 
+     // accessibility
+@@ -1864,6 +1868,14 @@ private:
+     // base for dialog unit conversion, i.e. average character size
+     wxSize GetDlgUnitBase() const;
+ 
++    // Track if this window is a member of a sizer
++    void AddContainingSizer(wxSizer* sizer);
++    void RemoveContainingSizer(wxSizer* sizer);
++
++    // Allows sizers to update the containing sizer for a window without making
++    // the functions public
++    friend class WXDLLIMPEXP_FWD_CORE wxSizer;
++
+ 
+     // number of Freeze() calls minus the number of Thaw() calls: we're frozen
+     // (i.e. not being updated) if it is positive
+diff --git a/interface/wx/window.h b/interface/wx/window.h
+index cc50b7a..5a9de78 100644
+--- a/interface/wx/window.h
++++ b/interface/wx/window.h
+@@ -1316,9 +1316,7 @@ public:
+     void SetClientSize(const wxRect& rect);
+ 
+     /**
+-        This normally does not need to be called by user code.
+-        It is called when a window is added to a sizer, and is used so the window
+-        can remove itself from the sizer when it is destroyed.
++        @deprecated Use wxSizer::Detach instead
+     */
+     void SetContainingSizer(wxSizer* sizer);
+ 
+diff --git a/src/common/gbsizer.cpp b/src/common/gbsizer.cpp
+index 3b29187..e580f01 100644
+--- a/src/common/gbsizer.cpp
++++ b/src/common/gbsizer.cpp
+@@ -224,7 +224,7 @@ wxSizerItem* wxGridBagSizer::Add( wxGBSizerItem *item )
+     m_children.Append(item);
+     item->SetGBSizer(this);
+     if ( item->GetWindow() )
+-        item->GetWindow()->SetContainingSizer( this );
++        AddContainingSizerForWindow( item->GetWindow(), this );
+ 
+     // extend the number of rows/columns of the underlying wxFlexGridSizer if
+     // necessary
+diff --git a/src/common/sizer.cpp b/src/common/sizer.cpp
+index cd2e50c..df009da 100644
+--- a/src/common/sizer.cpp
++++ b/src/common/sizer.cpp
+@@ -306,10 +306,7 @@ void wxSizerItem::Free()
+     switch ( m_kind )
+     {
+         case Item_None:
+-            break;
+-
+         case Item_Window:
+-            m_window->SetContainingSizer(NULL);
+             break;
+ 
+         case Item_Sizer:
+@@ -580,10 +577,6 @@ void wxSizerItem::DeleteWindows()
+             break;
+ 
+         case Item_Window:
+-            //We are deleting the window from this sizer - normally
+-            //the window destroys the sizer associated with it,
+-            //which might destroy this, which we don't want
+-            m_window->SetContainingSizer(NULL);
+             m_window->Destroy();
+             //Putting this after the switch will result in a spacer
+             //not being deleted properly on destruction
+@@ -665,7 +658,7 @@ bool wxSizerItem::IsShown() const
+ 
+ wxSizer::~wxSizer()
+ {
+-    WX_CLEAR_LIST(wxSizerItemList, m_children);
++    Clear(false);
+ }
+ 
+ wxSizerItem* wxSizer::DoInsert( size_t index, wxSizerItem *item )
+@@ -673,7 +666,7 @@ wxSizerItem* wxSizer::DoInsert( size_t index, wxSizerItem *item )
+     m_children.Insert( index, item );
+ 
+     if ( item->GetWindow() )
+-        item->GetWindow()->SetContainingSizer( this );
++        AddContainingSizerForWindow( item->GetWindow(), GetControllingSizer() );
+ 
+     if ( item->GetSizer() )
+         item->GetSizer()->SetContainingWindow( m_containingWindow );
+@@ -736,7 +729,12 @@ bool wxSizer::Remove( int index )
+ 
+     wxCHECK_MSG( node, false, wxT("Failed to find child node") );
+ 
+-    delete node->GetData();
++    wxSizerItem *item = node->GetData();
++
++    if (item->IsWindow())
++        RemoveContainingSizerForWindow(item->GetWindow(), GetControllingSizer());
++
++    delete item;
+     m_children.Erase( node );
+ 
+     return true;
+@@ -775,6 +773,7 @@ bool wxSizer::Detach( wxWindow *window )
+ 
+         if (item->GetWindow() == window)
+         {
++            RemoveContainingSizerForWindow(window, GetControllingSizer());
+             delete item;
+             m_children.Erase( node );
+             return true;
+@@ -797,6 +796,9 @@ bool wxSizer::Detach( int index )
+ 
+     wxSizerItem *item = node->GetData();
+ 
++    if (item->IsWindow() && item->GetWindow())
++        RemoveContainingSizerForWindow(item->GetWindow(), GetControllingSizer());
++
+     if ( item->IsSizer() )
+         item->DetachSizer();
+ 
+@@ -817,8 +819,9 @@ bool wxSizer::Replace( wxWindow *oldwin, wxWindow *newwin, bool recursive )
+ 
+         if (item->GetWindow() == oldwin)
+         {
++            RemoveContainingSizerForWindow(oldwin, GetControllingSizer());
+             item->AssignWindow(newwin);
+-            newwin->SetContainingSizer( this );
++            AddContainingSizerForWindow(newwin, GetControllingSizer());
+             return true;
+         }
+         else if (recursive && item->IsSizer())
+@@ -873,7 +876,7 @@ bool wxSizer::Replace( size_t old, wxSizerItem *newitem )
+     node->SetData(newitem);
+ 
+     if (item->IsWindow() && item->GetWindow())
+-        item->GetWindow()->SetContainingSizer(NULL);
++        RemoveContainingSizerForWindow(item->GetWindow(), GetControllingSizer());
+ 
+     delete item;
+ 
+@@ -882,14 +885,15 @@ bool wxSizer::Replace( size_t old, wxSizerItem *newitem )
+ 
+ void wxSizer::Clear( bool delete_windows )
+ {
+-    // First clear the ContainingSizer pointers
++    // First clear the ContainingSizer pointers, unless we're deleting the
++    // windows, in which case this is handled by that process.
+     wxSizerItemList::compatibility_iterator node = m_children.GetFirst();
+     while (node)
+     {
+         wxSizerItem     *item = node->GetData();
+ 
+-        if (item->IsWindow())
+-            item->GetWindow()->SetContainingSizer( NULL );
++        if (!delete_windows && item->IsWindow())
++            RemoveContainingSizerForWindow(item->GetWindow(), GetControllingSizer());
+         node = node->GetNext();
+     }
+ 
+@@ -908,6 +912,9 @@ void wxSizer::DeleteWindows()
+     {
+         wxSizerItem     *item = node->GetData();
+ 
++        if (item->IsWindow())
++            RemoveContainingSizerForWindow(item->GetWindow(), GetControllingSizer());
++
+         item->DeleteWindows();
+         node = node->GetNext();
+     }
+@@ -2561,7 +2568,7 @@ wxStaticBoxSizer::wxStaticBoxSizer( wxStaticBox *box, int orient )
+ 
+     // do this so that our Detach() is called if the static box is destroyed
+     // before we are
+-    m_staticBox->SetContainingSizer(this);
++    AddContainingSizerForWindow(m_staticBox, GetControllingSizer());
+ }
+ 
+ wxStaticBoxSizer::wxStaticBoxSizer(int orient, wxWindow *win, const wxString& s)
+@@ -2569,7 +2576,7 @@ wxStaticBoxSizer::wxStaticBoxSizer(int orient, wxWindow *win, const wxString& s)
+                   m_staticBox(new wxStaticBox(win, wxID_ANY, s))
+ {
+     // same as above
+-    m_staticBox->SetContainingSizer(this);
++    AddContainingSizerForWindow(m_staticBox, GetControllingSizer());
+ }
+ 
+ wxStaticBoxSizer::~wxStaticBoxSizer()
+diff --git a/src/common/wincmn.cpp b/src/common/wincmn.cpp
+index eaba022..8d9a069 100644
+--- a/src/common/wincmn.cpp
++++ b/src/common/wincmn.cpp
+@@ -2464,6 +2464,32 @@ void wxWindowBase::SetSizerAndFit(wxSizer *sizer, bool deleteOld)
+ }
+ 
+ 
++// ----------------------------------------------------------------------------
++// Containing sizer functions
++// ----------------------------------------------------------------------------
++void wxWindowBase::AddContainingSizer(wxSizer* sizer)
++{
++    wxASSERT_MSG( sizer, wxS("AddContainingSizer called with a null sizer") );
++    wxASSERT_MSG( (m_containingSizer != sizer), wxS("Adding a window to the same sizer twice?") );
++    wxASSERT_MSG( !m_containingSizer, wxS("Adding a window already in a sizer, detach it first!") );
++    if ( m_containingSizer )
++    {
++        // If we've got here, there's already a serious problem, since the
++        // window must not already be contained in a sizer when this function
++        // is called. That said, to avoid memory corruption, we must detach from
++        // the previous sizer before going any further.
++        m_containingSizer->Detach( (wxWindow*) this );
++        wxASSERT_MSG( !m_containingSizer, wxS("AddContainingSizer failed to remove an existing containing sizer. You will almost certainly get memory corruption!") );
++    }
++    m_containingSizer = sizer;
++}
++
++void wxWindowBase::RemoveContainingSizer(wxSizer* sizer)
++{
++    wxASSERT_MSG( (m_containingSizer == sizer), wxS("RemoveContainingSizer called with a different sizer than the containing sizer.") );
++    m_containingSizer = 0;
++}
++
+ void wxWindowBase::SetContainingSizer(wxSizer* sizer)
+ {
+     // Adding a window to another sizer if it's already managed by one would
+diff --git a/src/common/wrapsizer.cpp b/src/common/wrapsizer.cpp
+index 3df35e7..16a55fb 100644
+--- a/src/common/wrapsizer.cpp
++++ b/src/common/wrapsizer.cpp
+@@ -61,6 +61,22 @@ private:
+     wxDECLARE_NO_COPY_CLASS(wxPropChanger);
+ };
+ 
++class wxProxyBoxSizer : public wxBoxSizer
++{
++public:
++    wxProxyBoxSizer(int orient, wxSizer* controllingSizer)
++        : wxBoxSizer(orient),
++          m_controllingSizer(controllingSizer)
++    { }
++
++protected:
++    virtual wxSizer* GetControllingSizer() wxOVERRIDE
++        { return m_controllingSizer; }
++
++private:
++    wxSizer* m_controllingSizer;
++};
++
+ } // anonymous namespace
+ 
+ // ============================================================================
+@@ -126,7 +142,7 @@ wxSizer *wxWrapSizer::GetRowSizer(size_t n)
+     if ( n < rows.size() )
+         return rows[n]->GetSizer();
+ 
+-    wxSizer * const sizer = new wxBoxSizer(GetOrientation());
++    wxSizer * const sizer = new wxProxyBoxSizer(GetOrientation(), this);
+     m_rows.Add(sizer, wxSizerFlags().Expand());
+     return sizer;
+ }
+@@ -565,26 +581,11 @@ void wxWrapSizer::RecalcSizes()
+                 sizer->Add(itemSpace);
+             }
+ 
+-            // We must pretend that any window item is not part of this sizer,
+-            // otherwise adding it to another one would trigger an assert due
+-            // to a conflict with the current containing sizer.
+-            wxWindow * const win = item->GetWindow();
+-            if ( win )
+-                win->SetContainingSizer(NULL);
+-
+             // Notice that we reuse a pointer to our own sizer item here, so we
+             // must remember to remove it by calling ClearRows() to avoid
+             // double deletion later
+             sizer->Add(item);
+ 
+-            // If item is a window, it now has a pointer to the child sizer,
+-            // which is wrong. Set it to point to us.
+-            if ( win )
+-            {
+-                win->SetContainingSizer(NULL);
+-                win->SetContainingSizer(this);
+-            }
+-
+             itemLast = item;
+             itemSpace = NULL;
+         }
+diff --git a/src/generic/collpaneg.cpp b/src/generic/collpaneg.cpp
+index 886b4ab..bfd9dc5 100644
+--- a/src/generic/collpaneg.cpp
++++ b/src/generic/collpaneg.cpp
+@@ -113,11 +113,11 @@ bool wxGenericCollapsiblePane::Create(wxWindow *parent,
+ 
+ wxGenericCollapsiblePane::~wxGenericCollapsiblePane()
+ {
+-    if (m_pButton)
+-        m_pButton->SetContainingSizer(NULL);
++    if (m_sz && m_pButton)
++        m_sz->Detach(m_pButton);
+ 
+-    if (m_pStaticLine)
+-        m_pStaticLine->SetContainingSizer(NULL);
++    if (m_sz && m_pStaticLine)
++        m_sz->Detach(m_pStaticLine);
+ 
+     // our sizer is not deleted automatically since we didn't use SetSizer()!
+     wxDELETE(m_sz);
+-- 
+1.8.3.msysgit.0
+

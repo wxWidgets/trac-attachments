@@ -1,0 +1,216 @@
+Index: docs/latex/wx/tokenizr.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/tokenizr.tex,v
+retrieving revision 1.10
+diff -u -w -b -i -b -u -2 -r1.10 tokenizr.tex
+--- docs/latex/wx/tokenizr.tex	2004/04/23 19:22:19	1.10
++++ docs/latex/wx/tokenizr.tex	2005/01/25 17:43:24
+@@ -57,4 +57,23 @@
+ \end{twocollist}
+ 
++
++Sometimes you need to ignore delimiter characters that are specified inside a
++pair of quote characters. Consider a command line parameter -f that allows
++a user to specify a path to a file. If the path contains spaces, the user
++must enclose the path in quote (") characters. To avoid wxStringTokenizer
++breaking the string apart at the wrong place - inside the path specification -
++you can pass a list of quote characters to it. When it sees a quote character
++wxStringTokenizer returns all characters up to and including the closing quote in
++a token, even if there is a delimiter character inside the quoted token.
++It ignores all occurrences of delimiters inside the quoted string.
++\begin{verbatim}
++    // parse the command line  '-u=user -f="c:\my data.txt" -p=password'
++wxString some_command_line("-u=user -f=\"c:\\my data.txt\" -p=password");
++wxStringTokenizer ignores_quotes(some_command_line, wxT(" "));
++    // returns 4 tokens: '-u=user', '-f="c:\my', 'data.txt"', '-p=password'
++wxStringTokenizer respects_quotes(some_command_line, wxString(" "), wxString("\""));
++    // returns 3 tokens: '-u=user', '-f="c:\my data.txt"', '-p=password'
++\end{verbatim}
++
+ \wxheading{Derived from}
+ 
+@@ -80,4 +99,14 @@
+ Constructor. Pass the string to tokenize, a string containing delimiters
+ and the mode specifying how the string should be tokenized.
++
++
++\func{}{wxStringTokenizer}{\param{const wxString\& }{str}, \param{const wxString\& }{delims}, \param{const wxString\& }{quotes}, \param{quotes_usage }{use_quotes}, \param{wxStringTokenizerMode }{mode = wxTOKEN\_DEFAULT}}
++
++Tokenize the string and respect quotes that enclose a token: Pass the string to tokenize, a string containing delimiters,
++a string containing quote characters, the quote mode and the mode specifying
++how the string should be tokenized. The quote mode can be {\tt escape_double_quote}, 
++{\tt escape_backslash_quote} or a binary OR combination of both or 0. It specifies how
++quotes inside a quoted string should be escaped.
++
+ 
+ 
+Index: src/common/tokenzr.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/tokenzr.cpp,v
+retrieving revision 1.19
+diff -u -w -b -i -b -u -2 -r1.19 tokenzr.cpp
+--- src/common/tokenzr.cpp	2004/09/23 18:20:55	1.19
++++ src/common/tokenzr.cpp	2005/01/25 11:45:52
+@@ -50,8 +50,19 @@
+ }
+ 
++wxStringTokenizer::wxStringTokenizer(const wxString &str,
++                                     const wxString &delims,
++                                     const wxString &quotes,   // quote characters
++                                     quotes_usage use_quotes,
++                                     wxStringTokenizerMode mode)
++{
++    SetString(str, delims, quotes, use_quotes, mode);
++}
++
+ void wxStringTokenizer::SetString(const wxString& str,
+                                   const wxString& delims,
+                                   wxStringTokenizerMode mode)
+ {
++    m_use_quotes=dont_use_quotes;
++    m_quote_chars=wxString();
+     if ( mode == wxTOKEN_DEFAULT )
+     {
+@@ -85,4 +96,15 @@
+ }
+ 
++void wxStringTokenizer::SetString(const wxString &str,
++                                  const wxString &delims,
++                                  const wxString &quotes,
++                                  quotes_usage use_quotes,
++                                  wxStringTokenizerMode mode)
++{
++    SetString(str, delims, mode);
++    m_use_quotes=use_quotes;
++    m_quote_chars=quotes;
++}
++
+ void wxStringTokenizer::Reinit(const wxString& str)
+ {
+@@ -155,4 +177,54 @@
+ // ----------------------------------------------------------------------------
+ 
++size_t wxStringTokenizer::find_next_delimiter() const
++{
++    if (m_use_quotes==dont_use_quotes)
++        return m_string.find_first_of(m_delims);
++    enum {
++        outside,
++        inside
++    } scan_state=outside;
++    wxChar quote_char=0;
++    size_t pos=0;
++
++    while (pos<m_string.size()) {
++        wxChar c=m_string[pos];
++        switch (scan_state) {
++            case outside: 
++                {
++                    if (m_quote_chars.find_first_of(c)!=wxString::npos) {
++                        // current character is a quote character
++                        scan_state=inside;
++                        quote_char=c;
++                    } else if (m_delims.find_first_of(c)!=wxString::npos) {
++                        // current character is a delimiter character
++                        return pos;
++                    }
++                } break;
++            case inside: 
++                {
++                    if (c==quote_char) {
++                        if (m_use_quotes & escape_double_quote) {
++                            if (pos+1<m_string.size() && m_string[pos+1]==quote_char)    // this is a double quote
++                                ++pos;
++                            else
++                                scan_state=outside;             // end of quote
++                        } else
++                            scan_state=outside; // end of quote
++
++                    } else if (c==wxT('\\') && (m_use_quotes & escape_backslash_quote)) {
++                        ++pos;  // this is a backslash quote escape
++                    }
++                    // else do nothing. still inside the quotes
++                } break;
++        }
++        ++pos;
++    }
++    if (scan_state==inside) {
++        wxLogDebug(wxT("unterminated quote '%c' in %s"), quote_char, m_string);
++    }
++    return wxString::npos;
++}
++
+ wxString wxStringTokenizer::GetNextToken()
+ {
+@@ -168,5 +240,5 @@
+         }
+         // find the end of this token
+-        size_t pos = m_string.find_first_of(m_delims);
++        size_t pos = find_next_delimiter();
+ 
+         // and the start of the next one
+Index: include/wx/tokenzr.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/tokenzr.h,v
+retrieving revision 1.19
+diff -u -w -b -i -b -u -2 -r1.19 tokenzr.h
+--- include/wx/tokenzr.h	2004/05/23 20:50:25	1.19
++++ include/wx/tokenzr.h	2005/01/25 17:48:17
+@@ -46,7 +46,14 @@
+ {
+ public:
++    enum quotes_usage {
++        escape_no_quote = 0,
++        escape_double_quote = 1,
++        escape_backslash_quote = 2,
++        dont_use_quotes = 4
++    } m_use_quotes;
++
+     // ctors and initializers
+         // default ctor, call SetString() later
+-    wxStringTokenizer() { m_mode = wxTOKEN_INVALID; }
++    wxStringTokenizer() { m_mode = wxTOKEN_INVALID; m_use_quotes=dont_use_quotes; }
+         // ctor which gives us the string
+     wxStringTokenizer(const wxString& str,
+@@ -59,4 +66,28 @@
+                    wxStringTokenizerMode mode = wxTOKEN_DEFAULT);
+ 
++        // ctor which skips enclosed in quote characters
++    wxStringTokenizer(const wxString &str,
++                      const wxString &delims,
++                      const wxString &quotes,   // quote characters
++                      quotes_usage use_quotes = wxStringTokenizer::escape_double_quote,
++                      wxStringTokenizerMode mode = wxTOKEN_DEFAULT);
++        // this ctor is neccessary to avoid conflicts with the backwards compatibility
++        // constructor below wxStringTokenizer(const wxString&, const wxString&, bool)
++        // once that constructor has been removed, this one can be removed as well
++    wxStringTokenizer(const wxString &str,
++                      const wxString &delims,
++                      const wxChar *quotes,
++                      quotes_usage use_quotes = wxStringTokenizer::escape_double_quote,
++                      wxStringTokenizerMode mode = wxTOKEN_DEFAULT)
++    {
++        SetString(str, delims, wxString(quotes), use_quotes, mode);
++    }
++        // args are same as for the non default ctor above
++    void SetString(const wxString &str,
++                   const wxString &delims,
++                   const wxString &quotes,
++                   quotes_usage use_quotes = wxStringTokenizer::escape_double_quote,
++                   wxStringTokenizerMode mode = wxTOKEN_DEFAULT);
++
+         // reinitialize the tokenizer with the same delimiters/mode
+     void Reinit(const wxString& str);
+@@ -111,4 +142,9 @@
+     wxString m_string,              // the (rest of) string to tokenize
+              m_delims;              // all delimiters
++    wxString m_quote_chars;         // delimiters inside quotes are ignored
++
++        /// find the position (into m_string) of the next delimiter, taking
++        /// m_quote_chars into account if it is set
++    size_t   find_next_delimiter() const;
+ 
+     size_t   m_pos;                 // the position in the original string
+
+
+ 	  	 

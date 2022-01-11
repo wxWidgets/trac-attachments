@@ -1,0 +1,268 @@
+diff -rNbu2 wxW/build/bakefiles/files.bkl wxWidgets/build/bakefiles/files.bkl
+--- wxW/build/bakefiles/files.bkl	Sat Oct  2 19:34:27 2004
++++ wxWidgets/build/bakefiles/files.bkl	Sun Oct  3 03:44:03 2004
+@@ -1917,4 +1917,5 @@
+     src/cocoa/settings.cpp
+     src/cocoa/slider.mm
++    src/cocoa/sound.mm
+     src/cocoa/spinbutt.mm
+     src/cocoa/statbmp.mm
+@@ -2002,4 +2003,5 @@
+     wx/cocoa/scrolbar.h
+     wx/cocoa/slider.h
++    wx/cocoa/sound.h
+     wx/cocoa/spinbutt.h
+     wx/cocoa/statbmp.h
+diff -rNbu2 wxW/include/wx/cocoa/sound.h wxWidgets/include/wx/cocoa/sound.h
+--- wxW/include/wx/cocoa/sound.h	Wed Dec 31 16:00:00 1969
++++ wxWidgets/include/wx/cocoa/sound.h	Sat Oct  2 15:05:40 2004
+@@ -0,0 +1,52 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        sound.h
++// Purpose:     wxSound class (loads and plays short Windows .wav files).
++//              Optional on non-Windows platforms.
++// Author:      Ryan Norton
++// Modified by:
++// Created:     2004-10-02
++// RCS-ID:      $Id: sound.h,v 1.6 2004/07/31 07:36:11 DS Exp $
++// Copyright:   (c) Ryan Norton
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifndef _WX_COCOA_SOUND_H_
++#define _WX_COCOA_SOUND_H_
++
++#if defined(__GNUG__) && !defined(NO_GCC_PRAGMA)
++#pragma interface "sound.h"
++#endif
++
++#if wxUSE_SOUND
++
++#include "wx/object.h"
++
++class WXDLLEXPORT wxSound : public wxSoundBase
++{
++public:
++  wxSound();
++  wxSound(const wxString& fileName, bool isResource = FALSE);
++  wxSound(int size, const wxByte* data);
++  ~wxSound();
++
++public:
++  bool  Create(const wxString& fileName, bool isResource = FALSE);
++  bool  IsOk() const { return m_hSnd != NULL; }
++  static void  Stop();
++  static bool IsPlaying();
++
++  inline WX_NSSound GetNSSound()
++  {		return m_hSnd;	}
++protected:  
++  bool  DoPlay(unsigned flags) const;
++
++private:
++    WX_NSSound m_hSnd; //NSSound handle
++    wxString m_sndname; //file path
++    int m_waveLength; //size of file in memory mode    
++    struct objc_object * m_cocoaSoundDelegate;
++};
++
++#endif
++#endif
++    // _WX_COCOA_SOUND_H_
+diff -rNbu2 wxW/include/wx/defs.h wxWidgets/include/wx/defs.h
+--- wxW/include/wx/defs.h	Sun Oct  3 03:25:07 2004
++++ wxWidgets/include/wx/defs.h	Sun Oct  3 03:38:10 2004
+@@ -2184,4 +2184,5 @@
+ DECLARE_WXCOCOA_OBJC_CLASS(NSPanel);
+ DECLARE_WXCOCOA_OBJC_CLASS(NSScrollView);
++DECLARE_WXCOCOA_OBJC_CLASS(NSSound);
+ DECLARE_WXCOCOA_OBJC_CLASS(NSTableColumn);
+ DECLARE_WXCOCOA_OBJC_CLASS(NSTableView);
+diff -rNbu2 wxW/include/wx/sound.h wxWidgets/include/wx/sound.h
+--- wxW/include/wx/sound.h	Sun Oct  3 03:19:28 2004
++++ wxWidgets/include/wx/sound.h	Sat Oct  2 10:52:53 2004
+@@ -72,4 +72,6 @@
+ #elif defined(__WXPM__)
+     #include "wx/os2/sound.h"
++#elif defined(__WXCOCOA__)
++    #include "wx/cocoa/sound.h"
+ #elif defined(__UNIX__)
+     #include "wx/unix/sound.h"
+diff -rNbu2 wxW/src/cocoa/sound.mm wxWidgets/src/cocoa/sound.mm
+--- wxW/src/cocoa/sound.mm	Wed Dec 31 16:00:00 1969
++++ wxWidgets/src/cocoa/sound.mm	Sat Oct  2 17:50:05 2004
+@@ -0,0 +1,172 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        sound.cpp
++// Purpose:     wxSound class implementation: optional
++// Author:      Ryan Norton
++// Modified by: 
++// Created:     2004-10-02
++// RCS-ID:      $Id: sound.cpp,v 1.14 2004/09/28 09:24:48 RN Exp $
++// Copyright:   (c) Ryan Norton
++// Licence:       wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#ifdef __GNUG__
++#pragma implementation "sound.h"
++#endif
++
++#include "wx/object.h"
++#include "wx/string.h"
++#include "wx/sound.h"
++
++#if wxUSE_SOUND
++
++#include "wx/app.h"
++#include "wx/cocoa/autorelease.h"
++#include "wx/cocoa/string.h"
++
++#import <AppKit/AppKit.h>
++
++//
++// NB:  Vaclav's new wxSound API is really tricky -
++// Basically, we need to make sure that if the wxSound
++// object is still in scope we don't release it's NSSound
++//
++
++WX_NSSound lastSound=NULL;
++bool isLastSoundLooping = NO;
++bool isLastSoundInScope = NO;
++
++// ========================================================================
++// wxNSSoundDelegate
++// ========================================================================
++@interface wxNSSoundDelegate : NSObject
++{
++}
++
++// Delegate methods
++- (void)sound:(NSSound *)theSound didFinishPlaying:(BOOL)bOK;
++@end // interface wxNSSoundDelegate : NSObject
++
++@implementation wxNSSoundDelegate : NSObject
++
++- (void)sound:(NSSound *)theSound didFinishPlaying:(BOOL)bOK
++{
++    if (bOK && isLastSoundLooping)
++        [lastSound play];
++    else if (isLastSoundInScope = NO)
++    {
++        [lastSound release];
++        [self release];
++    }
++}
++
++@end // wxNSSoundDelegate
++
++// ------------------------------------------------------------------
++//          wxSound
++// ------------------------------------------------------------------
++
++wxSound::wxSound()
++: m_hSnd(NULL), m_waveLength(0)
++{
++}
++
++wxSound::wxSound(const wxString& sFileName, bool isResource)
++: m_hSnd(NULL), m_waveLength(0)
++{
++    Create(sFileName, isResource);
++}
++
++wxSound::wxSound(int size, const wxByte* data)
++: m_hSnd(NULL), m_waveLength(size)
++{
++    NSData* theData = [[NSData alloc] dataWithBytesNoCopy:(void*)data length:size];
++    m_hSnd = [[NSSound alloc] initWithData:theData];
++
++    m_cocoaSoundDelegate = [[wxNSSoundDelegate alloc] init];
++}
++
++wxSound::~wxSound()
++{
++    if (m_hSnd != lastSound)
++    {
++        [m_hSnd release];
++        [m_cocoaSoundDelegate release];
++    }
++    else
++        isLastSoundInScope = NO;
++}
++
++bool wxSound::Create(const wxString& fileName, bool isResource)
++{
++    wxAutoNSAutoreleasePool thePool;
++
++    Stop();
++
++    if (isResource)
++    {
++            //oftype could be @"snd" @"wav" or @"aiff", nil or @"" autodetects (?)
++        m_hSnd = [[NSSound alloc] initWithContentsOfFile:
++            [[NSBundle mainBundle] pathForResource:wxNSStringWithWxString(fileName) ofType:nil] 
++            byReference:NO];    
++    }
++    else
++            m_hSnd = [[NSSound alloc] initWithContentsOfFile:wxNSStringWithWxString(fileName) byReference:YES];
++
++    m_cocoaSoundDelegate = [[wxNSSoundDelegate alloc] init];
++
++    m_sndname = fileName;
++    return m_hSnd != nil;
++}
++
++bool wxSound::DoPlay(unsigned flags) const
++{
++    wxASSERT_MSG(!( (flags & wxSOUND_SYNC) && (flags & wxSOUND_LOOP)), 
++                wxT("Invalid flag combination passed to wxSound::Play"));
++
++    Stop();
++
++    if (flags & wxSOUND_ASYNC)
++    {
++        lastSound = m_hSnd;
++        isLastSoundLooping = (flags & wxSOUND_LOOP) == wxSOUND_LOOP;
++        isLastSoundInScope = YES;
++       [m_hSnd setDelegate:m_cocoaSoundDelegate];
++        return [m_hSnd play];
++    }
++    else
++    {
++        [m_hSnd setDelegate:nil];
++   
++           //play until done
++        bool bOK = [m_hSnd play];
++        
++        while ([m_hSnd isPlaying]) 
++        {
++            wxTheApp->Yield(false);
++        }
++        return bOK;
++    }
++}
++
++bool wxSound::IsPlaying()
++{
++    return [lastSound isPlaying];
++}
++
++void wxSound::Stop()
++{
++    if (isLastSoundInScope)
++    {
++        isLastSoundInScope = NO;
++        
++        //remember that even though we're
++        //programatically stopping it, the
++        //delegate will still be called - 
++        //so it will free the memory here
++        [((NSSound*&)lastSound) stop];
++    }
++    
++    lastSound = nil;
++}
++
++#endif //wxUSE_SOUND
+
+ 	  	 

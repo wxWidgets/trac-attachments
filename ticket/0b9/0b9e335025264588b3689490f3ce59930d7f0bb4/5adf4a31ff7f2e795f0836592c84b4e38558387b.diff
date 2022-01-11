@@ -1,0 +1,159 @@
+diff --git a/interface/wx/fswatcher.h b/interface/wx/fswatcher.h
+index 5041acc..77f2e15 100644
+--- a/interface/wx/fswatcher.h
++++ b/interface/wx/fswatcher.h
+@@ -68,6 +68,7 @@ public:
+             The name of the path to watch.
+         @param events
+             An optional filter to receive only events of particular types.
++            This is currently implemented only for GTK.
+      */
+     virtual bool Add(const wxFileName& path, int events = wxFSW_EVENT_ALL);
+ 
+diff --git a/src/unix/fswatcher_inotify.cpp b/src/unix/fswatcher_inotify.cpp
+index 5bcc475..f7bcc03 100644
+--- a/src/unix/fswatcher_inotify.cpp
++++ b/src/unix/fswatcher_inotify.cpp
+@@ -479,10 +479,31 @@ protected:
+         return path;
+     }
+ 
+-    static int Watcher2NativeFlags(int WXUNUSED(flags))
++    static int Watcher2NativeFlags(int flags)
+     {
+-        // TODO: it would be nice to subscribe only to the events we really need
+-        return IN_ALL_EVENTS;
++        // Start with the standard case of wanting all events
++        if (flags == wxFSW_EVENT_ALL)
++        {
++            return IN_ALL_EVENTS;
++        }
++
++        static const int flag_mapping[][2] = {
++            { wxFSW_EVENT_ACCESS, IN_ACCESS },
++            { wxFSW_EVENT_MODIFY, IN_MODIFY },
++            { wxFSW_EVENT_RENAME, IN_MOVE   },
++            { wxFSW_EVENT_CREATE, IN_CREATE },
++            { wxFSW_EVENT_DELETE, IN_DELETE|IN_DELETE_SELF|IN_MOVE_SELF }
++            // wxFSW_EVENT_ERROR/WARNING make no sense here
++        };
++
++        int native_flags = 0;
++        for ( unsigned int i=0; i < WXSIZEOF(flag_mapping); ++i)
++        {
++            if (flags & flag_mapping[i][0])
++                native_flags |= flag_mapping[i][1];
++        }
++
++        return native_flags;
+     }
+ 
+     static int Native2WatcherFlags(int flags)
+@@ -504,7 +525,7 @@ protected:
+             { IN_UNMOUNT,       wxFSW_EVENT_ERROR  },
+             { IN_Q_OVERFLOW,    wxFSW_EVENT_WARNING},
+ 
+-            // ignored, because this is genereted mainly by watcher::Remove()
++            // ignored, because this is generated mainly by watcher::Remove()
+             { IN_IGNORED,        0 }
+         };
+ 
+diff --git a/tests/fswatcher/fswatchertest.cpp b/tests/fswatcher/fswatchertest.cpp
+index cd44d2a..caca07b 100644
+--- a/tests/fswatcher/fswatchertest.cpp
++++ b/tests/fswatcher/fswatchertest.cpp
+@@ -190,8 +190,9 @@ class EventHandler : public wxEvtHandler
+ public:
+     enum { WAIT_DURATION = 3 };
+ 
+-    EventHandler() :
+-        eg(EventGenerator::Get()), m_loop(0), m_count(0), m_watcher(0)
++    EventHandler(int types = wxFSW_EVENT_ALL) :
++        eg(EventGenerator::Get()), m_loop(0), m_count(0), m_watcher(0),
++        m_eventTypes(types)
+     {
+         m_loop = new wxEventLoop();
+         Connect(wxEVT_IDLE, wxIdleEventHandler(EventHandler::OnIdle));
+@@ -289,7 +290,7 @@ public:
+ 
+         // add dir to be watched
+         wxFileName dir = EventGenerator::GetWatchDir();
+-        CPPUNIT_ASSERT(m_watcher->Add(dir, wxFSW_EVENT_ALL));
++        CPPUNIT_ASSERT(m_watcher->Add(dir, m_eventTypes));
+ 
+         return true;
+     }
+@@ -389,6 +390,7 @@ protected:
+     int m_count;                // idle events count
+ 
+     wxFileSystemWatcher* m_watcher;
++    int m_eventTypes;  // Which event-types to watch. Normally all of them
+     bool tested;  // indicates, whether we have already passed the test
+ 
+     #include "wx/arrimpl.cpp"
+@@ -436,6 +438,10 @@ private:
+ #endif // __WINDOWS__
+ #endif // !wxHAS_KQUEUE
+ 
++#ifdef wxHAS_INOTIFY
++        CPPUNIT_TEST( TestSingleWatchtypeEvent );
++#endif // wxHAS_INOTIFY
++
+         CPPUNIT_TEST( TestNoEventsAfterRemove );
+     CPPUNIT_TEST_SUITE_END();
+ 
+@@ -444,6 +450,9 @@ private:
+     void TestEventRename();
+     void TestEventModify();
+     void TestEventAccess();
++#ifdef wxHAS_INOTIFY
++    void TestSingleWatchtypeEvent();
++#endif // wxHAS_INOTIFY
+ #if !defined(__VISUALC__) || wxCHECK_VISUALC_VERSION(7)
+     void TestTrees();   // Visual C++ 6 can't build this
+ #endif
+@@ -635,6 +644,44 @@ void FileSystemWatcherTestCase::TestEventAccess()
+     tester.Run();
+ }
+ 
++#ifdef wxHAS_INOTIFY
++// ----------------------------------------------------------------------------
++// TestSingleWatchtypeEvent: Watch only wxFSW_EVENT_ACCESS
++// ----------------------------------------------------------------------------
++void FileSystemWatcherTestCase::TestSingleWatchtypeEvent()
++{
++    wxLogDebug("TestSingleWatchtypeEvent()");
++
++    class EventTester : public EventHandler
++    {
++    public:
++        // We could pass wxFSW_EVENT_CREATE or MODIFY instead, but not RENAME or
++        // DELETE as the event path fields would be wrong in CheckResult()
++        EventTester() : EventHandler(wxFSW_EVENT_ACCESS) {}
++
++        virtual void GenerateEvent()
++        {
++            // As wxFSW_EVENT_ACCESS is passed to the ctor only ReadFile() will
++            // generate an event. Without it they all will, and the test fails
++            CPPUNIT_ASSERT(eg.CreateFile());
++            CPPUNIT_ASSERT(eg.ModifyFile());
++            CPPUNIT_ASSERT(eg.ReadFile());
++        }
++
++        virtual wxFileSystemWatcherEvent ExpectedEvent()
++        {
++            wxFileSystemWatcherEvent event(wxFSW_EVENT_ACCESS);
++            event.SetPath(eg.m_file);
++            event.SetNewPath(eg.m_file);
++            return event;
++        }
++    };
++
++    EventTester tester;
++    tester.Run();
++}
++#endif // wxHAS_INOTIFY
++
+ // ----------------------------------------------------------------------------
+ // TestTrees
+ // ----------------------------------------------------------------------------

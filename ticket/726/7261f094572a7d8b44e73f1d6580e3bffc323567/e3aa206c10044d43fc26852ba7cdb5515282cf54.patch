@@ -1,0 +1,185 @@
+Index: include/wx/graphics.h
+===================================================================
+--- include/wx/graphics.h	(revision 72603)
++++ include/wx/graphics.h	(working copy)
+@@ -665,6 +665,11 @@
+ 
+     virtual void GetPartialTextExtents(const wxString& text, wxArrayDouble& widths) const = 0;
+ 
++#ifdef __WXMSW__
++    enum MSWStringFormat { Format_Normal, Format_OptimizeForSmallFont };
++    virtual void MSWSetStringFormat( MSWStringFormat sf ) = 0;
++#endif
++
+     //
+     // image support
+     //
+Index: interface/wx/graphics.h
+===================================================================
+--- interface/wx/graphics.h	(revision 72603)
++++ interface/wx/graphics.h	(working copy)
+@@ -845,6 +845,29 @@
+     virtual void EnableOffset(bool enable = true);
+     void DisableOffset();
+     bool OffsetEnabled();
++	
++	/**
++       Switches the text rendering mode in Windows GDI+.  For small text, GDI+
++       sometimes squishes the letters together resulting in poor quality output,
++       particularly under Windows XP.  Setting the string format to Format_OptimizeForSmallFont
++       improves this behaviour slightly at the expense of incorrect text extents being calculated.
++       
++       For more detailed information, refer to:
++         http://support.microsoft.com/?id=307208
++         http://trac.wxwidgets.org/ticket/14537
++       
++       In most situations, Format_Normal is the recommended (default) setting.
++    */
++    void MSWSetStringFormat( MSWStringFormat sf );
++	
++    enum MSWStringFormat
++    {
++	/**
++	   Windows GDI+ specific text layout engine flags. @see wxGraphicsContext::MSWSetStringFormat
++	*/
++        Format_Normal,
++		Format_OptimizeForSmallFont
++    };
+ 
+ };
+ 
+Index: src/msw/graphics.cpp
+===================================================================
+--- src/msw/graphics.cpp	(revision 72603)
++++ src/msw/graphics.cpp	(working copy)
+@@ -78,31 +78,6 @@
+     return Color(col.Alpha(), col.Red(), col.Green(), col.Blue());
+ }
+ 
+-// Do not use this pointer directly, it's only used by
+-// GetDrawTextStringFormat() and the cleanup code in wxGDIPlusRendererModule.
+-StringFormat* gs_drawTextStringFormat = NULL;
+-
+-// Get the string format used for the text drawing and measuring functions:
+-// notice that it must be the same one for all of them, otherwise the drawn
+-// text might be of different size than what measuring it returned.
+-inline StringFormat* GetDrawTextStringFormat()
+-{
+-    if ( !gs_drawTextStringFormat )
+-    {
+-        gs_drawTextStringFormat = new StringFormat(StringFormat::GenericTypographic());
+-
+-        // This doesn't make any difference for DrawText() actually but we want
+-        // this behaviour when measuring text.
+-        gs_drawTextStringFormat->SetFormatFlags
+-        (
+-            gs_drawTextStringFormat->GetFormatFlags()
+-                | StringFormatFlagsMeasureTrailingSpaces
+-        );
+-    }
+-
+-    return gs_drawTextStringFormat;
+-}
+-
+ } // anonymous namespace
+ 
+ //-----------------------------------------------------------------------------
+@@ -419,6 +394,8 @@
+     virtual void GetSize( wxDouble* width, wxDouble *height );
+ 
+     Graphics* GetGraphics() const { return m_context; }
++	
++	virtual void MSWSetStringFormat( MSWStringFormat sf );
+ 
+ protected:
+ 
+@@ -430,11 +407,12 @@
+ 
+ private:
+     virtual void DoDrawText(const wxString& str, wxDouble x, wxDouble y);
+-
++    
+     Graphics* m_context;
+     wxStack<GraphicsState> m_stateStack;
+     GraphicsState m_state1;
+     GraphicsState m_state2;
++    StringFormat *m_textStringFormat;
+ 
+     wxDECLARE_NO_COPY_CLASS(wxGDIPlusContext);
+ };
+@@ -1410,6 +1388,7 @@
+ 
+ void wxGDIPlusContext::Init(Graphics* graphics, int width, int height)
+ {
++	m_textStringFormat = NULL;
+     m_context = graphics;
+     m_state1 = 0;
+     m_state2 = 0;
+@@ -1427,6 +1406,9 @@
+ 
+ wxGDIPlusContext::~wxGDIPlusContext()
+ {
++    if ( m_textStringFormat )
++        delete m_textStringFormat;
++    
+     if ( m_context )
+     {
+         m_context->Restore( m_state2 );
+@@ -1435,7 +1417,21 @@
+     }
+ }
+ 
++void wxGDIPlusContext::MSWSetStringFormat( MSWStringFormat type )
++{
++    if ( m_textStringFormat )
++        delete m_textStringFormat;
+ 
++    if ( type == Format_OptimizeForSmallFont )
++        m_textStringFormat = new StringFormat( StringFormatFlagsLineLimit |  
++                                            StringFormatFlagsNoClip |  
++                                            StringFormatFlagsNoFitBlackBox |  
++                                            StringFormatFlagsMeasureTrailingSpaces );
++    else 
++        m_textStringFormat = new StringFormat( StringFormat::GenericTypographic() ); 
++}
++
++
+ void wxGDIPlusContext::Clip( const wxRegion &region )
+ {
+     Region rgn((HRGN)region.GetHRGN());
+@@ -1784,7 +1780,7 @@
+                     -1,                     // length: string is NUL-terminated
+                     fontData->GetGDIPlusFont(),
+                     PointF(x, y),
+-                    GetDrawTextStringFormat(),
++                    m_textStringFormat,
+                     fontData->GetGDIPlusBrush()
+                );
+ }
+@@ -1828,7 +1824,7 @@
+         RectF layoutRect(0,0, 100000.0f, 100000.0f);
+ 
+         RectF bounds ;
+-        m_context->MeasureString((const wchar_t *) s , wcslen(s) , f, layoutRect, GetDrawTextStringFormat(), &bounds ) ;
++        m_context->MeasureString((const wchar_t *) s , wcslen(s) , f, layoutRect, m_textStringFormat, &bounds ) ;
+         if ( width )
+             *width = bounds.Width;
+         if ( height )
+@@ -1852,7 +1848,7 @@
+     wxASSERT_MSG(text.length() == len , wxT("GetPartialTextExtents not yet implemented for multichar situations"));
+ 
+     RectF layoutRect(0,0, 100000.0f, 100000.0f);
+-    StringFormat strFormat( GetDrawTextStringFormat() );
++    StringFormat strFormat( m_textStringFormat );
+ 
+     size_t startPosition = 0;
+     size_t remainder = len;
+@@ -2286,8 +2282,6 @@
+     virtual bool OnInit() { return true; }
+     virtual void OnExit()
+     {
+-        wxDELETE(gs_drawTextStringFormat);
+-
+         gs_GDIPlusRenderer.Unload();
+     }
+ 

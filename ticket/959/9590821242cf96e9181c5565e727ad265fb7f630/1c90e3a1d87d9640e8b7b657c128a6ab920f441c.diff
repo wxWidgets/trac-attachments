@@ -1,0 +1,148 @@
+commit bd09e68a7596f00c167de9dcbae2afaeabf058cb
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Fri Oct 9 01:49:25 2009 +0200
+
+    Ignore time component of SYSTEMTIME in wxCalendarCtrl.
+    
+    Native month calendar functions doesn't always return correct values in the
+    time part of SYSTEMTIME so ignore it and use just the date component.
+    
+    To simplify doing it, add helper (MSW-specific) SetFromMSWSysDate() and
+    GetAsMSWSysDate() functions which convert between wxDateTime and SYSTEMTIME
+    but take only date component into account.
+
+diff --git a/include/wx/datetime.h b/include/wx/datetime.h
+index dc59c92..8e0c196 100644
+--- a/include/wx/datetime.h
++++ b/include/wx/datetime.h
+@@ -947,12 +947,15 @@ public:
+     // SYSTEMTIME format
+     // ------------------------------------------------------------------------
+ #ifdef __WXMSW__
+-
+     // convert SYSTEMTIME to wxDateTime
+-    wxDateTime& SetFromMSWSysTime(const struct _SYSTEMTIME&);
++    wxDateTime& SetFromMSWSysTime(const struct _SYSTEMTIME& st);
+ 
+     // convert wxDateTime to SYSTEMTIME
+-    void GetAsMSWSysTime(struct _SYSTEMTIME*) const;
++    void GetAsMSWSysTime(struct _SYSTEMTIME* st) const;
++
++    // same as above but only take date part into account, time is always zero
++    wxDateTime& SetFromMSWSysDate(const struct _SYSTEMTIME& st);
++    void GetAsMSWSysDate(struct _SYSTEMTIME* st) const;
+ #endif // __WXMSW__
+ 
+     // comparison (see also functions below for operator versions)
+diff --git a/src/common/datetime.cpp b/src/common/datetime.cpp
+index 827cb51..fd79632 100644
+--- a/src/common/datetime.cpp
++++ b/src/common/datetime.cpp
+@@ -2343,6 +2343,14 @@ wxDateTime& wxDateTime::SetFromMSWSysTime(const SYSTEMTIME& st)
+             st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+ }
+ 
++wxDateTime& wxDateTime::SetFromMSWSysDate(const SYSTEMTIME& st)
++{
++    return Set(st.wDay,
++            static_cast<wxDateTime::Month>(wxDateTime::Jan + st.wMonth - 1),
++            st.wYear,
++            0, 0, 0, 0);
++}
++
+ void wxDateTime::GetAsMSWSysTime(SYSTEMTIME* st) const
+ {
+     const wxDateTime::Tm tm(GetTm());
+@@ -2357,6 +2365,22 @@ void wxDateTime::GetAsMSWSysTime(SYSTEMTIME* st) const
+     st->wSecond = tm.sec;
+     st->wMilliseconds = tm.msec;
+ }
++
++void wxDateTime::GetAsMSWSysDate(SYSTEMTIME* st) const
++{
++    const wxDateTime::Tm tm(GetTm());
++
++    st->wYear = (WXWORD)tm.year;
++    st->wMonth = (WXWORD)(tm.mon - wxDateTime::Jan + 1);
++    st->wDay = tm.mday;
++
++    st->wDayOfWeek =
++    st->wHour =
++    st->wMinute =
++    st->wSecond =
++    st->wMilliseconds = 0;
++}
++
+ #endif // __WXMSW__
+ 
+ #endif // wxUSE_DATETIME
+diff --git a/src/msw/calctrl.cpp b/src/msw/calctrl.cpp
+index cf0de6e..f4dd175 100644
+--- a/src/msw/calctrl.cpp
++++ b/src/msw/calctrl.cpp
+@@ -214,7 +214,7 @@ wxCalendarCtrl::HitTest(const wxPoint& pos,
+ 
+         case MCHT_CALENDARDATE:
+             if ( date )
+-                date->SetFromMSWSysTime(hti.st);
++                date->SetFromMSWSysDate(hti.st);
+             return wxCAL_HITTEST_DAY;
+ 
+         case MCHT_CALENDARDAY:
+@@ -264,7 +264,7 @@ bool wxCalendarCtrl::SetDate(const wxDateTime& dt)
+     wxCHECK_MSG( dt.IsValid(), false, "invalid date" );
+ 
+     SYSTEMTIME st;
+-    dt.GetAsMSWSysTime(&st);
++    dt.GetAsMSWSysDate(&st);
+     if ( !MonthCal_SetCurSel(GetHwnd(), &st) )
+     {
+         wxLogDebug(wxT("DateTime_SetSystemtime() failed"));
+@@ -281,6 +281,7 @@ wxDateTime wxCalendarCtrl::GetDate() const
+ {
+ #if wxDEBUG_LEVEL
+     SYSTEMTIME st;
++
+     if ( !MonthCal_GetCurSel(GetHwnd(), &st) )
+     {
+         wxASSERT_MSG( !m_date.IsValid(), "mismatch between data and control" );
+@@ -288,9 +289,10 @@ wxDateTime wxCalendarCtrl::GetDate() const
+         return wxDefaultDateTime;
+     }
+ 
+-    wxDateTime dt(st);
++    wxDateTime dt;
++    dt.SetFromMSWSysDate(st);
+ 
+-    wxASSERT_MSG( dt == m_date, "mismatch between data and control" );
++    wxASSERT_MSG( dt.IsSameDate(m_date), "mismatch between data and control" );
+ #endif // wxDEBUG_LEVEL
+ 
+     return m_date;
+@@ -329,7 +331,7 @@ bool wxCalendarCtrl::GetDateRange(wxDateTime *dt1, wxDateTime *dt2) const
+     if ( dt1 )
+     {
+         if ( flags & GDTR_MIN )
+-            dt1->SetFromMSWSysTime(st[0]);
++            dt1->SetFromMSWSysDate(st[0]);
+         else
+             *dt1 = wxDefaultDateTime;
+     }
+@@ -337,7 +339,7 @@ bool wxCalendarCtrl::GetDateRange(wxDateTime *dt1, wxDateTime *dt2) const
+     if ( dt2 )
+     {
+         if ( flags & GDTR_MAX )
+-            dt2->SetFromMSWSysTime(st[1]);
++            dt2->SetFromMSWSysDate(st[1]);
+         else
+             *dt2 = wxDefaultDateTime;
+     }
+@@ -436,7 +438,7 @@ bool wxCalendarCtrl::MSWOnNotify(int idCtrl, WXLPARAM lParam, WXLPARAM *result)
+                 // which expects GetDate() to return the new date
+                 const wxDateTime dateOld = m_date;
+                 const NMSELCHANGE * const sch = (NMSELCHANGE *)lParam;
+-                m_date.SetFromMSWSysTime(sch->stSelStart);
++                m_date.SetFromMSWSysDate(sch->stSelStart);
+ 
+                 // changing the year or the month results in a second dummy
+                 // MCN_SELCHANGE event on this system which doesn't really

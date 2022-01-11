@@ -1,0 +1,158 @@
+diff --git a/include/wx/gtk/textctrl.h b/include/wx/gtk/textctrl.h
+index 921538b..e97f1f3 100644
+--- a/include/wx/gtk/textctrl.h
++++ b/include/wx/gtk/textctrl.h
+@@ -175,6 +175,7 @@ protected:
+     void GTKSetActivatesDefault();
+     void GTKSetWrapMode();
+     void GTKSetJustification();
++    bool GTKEnableSpellchecker();
+ 
+ private:
+     void Init();
+diff --git a/include/wx/textctrl.h b/include/wx/textctrl.h
+index 3414095..92bd0c4 100644
+--- a/include/wx/textctrl.h
++++ b/include/wx/textctrl.h
+@@ -73,6 +73,9 @@ const wxTextCoord wxInvalidTextCoord    = -2;
+ // and Win32 and is silently ignored under all other platforms
+ #define wxTE_RICH           0x0080
+ 
++// enable the built-in spell check function.
++#define wxTE_SPELLCHECK     0x0004
++
+ #define wxTE_PROCESS_ENTER  0x0400
+ #define wxTE_PASSWORD       0x0800
+ 
+diff --git a/interface/wx/textctrl.h b/interface/wx/textctrl.h
+index 574b8fd..54e5024 100644
+--- a/interface/wx/textctrl.h
++++ b/interface/wx/textctrl.h
+@@ -24,6 +24,9 @@
+ // and Win32 and is silently ignored under all other platforms
+ #define wxTE_RICH           0x0080
+ 
++// enable the built-in spell check function.
++#define wxTE_SPELLCHECK     0x0004
++
+ #define wxTE_PROCESS_ENTER  0x0400
+ #define wxTE_PASSWORD       0x0800
+ 
+@@ -1001,6 +1004,10 @@ public:
+     @style{wxTE_CAPITALIZE}
+            On PocketPC and Smartphone, causes the first letter to be
+            capitalized.
++    @style{wxTE_SPELLCHECK}
++           Enable the built in spellchecker. Currently this is only available 
++           on wxMSW (running under Windows 8 and later) and wxGTK2 / wxGTK3 
++           (requires GtkSpell).
+     @endStyleTable
+ 
+     Note that alignment styles (wxTE_LEFT, wxTE_CENTRE and wxTE_RIGHT) can be
+diff --git a/samples/text/text.cpp b/samples/text/text.cpp
+index fa48fd7..f54f75f 100644
+--- a/samples/text/text.cpp
++++ b/samples/text/text.cpp
+@@ -142,6 +142,7 @@ public:
+     MyTextCtrl    *m_password;
+     MyTextCtrl    *m_enter;
+     MyTextCtrl    *m_tab;
++    MyTextCtrl    *m_spell;
+     MyTextCtrl    *m_readonly;
+     MyTextCtrl    *m_limited;
+ 
+@@ -1183,6 +1184,10 @@ MyPanel::MyPanel( wxFrame *frame, int x, int y, int w, int h )
+     m_enter = new MyTextCtrl( this, 100, wxT("Multiline, allow <ENTER> processing."),
+       wxPoint(180,170), wxSize(200,70), wxTE_MULTILINE | wxTE_PROCESS_ENTER );
+     m_enter->SetClientData((void *)wxT("enter"));
++    
++    m_spell = new MyTextCtrl(this, 100, wxT("Multiline, spellcheck enabled."),
++      wxPoint(180,270), wxSize(200,70), wxTE_MULTILINE | wxTE_SPELLCHECK);
++    m_spell->SetClientData((void *)wxT("spell"));
+ 
+     m_textrich = new MyTextCtrl(this, wxID_ANY, wxT("Allows more than 30Kb of text\n")
+                                 wxT("(on all Windows versions)\n")
+@@ -1221,7 +1226,8 @@ MyPanel::MyPanel( wxFrame *frame, int x, int y, int w, int h )
+     wxBoxSizer *column2 = new wxBoxSizer(wxVERTICAL);
+     column2->Add( m_multitext, 1, wxALL | wxEXPAND, 10 );
+     column2->Add( m_tab, 0, wxALL | wxEXPAND, 10 );
+-    column2->Add( m_enter, 1, wxALL | wxEXPAND, 10 );
++    column2->Add( m_enter, 0, wxALL | wxEXPAND, 10 );
++    column2->Add( m_spell, 1, wxALL | wxEXPAND, 10 );
+ 
+     wxBoxSizer *row1 = new wxBoxSizer(wxHORIZONTAL);
+     row1->Add( column1, 0, wxALL | wxEXPAND, 10 );
+diff --git a/src/gtk/textctrl.cpp b/src/gtk/textctrl.cpp
+index 03effd8..e8516e6 100644
+--- a/src/gtk/textctrl.cpp
++++ b/src/gtk/textctrl.cpp
+@@ -33,6 +33,15 @@
+ #include "wx/gtk/private.h"
+ #include "wx/gtk/private/gtk2-compat.h"
+ 
++
++extern "C" {
++#if GTK_CHECK_VERSION(3,0,0)
++#include <gtkspell-3.0/gtkspell/gtkspell.h>
++#else // GTK_CHECK_VERSION(3,0,0)
++#include <gtkspell-2.0/gtkspell/gtkspell.h>
++#endif // GTK_CHECK_VERSION(3,0,0)
++}
++
+ // ----------------------------------------------------------------------------
+ // helpers
+ // ----------------------------------------------------------------------------
+@@ -783,6 +792,9 @@ bool wxTextCtrl::Create( wxWindow *parent,
+     // left justification (alignment) is the default anyhow
+     if ( style & (wxTE_RIGHT | wxTE_CENTRE) )
+         GTKSetJustification();
++        
++    if (style & wxTE_SPELLCHECK)
++        GTKEnableSpellchecker();
+ 
+     if (multi_line)
+     {
+@@ -958,6 +970,43 @@ void wxTextCtrl::GTKSetJustification()
+     }
+ }
+ 
++bool wxTextCtrl::GTKEnableSpellchecker()
++{
++    GtkTextView *textview = GTK_TEXT_VIEW(m_text);
++    wxASSERT_MSG( textview, wxS("wxTextCtrl is not a GtkTextView" ));
++    
++    wxString lang = wxLocale::GetLanguageCanonicalName(wxLANGUAGE_DEFAULT);
++    
++#if GTK_CHECK_VERSION(3,0,0)
++    GtkSpellChecker *spell = gtk_spell_checker_get_from_text_view(textview);
++
++    if (!spell)
++    {
++        spell = gtk_spell_checker_new();
++        gtk_spell_checker_attach(spell, textview);
++    }
++
++    return gtk_spell_checker_set_language(spell, lang.c_str(), NULL);
++
++#else // GTK_CHECK_VERSION(3,0,0)
++    GtkSpell *spell = gtkspell_get_from_text_view(textview);
++    GError *err = NULL;
++
++    if (spell)
++        gtkspell_set_language(spell, lang.c_str(), &err);
++    else
++        gtkspell_new_attach(textview, lang.c_str(), &err);
++
++    if (err)
++    {
++        g_error_free(err);
++        return false;
++    }
++    else
++        return true;
++#endif // GTK_CHECK_VERSION(3,0,0)
++}
++
+ void wxTextCtrl::SetWindowStyleFlag(long style)
+ {
+     long styleOld = GetWindowStyleFlag();

@@ -1,0 +1,295 @@
+Index: include/wx/html/htmlcell.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/html/htmlcell.h,v
+retrieving revision 1.58
+diff -u -r1.58 htmlcell.h
+--- include/wx/html/htmlcell.h	2005/02/24 14:33:32	1.58
++++ include/wx/html/htmlcell.h	2005/08/18 12:33:05
+@@ -181,6 +181,13 @@
+     int GetHeight() const {return m_Height;}
+     int GetDescent() const {return m_Descent;}
+ 
++    void SetSubSuperAlignment(int align) { m_SubSuper = align; }
++    int GetSubSuperAlignment() const { return m_SubSuper; }
++    long GetSubSuperBase() { return m_SubSuperBase; }
++    void SetSubSuperBase(long base) { m_SubSuperBase = base; }
++    // calculate new descent based on Sub/Super alignment and previous base
++    void ActualizeSubSuper(long prevbase);
++
+     // Formatting cells are not visible on the screen, they only alter
+     // renderer's state.
+     bool IsFormattingCell() const { return m_Width == 0 && m_Height == 0; }
+@@ -311,6 +318,7 @@
+             // m_Descent is used to position text&images..
+     long m_PosX, m_PosY;
+             // position where the fragment is drawn
++    long m_SubSuper, m_SubSuperBase;
+     wxHtmlLinkInfo *m_Link;
+             // destination address if this fragment is hypertext link, NULL otherwise
+     bool m_CanLiveOnPagebreak;
+Index: include/wx/html/htmldefs.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/html/htmldefs.h,v
+retrieving revision 1.13
+diff -u -r1.13 htmldefs.h
+--- include/wx/html/htmldefs.h	2004/09/27 19:06:39	1.13
++++ include/wx/html/htmldefs.h	2005/08/18 12:33:06
+@@ -29,6 +29,10 @@
+ 
+ #define wxHTML_ALIGN_CENTER          0x0001
+ 
++// <sub> <sup> alignment 
++#define wxHTML_VALIGN_NORMAL         0x0000
++#define wxHTML_VALIGN_SUB            0x0001
++#define wxHTML_VALIGN_SUPER          0x0002
+ 
+ 
+ //--------------------------------------------------------------------------------
+Index: include/wx/html/winpars.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/html/winpars.h,v
+retrieving revision 1.29
+diff -u -r1.29 winpars.h
+--- include/wx/html/winpars.h	2004/10/13 14:04:15	1.29
++++ include/wx/html/winpars.h	2005/08/18 12:33:06
+@@ -117,6 +117,11 @@
+ 
+     int GetAlign() const {return m_Align;}
+     void SetAlign(int a) {m_Align = a;}
++    int GetSubSuperAlign() const { return m_SubSuperAlign; }
++    void SetSubSuperAlign(int a) { m_SubSuperAlign = a; }
++    int GetSubSuperBase() const { return m_SubSuperBase; }
++    void SetSubSuperBase(long base) { m_SubSuperBase = base; }
++
+     const wxColour& GetLinkColor() const { return m_LinkColor; }
+     void SetLinkColor(const wxColour& clr) { m_LinkColor = clr; }
+     const wxColour& GetActualColor() const { return m_ActualColor; }
+@@ -167,6 +172,10 @@
+             // average height of normal-sized text
+     int m_Align;
+             // actual alignment
++    int m_SubSuperAlign;
++            // actual <sub> <sup> alignment
++    int m_SubSuperBase;
++            // actual <sub> <sup> base
+ 
+     wxFont* m_FontsTable[2][2][2][2][7];
+     wxString m_FontsFacesTable[2][2][2][2][7];
+Index: src/html/htmlcell.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/html/htmlcell.cpp,v
+retrieving revision 1.100
+diff -u -r1.100 htmlcell.cpp
+--- src/html/htmlcell.cpp	2005/05/31 09:20:12	1.100
++++ src/html/htmlcell.cpp	2005/08/18 12:33:07
+@@ -35,6 +35,10 @@
+ 
+ #include <stdlib.h>
+ 
++// useful for debugging: draw border around cells
++#define wxHTML_DEBUG_HTMLWORDCELL       0
++#define wxHTML_DEBUG_HTMLCONTAINERCELL  0
++
+ //-----------------------------------------------------------------------------
+ // Global variables
+ //-----------------------------------------------------------------------------
+@@ -94,6 +98,8 @@
+     m_Next = NULL;
+     m_Parent = NULL;
+     m_Width = m_Height = m_Descent = 0;
++    m_SubSuper = wxHTML_VALIGN_NORMAL;        // <sub> or <sup> alignment
++    m_SubSuperBase = 0;                       // <sub> or <sup> base delta
+     m_CanLiveOnPagebreak = true;
+     m_Link = NULL;
+ }
+@@ -103,6 +109,17 @@
+     delete m_Link;
+ }
+ 
++// Update the descent value when whe are in a <sub> or <sup>.
++// prevbase is the parent base
++void wxHtmlCell::ActualizeSubSuper(long prevbase)
++{
++    m_SubSuperBase = 0;
++    if (m_SubSuper == wxHTML_VALIGN_SUPER)
++        m_SubSuperBase = prevbase - (m_Height + 1) / 2;
++    else if (m_SubSuper == wxHTML_VALIGN_SUB)
++        m_SubSuperBase = prevbase + (m_Height + 1) / 6;
++    m_Descent += m_SubSuperBase;
++}
+ 
+ void wxHtmlCell::OnMouseClick(wxWindow *parent, int x, int y,
+                               const wxMouseEvent& event)
+@@ -379,9 +396,19 @@
+                           int WXUNUSED(view_y1), int WXUNUSED(view_y2),
+                           wxHtmlRenderingInfo& info)
+ {
+-#if 0 // useful for debugging
++#if wxHTML_DEBUG_HTMLWORDCELL
+     dc.SetPen(*wxBLACK_PEN);
+     dc.DrawRectangle(x+m_PosX,y+m_PosY,m_Width /* VZ: +1? */ ,m_Height);
++    if (m_SubSuper == wxHTML_VALIGN_SUB)
++    {
++        dc.SetPen(*wxRED_PEN);
++        dc.DrawLine(x+m_PosX,y+m_PosY+m_Height,x+m_PosX+m_Width,y+m_PosY+m_Height);
++    }
++    else if (m_SubSuper == wxHTML_VALIGN_SUPER)
++    {
++        dc.SetPen(*wxBLUE);
++        dc.DrawLine(x+m_PosX,y+m_PosY,x+m_PosX+m_Width,y+m_PosY);
++    }
+ #endif
+ 
+     bool drawSelectionAfterCell = false;
+@@ -898,7 +925,7 @@
+ void wxHtmlContainerCell::Draw(wxDC& dc, int x, int y, int view_y1, int view_y2,
+                                wxHtmlRenderingInfo& info)
+ {
+-#if 0 // useful for debugging
++#if wxHTML_DEBUG_HTMLCONTAINERCELL
+     dc.SetPen(*wxRED_PEN);
+     dc.DrawRectangle(x+m_PosX,y+m_PosY,m_Width,m_Height);
+ #endif
+Index: src/html/m_fonts.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/html/m_fonts.cpp,v
+retrieving revision 1.26
+diff -u -r1.26 m_fonts.cpp
+--- src/html/m_fonts.cpp	2004/09/27 19:15:05	1.26
++++ src/html/m_fonts.cpp	2005/08/18 12:33:07
+@@ -315,7 +315,51 @@
+ 
+ 
+ 
++TAG_HANDLER_BEGIN(SUBSUP, "SUB,SUP")
++    TAG_HANDLER_CONSTR(SUBSUP) { }
+ 
++    TAG_HANDLER_PROC(tag)
++    {
++        bool issub = tag.GetName() == wxT("SUB");
++        int oldvalign = m_WParser->GetSubSuperAlign();
++        int oldbase = m_WParser->GetSubSuperBase();
++        int oldsize = m_WParser->GetFontSize();
++
++        if (issub)
++            m_WParser->SetSubSuperAlign(wxHTML_VALIGN_SUB);
++        else
++            m_WParser->SetSubSuperAlign(wxHTML_VALIGN_SUPER);
++        // find last item
++        wxHtmlCell *c = m_WParser->GetContainer()->GetFirstChild();
++        while (c->GetNext() != NULL)
++        {
++            c = c->GetNext();
++        }
++        m_WParser->SetSubSuperBase(oldbase + c->GetSubSuperBase());
++
++        // select smaller font
++        m_WParser->SetFontSize(m_WParser->GetFontSize()-2);
++        m_WParser->GetContainer()->InsertCell(
++            new wxHtmlFontCell(m_WParser->CreateCurrentFont()));
++
++        ParseInner(tag);
++
++        // restore font size
++        m_WParser->SetFontSize(oldsize);
++        m_WParser->GetContainer()->InsertCell(
++            new wxHtmlFontCell(m_WParser->CreateCurrentFont()));
++
++        // restore base and alignment
++        m_WParser->SetSubSuperBase(oldbase);
++        m_WParser->SetSubSuperAlign(oldvalign);
++
++        return true;
++    }
++
++TAG_HANDLER_END(SUBSUP)
++
++
++
+ TAGS_MODULE_BEGIN(Fonts)
+ 
+     TAGS_MODULE_ADD(FONT)
+@@ -325,6 +369,7 @@
+     TAGS_MODULE_ADD(FACES_TT)
+     TAGS_MODULE_ADD(Hx)
+     TAGS_MODULE_ADD(BIGSMALL)
++    TAGS_MODULE_ADD(SUBSUP)
+ 
+ TAGS_MODULE_END(Fonts)
+ 
+Index: src/html/m_image.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/html/m_image.cpp,v
+retrieving revision 1.53
+diff -u -r1.53 m_image.cpp
+--- src/html/m_image.cpp	2005/07/26 23:33:27	1.53
++++ src/html/m_image.cpp	2005/08/18 12:33:08
+@@ -649,6 +649,16 @@
+                                           str, w, h,
+                                           m_WParser->GetPixelScale(),
+                                           al, mn);
++                if (m_WParser->GetSubSuperAlign() == wxHTML_VALIGN_SUPER)
++                {
++                    cel->SetSubSuperAlignment(wxHTML_VALIGN_SUPER);
++                    cel->ActualizeSubSuper(m_WParser->GetSubSuperBase());
++                }
++                else if (m_WParser->GetSubSuperAlign() == wxHTML_VALIGN_SUB)
++                {
++                    cel->SetSubSuperAlignment(wxHTML_VALIGN_SUB);
++                    cel->ActualizeSubSuper(m_WParser->GetSubSuperBase());
++                }
+                 cel->SetLink(m_WParser->GetLink());
+                 cel->SetId(tag.GetParam(wxT("id"))); // may be empty
+                 m_WParser->GetContainer()->InsertCell(cel);
+Index: src/html/winpars.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/html/winpars.cpp,v
+retrieving revision 1.58
+diff -u -r1.58 winpars.cpp
+--- src/html/winpars.cpp	2005/02/08 13:00:05	1.58
++++ src/html/winpars.cpp	2005/08/18 12:33:09
+@@ -197,6 +197,8 @@
+     m_LinkColor.Set(0, 0, 0xFF);
+     m_ActualColor.Set(0, 0, 0);
+     m_Align = wxHTML_ALIGN_LEFT;
++    m_SubSuperAlign = wxHTML_VALIGN_NORMAL;
++    m_SubSuperBase = 0;
+     m_tmpLastWasSpace = false;
+     m_lastWordCell = NULL;
+ 
+@@ -354,6 +356,16 @@
+                 if (temp[j] == nbsp)
+                     temp[j] = wxT(' ');
+             c = new wxHtmlWordCell(temp, *(GetDC()));
++            if (GetSubSuperAlign() == wxHTML_VALIGN_SUPER)
++            {
++                c->SetSubSuperAlignment(wxHTML_VALIGN_SUPER);
++                c->ActualizeSubSuper(GetSubSuperBase());
++            }
++            else if (GetSubSuperAlign() == wxHTML_VALIGN_SUB)
++            {
++                c->SetSubSuperAlignment(wxHTML_VALIGN_SUB);
++                c->ActualizeSubSuper(GetSubSuperBase());
++            }
+             if (m_UseLink)
+                 c->SetLink(m_Link);
+             m_Container->InsertCell(c);
+@@ -375,6 +387,16 @@
+             if (temp[j] == nbsp)
+                 temp[j] = wxT(' ');
+         c = new wxHtmlWordCell(temp, *(GetDC()));
++        if (GetSubSuperAlign() == wxHTML_VALIGN_SUPER)
++        {
++            c->SetSubSuperAlignment(wxHTML_VALIGN_SUPER);
++            c->ActualizeSubSuper(GetSubSuperBase());
++        }
++        else if (GetSubSuperAlign() == wxHTML_VALIGN_SUB)
++        {
++            c->SetSubSuperAlignment(wxHTML_VALIGN_SUB);
++            c->ActualizeSubSuper(GetSubSuperBase());
++        }
+         if (m_UseLink)
+             c->SetLink(m_Link);
+         m_Container->InsertCell(c);
+
+ 	  	 

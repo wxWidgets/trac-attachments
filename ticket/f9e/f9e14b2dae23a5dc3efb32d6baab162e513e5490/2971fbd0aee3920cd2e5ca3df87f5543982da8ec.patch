@@ -1,0 +1,237 @@
+--- wxWidgets.orig/include/wx/odcombo.h	Fri Jun 16 18:17:19 2006
++++ wxWidgets/include/wx/odcombo.h	Sat Jun 17 16:06:21 2006
+@@ -119,6 +119,10 @@
+     void DismissWithEvent();
+ 
+-    // Re-calculates width for given item
+-    void CheckWidth( int pos );
++    // OnMeasureItemWidth will be called on next GetAdjustedSize.
++    void ItemWidthChanged(unsigned int item)
++    {
++        m_widths[item] = -1;
++        m_widthsDirty = true;
++    }
+ 
+     // Callbacks for drawing and measuring items. Override in a derived class for
+@@ -156,5 +160,4 @@
+     wxArrayString           m_strings;
+     wxArrayPtrVoid          m_clientDatas;
+-    wxArrayInt              m_widths; // cached line widths
+ 
+     wxFont                  m_useFont;
+@@ -163,7 +166,4 @@
+     int                     m_value; // selection
+     int                     m_itemHover; // on which item the cursor is
+-    int                     m_widestWidth; // width of widest item thus far
+-    int                     m_avgCharWidth;
+-    int                     m_baseImageWidth; // how much per item drawn in addition to text
+     int                     m_itemHeight; // default item height (calculate from font size
+                                           // and used in the absence of callback)
+@@ -172,6 +172,21 @@
+ private:
+ 
++    // Cached item widths (in pixels).
++    wxArrayInt              m_widths;
++
++    // Width of currently widest item.
++    int                     m_widestWidth;
++
++    // Index of currently widest item.
++    int                     m_widestItem;
++
++    // Measure some items in next GetAdjustedSize?
++    bool                    m_widthsDirty;
++
++    // Find widest item in next GetAdjustedSize?
++    bool                    m_findWidest;
++
+     // has the mouse been released on this control?
+-    bool m_clicked;
++    bool                    m_clicked;
+ 
+     DECLARE_EVENT_TABLE()
+--- wxWidgets.orig/src/generic/odcombo.cpp	Fri Jun 16 18:18:26 2006
++++ wxWidgets/src/generic/odcombo.cpp	Sat Jun 17 16:07:08 2006
+@@ -59,6 +59,7 @@
+ {
+     m_widestWidth = 0;
+-    m_avgCharWidth = 0;
+-    m_baseImageWidth = 0;
++    m_widestItem = -1;
++    m_widthsDirty = false;
++    m_findWidest = false;
+     m_itemHeight = 0;
+     m_value = -1;
+@@ -328,24 +329,4 @@
+ }
+ 
+-void wxVListBoxComboPopup::CheckWidth( int pos )
+-{
+-    wxCoord x = OnMeasureItemWidth(pos);
+-
+-    if ( x < 0 )
+-    {
+-        if ( !m_useFont.Ok() )
+-            m_useFont = m_combo->GetFont();
+-
+-        wxCoord y;
+-        m_combo->GetTextExtent(m_strings[pos], &x, &y, 0, 0, &m_useFont);
+-        x += 4;
+-    }
+-
+-    if ( m_widestWidth < x )
+-    {
+-        m_widestWidth = x;
+-    }
+-}
+-
+ void wxVListBoxComboPopup::Insert( const wxString& item, int pos )
+ {
+@@ -359,10 +340,9 @@
+ 
+     m_strings.Insert(item,pos);
++    m_widths.Insert(-1,pos);
++    m_widthsDirty = true;
+ 
+     if ( IsCreated() )
+         wxVListBox::SetItemCount( wxVListBox::GetItemCount()+1 );
+-
+-    // Calculate width
+-    CheckWidth(pos);
+ }
+ 
+@@ -398,4 +378,8 @@
+ 
+     m_strings.Empty();
++    m_widths.Empty();
++
++    m_widestWidth = 0;
++    m_widestItem = -1;
+ 
+     ClearClientDatas();
+@@ -428,4 +412,6 @@
+     m_clientDatas.SetCount(n+1,NULL);
+     m_clientDatas[n] = clientData;
++
++    ItemWidthChanged(n);
+ }
+ 
+@@ -450,4 +436,8 @@
+ 
+     m_strings.RemoveAt(item);
++    m_widths.RemoveAt(item);
++
++    if ( (int)item == m_widestItem )
++        m_findWidest = true;
+ 
+     if ( IsCreated() )
+@@ -473,4 +463,5 @@
+ {
+     m_strings[item] = str;
++    ItemWidthChanged(item);
+ }
+ 
+@@ -538,4 +529,91 @@
+         height = 50;
+ 
++
++    bool doFindWidest = m_findWidest;
++
++    // Measure items with dirty width.
++    if ( m_widthsDirty )
++    {
++        unsigned int i;
++        unsigned int n = m_widths.GetCount();
++        int dirtyHandled = 0;
++        wxArrayInt& widths = m_widths;
++
++        // I think using wxDC::GetTextExtent is faster than
++        // wxWindow::GetTextExtent (assuming same dc is used
++        // for all calls, as we do here).
++        wxClientDC dc(m_combo);
++        dc.SetFont(m_useFont);
++
++        for ( i=0; i<n; i++ )
++        {
++            if ( widths[i] < 0 )
++            {
++                wxCoord x = OnMeasureItemWidth(i);
++
++                if ( x < 0 )
++                {
++                    const wxString& text = m_strings[i];
++
++                    // To make sure performance won't suck in extreme scenarios,
++                    // we'll estimate length after some arbitrary number of items
++                    // have been checked precily.
++                    if ( dirtyHandled < 1024 )
++                    {
++                        wxCoord y;
++                        dc.GetTextExtent(text, &x, &y, 0, 0);
++                        x += 4;
++                    }
++                    else
++                    {
++                        x = text.length() * (dc.GetCharWidth()+1);
++                    }
++                }
++
++                widths[i] = x;
++
++                if ( x >= m_widestWidth )
++                {
++                    m_widestWidth = x;
++                    m_widestItem = (int)i;
++                }
++                else if ( (int)i == m_widestItem )
++                {
++                    // Width of previously widest item has been decreased, so
++                    // we'll have to check all to find current widest item.
++                    doFindWidest = true;
++                }
++
++                dirtyHandled++;
++            }
++        }
++
++        m_widthsDirty = false;
++    }
++
++    if ( doFindWidest )
++    {
++        unsigned int i;
++        unsigned int n = m_widths.GetCount();
++
++        int bestWidth = -1;
++        int bestIndex = -1;
++
++        for ( i=0; i<n; i++ )
++        {
++            int w = m_widths[i];
++            if ( w > bestWidth )
++            {
++                bestIndex = (int)i;
++                bestWidth = w;
++            }
++        }
++
++        m_widestWidth = bestWidth;
++        m_widestItem = bestIndex;
++
++        m_findWidest = false;
++    }
++
+     // Take scrollbar into account in width calculations
+     int widestWidth = m_widestWidth + wxSystemSettings::GetMetric(wxSYS_VSCROLL_X);
+@@ -555,6 +633,8 @@
+         const wxString& item = choices.Item(i);
+         m_strings.Add(item);
+-        CheckWidth(i);
+     }
++
++    m_widths.SetCount(n,-1);
++    m_widthsDirty = true;
+ 
+     if ( IsCreated() )
+
+ 	  	 

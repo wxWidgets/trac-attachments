@@ -1,0 +1,246 @@
+Index: include/wx/uri.h
+===================================================================
+--- include/wx/uri.h	(revision 62197)
++++ include/wx/uri.h	(working copy)
+@@ -55,16 +55,26 @@
+     wxURI();
+     wxURI(const wxString& uri);
+ 
+-    // default copy ctor, assignment operator and dtor are ok
++    // dtor must be virtual!
++    virtual ~wxURI() {};
+ 
++    // default copy ctor is ok
++
+     bool Create(const wxString& uri);
+ 
+-    wxURI& operator=(const wxString& string)
++    // operator= must be virtual
++    virtual wxURI& operator=(const wxString& string)
+     {
+         Create(string);
+         return *this;
+     }
+ 
++    // operator= must be virtual
++    virtual wxURI& operator=(const wxURI& uri)
++    {
++        return operator = (uri.BuildURI());
++    }
++
+     bool operator==(const wxURI& uri) const;
+ 
+     // various accessors
+Index: include/wx/url.h
+===================================================================
+--- include/wx/url.h	(revision 62197)
++++ include/wx/url.h	(working copy)
+@@ -48,11 +48,13 @@
+ {
+ public:
+     wxURL(const wxString& sUrl = wxEmptyString);
+-    wxURL(const wxURI& url);
++    wxURL(const wxURI& uri);
++    wxURL(const wxURL& url);
+     virtual ~wxURL();
+ 
+-    wxURL& operator = (const wxString& url);
+-    wxURL& operator = (const wxURI& url);
++    virtual wxURL& operator = (const wxString& url);
++    virtual wxURL& operator = (const wxURI& uri);
++    wxURL& operator = (const wxURL& url);
+ 
+     wxProtocol& GetProtocol()        { return *m_protocol; }
+     wxURLError GetError() const      { return m_error; }
+@@ -97,6 +99,7 @@
+     wxString m_url;
+ 
+     void Init(const wxString&);
++    void Free();
+     bool ParseURL();
+     void CleanData();
+     bool FetchProtocol();
+Index: src/common/url.cpp
+===================================================================
+--- src/common/url.cpp	(revision 62197)
++++ src/common/url.cpp	(working copy)
+@@ -65,12 +65,18 @@
+     ParseURL();
+ }
+ 
+-wxURL::wxURL(const wxURI& url) : wxURI(url)
++wxURL::wxURL(const wxURI& uri) : wxURI(uri)
+ {
+-    Init(url.BuildURI());
++    Init(uri.BuildURI());
+     ParseURL();
+ }
+ 
++wxURL::wxURL(const wxURL& url) : wxURI(url)
++{
++    Init(url.GetURL());
++    ParseURL();
++}
++
+ void wxURL::Init(const wxString& url)
+ {
+     m_protocol = NULL;
+@@ -102,16 +108,25 @@
+ // Assignment
+ // --------------------------------------------------------------
+ 
+-wxURL& wxURL::operator = (const wxURI& url)
++wxURL& wxURL::operator = (const wxURI& uri)
+ {
+-    wxURI::operator = (url);
+-    Init(url.BuildURI());
+-    ParseURL();
++    // This could be an assignment to self through a base class pointer!
++    return operator = (uri.BuildURI());
++}
++
++wxURL& wxURL::operator = (const wxURL& url)
++{
++    // Beware of assignment to self
++    if (&url != this)
++        operator = (url.GetURL());
+     return *this;
+ }
++
+ wxURL& wxURL::operator = (const wxString& url)
+ {
+     wxURI::operator = (url);
++    // We must free everything before Init()
++    Free();
+     Init(url);
+     ParseURL();
+     return *this;
+@@ -188,7 +203,7 @@
+             m_protocol->Destroy();
+ }
+ 
+-wxURL::~wxURL()
++void wxURL::Free()
+ {
+     CleanData();
+ #if wxUSE_PROTOCOL_HTTP
+@@ -200,6 +215,11 @@
+ #endif
+ }
+ 
++wxURL::~wxURL()
++{
++    Free();
++}
++
+ // --------------------------------------------------------------
+ // FetchProtocol
+ // --------------------------------------------------------------
+Index: tests/uris/url.cpp
+===================================================================
+--- tests/uris/url.cpp	(revision 62197)
++++ tests/uris/url.cpp	(working copy)
+@@ -37,9 +37,11 @@
+ private:
+     CPPUNIT_TEST_SUITE( URLTestCase );
+         CPPUNIT_TEST( GetInputStream );
++        CPPUNIT_TEST( CopyAndAssignment );
+     CPPUNIT_TEST_SUITE_END();
+ 
+     void GetInputStream();
++    void CopyAndAssignment();
+ 
+     DECLARE_NO_COPY_CLASS(URLTestCase)
+ };
+@@ -69,16 +71,83 @@
+         return;
+     }
+     
+-    wxURL url("http://wxwidgets.org/logo9.jpg");
+-    CPPUNIT_ASSERT_EQUAL(wxURL_NOERR, url.GetError());
++    // Set check point for heap
++    wxDebugContext::SetCheckpoint();
+ 
+-    wxInputStream *in_stream = url.GetInputStream();
+-    CPPUNIT_ASSERT(in_stream && in_stream->IsOk());
++    // Create block for heap check
++    {
++        wxURL url("http://wxwidgets.org/logo9.jpg");
++        CPPUNIT_ASSERT_EQUAL(wxURL_NOERR, url.GetError());
+ 
+-    wxMemoryOutputStream ostream;
+-    CPPUNIT_ASSERT(in_stream->Read(ostream).GetLastError() == wxSTREAM_EOF);
++        wxInputStream *in_stream = url.GetInputStream();
++        CPPUNIT_ASSERT(in_stream && in_stream->IsOk());
++
++        wxMemoryOutputStream ostream;
++        CPPUNIT_ASSERT(in_stream->Read(ostream).GetLastError() == wxSTREAM_EOF);
++
++        // wx logo image currently is 13219 bytes
++        CPPUNIT_ASSERT(ostream.GetSize() == 13219);
++
++        // we have to delete the object created by GetInputStream()
++        delete in_stream;
++    }
+     
+-    // wx logo image currently is 13219 bytes
+-    CPPUNIT_ASSERT(ostream.GetSize() == 13219);
++    CPPUNIT_ASSERT(wxDebugContext::CountObjectsLeft(true) == 0);
++    // Release check point for normal heap monitoring
++    wxDebugContext::SetCheckpoint(true);
+ }
+ 
++void URLTestCase::CopyAndAssignment()
++{
++    // Set check point for heap
++    wxDebugContext::SetCheckpoint();
++    
++    // Create block for heap check
++    {
++        wxURL url1("http://www.example.org/");
++        wxURL url2;
++        wxURI *puri = &url2;
++
++        { // Copy constructor
++            wxURL url3(url1);
++            CPPUNIT_ASSERT(url1 == url3);
++        }
++        { // Constructor for string
++            wxURL url3(url1.GetURL());
++            CPPUNIT_ASSERT(url1 == url3);
++        }
++        { // 'Copy' constructor for uri
++            wxURL url3(*puri);
++            CPPUNIT_ASSERT(url2 == url3);
++        }
++
++        // assignment for uri
++        *puri = url1;
++        CPPUNIT_ASSERT(url1 == url2);
++
++        // assignment to self through base pointer
++        *puri = url2;
++
++        // Assignment of string
++        url1 = _("http://www.example2.org/index.html");
++        *puri = _("http://www.example2.org/index.html");
++        CPPUNIT_ASSERT(url1 == url2);
++
++        // Assignment
++        url1 = _("");
++        url2 = url1;
++        CPPUNIT_ASSERT(url1 == url2);
++
++        // assignment to self
++        url2 = url2;
++
++        // check for destructor (with base pointer!)
++        puri = new wxURL();
++        delete puri;
++    }
++
++    // Check for memory leaks
++    CPPUNIT_ASSERT(wxDebugContext::CountObjectsLeft(true) == 0);
++    // Release check point for normal heap monitoring
++    wxDebugContext::SetCheckpoint(true);
++}

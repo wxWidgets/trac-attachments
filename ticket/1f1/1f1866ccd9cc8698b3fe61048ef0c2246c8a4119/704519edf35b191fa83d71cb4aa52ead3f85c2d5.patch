@@ -1,0 +1,2431 @@
+Index: wxWidgets.org/src/unix/gsocket.cpp
+===================================================================
+--- wxWidgets.org/src/unix/gsocket.cpp	(revision 50277)
++++ wxWidgets.org/src/unix/gsocket.cpp	(working copy)
+@@ -21,6 +21,7 @@
+ #ifndef __GSOCKET_STANDALONE__
+ #include "wx/defs.h"
+ #include "wx/private/gsocketiohandler.h"
++#include "wx/thread.h" //for assert
+ #endif
+ 
+ #if defined(__VISAGECPP__)
+@@ -459,54 +460,18 @@
+ /* Table of GUI-related functions. We must call them indirectly because
+  * of wxBase and GUI separation: */
+ 
+-static GSocketGUIFunctionsTable *gs_gui_functions;
++static GSocketFunctionsTable *gs_gui_functions;
+ 
+-class GSocketGUIFunctionsTableNull: public GSocketGUIFunctionsTable
+-{
+-public:
+-    virtual bool OnInit();
+-    virtual void OnExit();
+-    virtual bool CanUseEventLoop();
+-    virtual bool Init_Socket(GSocket *socket);
+-    virtual void Destroy_Socket(GSocket *socket);
+-    virtual void Install_Callback(GSocket *socket, GSocketEvent event);
+-    virtual void Uninstall_Callback(GSocket *socket, GSocketEvent event);
+-    virtual void Enable_Events(GSocket *socket);
+-    virtual void Disable_Events(GSocket *socket);
+-};
+-
+-bool GSocketGUIFunctionsTableNull::OnInit()
+-{   return true; }
+-void GSocketGUIFunctionsTableNull::OnExit()
+-{}
+-bool GSocketGUIFunctionsTableNull::CanUseEventLoop()
+-{   return false; }
+-bool GSocketGUIFunctionsTableNull::Init_Socket(GSocket *WXUNUSED(socket))
+-{   return true; }
+-void GSocketGUIFunctionsTableNull::Destroy_Socket(GSocket *WXUNUSED(socket))
+-{}
+-void GSocketGUIFunctionsTableNull::Install_Callback(GSocket *WXUNUSED(socket), GSocketEvent WXUNUSED(event))
+-{}
+-void GSocketGUIFunctionsTableNull::Uninstall_Callback(GSocket *WXUNUSED(socket), GSocketEvent WXUNUSED(event))
+-{}
+-void GSocketGUIFunctionsTableNull::Enable_Events(GSocket *WXUNUSED(socket))
+-{}
+-void GSocketGUIFunctionsTableNull::Disable_Events(GSocket *WXUNUSED(socket))
+-{}
+ /* Global initialisers */
+ 
+-void GSocket_SetGUIFunctions(GSocketGUIFunctionsTable *guifunc)
++void GSocket_SetGUIFunctions(GSocketFunctionsTable *guifunc)
+ {
+   gs_gui_functions = guifunc;
+ }
+ 
+ int GSocket_Init(void)
+ {
+-  if (!gs_gui_functions)
+-  {
+-    static GSocketGUIFunctionsTableNull table;
+-    gs_gui_functions = &table;
+-  }
++  wxASSERT(gs_gui_functions);
+   if ( !gs_gui_functions->OnInit() )
+     return 0;
+   return 1;
+@@ -547,6 +512,7 @@
+   m_timeout             = 10*60*1000;
+                                 /* 10 minutes * 60 sec * 1000 millisec */
+   m_establishing        = false;
++  m_use_events          = false;
+   m_initialRecvBufferSize = -1;
+   m_initialSendBufferSize = -1;
+ 
+@@ -557,7 +523,8 @@
+ 
+ void GSocket::Close()
+ {
+-    gs_gui_functions->Disable_Events(this);
++    if (m_use_events)
++        DisableEvents();
+ 
+     /*  When running on OS X, the gsockosx implementation of GSocketGUIFunctionsTable
+         will close the socket during Disable_Events.  However, it will only do this
+@@ -581,7 +548,8 @@
+     Shutdown();
+ 
+   /* Per-socket GUI-specific cleanup */
+-  gs_gui_functions->Destroy_Socket(this);
++  if (m_use_events)
++    gs_gui_functions->Destroy_Socket(this);
+ 
+   delete m_handler;
+ 
+@@ -591,6 +559,7 @@
+ 
+   if (m_peer)
+     GAddress_destroy(m_peer);
++
+ }
+ 
+ /* GSocket_Shutdown:
+@@ -604,7 +573,8 @@
+   assert(this);
+ 
+   /* Don't allow events to fire after socket has been closed */
+-  gs_gui_functions->Disable_Events(this);
++  if (m_use_events)
++    DisableEvents();
+ 
+   /* If socket has been created, shutdown it */
+   if (m_fd != INVALID_SOCKET)
+@@ -788,7 +758,8 @@
+ #endif
+ 
+   ioctl(m_fd, FIONBIO, &arg);
+-  gs_gui_functions->Enable_Events(this);
++  if (m_use_events)
++    EnableEvents();
+ 
+   /* allow a socket to re-bind if the socket is in the TIME_WAIT
+      state after being previously closed.
+@@ -907,11 +878,30 @@
+ #else
+   ioctl(connection->m_fd, FIONBIO, &arg);
+ #endif
+-  gs_gui_functions->Enable_Events(connection);
++  if (m_use_events)
++    connection->Notify(true);
+ 
+   return connection;
+ }
+ 
++void GSocket::Notify(bool flag)
++{
++    if (flag == m_use_events)
++        return;
++    //it is not safe to attach or detach i/o descriptor in child thread
++    wxASSERT_MSG(wxThread::IsMain(),wxT("wxSocketBase::Notify can be called in main thread only"));
++    m_use_events = flag;
++    EnableEvents(flag);
++}
++
++void GSocket::EnableEvents(bool flag)
++{
++    if (flag)
++        gs_gui_functions->Enable_Events(this);
++    else
++        gs_gui_functions->Disable_Events(this);
++}
++
+ bool GSocket::SetReusable()
+ {
+     /* socket must not be null, and must not be in use/already bound */
+@@ -1049,8 +1039,8 @@
+    * call to Enable_Events now.
+    */
+ 
+-  if (m_non_blocking || ret == 0)
+-    gs_gui_functions->Enable_Events(this);
++  if (m_use_events && (m_non_blocking || ret == 0))
++    EnableEvents();
+ 
+   if (ret == -1)
+   {
+@@ -1075,9 +1065,9 @@
+         SOCKOPTLEN_T len = sizeof(error);
+ 
+         getsockopt(m_fd, SOL_SOCKET, SO_ERROR, (char*) &error, &len);
++        if (m_use_events)
++            EnableEvents();
+ 
+-        gs_gui_functions->Enable_Events(this);
+-
+         if (!error)
+           return GSOCK_NOERROR;
+       }
+@@ -1156,7 +1146,8 @@
+ #else
+   ioctl(m_fd, FIONBIO, &arg);
+ #endif
+-  gs_gui_functions->Enable_Events(this);
++  if (m_use_events)
++    EnableEvents();
+ 
+   if (m_reusable)
+   {
+@@ -1228,9 +1219,11 @@
+     if (ret == 0)
+     {
+       /* Make sure wxSOCKET_LOST event gets sent and shut down the socket */
+-      m_detected = GSOCK_LOST_FLAG;
+-      Detected_Read();
+-      return 0;
++      if (m_use_events) {
++        m_detected = GSOCK_LOST_FLAG;
++        Detected_Read();
++        return 0;
++      }
+     }
+     else if (ret == -1)
+     {
+@@ -1558,14 +1551,18 @@
+ 
+ void GSocket::Enable(GSocketEvent event)
+ {
+-  m_detected &= ~(1 << event);
+-  gs_gui_functions->Install_Callback(this, event);
++    if (m_use_events) {
++        m_detected &= ~(1 << event);
++        gs_gui_functions->Install_Callback(this, event);
++    }
+ }
+ 
+ void GSocket::Disable(GSocketEvent event)
+ {
+-  m_detected |= (1 << event);
+-  gs_gui_functions->Uninstall_Callback(this, event);
++    if (m_use_events) {
++        m_detected |= (1 << event);
++        gs_gui_functions->Uninstall_Callback(this, event);
++    }
+ }
+ 
+ /* _GSocket_Input_Timeout:
+Index: wxWidgets.org/src/unix/baseunix.cpp
+===================================================================
+--- wxWidgets.org/src/unix/baseunix.cpp	(revision 50277)
++++ wxWidgets.org/src/unix/baseunix.cpp	(working copy)
+@@ -33,6 +33,7 @@
+ #include "wx/apptrait.h"
+ #include "wx/unix/execute.h"
+ #include "wx/evtloop.h"
++#include "wx/unix/gsockunx.h"
+ 
+ #include "wx/unix/private/timer.h"
+ 
+@@ -95,4 +96,11 @@
+ 
+ #endif // wxUSE_TIMER
+ 
++#if wxUSE_SOCKETS
++GSocketFunctionsTable* wxConsoleAppTraits::GetSocketFunctionsTable() {
++  static GSocketUnixFunctionsTable funcs;
++  return &funcs;
++};
++#endif
++
+ //  Note: wxConsoleAppTraits::CreateEventLoop() is defined in evtloopunix.cpp!
+Index: wxWidgets.org/src/unix/epolldispatcher.cpp
+===================================================================
+--- wxWidgets.org/src/unix/epolldispatcher.cpp	(revision 50277)
++++ wxWidgets.org/src/unix/epolldispatcher.cpp	(working copy)
+@@ -82,7 +82,8 @@
+         wxLogSysError(_("Failed to create epoll descriptor"));
+         return NULL;
+     }
+-
++    wxLogTrace(wxEpollDispatcher_Trace,
++                   _T("Epoll fd %d created"), epollDescriptor);
+     return new wxEpollDispatcher(epollDescriptor);
+ }
+ 
+@@ -115,6 +116,8 @@
+ 
+         return false;
+     }
++    wxLogTrace(wxEpollDispatcher_Trace,
++               _T("Added fd %d (handler %p) to epoll %d"), fd, handler, m_epollDescriptor);
+ 
+     return true;
+ }
+@@ -134,6 +137,8 @@
+         return false;
+     }
+ 
++    wxLogTrace(wxEpollDispatcher_Trace,
++                _T("Modified fd %d (handler: %p) on epoll %d"), fd, handler, m_epollDescriptor);
+     return true;
+ }
+ 
+@@ -148,7 +153,8 @@
+         wxLogSysError(_("Failed to unregister descriptor %d from epoll descriptor %d"),
+                       fd, m_epollDescriptor);
+     }
+-
++    wxLogTrace(wxEpollDispatcher_Trace,
++                _T("removed fd %d from %d"), fd, m_epollDescriptor);
+     return true;
+ }
+ 
+Index: wxWidgets.org/src/mac/carbon/gsocket.cpp
+===================================================================
+--- wxWidgets.org/src/mac/carbon/gsocket.cpp	(revision 50277)
++++ wxWidgets.org/src/mac/carbon/gsocket.cpp	(working copy)
+@@ -196,7 +196,7 @@
+ 
+ /* Global initialisers */
+ 
+-void GSocket_SetGUIFunctions(GSocketGUIFunctionsTable *table)
++void GSocket_SetGUIFunctions(GSocketFunctionsTable *table)
+ {
+     // do nothing, wxMac doesn't have wxBase-GUI separation yet
+ }
+Index: wxWidgets.org/src/common/gsocketiohandler.cpp
+===================================================================
+--- wxWidgets.org/src/common/gsocketiohandler.cpp	(revision 50277)
++++ wxWidgets.org/src/common/gsocketiohandler.cpp	(working copy)
+@@ -76,21 +76,21 @@
+ // GSocket interface
+ // ----------------------------------------------------------------------------
+ 
+-bool GSocketGUIFunctionsTableConcrete::CanUseEventLoop()
++bool GSocketUnixFunctionsTable::CanUseEventLoop()
+ {
+     return true;
+ }
+ 
+-bool GSocketGUIFunctionsTableConcrete::OnInit()
++bool GSocketUnixFunctionsTable::OnInit()
+ {
+     return true;
+ }
+ 
+-void GSocketGUIFunctionsTableConcrete::OnExit()
++void GSocketUnixFunctionsTable::OnExit()
+ {
+ }
+ 
+-bool GSocketGUIFunctionsTableConcrete::Init_Socket(GSocket *socket)
++bool GSocketUnixFunctionsTable::Init_Socket(GSocket *socket)
+ {
+   int *m_id;
+ 
+@@ -103,12 +103,12 @@
+   return true;
+ }
+ 
+-void GSocketGUIFunctionsTableConcrete::Destroy_Socket(GSocket *socket)
++void GSocketUnixFunctionsTable::Destroy_Socket(GSocket *socket)
+ {
+   free(socket->m_gui_dependent);
+ }
+ 
+-void GSocketGUIFunctionsTableConcrete::Install_Callback(GSocket *socket,
++void GSocketUnixFunctionsTable::Install_Callback(GSocket *socket,
+                                                         GSocketEvent event)
+ {
+   int *m_id = (int *)(socket->m_gui_dependent);
+@@ -162,7 +162,7 @@
+       dispatcher->ModifyFD(fd, handler, handler->GetFlags());
+ }
+ 
+-void GSocketGUIFunctionsTableConcrete::Uninstall_Callback(GSocket *socket,
++void GSocketUnixFunctionsTable::Uninstall_Callback(GSocket *socket,
+                                                           GSocketEvent event)
+ {
+   int *m_id = (int *)(socket->m_gui_dependent);
+@@ -198,6 +198,7 @@
+       {
+           dispatcher->UnregisterFD(fd);
+           delete handler;
++          socket->m_handler = NULL;
+       }
+       else
+       {
+@@ -210,13 +211,13 @@
+   }
+ }
+ 
+-void GSocketGUIFunctionsTableConcrete::Enable_Events(GSocket *socket)
++void GSocketUnixFunctionsTable::Enable_Events(GSocket *socket)
+ {
+   Install_Callback(socket, GSOCK_INPUT);
+   Install_Callback(socket, GSOCK_OUTPUT);
+ }
+ 
+-void GSocketGUIFunctionsTableConcrete::Disable_Events(GSocket *socket)
++void GSocketUnixFunctionsTable::Disable_Events(GSocket *socket)
+ {
+   Uninstall_Callback(socket, GSOCK_INPUT);
+   Uninstall_Callback(socket, GSOCK_OUTPUT);
+Index: wxWidgets.org/src/common/fdiodispatcher.cpp
+===================================================================
+--- wxWidgets.org/src/common/fdiodispatcher.cpp	(revision 50277)
++++ wxWidgets.org/src/common/fdiodispatcher.cpp	(working copy)
+@@ -55,7 +55,7 @@
+ #endif // wxUSE_EPOLL_DISPATCHER
+ #if wxUSE_SELECT_DISPATCHER
+             gs_dispatcher = wxSelectDispatcher::Create();
+-#endif // wxUSE_WCHAR_T
++#endif // wxUSE_SELECT_DISPATCHER
+     }
+ 
+     wxASSERT_MSG( gs_dispatcher, _T("failed to create any IO dispatchers") );
+Index: wxWidgets.org/src/common/socket.cpp
+===================================================================
+--- wxWidgets.org/src/common/socket.cpp	(revision 50277)
++++ wxWidgets.org/src/common/socket.cpp	(working copy)
+@@ -143,8 +143,8 @@
+ 
+         wxAppTraits *traits = wxAppConsole::GetInstance() ?
+                               wxAppConsole::GetInstance()->GetTraits() : NULL;
+-        GSocketGUIFunctionsTable *functions =
+-            traits ? traits->GetSocketGUIFunctionsTable() : NULL;
++        GSocketFunctionsTable *functions =
++            traits ? traits->GetSocketFunctionsTable() : NULL;
+         GSocket_SetGUIFunctions(functions);
+ 
+         if ( !GSocket_Init() )
+@@ -695,7 +695,7 @@
+   else
+     timeout = m_timeout * 1000;
+ 
+-  bool has_event_loop = wxTheApp->GetTraits() ? (wxTheApp->GetTraits()->GetSocketGUIFunctionsTable() ? true : false) : false;
++  bool has_event_loop = wxTheApp->GetTraits() ? (wxTheApp->GetTraits()->GetSocketFunctionsTable() ? true : false) : false;
+ 
+   // Wait in an active polling loop.
+   //
+@@ -1009,6 +1009,8 @@
+ void wxSocketBase::Notify(bool notify)
+ {
+     m_notify = notify;
++    if (m_socket)
++        m_socket->Notify(notify);
+ }
+ 
+ void wxSocketBase::SetNotify(wxSocketEventFlags flags)
+@@ -1096,8 +1098,8 @@
+         return;
+     }
+ 
+-        // Setup the socket as server
+-
++    // Setup the socket as server
++    m_socket->Notify(m_notify);
+     m_socket->SetLocal(addr_man.GetAddress());
+ 
+     if (GetFlags() & wxSOCKET_REUSEADDR) {
+@@ -1123,6 +1125,8 @@
+     m_socket->SetCallback(GSOCK_INPUT_FLAG | GSOCK_OUTPUT_FLAG |
+                                   GSOCK_LOST_FLAG | GSOCK_CONNECTION_FLAG,
+                                   wx_socket_callback, (char *)this);
++
++    wxLogTrace( wxTRACE_Socket, _T("wxSocketServer on fd %d"), m_socket->m_fd );
+ }
+ 
+ // --------------------------------------------------------------------------
+@@ -1310,6 +1314,9 @@
+   m_socket->SetPeer(addr_man.GetAddress());
+   err = m_socket->Connect(GSOCK_STREAMED);
+ 
++  //this will register for callbacks - must be called after m_socket->m_fd was initialized
++  m_socket->Notify(m_notify);
++
+   if (!wait)
+     m_socket->SetNonBlocking(0);
+ 
+@@ -1365,6 +1372,7 @@
+         wxFAIL_MSG( _T("datagram socket not new'd") );
+         return;
+     }
++    m_socket->Notify(m_notify);
+     // Setup the socket as non connection oriented
+     m_socket->SetLocal(addr.GetAddress());
+     if (flags & wxSOCKET_REUSEADDR)
+Index: wxWidgets.org/src/common/appbase.cpp
+===================================================================
+--- wxWidgets.org/src/common/appbase.cpp	(revision 50277)
++++ wxWidgets.org/src/common/appbase.cpp	(working copy)
+@@ -645,7 +645,7 @@
+ }
+ 
+ #if wxUSE_SOCKETS
+-GSocketGUIFunctionsTable* wxConsoleAppTraitsBase::GetSocketGUIFunctionsTable()
++GSocketFunctionsTable* wxConsoleAppTraitsBase::GetSocketFunctionsTable()
+ {
+     return NULL;
+ }
+Index: wxWidgets.org/src/common/appcmn.cpp
+===================================================================
+--- wxWidgets.org/src/common/appcmn.cpp	(revision 50277)
++++ wxWidgets.org/src/common/appcmn.cpp	(working copy)
+@@ -563,10 +563,16 @@
+     #error "Must include correct GSocket header here"
+ #endif
+ 
+-GSocketGUIFunctionsTable* wxGUIAppTraitsBase::GetSocketGUIFunctionsTable()
++GSocketFunctionsTable* wxGUIAppTraitsBase::GetSocketFunctionsTable()
+ {
+-    static GSocketGUIFunctionsTableConcrete table;
+-    return &table;
++//wxDFB uses sockets implementation from wxBase
++#if defined(__WXDFB__)
++    static GSocketUnixFunctionsTable table;
++    return &table;
++#else // !__WXDFB__
++    static GSocketGUIFunctionsTableConcrete table;
++    return &table;
++#endif
+ }
+ 
+ #endif
+Index: wxWidgets.org/src/common/selectdispatcher.cpp
+===================================================================
+--- wxWidgets.org/src/common/selectdispatcher.cpp	(revision 50277)
++++ wxWidgets.org/src/common/selectdispatcher.cpp	(working copy)
+@@ -96,14 +96,10 @@
+         if ( flags & ms_flags[n] )
+         {
+             wxFD_SET(fd, &m_fds[n]);
+-            wxLogTrace(wxSelectDispatcher_Trace,
+-                       _T("Registered fd %d for %s events"), fd, ms_names[n]);
+         }
+         else if ( wxFD_ISSET(fd,  (fd_set*) &m_fds[n]) )
+         {
+             wxFD_CLR(fd, &m_fds[n]);
+-            wxLogTrace(wxSelectDispatcher_Trace,
+-                       _T("Unregistered fd %d from %s events"), fd, ms_names[n]);
+         }
+     }
+ 
+@@ -124,6 +120,9 @@
+             wxLogTrace(wxSelectDispatcher_Trace,
+                        _T("Got %s event on fd %d"), ms_names[n], fd);
+             (handler.*ms_handlers[n])();
++            // callback can modify sets and destroy handler
++            // this forces that one event can be processed at one time
++            return;
+         }
+     }
+ }
+@@ -154,6 +153,8 @@
+     if ( fd > m_maxFD )
+       m_maxFD = fd;
+ 
++    wxLogTrace(wxSelectDispatcher_Trace,
++                _T("Registered fd %d: input:%d, output:%d, exceptional:%d"), fd, (flags & wxFDIO_INPUT) == wxFDIO_INPUT, (flags & wxFDIO_OUTPUT), (flags & wxFDIO_EXCEPTION) == wxFDIO_EXCEPTION);
+     return true;
+ }
+ 
+@@ -164,6 +165,8 @@
+ 
+     wxASSERT_MSG( fd <= m_maxFD, _T("logic error: registered fd > m_maxFD?") );
+ 
++    wxLogTrace(wxSelectDispatcher_Trace,
++                _T("Modified fd %d: input:%d, output:%d, exceptional:%d"), fd, (flags & wxFDIO_INPUT) == wxFDIO_INPUT, (flags & wxFDIO_OUTPUT) == wxFDIO_OUTPUT, (flags & wxFDIO_EXCEPTION) == wxFDIO_EXCEPTION);
+     return m_sets.SetFD(fd, flags);
+ }
+ 
+@@ -186,11 +189,15 @@
+                   ++it )
+             {
+                 if ( it->first > m_maxFD )
++                {
+                     m_maxFD = it->first;
++                }
+             }
+         }
+     }
+ 
++    wxLogTrace(wxSelectDispatcher_Trace,
++                _T("Removed fd %d, current max: %d"), fd, m_maxFD);
+     return true;
+ }
+ 
+Index: wxWidgets.org/src/msw/gsocket.cpp
+===================================================================
+--- wxWidgets.org/src/msw/gsocket.cpp	(revision 50277)
++++ wxWidgets.org/src/msw/gsocket.cpp	(working copy)
+@@ -100,32 +100,6 @@
+ 
+ static GSocketGUIFunctionsTable *gs_gui_functions;
+ 
+-class GSocketGUIFunctionsTableNull: public GSocketGUIFunctionsTable
+-{
+-public:
+-    virtual bool OnInit();
+-    virtual void OnExit();
+-    virtual bool CanUseEventLoop();
+-    virtual bool Init_Socket(GSocket *socket);
+-    virtual void Destroy_Socket(GSocket *socket);
+-    virtual void Enable_Events(GSocket *socket);
+-    virtual void Disable_Events(GSocket *socket);
+-};
+-
+-bool GSocketGUIFunctionsTableNull::OnInit()
+-{   return true; }
+-void GSocketGUIFunctionsTableNull::OnExit()
+-{}
+-bool GSocketGUIFunctionsTableNull::CanUseEventLoop()
+-{   return false; }
+-bool GSocketGUIFunctionsTableNull::Init_Socket(GSocket *WXUNUSED(socket))
+-{   return true; }
+-void GSocketGUIFunctionsTableNull::Destroy_Socket(GSocket *WXUNUSED(socket))
+-{}
+-void GSocketGUIFunctionsTableNull::Enable_Events(GSocket *WXUNUSED(socket))
+-{}
+-void GSocketGUIFunctionsTableNull::Disable_Events(GSocket *WXUNUSED(socket))
+-{}
+ /* Global initialisers */
+ 
+ void GSocket_SetGUIFunctions(GSocketGUIFunctionsTable *guifunc)
+@@ -139,7 +113,7 @@
+ 
+   if (!gs_gui_functions)
+   {
+-    static GSocketGUIFunctionsTableNull table;
++    static GSocketGUIFunctionsTableConcrete table;
+     gs_gui_functions = &table;
+   }
+   if ( !gs_gui_functions->OnInit() )
+Index: wxWidgets.org/src/msw/evtloop.cpp
+===================================================================
+--- wxWidgets.org/src/msw/evtloop.cpp	(revision 50277)
++++ wxWidgets.org/src/msw/evtloop.cpp	(working copy)
+@@ -336,7 +336,7 @@
+     }
+     else
+     {
+-        wxLogDebug(_T("Ignoring unexpected message %d"), msg.message);
++        ::DispatchMessage(&msg);
+     }
+ 
+     return !m_shouldExit;
+Index: wxWidgets.org/include/wx/unix/gsockunx.h
+===================================================================
+--- wxWidgets.org/include/wx/unix/gsockunx.h	(revision 50277)
++++ wxWidgets.org/include/wx/unix/gsockunx.h	(working copy)
+@@ -25,7 +25,10 @@
+ #include "gsocket.h"
+ #endif
+ 
+-class GSocketGUIFunctionsTableConcrete : public GSocketGUIFunctionsTable
++#include "wx/private/gsocketiohandler.h"
++
++//table for wxBase socket functions table
++class GSocketUnixFunctionsTable : public GSocketFunctionsTable
+ {
+ public:
+     virtual bool OnInit();
+@@ -39,6 +42,22 @@
+     virtual void Disable_Events(GSocket *socket);
+ };
+ 
++//table for port specific (GTK1, GTK2, OS2) socket functions table
++class GSocketGUIFunctionsTableConcrete : public GSocketUnixFunctionsTable
++{
++public:
++    virtual bool OnInit();
++    virtual void OnExit();
++    virtual bool CanUseEventLoop();
++    virtual bool Init_Socket(GSocket *socket);
++    virtual void Destroy_Socket(GSocket *socket);
++    virtual void Install_Callback(GSocket *socket, GSocketEvent event);
++    virtual void Uninstall_Callback(GSocket *socket, GSocketEvent event);
++    virtual void Enable_Events(GSocket *socket);
++    virtual void Disable_Events(GSocket *socket);
++};
++
++
+ class GSocket
+ {
+ public:
+@@ -70,6 +89,8 @@
+     GSocketError GetSockOpt(int level, int optname, void *optval, int *optlen);
+     GSocketError SetSockOpt(int level, int optname,
+         const void *optval, int optlen);
++    //attach or detach from main loop
++    void Notify(bool flag);
+     virtual void Detected_Read();
+     virtual void Detected_Write();
+     void SetInitialSocketBuffers(int recv, int send)
+@@ -79,6 +100,9 @@
+     }
+ 
+ protected:
++    //enable or disable event callback using gsocket gui callback table
++    void EnableEvents(bool flag = true);
++    void DisableEvents() { EnableEvents(false); }
+     void Enable(GSocketEvent event);
+     void Disable(GSocketEvent event);
+     GSocketError Input_Timeout();
+@@ -108,6 +132,9 @@
+   bool m_dobind;
+   unsigned long m_timeout;
+ 
++  // true if socket should fire events (use GUI GSocketFunctionsTable)
++  bool m_use_events;
++
+   /* Callbacks */
+   GSocketEventFlags m_detected;
+   GSocketCallback m_cbacks[GSOCK_MAX_EVENT];
+Index: wxWidgets.org/include/wx/unix/apptrait.h
+===================================================================
+--- wxWidgets.org/include/wx/unix/apptrait.h	(revision 50277)
++++ wxWidgets.org/include/wx/unix/apptrait.h	(working copy)
+@@ -29,6 +29,9 @@
+ #if wxUSE_TIMER
+     virtual wxTimerImpl *CreateTimerImpl(wxTimer *timer);
+ #endif
++#if wxUSE_SOCKETS
++    virtual GSocketFunctionsTable* GetSocketFunctionsTable();
++#endif
+ };
+ 
+ #if wxUSE_GUI
+Index: wxWidgets.org/include/wx/gsocket.h
+===================================================================
+--- wxWidgets.org/include/wx/gsocket.h	(revision 50277)
++++ wxWidgets.org/include/wx/gsocket.h	(working copy)
+@@ -98,11 +98,11 @@
+ 
+ /* Actually this is a misnomer now, but reusing this name means I don't
+    have to ifdef app traits or common socket code */
+-class GSocketGUIFunctionsTable
++class GSocketFunctionsTable
+ {
+ public:
+     // needed since this class declares virtual members
+-    virtual ~GSocketGUIFunctionsTable() { }
++    virtual ~GSocketFunctionsTable() { }
+     virtual bool OnInit() = 0;
+     virtual void OnExit() = 0;
+     virtual bool CanUseEventLoop() = 0;
+@@ -121,7 +121,7 @@
+ 
+ /* Sets GUI functions callbacks. Must be called *before* GSocket_Init
+    if the app uses async sockets. */
+-void GSocket_SetGUIFunctions(GSocketGUIFunctionsTable *guifunc);
++void GSocket_SetGUIFunctions(GSocketFunctionsTable *guifunc);
+ 
+ /* GSocket_Init() must be called at the beginning */
+ int GSocket_Init(void);
+Index: wxWidgets.org/include/wx/msw/gsockmsw.h
+===================================================================
+--- wxWidgets.org/include/wx/msw/gsockmsw.h	(revision 50277)
++++ wxWidgets.org/include/wx/msw/gsockmsw.h	(working copy)
+@@ -35,7 +35,7 @@
+ #include <winsock.h>
+ #endif
+ 
+-class GSocketGUIFunctionsTableConcrete: public GSocketGUIFunctionsTable
++class GSocketGUIFunctionsTableConcrete: public GSocketFunctionsTable
+ {
+ public:
+     virtual bool OnInit();
+@@ -62,6 +62,8 @@
+   GAddress *GetPeer();
+   GSocketError SetServer();
+   GSocket *WaitConnection();
++  //not used for msw
++  void Notify(bool) {};
+   bool SetReusable();
+   bool SetBroadcast();
+   bool DontDoBind();
+Index: wxWidgets.org/include/wx/apptrait.h
+===================================================================
+--- wxWidgets.org/include/wx/apptrait.h	(revision 50277)
++++ wxWidgets.org/include/wx/apptrait.h	(working copy)
+@@ -30,7 +30,7 @@
+ class WXDLLIMPEXP_FWD_BASE wxTimer;
+ class WXDLLIMPEXP_FWD_BASE wxTimerImpl;
+ 
+-class GSocketGUIFunctionsTable;
++class GSocketFunctionsTable;
+ 
+ 
+ // ----------------------------------------------------------------------------
+@@ -122,7 +122,7 @@
+     // used in both GUI and base apps). To complicate it further, GUI library
+     // ("wxCore") doesn't depend on networking library and so only a functions
+     // table can be passed around
+-    virtual GSocketGUIFunctionsTable* GetSocketGUIFunctionsTable() = 0;
++    virtual GSocketFunctionsTable* GetSocketFunctionsTable() = 0;
+ #endif
+ 
+     // create a new, port specific, instance of the event loop used by wxApp
+@@ -216,7 +216,7 @@
+ #endif // wxUSE_FONTMAP
+     virtual wxRendererNative *CreateRenderer();
+ #if wxUSE_SOCKETS
+-    virtual GSocketGUIFunctionsTable* GetSocketGUIFunctionsTable();
++    virtual GSocketFunctionsTable* GetSocketFunctionsTable();
+ #endif
+ 
+ #ifdef __WXDEBUG__
+@@ -260,7 +260,7 @@
+ #endif // wxUSE_FONTMAP
+     virtual wxRendererNative *CreateRenderer();
+ #if wxUSE_SOCKETS
+-    virtual GSocketGUIFunctionsTable* GetSocketGUIFunctionsTable();
++    virtual GSocketFunctionsTable* GetSocketFunctionsTable();
+ #endif
+ 
+ #ifdef __WXDEBUG__
+Index: wxWidgets.org/configure.in
+===================================================================
+--- wxWidgets.org/configure.in	(revision 50277)
++++ wxWidgets.org/configure.in	(working copy)
+@@ -7210,6 +7210,9 @@
+     fi
+ else
+     SAMPLES_SUBDIRS="console"
++    if test "$wxUSE_SOCKETS" = "yes" ; then
++        SAMPLES_SUBDIRS="$SAMPLES_SUBDIRS sockets"
++    fi
+ fi
+ 
+ 
+@@ -7843,7 +7846,14 @@
+             dnl don't take all samples/utils, just those which build with
+             dnl wxBase
+             if test ${subdir} = "samples"; then
+-                makefiles="samples/Makefile.in samples/console/Makefile.in"
++                dnl only take those samples which compile in the current
++                dnl configuration and which exist
++                makefiles="samples/Makefile.in $makefiles"
++                for sample in `echo $SAMPLES_SUBDIRS`; do
++                    if test -d $srcdir/samples/$sample; then
++                        makefiles="samples/$sample/Makefile.in $makefiles"
++                    fi
++                done
+             elif test ${subdir} = "utils"; then
+                 makefiles=""
+                 for util in HelpGen tex2rtf ; do
+Index: wxWidgets.org/build/bakefiles/files.bkl
+===================================================================
+--- wxWidgets.org/build/bakefiles/files.bkl	(revision 50277)
++++ wxWidgets.org/build/bakefiles/files.bkl	(working copy)
+@@ -54,6 +54,7 @@
+ <!--                               UNIX                                     -->
+ <!-- =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=- -->
+ <set var="BASE_UNIX_SRC" hints="files">
++    src/common/gsocketiohandler.cpp
+     src/common/fdiodispatcher.cpp
+     src/common/selectdispatcher.cpp
+     src/unix/appunix.cpp
+@@ -74,6 +75,7 @@
+ </set>
+ <set var="BASE_UNIX_HDR" hints="files">
+     wx/private/fdiodispatcher.h
++    wx/private/gsocketiohandler.h
+     wx/private/selectdispatcher.h
+     wx/unix/app.h
+     wx/unix/apptbase.h
+@@ -547,6 +549,7 @@
+ 
+ <set var="NET_WIN32_SRC" hints="files">
+     src/msw/gsocket.cpp
++    src/msw/gsockmsw.cpp
+     src/msw/urlmsw.cpp
+ </set>
+ <set var="NET_WIN32_HDR" hints="files">
+@@ -1479,7 +1482,6 @@
+ 
+ <set var="X11_LOWLEVEL_SRC" hints="files">
+     $(XWIN_LOWLEVEL_SRC)
+-    src/common/gsocketiohandler.cpp
+     src/generic/icon.cpp
+     src/generic/timer.cpp
+     src/x11/app.cpp
+@@ -1574,7 +1576,6 @@
+     src/msw/gdiobj.cpp
+     src/msw/gdiplus.cpp
+     src/msw/graphics.cpp
+-    src/msw/gsockmsw.cpp
+     src/msw/icon.cpp
+     src/msw/imaglist.cpp
+     src/msw/minifram.cpp
+@@ -1903,7 +1904,6 @@
+ 
+ <set var="DFB_LOWLEVEL_SRC" hints="files">
+     src/common/fontmgrcmn.cpp
+-    src/common/gsocketiohandler.cpp
+     src/generic/caret.cpp
+     src/generic/colour.cpp
+     src/generic/icon.cpp
+@@ -1923,6 +1923,7 @@
+     src/dfb/font.cpp
+     src/dfb/fontenum.cpp
+     src/dfb/fontmgr.cpp
++    src/dfb/gsockdfb.cpp
+     src/dfb/nonownedwnd.cpp
+     src/dfb/overlay.cpp
+     src/dfb/pen.cpp
+Index: wxWidgets.org/samples/sockets/baseserver.cpp
+===================================================================
+--- wxWidgets.org/samples/sockets/baseserver.cpp	(revision 0)
++++ wxWidgets.org/samples/sockets/baseserver.cpp	(revision 0)
+@@ -0,0 +1,736 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        samples/sockbase/client.cpp
++// Purpose:     Sockets sample for wxBase
++// Author:      Lukasz Michalski
++// Modified by:
++// Created:     27.06.2005
++// RCS-ID:      $Id: zork-mainloop-0.19.patch,v 1.1 2006/05/30 09:14:25 zork Exp $
++// Copyright:   (c) 2005 Lukasz Michalski <lmichalski@user.sourceforge.net>
++// Licence:     wxWindows license
++/////////////////////////////////////////////////////////////////////////////
++
++// ============================================================================
++// declarations
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++#include <wx/wx.h>
++#include <wx/socket.h>
++#include <wx/event.h>
++#include <wx/list.h>
++#include <wx/cmdline.h>
++#include <wx/datetime.h>
++#include <wx/timer.h>
++
++wxChar* GetSocketErrorMsg(int pSockError)
++{
++    switch(pSockError)
++    {
++        case wxSOCKET_NOERROR:
++            return wxT("wxSOCKET_NOERROR");
++        break;
++        case wxSOCKET_INVOP:
++            return wxT("wxSOCKET_INVOP");
++        break;
++        case wxSOCKET_IOERR:
++            return wxT("wxSOCKET_IOERR");
++        break;
++        case wxSOCKET_INVADDR:
++            return wxT("wxSOCKET_INVADDR");
++        break;
++        case wxSOCKET_NOHOST:
++            return wxT("wxSOCKET_NOHOST");
++        break;
++        case wxSOCKET_INVPORT:
++            return wxT("wxSOCKET_INVPORT");
++        break;
++        case wxSOCKET_WOULDBLOCK:
++            return wxT("wxSOCKET_WOULDBLOCK");
++        break;
++        case wxSOCKET_TIMEDOUT:
++            return wxT("wxSOCKET_TIMEDOUT");
++        break;
++        case wxSOCKET_MEMERR:
++            return wxT("wxSOCKET_MEMERR");
++        break;
++        default:
++            return wxT("Unknown");
++        break;
++    }
++}
++
++//log output types for LogWorker helper function
++typedef enum
++{
++    LOG_MESSAGE,
++    LOG_ERROR,
++    LOG_VERBOSE
++} logWorker_t;
++
++//outputs log message with IP and TCP port number prepended
++void
++LogWorker(const wxIPV4address& pAddr, const wxString& pMessage, logWorker_t pType = LOG_VERBOSE)
++{
++    wxString msg(wxString::Format(wxT("%s:%d "),pAddr.IPAddress().c_str(),pAddr.Service()));
++    msg += pMessage;
++    switch (pType)
++    {
++        case LOG_VERBOSE:
++            wxLogVerbose(msg);
++        break;
++        case LOG_MESSAGE:
++            wxLogMessage(msg);
++        break;
++        case LOG_ERROR:
++            wxLogError(msg);
++        break;
++    }
++}
++
++//event sent by workers to server class
++//after client is served
++const wxEventType wxEVT_WORKER = wxNewEventType();
++#define EVT_WORKER(func) DECLARE_EVENT_TABLE_ENTRY( wxEVT_WORKER, -1, -1, (wxObjectEventFunction) (wxEventFunction) (WorkerEventFunction) & func, (wxObject *) NULL ),
++
++class WorkerEvent : public wxEvent {
++public:
++    WorkerEvent(void* pSender)
++    {
++        SetId(-1);
++        SetEventType(wxEVT_WORKER);
++        m_sender = pSender;
++        m_exit = false;
++        m_workerFailed = false;
++    }
++
++    virtual wxEvent* Clone() const
++    {
++        return new WorkerEvent(*this);
++    }
++
++    void* m_sender;
++    bool m_exit;
++    bool m_workerFailed;
++};
++
++typedef void (wxEvtHandler::*WorkerEventFunction)(WorkerEvent&);
++
++class ThreadWorker;
++class EventWorker;
++
++WX_DECLARE_LIST(ThreadWorker, TList);
++WX_DECLARE_LIST(EventWorker, EList);
++
++//main server class contains listening socket
++//and list of two type worker classes that serve clients
++class Server : public wxApp
++{
++    DECLARE_EVENT_TABLE();
++public:
++    Server() : m_maxConnections(-1) {}
++    ~Server() {}
++private:
++    typedef enum {
++      MIXED,
++      THREADS,
++      EVENTS
++    } workMode;
++
++    virtual bool OnInit();
++    virtual int OnExit();
++
++    void OnInitCmdLine(wxCmdLineParser& pParser);
++    bool OnCmdLineParsed(wxCmdLineParser& pParser);
++
++    void OnSocketEvent(wxSocketEvent& pEvent);
++    void OnWorkerEvent(WorkerEvent& pEvent);
++    void OnTimerEvent(wxTimerEvent& pEvent);
++    void DumpStatistics();
++
++    TList m_threadWorkers;
++    EList m_eventWorkers;
++    workMode m_workMode;
++    wxSocketServer* m_listeningSocket;
++
++    //staticstics
++    unsigned m_threadWorkersCreated;
++    unsigned m_threadWorkersDone;
++    unsigned m_threadWorkersFailed;
++    unsigned m_maxThreadWorkers;
++
++    unsigned m_eventWorkersCreated;
++    unsigned m_eventWorkersDone;
++    unsigned m_eventWorkersFailed;
++    unsigned m_maxEventWorkers;
++
++    long int m_maxConnections;
++
++    long m_port;
++
++    wxTimer mTimer;
++};
++
++DECLARE_APP(Server);
++
++//thread based worker reads signature and all data first from connected client
++//and resends data to client after reading
++class ThreadWorker : public wxThread
++{
++public:
++    ThreadWorker(wxSocketBase* pSocket);
++    virtual ExitCode Entry();
++private:
++    wxSocketBase* m_socket;
++    wxIPV4address m_peer;
++};
++
++//event based worker reads signature and creates buffer for incoming data.
++//When part of data arrives this worker resends it as soon as possible.
++class EventWorker : public wxEvtHandler
++{
++    DECLARE_EVENT_TABLE();
++public:
++    EventWorker(wxSocketBase* pSock);
++    ~EventWorker();
++private:
++    wxSocketBase* m_socket;
++    wxIPV4address m_peer;
++
++    unsigned char m_signature[2];
++    char* m_inbuf;
++    int m_infill;
++    int m_size;
++    char* m_outbuf;
++    int m_outfill;
++    int m_written;
++
++    void OnSocketEvent(wxSocketEvent& pEvent);
++    void DoWrite();
++    void DoRead();
++};
++
++/******************* Implementation ******************/
++IMPLEMENT_APP(Server)
++
++#include <wx/listimpl.cpp>
++WX_DEFINE_LIST(TList);
++WX_DEFINE_LIST(EList);
++
++
++void
++Server::OnInitCmdLine(wxCmdLineParser& pParser)
++{
++    wxApp::OnInitCmdLine(pParser);
++    pParser.AddSwitch(wxT("t"),wxT("threads"),_("Use thread based workers only"));
++    pParser.AddSwitch(wxT("e"),wxT("events"),_("Use event based workers only"));
++    pParser.AddOption(wxT("m"),wxT("max"),_("Exit after <n> connections"),wxCMD_LINE_VAL_NUMBER,wxCMD_LINE_PARAM_OPTIONAL);
++    pParser.AddOption(wxT("p"),wxT("port"),_("listen on given port (default 3000)"),wxCMD_LINE_VAL_NUMBER,wxCMD_LINE_PARAM_OPTIONAL);
++}
++
++void
++Server::DumpStatistics()
++{
++    wxString mode;
++    switch(m_workMode)
++    {
++        case EVENTS:
++           mode = _("Event based workers");
++        break;
++        case THREADS:
++            mode = _("Thread based workers");
++        break;
++        case MIXED:
++            mode = _("Event and thread based workers");
++        break;
++    }
++    wxLogMessage(wxString::Format(wxT("Server mode: %s"),mode.c_str()));
++    wxLogMessage(wxString::Format(wxT("\t\t\t\tThreads\tEvents\tTotal")));
++    wxLogMessage(wxString::Format(wxT("Workers created:\t\t%d\t%d\t%d"),m_threadWorkersCreated,m_eventWorkersCreated,m_threadWorkersCreated+m_eventWorkersCreated));
++    wxLogMessage(wxString::Format(wxT("Max concurrent workers:\t%d\t%d\t%d"),m_maxThreadWorkers,m_maxEventWorkers,m_maxThreadWorkers+m_maxEventWorkers));
++    wxLogMessage(wxString::Format(wxT("Workers failed:\t\t%d\t%d\t%d"),m_threadWorkersFailed,m_eventWorkersFailed,m_threadWorkersFailed+m_eventWorkersFailed));
++    wxLogMessage(wxString::Format(wxT("Workers done:\t\t%d\t%d\t%d"),m_threadWorkersDone,m_eventWorkersDone,m_threadWorkersDone+m_eventWorkersDone));
++
++    if ((int)(m_threadWorkersDone+m_eventWorkersDone) == m_maxConnections)
++    {
++        wxLogMessage(wxT("%d connection(s) served, exiting"),m_maxConnections);
++        ExitMainLoop();
++    }
++}
++
++
++bool
++Server::OnCmdLineParsed(wxCmdLineParser& pParser)
++{
++    if (pParser.Found(_("verbose")))
++    {
++        wxLog::AddTraceMask(wxT("wxSocket"));
++        wxLog::AddTraceMask(wxT("epolldispatcher"));
++        wxLog::AddTraceMask(wxT("selectdispatcher"));
++        wxLog::AddTraceMask(wxT("thread"));
++        wxLog::AddTraceMask(wxT("events"));
++        wxLog::AddTraceMask(wxT("timer"));
++    }
++
++    if (pParser.Found(wxT("m"),&m_maxConnections))
++    {
++        wxLogMessage(wxT("%d connection(s) to exit"),m_maxConnections);
++    }
++
++    if (pParser.Found(wxT("p"),&m_port))
++    {
++        wxLogMessage(wxT("%d connection(s) to exit"),m_maxConnections);
++    }
++
++    if (pParser.Found(wxT("t")))
++        m_workMode = THREADS;
++    else if (pParser.Found(wxT("e")))
++        m_workMode = EVENTS;
++    else
++        m_workMode = MIXED;
++
++    return wxApp::OnCmdLineParsed(pParser);
++}
++
++bool Server::OnInit()
++{
++    wxLog* logger = new wxLogStderr();
++    wxLog::SetActiveTarget(logger);
++
++    m_port = 3000;
++
++    //send interesting things to console
++    if (!wxApp::OnInit())
++        return false;
++
++    //setup listening socket
++    wxIPV4address la;
++    la.Service(m_port);
++    m_listeningSocket = new wxSocketServer(la,wxSOCKET_NOWAIT|wxSOCKET_REUSEADDR);
++    m_listeningSocket->SetEventHandler(*this);
++    m_listeningSocket->SetNotify(wxSOCKET_CONNECTION_FLAG);
++    m_listeningSocket->Notify(true);
++    if (!m_listeningSocket->Ok())
++    {
++        wxLogError(wxT("Cannot bind listening socket"));
++        return false;
++    }
++
++    m_threadWorkersCreated = 0;
++    m_threadWorkersDone = 0;
++    m_threadWorkersFailed = 0;
++    m_maxThreadWorkers = 0;
++
++    m_eventWorkersCreated = 0;
++    m_eventWorkersDone = 0;
++    m_eventWorkersFailed = 0;
++    m_maxEventWorkers = 0;
++
++    wxLogMessage(wxT("Server listening at port %d, waiting for connections"), m_port);
++    return true;
++}
++
++
++int Server::OnExit()
++{
++    for(TList::compatibility_iterator it = m_threadWorkers.GetFirst(); it ; it = it->GetNext()) {
++        it->GetData()->Wait();
++        delete it->GetData();
++    }
++
++    for(EList::compatibility_iterator it = m_eventWorkers.GetFirst(); it ; it->GetNext()) {
++        delete it->GetData();
++    }
++
++    m_threadWorkers.Clear();
++    m_eventWorkers.Clear();
++    m_listeningSocket->Destroy();
++    return 0;
++}
++
++void Server::OnSocketEvent(wxSocketEvent& pEvent)
++{
++    switch(pEvent.GetSocketEvent())
++    {
++        case wxSOCKET_INPUT:
++            wxLogError(wxT("Unexpected wxSOCKET_INPUT in wxSocketServer"));
++        break;
++        case wxSOCKET_OUTPUT:
++            wxLogError(wxT("Unexpected wxSOCKET_OUTPUT in wxSocketServer"));
++        break;
++        case wxSOCKET_CONNECTION:
++        {
++            wxSocketBase* sock = m_listeningSocket->Accept();
++            wxIPV4address addr;
++            if (!sock->GetPeer(addr))
++            {
++                wxLogError(wxT("Server: cannot get peer info"));
++            } else {
++                wxLogMessage(wxT("Got connection from %s:%d"),addr.IPAddress().c_str(), addr.Service());
++            }
++            bool createThread;
++
++            if (m_workMode != MIXED)
++                createThread = m_workMode == THREADS;
++            else
++                createThread = (wxDateTime::Now().GetSecond())%2 == 0;
++
++            if (createThread)
++            {
++                ThreadWorker* c = new ThreadWorker(sock);
++                if (c->Create() == wxTHREAD_NO_ERROR)
++                {
++                    m_threadWorkers.Append(c);
++                    if (m_threadWorkers.GetCount() > m_maxThreadWorkers)
++                    m_maxThreadWorkers++;
++                    m_threadWorkersCreated++;
++                    c->Run();
++                }
++                else
++                {
++                    wxLogError(wxT("Server: cannot create next thread (current threads: %d"), m_threadWorkers.size());
++                };
++            }
++            else
++            {
++                EventWorker* w = new EventWorker(sock);
++                m_eventWorkers.Append(w);
++                if (m_eventWorkers.GetCount() > m_maxEventWorkers)
++                m_maxEventWorkers++;
++                m_eventWorkersCreated++;
++            }
++        }
++        break;
++        case wxSOCKET_LOST:
++            wxLogError(wxT("Unexpected wxSOCKET_LOST in wxSocketServer"));
++        break;
++    }
++}
++
++void  Server::OnWorkerEvent(WorkerEvent& pEvent)
++{
++    //wxLogMessage(wxT("Got worker event"));
++    for(TList::compatibility_iterator it = m_threadWorkers.GetFirst(); it ; it = it->GetNext())
++    {
++        if (it->GetData() == pEvent.m_sender)
++        {
++            wxLogVerbose(wxT("Deleting thread worker (%d left)"),m_threadWorkers.GetCount());
++            it->GetData()->Wait();
++            delete it->GetData();
++            m_threadWorkers.DeleteNode(it);
++            if (!pEvent.m_workerFailed)
++                m_threadWorkersDone++;
++            else
++                m_threadWorkersFailed++;
++            break;
++        }
++    }
++    for(EList::compatibility_iterator it = m_eventWorkers.GetFirst(); it ; it = it->GetNext())
++    {
++        if (it->GetData() == pEvent.m_sender)
++        {
++            wxLogVerbose(wxT("Deleting event worker (%d left)"),m_eventWorkers.GetCount());
++            delete it->GetData();
++            m_eventWorkers.DeleteNode(it);
++            if (!pEvent.m_workerFailed)
++                m_eventWorkersDone++;
++            else
++                m_eventWorkersFailed++;
++            break;
++        }
++    }
++
++    if (m_eventWorkers.GetCount() == 0 && m_threadWorkers.GetCount() == 0)
++    {
++        mTimer.Start(1000,true);
++    }
++}
++
++void Server::OnTimerEvent(wxTimerEvent&)
++{
++  DumpStatistics();
++}
++
++
++BEGIN_EVENT_TABLE(Server,wxEvtHandler)
++  EVT_SOCKET(wxID_ANY,Server::OnSocketEvent)
++  EVT_WORKER(Server::OnWorkerEvent)
++  EVT_TIMER(wxID_ANY,Server::OnTimerEvent)
++END_EVENT_TABLE()
++
++
++ThreadWorker::ThreadWorker(wxSocketBase* pSocket) : wxThread(wxTHREAD_JOINABLE)
++{
++    m_socket = pSocket;
++    //Notify() cannot be called in thread context. We have to detach from main loop
++    //before switching thread contexts.
++    m_socket->Notify(false);
++    m_socket->SetFlags(wxSOCKET_WAITALL|wxSOCKET_BLOCK);
++    pSocket->GetPeer(m_peer);
++}
++
++wxThread::ExitCode ThreadWorker::Entry()
++{
++    WorkerEvent e(this);
++    if (!m_socket->IsConnected())
++    {
++        LogWorker(m_peer,wxT("ThreadWorker: not connected"),LOG_ERROR);
++        return 0;
++    }
++    int to_process = -1;
++    if (m_socket->IsConnected())
++    {
++        unsigned char signature[2];
++        LogWorker(m_peer,wxT("ThreadWorker: reading for data"));
++        to_process = 2;
++        do
++        {
++            m_socket->Read(&signature,to_process);
++            if (m_socket->Error())
++            {
++                LogWorker(m_peer,wxT("ThreadWorker: Read error"),LOG_ERROR);
++                wxGetApp().AddPendingEvent(e);
++                return 0;
++            }
++            to_process -= m_socket->LastCount();
++            LogWorker(m_peer,wxString::Format(wxT("to_process: %d"),to_process));
++
++        }
++        while (!m_socket->Error() && to_process != 0);
++
++        if (signature[0] == 0)
++        {
++            e.m_exit = true;
++            return 0;
++        }
++
++        if (signature[0] == 0xCE)
++        {
++            LogWorker(m_peer,_("This server does not support test2 from GUI client"));
++            e.m_workerFailed = true;
++            e.m_exit = true;
++            return 0;
++        }
++        int size = signature[1] * (signature[0] == 0xBE ? 1 : 1024);
++        char* buf = new char[size];
++        LogWorker(m_peer,wxString::Format(wxT("Message signature: chunks: %d, kilobytes: %d, size: %d (bytes)"),signature[0],signature[1],size));
++
++        to_process = size;
++        LogWorker(m_peer,wxString::Format(wxT("ThreadWorker: reading %d bytes of data"),to_process));
++
++        do
++        {
++            m_socket->Read(buf,to_process);
++            if (m_socket->Error())
++            {
++                LogWorker(m_peer,wxT("ThreadWorker: Read error"),LOG_ERROR);
++                wxGetApp().AddPendingEvent(e);
++                return 0;
++            }
++            to_process -= m_socket->LastCount();
++            LogWorker(m_peer,wxString::Format(wxT("ThreadWorker: %d bytes readed, %d todo"),m_socket->LastCount(),to_process));
++
++        }
++        while(!m_socket->Error() && to_process != 0);
++
++        to_process = size;
++
++        do
++        {
++            m_socket->Write(buf,to_process);
++            if (m_socket->Error()) {
++                LogWorker(m_peer,wxT("ThreadWorker: Write error"),LOG_ERROR);
++                break;
++           }
++           to_process -= m_socket->LastCount();
++           LogWorker(m_peer,wxString::Format(wxT("ThreadWorker: %d bytes written, %d todo"),m_socket->LastCount(),to_process));
++        }
++        while(!m_socket->Error() && to_process != 0);
++    }
++
++    LogWorker(m_peer,wxT("ThreadWorker: done"));
++    e.m_workerFailed = to_process != 0;
++    m_socket->Destroy();
++    wxGetApp().AddPendingEvent(e);
++    return 0;
++}
++
++EventWorker::EventWorker(wxSocketBase* pSock)
++  : m_socket(pSock),
++    m_inbuf(NULL),
++    m_infill(0),
++    m_outbuf(NULL),
++    m_outfill(0)
++{
++    m_socket->SetNotify(wxSOCKET_LOST_FLAG|wxSOCKET_INPUT_FLAG|wxSOCKET_OUTPUT_FLAG);
++    m_socket->Notify(true);
++    m_socket->SetEventHandler(*this);
++    m_socket->SetFlags(wxSOCKET_NOWAIT);
++    m_socket->GetPeer(m_peer);
++}
++
++EventWorker::~EventWorker() {
++    m_socket->Destroy();
++    delete [] m_inbuf;
++    delete [] m_outbuf;
++}
++
++void
++EventWorker::DoRead() 
++{
++    if (m_inbuf == NULL)
++    {
++        //read message header
++        do
++        {
++            m_socket->Read(m_signature,2 - m_infill);
++            if (m_socket->Error()) {
++                if (m_socket->LastError() != wxSOCKET_WOULDBLOCK)
++                {
++                    LogWorker(m_peer,wxString::Format(wxT("Read error (%d): %s"),m_socket->LastError(),GetSocketErrorMsg(m_socket->LastError())),LOG_ERROR);
++                    m_socket->Close();
++                }
++            }
++            else
++            {
++                m_infill += m_socket->LastCount();
++                if (m_infill == 2) {
++                    unsigned char chunks = m_signature[1];
++                    unsigned char type = m_signature[0];
++                    if (type == 0xCE)
++                    {
++                        LogWorker(m_peer,_("This server does not support test2 from GUI client"));
++                        m_written = -1; //wxSOCKET_LOST will interpret this as failure
++                        m_socket->Close();
++                    }
++                    else if (type == 0xBE || type == 0xDE)
++                    {
++                        m_size = chunks * (type == 0xBE ? 1 : 1024);
++                        m_inbuf = new char[m_size];
++                        m_outbuf = new char[m_size];
++                        m_infill = 0;
++                        m_outfill = 0;
++                        m_written = 0;
++                        LogWorker(m_peer,wxString::Format(wxT("Message signature: len: %d, type: %s, size: %d (bytes)"),chunks,type == 0xBE ? wxT("b") : wxT("kB"),m_size));
++                        break;
++                    } else 
++                    {
++                        LogWorker(m_peer,wxString::Format(wxT("Unknown test type %x"),type));
++                        m_socket->Close();
++                    }
++                }
++            }
++        }
++        while(!m_socket->Error() && (2 - m_infill != 0));
++    }
++
++    if (m_inbuf == NULL)
++        return;
++    //read message data
++    do {
++        if (m_size == m_infill) {
++            m_signature[0] = m_signature[1] = 0x0;
++            delete [] m_inbuf;
++            m_inbuf = NULL;
++            m_infill = 0;
++            return;
++        }
++        m_socket->Read(m_inbuf + m_infill,m_size - m_infill);
++        if (m_socket->Error()) {
++            if (m_socket->LastError() != wxSOCKET_WOULDBLOCK)
++            {
++                LogWorker(
++                        m_peer,
++                        wxString::Format(wxT("Read error (%d): %s"),
++                                        m_socket->LastError(),
++                                        GetSocketErrorMsg(m_socket->LastError())
++                                    ),
++                        LOG_ERROR);
++
++                m_socket->Close();
++            }
++        }
++        else
++        {
++            memcpy(m_outbuf+m_outfill,m_inbuf+m_infill,m_socket->LastCount());
++            m_infill += m_socket->LastCount();
++            m_outfill += m_socket->LastCount();
++            DoWrite();
++        }
++    }
++    while(!m_socket->Error());
++};
++
++void EventWorker::OnSocketEvent(wxSocketEvent& pEvent)
++{
++    switch(pEvent.GetSocketEvent())
++    {
++        case wxSOCKET_INPUT:
++            DoRead();
++        break;
++        case wxSOCKET_OUTPUT:
++            if (m_inbuf != NULL)
++                DoWrite();
++        break;
++        case wxSOCKET_CONNECTION:
++            LogWorker(m_peer,wxString::Format(wxT("Unexpected wxSOCKET_CONNECTION in EventWorker")),LOG_ERROR);
++        break;
++        case wxSOCKET_LOST:
++        {
++            LogWorker(m_peer,wxString::Format(wxT("Connection lost")));
++            WorkerEvent e(this);
++            e.m_workerFailed = m_written != m_size;
++            wxGetApp().AddPendingEvent(e);
++        }
++        break;
++    }
++}
++
++void  EventWorker::DoWrite() {
++    do {
++        if (m_written == m_size)
++        {
++                delete [] m_outbuf;
++                m_outbuf = NULL;
++                m_outfill = 0;
++                LogWorker(m_peer,wxString::Format(wxT("All data written")));
++                return;
++        }
++        if (m_outfill - m_written == 0)
++        {
++            return;
++        }
++        m_socket->Write(m_outbuf + m_written,m_outfill - m_written);
++        if (m_socket->Error())
++        {
++            if (m_socket->LastError() != wxSOCKET_WOULDBLOCK)
++            {
++                LogWorker(m_peer,
++                            wxString::Format(wxT("Write error (%d): %s"),
++                                            m_socket->LastError(),
++                                            GetSocketErrorMsg(m_socket->LastError())
++                                            )
++                            ,LOG_ERROR
++                            );
++                m_socket->Close();
++            }
++            else
++            {
++                LogWorker(m_peer,wxString::Format(wxT("Write would block, waiting for OUTPUT event")));
++            }
++        }
++        else
++        {
++            memmove(m_outbuf,m_outbuf+m_socket->LastCount(),m_outfill-m_socket->LastCount());
++            m_written += m_socket->LastCount();
++        }
++        LogWorker(m_peer,wxString::Format(wxT("Written %d of %d bytes, todo %d"),m_socket->LastCount(),m_size,m_size - m_written));
++    }
++    while (!m_socket->Error());
++}
++
++BEGIN_EVENT_TABLE(EventWorker,wxEvtHandler)
++  EVT_SOCKET(wxID_ANY,EventWorker::OnSocketEvent)
++END_EVENT_TABLE()
+
+Property changes on: wxWidgets.org/samples/sockets/baseserver.cpp
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+
+Index: wxWidgets.org/samples/sockets/sockets.bkl
+===================================================================
+--- wxWidgets.org/samples/sockets/sockets.bkl	(revision 50277)
++++ wxWidgets.org/samples/sockets/sockets.bkl	(working copy)
+@@ -3,7 +3,15 @@
+ 
+     <include file="../../build/bakefiles/common_samples.bkl"/>
+ 
+-    <exe id="client" template="wx_sample" template_append="wx_append">
++    <if cond="FORMAT=='gnu'">
++        <!-- as we can't (easily) test for GUI, build them always -->
++        <set var="cond_build_gui">1</set>
++    </if>
++    <if cond="FORMAT!='gnu'">
++        <set var="cond_build_gui">USE_GUI=='1'</set>
++    </if>
++
++    <exe id="client" template="wx_sample" template_append="wx_append" cond="$(cond_build_gui)">
+         <sources>client.cpp</sources>
+         <wx-lib>core</wx-lib>
+         <wx-lib>net</wx-lib>
+@@ -11,7 +19,7 @@
+         <win32-res>client.rc</win32-res>
+     </exe>
+ 
+-    <exe id="server" template="wx_sample" template_append="wx_append">
++    <exe id="server" template="wx_sample" template_append="wx_append" cond="$(cond_build_gui)">
+         <sources>server.cpp</sources>
+         <wx-lib>core</wx-lib>
+         <wx-lib>net</wx-lib>
+@@ -19,4 +27,18 @@
+         <win32-res>server.rc</win32-res>
+     </exe>
+ 
++    <exe id="baseclient" template="wx_sample_console"
++                      template_append="wx_append_base">
++        <sources>baseclient.cpp</sources>
++        <wx-lib>net</wx-lib>
++        <wx-lib>base</wx-lib>
++    </exe>
++
++    <exe id="baseserver" template="wx_sample_console"
++                      template_append="wx_append_base">
++        <sources>baseserver.cpp</sources>
++        <wx-lib>net</wx-lib>
++        <wx-lib>base</wx-lib>
++    </exe>
++
+ </makefile>
+Index: wxWidgets.org/samples/sockets/baseclient.cpp
+===================================================================
+--- wxWidgets.org/samples/sockets/baseclient.cpp	(revision 0)
++++ wxWidgets.org/samples/sockets/baseclient.cpp	(revision 0)
+@@ -0,0 +1,732 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        samples/sockbase/client.cpp
++// Purpose:     Sockets sample for wxBase
++// Author:      Lukasz Michalski
++// Modified by:
++// Created:     27.06.2005
++// RCS-ID:      $Id: zork-mainloop-0.19.patch,v 1.1 2006/05/30 09:14:25 zork Exp $
++// Copyright:   (c) 2005 Lukasz Michalski <lmichalski@sf.net>
++// Licence:     wxWindows license
++/////////////////////////////////////////////////////////////////////////////
++
++// ============================================================================
++// declarations
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++#include <wx/wx.h>
++#include <wx/socket.h>
++#include <wx/event.h>
++#include <wx/list.h>
++#include <wx/cmdline.h>
++#include <wx/ffile.h>
++#include <wx/datetime.h>
++#include <wx/timer.h>
++
++const wxEventType wxEVT_WORKER = wxNewEventType();
++#define EVT_WORKER(func) DECLARE_EVENT_TABLE_ENTRY( wxEVT_WORKER, -1, -1, (wxObjectEventFunction) (wxEventFunction) (WorkerEventFunction) & func, (wxObject *) NULL ),
++
++const int timeout_val = 1000;
++
++class WorkerEvent : public wxEvent {
++public:
++    typedef enum {
++        CONNECTING,
++        SENDING,
++        RECEIVING,
++        DISCONNECTING,
++        DONE
++    } evt_type;
++    WorkerEvent(void* pSender, evt_type type)
++    {
++        SetId(-1);
++        SetEventType(wxEVT_WORKER);
++        m_sender = pSender;
++        m_eventType = type;
++        m_isFailed = false;
++    }
++
++    void setFailed() { m_isFailed = true; }
++    bool isFailed() const { return m_isFailed; }
++
++    virtual wxEvent* Clone() const
++    {
++        return new WorkerEvent(*this);
++    }
++    void* m_sender;
++    bool m_isFailed;
++    wxString m_workerIdent;
++    evt_type m_eventType;
++};
++
++typedef void (wxEvtHandler::*WorkerEventFunction)(WorkerEvent&);
++
++class ThreadWorker;
++class EventWorker;
++
++WX_DECLARE_LIST(ThreadWorker, TList);
++WX_DECLARE_LIST(EventWorker, EList);
++
++class Client : public wxApp {
++    DECLARE_EVENT_TABLE();
++public:
++    void RemoveEventWorker(EventWorker* p_worker);
++private:
++    typedef enum
++    {
++      THREADS,
++      EVENTS
++    } workMode;
++
++    typedef enum
++    {
++      SEND_RANDOM,
++      SEND_MESSAGE,
++      STRESS_TEST
++    } sendType;
++
++    workMode m_workMode;
++    sendType m_sendType;
++    wxString m_message;
++    wxString m_host;
++    long m_stressWorkers;
++
++    virtual bool OnInit();
++    virtual int OnRun();
++    virtual int OnExit();
++    void OnInitCmdLine(wxCmdLineParser& pParser);
++    bool OnCmdLineParsed(wxCmdLineParser& pParser);
++    void OnWorkerEvent(WorkerEvent& pEvent);
++    void OnTimerEvent(wxTimerEvent& pEvent);
++
++    void StartWorker(workMode pMode, const wxString& pMessage);
++    void StartWorker(workMode pMode);
++    char* CreateBuffer(int *msgsize);
++
++    void dumpStatistics();
++
++    TList m_threadWorkers;
++    EList m_eventWorkers;
++
++    unsigned m_statConnecting;
++    unsigned m_statSending;
++    unsigned m_statReceiving;
++    unsigned m_statDisconnecting;
++    unsigned m_statDone;
++    unsigned m_statFailed;
++
++    wxTimer mTimer;
++};
++
++DECLARE_APP(Client);
++
++class ThreadWorker : public wxThread
++{
++public:
++    ThreadWorker(const wxString& p_host, char* p_buf, int p_size);
++    virtual ExitCode Entry();
++private:
++    wxString m_host;
++    wxSocketClient* m_clientSocket;
++    char* m_inbuf;
++    char* m_outbuf;
++    int m_outsize;
++    int m_insize;
++    wxString m_workerIdent;
++};
++
++class EventWorker : public wxEvtHandler
++{
++    DECLARE_EVENT_TABLE();
++public:
++    EventWorker(const wxString& p_host, char* p_buf, int p_size);
++    void Run();
++    virtual ~EventWorker();
++private:
++    wxString m_host;
++    wxSocketClient* m_clientSocket;
++    char* m_inbuf;
++    char* m_outbuf;
++    int m_outsize;
++    int m_written;
++    int m_insize;
++    int m_readed;
++
++    WorkerEvent::evt_type m_currentType;
++    bool m_doneSent;
++    wxIPV4address m_localaddr;
++
++    void OnSocketEvent(wxSocketEvent& pEvent);
++    void SendEvent(bool failed);
++};
++
++/******************* Implementation ******************/
++IMPLEMENT_APP(Client);
++
++#include <wx/listimpl.cpp>
++WX_DEFINE_LIST(TList);
++WX_DEFINE_LIST(EList);
++
++wxString
++CreateIdent(const wxIPV4address& addr)
++{
++    return wxString::Format(wxT("%s:%d"),addr.IPAddress().c_str(),addr.Service());
++}
++
++void
++Client::OnInitCmdLine(wxCmdLineParser& pParser)
++{
++    wxApp::OnInitCmdLine(pParser);
++    pParser.AddSwitch(wxT("e"),wxT("event"),_("Use event based worker (default)"),wxCMD_LINE_PARAM_OPTIONAL);
++    pParser.AddSwitch(wxT("t"),wxT("thread"),_("Use thread based worker"),wxCMD_LINE_PARAM_OPTIONAL);
++    pParser.AddSwitch(wxT("r"),wxT("random"),_("Send radnom data (default)"),wxCMD_LINE_PARAM_OPTIONAL);
++    pParser.AddOption(wxT("m"),wxT("message"),_("Send message from <str>"),wxCMD_LINE_VAL_STRING,wxCMD_LINE_PARAM_OPTIONAL);
++    pParser.AddOption(wxT("f"),wxT("file"),_("Send contents of <file>"),wxCMD_LINE_VAL_STRING,wxCMD_LINE_PARAM_OPTIONAL);
++    pParser.AddOption(wxT("H"),wxT("hostname"),_("IP or name of host to connect to"),wxCMD_LINE_VAL_STRING,wxCMD_LINE_PARAM_OPTIONAL);
++    pParser.AddOption(wxT("s"),wxT("stress"),_("stress test with <num> concurrent connections"),wxCMD_LINE_VAL_NUMBER,wxCMD_LINE_PARAM_OPTIONAL);
++}
++
++
++bool
++Client::OnCmdLineParsed(wxCmdLineParser& pParser)
++{
++    wxString fname;
++    m_workMode = EVENTS;
++    m_stressWorkers = 50;
++
++    if (pParser.Found(_("verbose")))
++    {
++        wxLog::AddTraceMask(wxT("wxSocket"));
++        wxLog::AddTraceMask(wxT("epolldispatcher"));
++        wxLog::AddTraceMask(wxT("selectdispatcher"));
++        wxLog::AddTraceMask(wxT("thread"));
++        wxLog::AddTraceMask(wxT("events"));
++    }
++
++    if (pParser.Found(wxT("t")))
++        m_workMode = THREADS;
++    m_sendType = SEND_RANDOM;
++
++    if (pParser.Found(wxT("m"),&m_message))
++        m_sendType = SEND_MESSAGE;
++    else if (pParser.Found(wxT("f"),&fname))
++    {
++        wxFFile file(fname);
++        if (!file.IsOpened()) {
++            wxLogError(wxT("Cannot open file %s"),fname.c_str());
++            return false;
++        };
++        if (!file.ReadAll(&m_message)) {
++            wxLogError(wxT("Cannot read conten of file %s"),fname.c_str());
++            return false;
++        };
++        m_sendType = SEND_MESSAGE;
++    };
++
++    if (pParser.Found(wxT("s"),&m_stressWorkers))
++        m_sendType = STRESS_TEST;
++
++    m_host = wxT("127.0.0.1");
++    pParser.Found(wxT("H"),&m_host);
++    return wxApp::OnCmdLineParsed(pParser);
++};
++
++bool
++Client::OnInit()
++{
++    if (!wxApp::OnInit())
++        return false;
++    srand(wxDateTime::Now().GetTicks());
++    mTimer.SetOwner(this);
++    m_statConnecting = 0;
++    m_statSending = 0;
++    m_statReceiving = 0;
++    m_statDisconnecting = 0;
++    m_statDone = 0;
++    m_statFailed = 0;
++    return true;
++}
++
++int
++Client::OnRun()
++{
++    switch(m_sendType)
++    {
++        case STRESS_TEST:
++            switch(m_workMode)
++            {
++                case THREADS:
++                    for (int i = 0; i < m_stressWorkers; i++) {
++                        if (m_message.empty())
++                            StartWorker(THREADS);
++                        else
++                            StartWorker(THREADS, m_message);
++                    }
++                    break;
++                case EVENTS:
++                    for (int i = 0; i < m_stressWorkers; i++) {
++                        if (m_message.empty())
++                            StartWorker(EVENTS);
++                        else
++                            StartWorker(EVENTS, m_message);
++                    }
++                    break;
++                default:
++                    for (int i = 0; i < m_stressWorkers; i++) {
++                        if (m_message.empty())
++                            StartWorker(i % 5 == 0 ? THREADS : EVENTS);
++                        else
++                            StartWorker(i % 5 == 0 ? THREADS : EVENTS, m_message);
++                    }
++                break;
++            }
++        break;
++        case SEND_MESSAGE:
++            StartWorker(m_workMode,m_message);
++        break;
++        case SEND_RANDOM:
++            StartWorker(m_workMode);
++        break;
++    }
++    mTimer.Start(timeout_val,true);
++    return wxApp::OnRun();
++}
++
++int
++Client::OnExit()
++{
++    for(EList::compatibility_iterator it = m_eventWorkers.GetFirst(); it ; it->GetNext()) {
++        delete it->GetData();
++    }
++    return 0;
++}
++
++// Create buffer to be sent by client. Buffer contains test indicator 
++// message size and place for data
++// msgsize parameter contains size of data in bytes and 
++// if input value does not fit into 250 bytes then
++// on exit is updated to new value that is multiply of 1024 bytes
++char*
++Client::CreateBuffer(int* msgsize)
++{
++    int bufsize = 0;
++    char* buf;
++    //if message should have more than 256 bytes then set it as
++    //test3 for compatibility with GUI server sample
++    if ((*msgsize) > 250) 
++    {
++        //send at least one kb of data
++        int size = (*msgsize)/1024 + 1;
++        //returned buffer will contain test indicator, message size in kb and data
++        bufsize = size*1024+2;
++        buf = new char[bufsize];
++        buf[0] = 0xDE; //second byte contains size in kilobytes
++        buf[1] = (char)(size);
++        *msgsize = size*1024;
++    }
++    else
++    {
++        //returned buffer will contain test indicator, message size in kb and data
++        bufsize = (*msgsize)+2;
++        buf = new char[bufsize];
++        buf[0] = 0xBE; //second byte contains size in bytes
++        buf[1] = (char)(*msgsize);
++    }
++    return buf;
++}
++
++void
++Client::StartWorker(workMode pMode) {
++    int msgsize = 1 + (int) (250000.0 * (rand() / (RAND_MAX + 1.0)));
++    char* buf = CreateBuffer(&msgsize);
++
++    //fill data part of buffer with random bytes
++    for (int i = 2; i < (msgsize); i++) {
++        buf[i] = i % 256;
++    }
++
++    if (pMode == THREADS) {
++        ThreadWorker* c = new ThreadWorker(m_host,buf,msgsize+2);
++        if (c->Create() != wxTHREAD_NO_ERROR) {
++            wxLogError(wxT("Cannot create more threads"));
++        } else {
++            c->Run();
++            m_threadWorkers.Append(c);
++        }
++    } else {
++        EventWorker* e = new EventWorker(m_host,buf,msgsize+2);
++        e->Run();
++        m_eventWorkers.Append(e);
++    }
++    m_statConnecting++;
++}
++
++void
++Client::StartWorker(workMode pMode, const wxString& pMessage) {
++    char* tmpbuf = strdup(pMessage.mb_str());
++    int msgsize = strlen(tmpbuf);
++    char* buf = CreateBuffer(&msgsize);
++    memset(buf+2,0x0,msgsize);
++    memcpy(buf+2,tmpbuf,msgsize);
++    free(tmpbuf);
++
++    if (pMode == THREADS) {
++        ThreadWorker* c = new ThreadWorker(m_host,buf,msgsize+2);
++        if (c->Create() != wxTHREAD_NO_ERROR) {
++            wxLogError(wxT("Cannot create more threads"));
++        } else {
++            c->Run();
++            m_threadWorkers.Append(c);
++        }
++    } else {
++        EventWorker* e = new EventWorker(m_host,buf,msgsize+2);
++        e->Run();
++        m_eventWorkers.Append(e);
++    }
++    m_statConnecting++;
++}
++
++void
++Client::OnWorkerEvent(WorkerEvent& pEvent) {
++    switch (pEvent.m_eventType) {
++        case WorkerEvent::CONNECTING:
++            if (pEvent.isFailed())
++            {
++                m_statConnecting--;
++                m_statFailed++;
++            }
++        break;
++        case WorkerEvent::SENDING:
++            if (pEvent.isFailed())
++            {
++                m_statFailed++;
++                m_statSending--;
++            }
++            else
++            {
++                m_statConnecting--;
++                m_statSending++;
++            }
++        break;
++        case WorkerEvent::RECEIVING:
++            if (pEvent.isFailed())
++            {
++                m_statReceiving--;
++                m_statFailed++;
++            }
++            else
++            {
++                m_statSending--;
++                m_statReceiving++;
++            }
++        break;
++        case WorkerEvent::DISCONNECTING:
++            if (pEvent.isFailed())
++            {
++                m_statDisconnecting--;
++                m_statFailed++;
++            }
++            else
++            {
++                m_statReceiving--;
++                m_statDisconnecting++;
++            }
++        break;
++        case WorkerEvent::DONE:
++            m_statDone++;
++            m_statDisconnecting--;
++        break;
++    };
++
++    if (pEvent.isFailed() || pEvent.m_eventType == WorkerEvent::DONE)
++    {
++        for(TList::compatibility_iterator it = m_threadWorkers.GetFirst(); it ; it = it->GetNext()) {
++            if (it->GetData() == pEvent.m_sender) {
++                m_threadWorkers.DeleteNode(it);
++                break;
++            }
++        }
++        for(EList::compatibility_iterator it = m_eventWorkers.GetFirst(); it ; it = it->GetNext())
++        {
++            if (it->GetData() == pEvent.m_sender) {
++                delete it->GetData();
++                m_eventWorkers.DeleteNode(it);
++                break;
++            }
++        }
++        if ((m_threadWorkers.GetCount() == 0) && (m_eventWorkers.GetCount() == 0))
++        {
++            mTimer.Stop();
++            dumpStatistics();
++            wxSleep(2);
++            ExitMainLoop();
++        }
++        else
++        {
++            mTimer.Start(timeout_val,true);
++        }
++    }
++}
++
++void
++Client::RemoveEventWorker(EventWorker* p_worker) {
++    for(EList::compatibility_iterator it = m_eventWorkers.GetFirst(); it ; it = it->GetNext()) {
++        if (it->GetData() == p_worker) {
++            //wxLogDebug(wxT("Deleting event worker"));
++            delete it->GetData();
++            m_eventWorkers.DeleteNode(it);
++            return;
++        }
++    }
++}
++
++void
++Client::dumpStatistics() {
++    wxString msg(
++        wxString::Format(_("Connecting:\t%d\nSending\t\t%d\nReceiving\t%d\nDisconnecting:\t%d\nDone:\t\t%d\nFailed:\t\t%d\n"),
++                m_statConnecting,
++                m_statSending,
++                m_statReceiving,
++                m_statDisconnecting,
++                m_statDone,
++                m_statFailed
++                ));
++
++    wxLogMessage(wxT("Current status:\n%s\n"),msg.c_str());
++}
++
++void
++Client::OnTimerEvent(wxTimerEvent&) {
++    dumpStatistics();
++}
++
++BEGIN_EVENT_TABLE(Client,wxEvtHandler)
++    EVT_WORKER(Client::OnWorkerEvent)
++    EVT_TIMER(wxID_ANY,Client::OnTimerEvent)
++END_EVENT_TABLE()
++
++
++
++EventWorker::EventWorker(const wxString& p_host, char* p_buf, int p_size)
++  : m_host(p_host),
++    m_outbuf(p_buf),
++    m_outsize(p_size),
++    m_written(0),
++    m_readed(0)
++{
++    m_clientSocket = new wxSocketClient(wxSOCKET_NOWAIT);
++    m_clientSocket->SetEventHandler(*this);
++    m_insize = m_outsize - 2;
++    m_inbuf = new char[m_insize];
++}
++
++void
++EventWorker::Run() {
++    wxIPV4address ca;
++    ca.Hostname(m_host);
++    ca.Service(3000);
++    m_clientSocket->SetNotify(wxSOCKET_CONNECTION_FLAG|wxSOCKET_LOST_FLAG|wxSOCKET_OUTPUT_FLAG|wxSOCKET_INPUT_FLAG);
++    m_clientSocket->Notify(true);
++    m_currentType = WorkerEvent::CONNECTING;
++    m_doneSent = false;
++    //wxLogMessage(wxT("EventWorker: Connecting....."));
++    m_clientSocket->Connect(ca,false);
++}
++
++void
++EventWorker::OnSocketEvent(wxSocketEvent& pEvent) {
++    switch(pEvent.GetSocketEvent()) {
++        case wxSOCKET_INPUT:
++            //wxLogDebug(wxT("EventWorker: INPUT"));
++            do {
++                if (m_readed == m_insize)
++                    return; //event already posted
++                m_clientSocket->Read(m_inbuf + m_readed, m_insize - m_readed);
++                if (m_clientSocket->Error())
++                {
++                    if (m_clientSocket->LastError() != wxSOCKET_WOULDBLOCK)
++                    {
++                        wxLogError(wxT("%s: read error"),CreateIdent(m_localaddr).c_str());
++                        SendEvent(true);
++                    }
++                }
++
++                m_readed += m_clientSocket->LastCount();
++                //wxLogDebug(wxT("EventWorker: readed %d bytes, %d bytes to do"),m_clientSocket->LastCount(), m_insize - m_readed);
++                if (m_readed == m_insize)
++                {
++                    if (!memcmp(m_inbuf,m_outbuf,m_insize)) {
++                        wxLogError(wxT("%s: data mismatch"),CreateIdent(m_localaddr).c_str());
++                        SendEvent(true);
++                    }
++                    m_currentType = WorkerEvent::DISCONNECTING;
++                    wxLogDebug(wxT("%s: DISCONNECTING"),CreateIdent(m_localaddr).c_str());
++                    SendEvent(false);
++
++                    //wxLogDebug(wxT("EventWorker %p closing"),this);
++                    m_clientSocket->Close();
++
++                    m_currentType = WorkerEvent::DONE;
++                    wxLogDebug(wxT("%s: DONE"),CreateIdent(m_localaddr).c_str());
++                    SendEvent(false);
++                }
++            } while (!m_clientSocket->Error());
++        break;
++        case wxSOCKET_OUTPUT:
++            //wxLogDebug(wxT("EventWorker: OUTPUT"));
++            do {
++                if (m_written == m_outsize)
++                    return;
++                if (m_written == 0)
++                {
++                    m_currentType = WorkerEvent::SENDING;
++                    wxLogDebug(wxT("%s: SENDING"),CreateIdent(m_localaddr).c_str());
++                }
++                m_clientSocket->Write(m_outbuf + m_written, m_outsize - m_written);
++                if (m_clientSocket->Error())
++                {
++                    if (m_clientSocket->LastError() != wxSOCKET_WOULDBLOCK) {
++                        wxLogError(wxT("%s: Write error"),CreateIdent(m_localaddr).c_str());
++                        SendEvent(true);
++                    }
++                }
++                m_written += m_clientSocket->LastCount();
++                if (m_written != m_outsize)
++                {
++                    //wxLogDebug(wxT("EventWorker: written %d bytes, %d bytes to do"),m_clientSocket->LastCount(),m_outsize - m_written);
++                }
++                else
++                {
++                    //wxLogDebug(wxT("EventWorker %p SENDING->RECEIVING"),this);
++                    m_currentType = WorkerEvent::RECEIVING;
++                    wxLogDebug(wxT("%s: RECEIVING"),CreateIdent(m_localaddr).c_str());
++                    SendEvent(false);
++                }
++            } while(!m_clientSocket->Error());
++        break;
++        case wxSOCKET_CONNECTION:
++        {
++            //wxLogMessage(wxT("EventWorker: got connection"));
++            wxLogMessage(wxT("%s: starting writing message (2 bytes for signature and %d bytes of data to write)"),CreateIdent(m_localaddr).c_str(),m_outsize-2);
++            if (!m_clientSocket->GetLocal(m_localaddr))
++                wxLogError(_("Cannot get peer data for socket %p"),m_clientSocket);
++            m_currentType = WorkerEvent::SENDING;
++            wxLogDebug(wxT("%s: CONNECTING"),CreateIdent(m_localaddr).c_str());
++            SendEvent(false);
++        }
++        break;
++        case wxSOCKET_LOST:
++        {
++            wxLogError(_("%s: connection lost"),CreateIdent(m_localaddr).c_str());
++            SendEvent(true);
++        }
++        break;
++    }
++}
++
++void
++EventWorker::SendEvent(bool failed) {
++    if (m_doneSent)
++        return;
++    WorkerEvent e(this,m_currentType);
++    if (failed) e.setFailed();
++    wxGetApp().AddPendingEvent(e);
++    m_doneSent = failed || m_currentType == WorkerEvent::DONE;
++};
++
++EventWorker::~EventWorker() {
++    m_clientSocket->Destroy();
++    delete [] m_outbuf;
++    delete [] m_inbuf;
++}
++
++BEGIN_EVENT_TABLE(EventWorker,wxEvtHandler)
++    EVT_SOCKET(wxID_ANY,EventWorker::OnSocketEvent)
++END_EVENT_TABLE()
++
++
++ThreadWorker::ThreadWorker(const wxString& p_host, char* p_buf, int p_size)
++  : wxThread(wxTHREAD_DETACHED),
++    m_host(p_host),
++    m_outbuf(p_buf),
++    m_outsize(p_size)
++{
++    m_clientSocket = new wxSocketClient(wxSOCKET_BLOCK|wxSOCKET_WAITALL);
++    m_insize = m_outsize - 2;
++    m_inbuf = new char[m_insize];
++}
++
++wxThread::ExitCode ThreadWorker::Entry()
++{
++    wxIPV4address ca;
++    ca.Hostname(m_host);
++    ca.Service(5678);
++    //wxLogDebug(wxT("ThreadWorker: Connecting....."));
++    m_clientSocket->SetTimeout(60);
++    bool failed = false;
++    WorkerEvent::evt_type etype = WorkerEvent::CONNECTING;
++    if (!m_clientSocket->Connect(ca)) {
++        wxLogError(wxT("Cannot connect to %s:%d"),ca.IPAddress().c_str(), ca.Service());
++        failed = true;
++    } else {
++        //wxLogMessage(wxT("ThreadWorker: Connected. Sending %d bytes of data"),m_outsize);
++        etype = WorkerEvent::SENDING;
++        WorkerEvent e(this,etype);
++        wxGetApp().AddPendingEvent(e);
++        int to_process = m_outsize;
++        do {
++            m_clientSocket->Write(m_outbuf,m_outsize);
++            if (m_clientSocket->Error()) {
++                wxLogError(wxT("ThreadWorker: Write error"));
++                failed  = true;
++            }
++            to_process -= m_clientSocket->LastCount();
++            //wxLogDebug(wxT("EventWorker: written %d bytes, %d bytes to do"),m_clientSocket->LastCount(),to_process);
++        } while(!m_clientSocket->Error() && to_process != 0);
++
++        if (!failed) {
++            etype = WorkerEvent::RECEIVING;
++            WorkerEvent e(this,etype);
++            wxGetApp().AddPendingEvent(e);
++            to_process = m_insize;
++            do {
++                m_clientSocket->Read(m_inbuf,m_insize);
++                if (m_clientSocket->Error()) {
++                    wxLogError(wxT("ThreadWorker: Read error"));
++                    failed = true;
++                    break;
++                }
++                to_process -= m_clientSocket->LastCount();
++                //wxLogDebug(wxT("EventWorker: readed %d bytes, %d bytes to do"),m_clientSocket->LastCount(),to_process);
++            } while(!m_clientSocket->Error() && to_process != 0);
++        }
++
++        char* outdat = (char*)m_outbuf+2;
++        if (!failed && (memcmp(m_inbuf,outdat,m_insize) != 0))
++        {
++            wxLogError(wxT("Data mismatch"));
++            failed = true;
++        }
++    }
++    //wxLogDebug(wxT("ThreadWorker: Finished"));
++    if (!failed) {
++        etype = WorkerEvent::DISCONNECTING;
++        WorkerEvent e(this,etype);
++        wxGetApp().AddPendingEvent(e);
++    };
++    m_clientSocket->Close();
++    m_clientSocket->Destroy();
++    m_clientSocket = NULL;
++    delete [] m_outbuf;
++    delete [] m_inbuf;
++    if (!failed)
++        etype = WorkerEvent::DONE;
++    WorkerEvent e(this,etype);
++    if (failed) e.setFailed();
++    wxGetApp().AddPendingEvent(e);
++    return 0;
++}
++
+
+Property changes on: wxWidgets.org/samples/sockets/baseclient.cpp
+___________________________________________________________________
+Name: svn:eol-style
+   + native
+
+
+ 	  	 

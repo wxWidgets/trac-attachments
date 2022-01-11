@@ -1,0 +1,159 @@
+Index: wxWidgets/include/wx/listbox.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/listbox.h,v
+retrieving revision 1.34
+diff -u -r1.34 listbox.h
+--- wxWidgets/include/wx/listbox.h	2006/04/14 18:17:16	1.34
++++ wxWidgets/include/wx/listbox.h	2007/02/09 16:20:30
+@@ -44,12 +44,12 @@
+ 
+     // all generic methods are in wxControlWithItems, except for the following
+     // ones which are not yet implemented by wxChoice/wxComboBox
+-    void Insert(const wxString& item, unsigned int pos)
+-        { DoInsert(item, pos); }
+-    void Insert(const wxString& item, unsigned int pos, void *clientData)
+-        { DoInsert(item, pos); SetClientData(pos, clientData); }
+-    void Insert(const wxString& item, unsigned int pos, wxClientData *clientData)
+-        { DoInsert(item, pos); SetClientObject(pos, clientData); }
++    int Insert(const wxString& item, unsigned int pos)
++        { return DoInsert(item, pos); }
++    int Insert(const wxString& item, unsigned int pos, void *clientData)
++        { int realPos = DoInsert(item, pos); SetClientData(realPos, clientData); return realPos; }
++    int Insert(const wxString& item, unsigned int pos, wxClientData *clientData)
++        { int realPos = DoInsert(item, pos); SetClientObject(realPos, clientData); return realPos; }
+ 
+     void InsertItems(unsigned int nItems, const wxString *items, unsigned int pos);
+     void InsertItems(const wxArrayString& items, unsigned int pos)
+@@ -116,10 +116,10 @@
+     // NB: due to wxGTK implementation details, DoInsert() is implemented
+     //     using DoInsertItems() and not the other way round
+     virtual int DoInsert(const wxString& item, unsigned int pos)
+-        { InsertItems(1, &item, pos); return pos; }
++        { wxArrayString aItems; aItems.Add(item); return DoInsertItems(aItems, pos); }
+ 
+     // to be implemented in derived classes
+-    virtual void DoInsertItems(const wxArrayString& items, unsigned int pos) = 0;
++    virtual int DoInsertItems(const wxArrayString& items, unsigned int pos) = 0;
+     virtual void DoSetItems(const wxArrayString& items, void **clientData) = 0;
+ 
+     virtual void DoSetFirstItem(int n) = 0;
+Index: wxWidgets/include/wx/gtk/listbox.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/gtk/listbox.h,v
+retrieving revision 1.63
+diff -u -r1.63 listbox.h
+--- wxWidgets/include/wx/gtk/listbox.h	2006/10/26 20:28:58	1.63
++++ wxWidgets/include/wx/gtk/listbox.h	2007/02/09 16:20:35
+@@ -95,7 +95,7 @@
+     bool       m_blockEvent;
+ 
+     struct _GtkTreeEntry* GtkGetEntry(int pos) const;
+-    void GtkInsertItems(const wxArrayString& items,
++    int GtkInsertItems(const wxArrayString& items,
+                         void** clientData, unsigned int pos);
+     void GtkDeselectAll();
+     void GtkSetSelection(int n, const bool select, const bool blockEvent);
+@@ -107,7 +107,7 @@
+ 
+     virtual void DoSetSelection(int n, bool select);
+     virtual int DoAppend(const wxString& item);
+-    virtual void DoInsertItems(const wxArrayString& items, unsigned int pos);
++    virtual int DoInsertItems(const wxArrayString& items, unsigned int pos);
+     virtual void DoSetItems(const wxArrayString& items, void **clientData);
+     virtual void DoSetFirstItem(int n);
+     virtual void DoSetItemClientData(unsigned int n, void* clientData);
+Index: wxWidgets/src/gtk/listbox.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/listbox.cpp,v
+retrieving revision 1.198
+diff -u -r1.198 listbox.cpp
+--- wxWidgets/src/gtk/listbox.cpp	2006/11/11 00:36:22	1.198
++++ wxWidgets/src/gtk/listbox.cpp	2007/02/09 16:22:16
+@@ -481,10 +481,10 @@
+ // adding items
+ // ----------------------------------------------------------------------------
+ 
+-void wxListBox::GtkInsertItems(const wxArrayString& items,
++int wxListBox::GtkInsertItems(const wxArrayString& items,
+                                void** clientData, unsigned int pos)
+ {
+-    wxCHECK_RET( m_treeview != NULL, wxT("invalid listbox") );
++    wxCHECK_MSG( m_treeview != NULL, wxNOT_FOUND, wxT("invalid listbox") );
+ 
+     InvalidateBestSize();
+ 
+@@ -505,12 +505,13 @@
+         if(!res)
+         {
+             wxLogSysError(wxT("internal wxListBox error in insertion"));
+-            return;
++            return wxNOT_FOUND;
+         }
+ 
+         pIter = &iter;
+     }
+ 
++    GtkTreeIter itercur;
+     for (unsigned int i = 0; i < nNum; ++i)
+     {
+         wxString label = items[i];
+@@ -524,7 +525,6 @@
+         if (clientData)
+             gtk_tree_entry_set_userdata(entry, clientData[i]);
+ 
+-        GtkTreeIter itercur;
+         gtk_list_store_insert_before(m_liststore, &itercur, pIter);
+ 
+ #if wxUSE_CHECKLISTBOX
+@@ -541,13 +541,36 @@
+ 
+         g_object_unref (entry); //liststore always refs :)
+     }
++
++    if (nNum == 1) //return index only for single insertions; otherwise index is meaningless
++    {
++        GtkTreePath* pPath = gtk_tree_model_get_path(
++                                GTK_TREE_MODEL(m_liststore),
++                                &itercur);
++
++        gint* pIntPath = gtk_tree_path_get_indices(pPath);
++
++        if (pIntPath == NULL)
++        {
++            wxLogSysError(wxT("internal wxListBox error in insertion"));
++            return wxNOT_FOUND;
++        }
++
++        int index = pIntPath[0];
++
++        gtk_tree_path_free(pPath);
++
++        return index;
++    }
++    else
++        return wxNOT_FOUND; //can't think of anything better to return
+ }
+ 
+-void wxListBox::DoInsertItems(const wxArrayString& items, unsigned int pos)
++int wxListBox::DoInsertItems(const wxArrayString& items, unsigned int pos)
+ {
+-    wxCHECK_RET( IsValidInsert(pos), wxT("invalid index in wxListBox::InsertItems") );
++    wxCHECK_MSG( IsValidInsert(pos), wxNOT_FOUND, wxT("invalid index in wxListBox::InsertItems") );
+ 
+-    GtkInsertItems(items, NULL, pos);
++    return GtkInsertItems(items, NULL, pos);
+ }
+ 
+ int wxListBox::DoAppend( const wxString& item )
+@@ -556,8 +579,7 @@
+     unsigned int nWhere = wxListBox::GetCount();
+     wxArrayString aItems;
+     aItems.Add(item);
+-    wxListBox::DoInsertItems(aItems, nWhere);
+-    return nWhere;
++    return wxListBox::DoInsertItems(aItems, nWhere);
+ }
+ 
+ void wxListBox::DoSetItems( const wxArrayString& items,
+
+ 	  	 

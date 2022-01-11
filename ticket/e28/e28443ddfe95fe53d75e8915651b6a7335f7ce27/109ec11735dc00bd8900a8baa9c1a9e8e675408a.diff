@@ -1,0 +1,437 @@
+Index: wxWindows/include/wx/filedlg.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/filedlg.h,v
+retrieving revision 1.22
+diff -b -u -2 -r1.22 filedlg.h
+--- wxWindows/include/wx/filedlg.h	2003/06/14 13:31:36	1.22
++++ wxWindows/include/wx/filedlg.h	2003/06/15 22:50:21
+@@ -37,12 +37,21 @@
+ WXDLLEXPORT_DATA(extern const wxChar*) wxFileSelectorDefaultWildcardStr;
+ 
+-// Parses the filterStr, returning the number of filters.
+-// Returns 0 if none or if there's a problem, they arrays will contain an equal
+-// number of items found before the error.
+-// filterStr is in the form:
+-// "All files (*.*)|*.*|Image Files (*.jpeg *.png)|*.jpg;*.png"
++// Parses the filterStr, in the form of
++// "All Files (*.*)|*.*|Image Files (*.jpeg *.png)|*.jpg;*.png"
++// Returns the number of filters parsed, 0 if none or error
++// The arrays descriptions and filters always contain an equal number of items
++
+ extern int wxParseFileFilter(const wxString& filterStr,
+                              wxArrayString& descriptions,
+                              wxArrayString& filters);
++
++// Append first extension to filePath from a ';' separated extensionList
++// if filePath = "path/foo.bar" just return it as is
++// extensionList can be "*.jpg;*.png" or just "*.jpg"
++// if filePath = "foo[.]" and extensionList = "*.jpg;*.png" return "foo.jpg"
++// if the extension is "*.j?g" (has wildcards) then return filePath
++
++extern wxString wxAddExtensionToFileName(const wxString &filePath,
++                                         const wxString &extensionList);
+ 
+ //----------------------------------------------------------------------------
+Index: wxWindows/src/msw/filedlg.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/filedlg.cpp,v
+retrieving revision 1.51
+diff -b -u -2 -r1.51 filedlg.cpp
+--- wxWindows/src/msw/filedlg.cpp	2003/06/14 13:31:42	1.51
++++ wxWindows/src/msw/filedlg.cpp	2003/06/15 22:50:21
+@@ -247,29 +247,40 @@
+     //=======================================================================
+ 
+-    wxString theFilter;
+-    if ( wxStrlen(m_wildCard) == 0 )
+-        theFilter = wxString(wxT("*.*"));
+-    else
+-        theFilter = m_wildCard ;
+-    wxString filterBuffer;
++    wxString theFilter = m_wildCard;
+ 
+-    if ( !wxStrchr( theFilter, wxT('|') ) ) {    // only one filter ==> default text
+-        filterBuffer.Printf(_("Files (%s)|%s"),
++    if ( theFilter.IsEmpty() )
++        theFilter = _("All Files (*.*)|*.*");
++    else if ( theFilter.Find(wxT('|')) == wxNOT_FOUND )
++    {
++        theFilter.Printf(_("Files (%s)|%s"),
+                             theFilter.c_str(), theFilter.c_str());
+     }
+-    else {                                // more then one filter
+-        filterBuffer = theFilter;
+ 
+-    }
++    // verify that the filter is valid
++    wxArrayString descriptions, filters;
++    int filter_count = wxParseFileFilter(theFilter, descriptions, filters);
+ 
+-    filterBuffer += wxT("|");
+-    // Replace | with \0
+-    for (i = 0; i < filterBuffer.Len(); i++ ) {
+-        if ( filterBuffer.GetChar(i) == wxT('|') ) {
+-            filterBuffer[i] = wxT('\0');
++    wxASSERT_MSG(filter_count > 0, wxT("Wrong file type description") );
++
++    // if error parsing or no valid filter found, add default back
++    if (filters.GetCount() < 1u)
++    {
++        descriptions.Add(_("All Files (*.*)");
++        filters.Add("*.*");
+         }
++
++    // reassemble filters for MSW
++    theFilter.Clear();
++    for (i = 0; i < filters.GetCount(); i++)
++        theFilter += descriptions[i] + wxT("|") + filters[i] + wxT("|");
++
++    // replace | with \0
++    for (i = 0; i < theFilter.Len(); i++ )
++    {
++        if ( theFilter.GetChar(i) == wxT('|') )
++            theFilter[i] = wxT('\0');
+     }
+ 
+-    of.lpstrFilter  = (LPTSTR)(const wxChar *)filterBuffer;
++    of.lpstrFilter  = (LPTSTR)(const wxChar *)theFilter;
+     of.nFilterIndex = m_filterIndex + 1;
+ 
+@@ -351,6 +362,4 @@
+         else
+         {
+-            const wxChar* extension = NULL;
+-
+             //=== Adding the correct extension >>=================================
+ 
+@@ -362,36 +371,9 @@
+                 // User has typed a filename without an extension:
+ 
+-                // A filename can end in a "." here ("abc."), this means it
+-                // does not have an extension. Because later on a "." with
+-                // the default extension is appended we remove the "." if
+-                // filename ends with one (We don't want files called
+-                // "abc..ext")
+-                int idx = wxStrlen(fileNameBuffer) - 1;
+-                if ( fileNameBuffer[idx] == wxT('.') )
+-                {
+-                    fileNameBuffer[idx] = wxT('\0');
+-                }
+-
+-                int   maxFilter = (int)(of.nFilterIndex*2L-1L);
+-                extension = filterBuffer;
+-
+-                for( int i = 0; i < maxFilter; i++ ) {          // get extension
+-                    extension = extension + wxStrlen( extension ) +1;
+-                }
+-
+-                extension = wxStrrchr( extension, wxT('.') );
+-                if (  extension                                 // != "blabla"
+-                        && !wxStrrchr( extension, wxT('*') )       // != "blabla.*"
+-                        && !wxStrrchr( extension, wxT('?') )       // != "blabla.?"
+-                        && extension[1]                           // != "blabla."
+-                        && extension[1] != wxT(' ') )              // != "blabla. "
+-                {
+-                    // now concat extension to the fileName:
+-                    m_fileName = wxString(fileNameBuffer) + extension;
++                m_fileName = wxAddExtensionToFileName(fileNameBuffer, filters[m_filterIndex]);
+ 
+-                    int len = wxStrlen( fileNameBuffer );
+-                    wxStrncpy( fileNameBuffer + len, extension, wxMAXPATH - len );
+-                    fileNameBuffer[ wxMAXPATH -1 ] = wxT('\0');
+-                }
++                wxStrncpy(fileNameBuffer, m_fileName.c_str(), wxMin(m_fileName.Len(), wxMAXPATH));
++                fileNameBuffer[m_fileName.Len()] = wxT('\0');
++                fileNameBuffer[ wxMAXPATH - 1 ] = wxT('\0');
+             }
+ 
+Index: wxWindows/src/common/fldlgcmn.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/fldlgcmn.cpp,v
+retrieving revision 1.1
+diff -b -u -2 -r1.1 fldlgcmn.cpp
+--- wxWindows/src/common/fldlgcmn.cpp	2003/06/14 13:31:35	1.1
++++ wxWindows/src/common/fldlgcmn.cpp	2003/06/15 22:50:21
+@@ -31,4 +31,8 @@
+ #if wxUSE_FILEDLG
+ 
++//----------------------------------------------------------------------------
++// wxFileSelector
++//----------------------------------------------------------------------------
++
+ wxString wxFileSelector(const wxChar *title,
+                                const wxChar *defaultDir,
+@@ -68,38 +72,25 @@
+                             defaultFilenameString, filter2,
+                             flags, wxPoint(x, y));
+-    if( wxStrlen(defaultExtension) != 0 )
+-    {
+-        int filterFind = 0,
+-            filterIndex = 0;
+ 
+-        for( unsigned int i = 0; i < filter2.Len(); i++ )
++    // if filter is of form "All files (*)|*|..." set correct filter index
++    if((wxStrlen(defaultExtension) != 0) && (filter2.Find(wxT('|')) != wxNOT_FOUND))
+         {
+-            if( filter2.GetChar(i) == wxT('|') )
+-            {
+-                // save the start index of the new filter
+-                unsigned int is = i++;
+-
+-                // find the end of the filter
+-                for( ; i < filter2.Len(); i++ )
+-                {
+-                    if(filter2[i] == wxT('|'))
+-                        break;
+-                }
++        int filterIndex = 0;
+ 
+-                if( i-is-1 > 0 && is+1 < filter2.Len() )
++        wxArrayString descriptions, filters;
++        // don't care about errors, handled already by wxFileDialog
++        (void)wxParseFileFilter(filter2, descriptions, filters);
++        for (size_t n=0; n<filters.GetCount(); n++)
+                 {
+-                    if( filter2.Mid(is+1,i-is-1).Contains(defaultExtension) )
++            if (filters[n].Contains(defaultExtension))
+                     {
+-                        filterFind = filterIndex;
++                filterIndex = n;
+                         break;
+                     }
+                 }
+ 
+-                filterIndex++;
++        if (filterIndex > 0)
++            fileDialog.SetFilterIndex(filterIndex);
+             }
+-        }
+-
+-        fileDialog.SetFilterIndex(filterFind);
+-    }
+ 
+     wxString filename;
+@@ -111,45 +102,9 @@
+     return filename;
+ }
+-
+ 
+-/*
+-wxString wxFileSelector( const wxChar *title,
+-                         const wxChar *defaultDir,
+-                         const wxChar *defaultFileName,
+-                         const wxChar *defaultExtension,
+-                         const wxChar *filter,
+-                         int flags,
+-                         wxWindow *parent,
+-                         int x,
+-                         int y )
+-{
+-    wxString filter2;
+-    if ( defaultExtension && !filter )
+-        filter2 = wxString(wxT("*.")) + wxString(defaultExtension) ;
+-    else if ( filter )
+-        filter2 = filter;
+-
+-    wxString defaultDirString;
+-    if (defaultDir)
+-        defaultDirString = defaultDir;
++//----------------------------------------------------------------------------
++// wxFileSelectorEx
++//----------------------------------------------------------------------------
+ 
+-    wxString defaultFilenameString;
+-    if (defaultFileName)
+-        defaultFilenameString = defaultFileName;
+-
+-    wxFileDialog fileDialog( parent, title, defaultDirString, defaultFilenameString, filter2, flags, wxPoint(x, y) );
+-
+-    if ( fileDialog.ShowModal() == wxID_OK )
+-    {
+-        return fileDialog.GetPath();
+-    }
+-    else
+-    {
+-        return wxEmptyString;
+-    }
+-}
+-*/
+-
+-
+ wxString wxFileSelectorEx(const wxChar *title,
+                           const wxChar *defaultDir,
+@@ -181,9 +136,9 @@
+     return filename;
+ }
+-
+ 
++//----------------------------------------------------------------------------
++// wxDefaultFileSelector - Generic load/save dialog (for internal use only)
++//----------------------------------------------------------------------------
+ 
+-// Generic file load/save dialog (for internal use only)
+-//   see wx[Load/Save]FileSelector
+ static wxString wxDefaultFileSelector(bool load,
+                                       const wxChar *what,
+@@ -218,5 +173,8 @@
+ }
+ 
+-// Generic file load dialog
++//----------------------------------------------------------------------------
++// wxLoadFileSelector
++//----------------------------------------------------------------------------
++
+ WXDLLEXPORT wxString wxLoadFileSelector(const wxChar *what,
+                                         const wxChar *extension,
+@@ -226,6 +184,9 @@
+     return wxDefaultFileSelector(TRUE, what, extension, default_name, parent);
+ }
++
++//----------------------------------------------------------------------------
++// wxSaveFileSelector
++//----------------------------------------------------------------------------
+ 
+-// Generic file save dialog
+ WXDLLEXPORT wxString wxSaveFileSelector(const wxChar *what,
+                                         const wxChar *extension,
+@@ -236,9 +197,8 @@
+ }
+ 
++//----------------------------------------------------------------------------
++// global generic helper functions
++//----------------------------------------------------------------------------
+ 
+-// Parses the filterStr, returning the number of filters.
+-// Returns 0 if none or if there's a problem.
+-// filterStr is in the form: "All files (*.*)|*.*|JPEG Files (*.jpeg)|*.jpg"
+-
+ int wxParseFileFilter(const wxString& filterStr,
+                       wxArrayString& descriptions,
+@@ -269,4 +229,12 @@
+         }
+ 
++        // some error checking
++        if ( filter.IsEmpty() ||
++            (filter.Find(wxT('\\')) != wxNOT_FOUND) ||
++            (filter.Find(wxT('/')) != wxNOT_FOUND) ||
++            (filter.Find(wxT('<')) != wxNOT_FOUND) ||
++            (filter.Find(wxT('>')) != wxNOT_FOUND))
++            return 0;
++
+         descriptions.Add(description);
+         filters.Add(filter);
+@@ -275,4 +243,39 @@
+ 
+     return filters.GetCount();
++}
++
++wxString wxAddExtensionToFileName(const wxString &filePath,
++                                  const wxString &extensionList)
++{
++    // strip off path, to avoid prblems with "path.bar/foo"
++    wxString fileName = filePath.AfterLast(wxFILE_SEP_PATH);
++
++    // if fileName is of form "foo.bar" it's ok, return it
++    int idx_dot = fileName.Find(wxT('.'), TRUE);
++    if ((idx_dot != wxNOT_FOUND) && (idx_dot < (int)fileName.Len() - 1))
++        return filePath;
++
++    // get the first extension from extensionList, or all of it
++    wxString ext = extensionList.BeforeFirst(wxT(';'));
++
++    // if ext == "foo" or "foo." there's no extension
++    int idx_ext_dot = ext.Find(wxT('.'), TRUE);
++    if ((idx_ext_dot == wxNOT_FOUND) || (idx_ext_dot == (int)ext.Len() - 1))
++        return filePath;
++    else
++        ext = ext.AfterLast(wxT('.'));
++
++    // if ext == "*" or "bar*" or "b?r" or " " then its not valid
++    if ((ext.Find(wxT('*')) != wxNOT_FOUND) ||
++        (ext.Find(wxT('?')) != wxNOT_FOUND) ||
++        (ext.Strip(wxString::both).IsEmpty()))
++        return filePath;
++
++    // if fileName doesn't have a '.' then add one
++    wxString dot;
++    if (filePath.Last() != wxT('.'))
++        dot = wxT(".");
++
++    return filePath + dot + ext;
+ }
+ 
+Index: wxWindows/src/generic/filedlgg.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/generic/filedlgg.cpp,v
+retrieving revision 1.93
+diff -b -u -2 -r1.93 filedlgg.cpp
+--- wxWindows/src/generic/filedlgg.cpp	2003/06/14 13:31:48	1.93
++++ wxWindows/src/generic/filedlgg.cpp	2003/06/15 22:50:22
+@@ -877,19 +877,24 @@
+     // interpret wildcards
+ 
+-    if (m_wildCard.IsEmpty())
+-        m_wildCard = _("All files (*)|*");
++    wxString theFilter = m_wildCard;
+ 
+-    wxArrayString wildDescriptions, wildFilters;
+-    int wild_count = wxParseFileFilter(m_wildCard, wildDescriptions, wildFilters);
++    if (theFilter.IsEmpty())
++        theFilter = _("All Files (*)|*");
++    else if ( theFilter.Find(wxT('|')) == wxNOT_FOUND )
++    {
++        theFilter.Printf(_("Files (%s)|%s"),
++                          theFilter.c_str(), theFilter.c_str());
++    }
++
++    wxArrayString descriptions, filters;
++    int filter_count = wxParseFileFilter(theFilter, descriptions, filters);
+ 
+-    wxASSERT_MSG(wild_count > 0, wxT("Wrong file type descripition") );
++    wxASSERT_MSG(filter_count > 0, wxT("Wrong file type description") );
+ 
+-    // if error parsing, add default back
+-    if (wildFilters.GetCount() < 1u)
++    // if error parsing or no valid filter found, add default back
++    if (filters.GetCount() < 1u)
+     {
+-        wild_count = 1;
+-        m_wildCard = _("All files (*)|*");
+-        wildDescriptions.Add(_("All files (*)"));
+-        wildFilters.Add(wxT("*"));
++        theFilter = _("All Files (*)|*");
++        filter_count = wxParseFileFilter(theFilter, descriptions, filters);
+     }
+ 
+@@ -962,5 +967,5 @@
+ 
+     m_list = new wxFileCtrl( this, ID_LIST_CTRL,
+-                             wildFilters[0], ms_lastShowHidden,
++                             filters[0], ms_lastShowHidden,
+                              wxDefaultPosition, wxSize(540,200),
+                              style2);
+@@ -1010,7 +1015,7 @@
+     }
+ 
+-    for (size_t n=0; n<wildFilters.GetCount(); n++)
++    for (size_t n=0; n<filters.GetCount(); n++)
+     {
+-        m_choice->Append( wildDescriptions[n], (void*) new wxString( wildFilters[n] ) );
++        m_choice->Append( descriptions[n], (void*) new wxString( filters[n] ) );
+     }
+     SetFilterIndex( 0 );
+@@ -1213,11 +1218,5 @@
+     if ( !(m_dialogStyle & wxOPEN) || !wxFileExists(filename) )
+     {
+-        wxString ext;
+-        wxSplitPath(filename, NULL, NULL, &ext);
+-        if ( ext.empty() )
+-        {
+-            // append the first extension of the filter string
+-            filename += m_filterExtension.BeforeFirst(_T(';'));
+-        }
++        filename = wxAddExtensionToFileName(filename, m_filterExtension);
+     }
+ 
+
+ 	  	 

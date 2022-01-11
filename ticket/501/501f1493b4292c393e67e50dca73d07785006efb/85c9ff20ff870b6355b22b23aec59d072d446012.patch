@@ -1,0 +1,147 @@
+diff -uNrbB -x setup.h wxWidgets-trunk\include/wx/graphics.h wxWidgets-work\include/wx/graphics.h
+--- wxWidgets-trunk\include/wx/graphics.h	2013-12-29 11:01:59.124117600 +0100
++++ wxWidgets-work\include/wx/graphics.h	2014-02-08 15:21:17.496169400 +0100
+@@ -498,7 +498,7 @@
+                               const wxGraphicsGradientStops& stops) const;
+ 
+     // creates a font
+-    virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK ) const;
++    virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK, wxDouble scale = 1.0 ) const;
+     virtual wxGraphicsFont CreateFont(double sizeInPixels,
+                                       const wxString& facename,
+                                       int flags = wxFONTFLAG_DEFAULT,
+@@ -738,6 +738,9 @@
+                                          wxDouble angle,
+                                          const wxGraphicsBrush& backgroundBrush);
+ 
++private:
++    virtual wxDouble GetFontScale() const { return 1.0; };
++
+     wxDECLARE_NO_COPY_CLASS(wxGraphicsContext);
+     DECLARE_ABSTRACT_CLASS(wxGraphicsContext)
+ };
+@@ -849,7 +852,7 @@
+                               const wxGraphicsGradientStops& stops) = 0;
+ 
+     // sets the font
+-    virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK ) = 0;
++    virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK, wxDouble scale = 1.0 ) = 0;
+     virtual wxGraphicsFont CreateFont(double sizeInPixels,
+                                       const wxString& facename,
+                                       int flags = wxFONTFLAG_DEFAULT,
+diff -uNrbB wxWidgets-trunk\src/common/graphcmn.cpp wxWidgets-work\src/common/graphcmn.cpp
+--- wxWidgets-trunk\src/common/graphcmn.cpp	2013-12-29 11:00:34.389263200 +0100
++++ wxWidgets-work\src/common/graphcmn.cpp	2014-02-08 16:15:13.598296700 +0100
+@@ -587,8 +587,11 @@
+ 
+ void wxGraphicsContext::GetDPI( wxDouble* dpiX, wxDouble* dpiY)
+ {
+-    *dpiX = 72.0;
+-    *dpiY = 72.0;
++    // DPI-Y is used for counting font scale in GDI+ text operations.
++    // Prinout is most similar to the screen view
++    // if reported DPI is the same as screen DPI.
++    *dpiX = 96.0;
++    *dpiY = 96.0;
+ }
+ 
+ // sets the pen
+@@ -628,7 +631,7 @@
+ void wxGraphicsContext::SetFont( const wxFont& font, const wxColour& colour )
+ {
+     if ( font.IsOk() )
+-        SetFont( CreateFont( font, colour ) );
++        SetFont( CreateFont( font, colour, GetFontScale() ) );
+     else
+         SetFont( wxNullGraphicsFont );
+ }
+@@ -841,9 +844,9 @@
+                           );
+ }
+ 
+-wxGraphicsFont wxGraphicsContext::CreateFont( const wxFont &font , const wxColour &col ) const
++wxGraphicsFont wxGraphicsContext::CreateFont( const wxFont &font , const wxColour &col, wxDouble scale ) const
+ {
+-    return GetRenderer()->CreateFont(font,col);
++    return GetRenderer()->CreateFont(font,col,scale);
+ }
+ 
+ wxGraphicsFont
+diff -uNrbB wxWidgets-trunk\src/msw/graphics.cpp wxWidgets-work\src/msw/graphics.cpp
+--- wxWidgets-trunk\src/msw/graphics.cpp	2014-01-07 23:03:57.849341200 +0100
++++ wxWidgets-work\src/msw/graphics.cpp	2014-02-08 16:16:32.576519300 +0100
+@@ -320,7 +320,8 @@
+ public:
+     wxGDIPlusFontData( wxGraphicsRenderer* renderer,
+                        const wxFont &font,
+-                       const wxColour& col );
++                       const wxColour& col,
++                       wxDouble scale);
+     wxGDIPlusFontData(wxGraphicsRenderer* renderer,
+                       const wxString& name,
+                       REAL sizeInPixels,
+@@ -429,6 +430,7 @@
+ 
+ private:
+     virtual void DoDrawText(const wxString& str, wxDouble x, wxDouble y);
++    virtual wxDouble GetFontScale() const { return 1.0 / m_fontScaleRatio; }
+ 
+     Graphics* m_context;
+     wxStack<GraphicsState> m_stateStack;
+@@ -574,7 +576,8 @@
+ #endif // wxUSE_IMAGE
+ 
+     virtual wxGraphicsFont CreateFont( const wxFont& font,
+-                                       const wxColour& col);
++                                       const wxColour& col,
++                                       wxDouble scale = 1.0);
+ 
+     virtual wxGraphicsFont CreateFont(double size,
+                                       const wxString& facename,
+@@ -935,7 +938,8 @@
+ 
+ wxGDIPlusFontData::wxGDIPlusFontData( wxGraphicsRenderer* renderer,
+                                       const wxFont &font,
+-                                      const wxColour& col )
++                                      const wxColour& col,
++                                      wxDouble scale)
+     : wxGraphicsObjectRefData( renderer )
+ {
+     int style = FontStyleRegular;
+@@ -946,7 +950,7 @@
+     if ( font.GetWeight() == wxFONTWEIGHT_BOLD )
+         style |= FontStyleBold;
+ 
+-    Init(font.GetFaceName(), font.GetPointSize(), style, col, UnitPoint);
++    Init(font.GetFaceName(), font.GetPointSize() * scale, style, col, UnitPoint);
+ }
+ 
+ wxGDIPlusFontData::wxGDIPlusFontData(wxGraphicsRenderer* renderer,
+@@ -1954,7 +1958,9 @@
+ 
+     // We use this modifier when measuring fonts. It is needed because the
+     // page scale is modified above.
+-    m_fontScaleRatio = context->GetDpiY() / 72.0;
++    double dpiX, dpiY;
++    GetDPI(&dpiX, &dpiY);
++    m_fontScaleRatio = context->GetDpiY() / dpiY;
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -2166,13 +2172,14 @@
+ 
+ wxGraphicsFont
+ wxGDIPlusRenderer::CreateFont( const wxFont &font,
+-                               const wxColour &col )
++                               const wxColour &col,
++                               wxDouble scale)
+ {
+     ENSURE_LOADED_OR_RETURN(wxNullGraphicsFont);
+     if ( font.IsOk() )
+     {
+         wxGraphicsFont p;
+-        p.SetRefData(new wxGDIPlusFontData( this, font, col ));
++        p.SetRefData(new wxGDIPlusFontData( this, font, col, scale));
+         return p;
+     }
+     else

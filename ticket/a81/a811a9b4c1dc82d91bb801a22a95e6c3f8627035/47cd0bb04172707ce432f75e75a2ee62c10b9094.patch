@@ -1,0 +1,203 @@
+Index: include/wx/filename.h
+===================================================================
+--- include/wx/filename.h	(revision 60035)
++++ include/wx/filename.h	(working copy)
+@@ -38,6 +38,8 @@
+ class WXDLLIMPEXP_FWD_BASE wxFFile;
+ #endif
+ 
++class WXDLLIMPEXP_FWD_BASE wxDir;
++
+ // this symbol is defined for the platforms where file systems use volumes in
+ // paths
+ #if defined(__WXMSW__) || defined(__DOS__) || defined(__OS2__)
+@@ -206,6 +208,10 @@
+                 !m_ext.empty() || m_hasExt;
+     }
+ 
++        // checks if the filename's path is equal-to or inside-a-subdirectory of "dir"
++        // optionally, if checkExistence==true, it checks for the existance of the file
++    bool IsInsideSubDirectory(const wxFileName &dir, bool checkExistence=false) const;
++
+         // does the file with this name exists?
+     bool FileExists() const;
+     static bool FileExists( const wxString &file );
+@@ -378,8 +384,7 @@
+         // replaces, if present in the path, the home directory for the given user
+         // (see wxGetHomeDir) with a tilde
+     bool ReplaceHomeDir(wxPathFormat format = wxPATH_NATIVE);
+-
+-
++        
+     // Comparison
+ 
+         // compares with the rules of the given platforms format
+Index: interface/wx/filename.h
+===================================================================
+--- interface/wx/filename.h	(revision 60035)
++++ interface/wx/filename.h	(working copy)
+@@ -430,6 +430,20 @@
+     static wxString CreateTempFileName(const wxString& prefix,
+                                        wxFFile* fileTemp = NULL);
+     //@}
++    
++    /**
++		Checks if the filename is equal-to or inside-a-subdirectory of parameter @c dir.
++		
++		If @c checkExistance is @true it checks this file is inside @c dir and if it both exist.
++		If @c checkExistance is @false it just checks that this path is inside @c dir 's path.
++		
++		@c dir must be a directory or a debug time assertion will raise.
++    
++        Returns @true if this' path is inside @c dir (and optionally if it exists)
++        
++        @see FileExists()
++    */
++    bool IsInsideSubDirectory(const wxFileName &dir, bool checkExistence=false) const;
+ 
+     /**
+         Returns @true if the directory with this name exists.
+Index: src/common/filename.cpp
+===================================================================
+--- src/common/filename.cpp	(revision 60035)
++++ src/common/filename.cpp	(working copy)
+@@ -539,6 +539,41 @@
+ // existence tests
+ // ----------------------------------------------------------------------------
+ 
++bool wxFileName::IsInsideSubDirectory(const wxFileName &dir, bool checkExistence/*=false*/) const
++{
++	//If you ended up here, probably you constructed a wxFileName incorrectly.
++	//e.g.:
++	//	wxFileName("/tmp/dir")
++	//	instead of wxFileName("/tmp/dir/") or wxFileName("/tmp/dir", wxEmptyString)
++	wxASSERT_MSG( dir.IsDir() , "dir parameter is not a directory");
++
++	wxFileName w( *this );
++	wxFileName in( dir );
++	
++	//check first to return sooner and avoid normalization and string comparison
++	if(
++		(checkExistence &&
++			(!in.DirExists() ||
++				(!w.DirExists() && !w.FileExists())
++			)
++		)
++	) {
++		return false;
++	}
++	
++	// normalize case
++	w.Normalize( wxPATH_NORM_ALL | wxPATH_NORM_CASE );
++	in.Normalize( wxPATH_NORM_ALL | wxPATH_NORM_CASE );
++	
++	// notice I get the SEPARATOR on the end of the directory path. This avoids
++	// thinking that "/something" is inside "/some" on the shortest-length string comparison below
++	// "/something/" inside "/some/" won't ever compare as equal
++	wxString wPath(w.GetFullPath());
++	wxString inPath(in.GetPath(wxPATH_GET_VOLUME|wxPATH_GET_SEPARATOR));
++
++	return (wPath.compare(0, inPath.size(), inPath) == 0);
++}
++
+ bool wxFileName::FileExists() const
+ {
+     return wxFileName::FileExists( GetFullPath() );
+Index: tests/filename/filenametest.cpp
+===================================================================
+--- tests/filename/filenametest.cpp	(revision 60035)
++++ tests/filename/filenametest.cpp	(working copy)
+@@ -23,11 +23,14 @@
+ 
+ #include "wx/filename.h"
+ #include "wx/filefn.h"
++#include "wx/dir.h"
+ 
+ #ifdef __WXMSW__
+     #include "wx/msw/registry.h"
+ #endif // __WXMSW__
+ 
++static const wxString FILENAME_EXISTANCE_TEST = _T("filename_existance_test.test");
++
+ // ----------------------------------------------------------------------------
+ // local functions
+ // ----------------------------------------------------------------------------
+@@ -127,6 +130,9 @@
+         CPPUNIT_TEST( TestStrip );
+         CPPUNIT_TEST( TestNormalize );
+         CPPUNIT_TEST( TestReplace );
++        CPPUNIT_TEST( TestFileExists );
++        CPPUNIT_TEST( TestIsInsideSubDirectory );
++        
+ #ifdef __WINDOWS__
+         CPPUNIT_TEST( TestShortLongPath );
+ #endif // __WINDOWS__
+@@ -139,6 +145,8 @@
+     void TestStrip();
+     void TestNormalize();
+     void TestReplace();
++    void TestFileExists();
++    void TestIsInsideSubDirectory();
+ #ifdef __WINDOWS__
+     void TestShortLongPath();
+ #endif // __WINDOWS__
+@@ -244,6 +252,59 @@
+     CPPUNIT_ASSERT_EQUAL(fn1.GetPath(), fn2.GetPath());
+ }
+ 
++void FileNameTestCase::TestFileExists()
++{
++    wxFileName fn(FILENAME_EXISTANCE_TEST);
++	
++    CPPUNIT_ASSERT( !fn.FileExists() );
++    CPPUNIT_ASSERT( !wxFileName::FileExists(FILENAME_EXISTANCE_TEST) );
++
++    wxFile temp(FILENAME_EXISTANCE_TEST, wxFile::write);
++    temp.Close();
++
++    CPPUNIT_ASSERT( fn.FileExists() );
++    CPPUNIT_ASSERT( wxFileName::FileExists(FILENAME_EXISTANCE_TEST) );
++	
++    wxRemoveFile(FILENAME_EXISTANCE_TEST);
++}
++
++void FileNameTestCase::TestIsInsideSubDirectory()
++{
++    wxFileName fn1(wxT("/tmp/file1"));
++    wxFileName fn2(wxT("/tmp/sarlanga/file2"));
++    wxFileName fn3(wxT("/tmp/SARLANGA/file3"));	//to test case sensitivity
++    wxFileName dir1(wxT("/tmp/"));
++    wxFileName dir2(wxT("/tmp/sarlanga"), wxEmptyString);	//this shouldn't be taken as inside of dir3
++    wxFileName dir3(wxT("/tmp/sar"), wxEmptyString);	
++    
++    //depth file-dir checks
++    CPPUNIT_ASSERT( fn1.IsInsideSubDirectory(dir1) );
++    CPPUNIT_ASSERT( fn2.IsInsideSubDirectory(dir1) );	
++    CPPUNIT_ASSERT( fn3.IsInsideSubDirectory(dir1) );
++
++	//incorrect dir checks
++    CPPUNIT_ASSERT( !fn1.IsInsideSubDirectory(dir2) );
++    
++    //dir-dir checks
++    CPPUNIT_ASSERT( dir2.IsInsideSubDirectory(dir1) );
++    CPPUNIT_ASSERT( dir3.IsInsideSubDirectory(dir1) );
++    CPPUNIT_ASSERT( !dir1.IsInsideSubDirectory(dir2) );
++    CPPUNIT_ASSERT( !dir2.IsInsideSubDirectory(dir3) );		//<- important, read above
++    
++    //self check, should be true
++    CPPUNIT_ASSERT( dir2.IsInsideSubDirectory(dir2) );	//itself
++
++    if( wxFileName::IsCaseSensitive() )
++    {
++        CPPUNIT_ASSERT( !fn3.IsInsideSubDirectory(dir2) );
++    }
++    else {
++        CPPUNIT_ASSERT( fn3.IsInsideSubDirectory(dir2) );
++    }
++    
++    //checkExistance parameter is already tested in TestFileExists();
++}
++
+ void FileNameTestCase::TestSplit()
+ {
+     for ( size_t n = 0; n < WXSIZEOF(filenames); n++ )

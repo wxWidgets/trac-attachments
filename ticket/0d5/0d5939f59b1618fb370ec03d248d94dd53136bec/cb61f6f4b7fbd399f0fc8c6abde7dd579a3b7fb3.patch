@@ -1,0 +1,546 @@
+Index: include/wx/dcbuffer.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/dcbuffer.h,v
+retrieving revision 1.17
+diff -b -u -2 -r1.17 dcbuffer.h
+--- include/wx/dcbuffer.h	2004/05/23 20:50:20	1.17
++++ include/wx/dcbuffer.h	2004/06/15 21:49:41
+@@ -3,5 +3,5 @@
+ // Purpose:     wxBufferedDC class
+ // Author:      Ron Lee <ron@debian.org>
+-// Modified by: Vadim Zeitlin (refactored, added bg preservation)
++// Modified by: Greg Hazel (added wxRect)
+ // Created:     16/03/02
+ // RCS-ID:      $Id: dcbuffer.h,v 1.17 2004/05/23 20:50:20 JS Exp $
+@@ -16,5 +16,4 @@
+ #include "wx/dcclient.h"
+ 
+-
+ // ----------------------------------------------------------------------------
+ // Double buffering helper.
+@@ -30,9 +29,8 @@
+ 
+     // Construct a wxBufferedDC using a user supplied buffer.
+-    wxBufferedDC(wxDC *dc, const wxBitmap &buffer)
+-        : m_dc( dc ),
+-          m_buffer( buffer )
++    wxBufferedDC(wxDC *dc,const wxBitmap& buffer, const wxPoint &offset = wxPoint(0, 0) )
++        : m_dc( 0 ) , m_buffer( buffer )
+     {
+-        UseBuffer();
++        Init(dc, buffer, offset);
+     }
+ 
+@@ -40,11 +38,19 @@
+     // (where area is usually something like the size of the window
+     // being buffered)
+-    wxBufferedDC(wxDC *dc, const wxSize &area)
+-        : m_dc( dc ),
+-          m_buffer( area.GetWidth(), area.GetHeight() )
++
++    //backwards compatability
++    wxBufferedDC(wxDC *dc, const wxSize &size)
++        : m_dc( 0 )
+     {
+-        UseBuffer();
++        Init(dc, wxRect( wxPoint(0, 0) , size ) );
+     }
+ 
++    wxBufferedDC(wxDC *dc, const wxRect &area)
++        : m_dc( 0 )
++    {
++        Init(dc, area);
++    }
++
++
+     // default copy ctor ok.
+ 
+@@ -54,22 +60,32 @@
+         if ( m_dc ) UnMask();
+     }
++
++    // These implement the actions of the ctors for two stage creation,
++    // they were not used by the ctors themselves to save a few cpu cycles,
++    // but this is an insignificant optimization, and it seems like cleaner
++    // code is more important
++    void Init(wxDC *dc, const wxSize &size)
++    {
++        Init(dc, wxRect( wxPoint(0, 0) , size ) );
++    }
+ 
+-    // These reimplement the actions of the ctors for two stage creation, but
+-    // are not used by the ctors themselves to save a few cpu cycles.
+-    void Init(wxDC *dc, const wxBitmap &buffer)
++    void Init(wxDC *dc, const wxRect &area)
+     {
++        dest_rect = area;
++        Init(dc, wxBitmap(dest_rect.GetWidth(), dest_rect.GetHeight()));
++    }
++
++    void Init(wxDC *dc,const wxBitmap& buffer, const wxPoint &offset = wxPoint(0, 0))
++    {
+         wxASSERT_MSG( m_dc == 0 && m_buffer == wxNullBitmap,
+                       _T("wxBufferedDC already initialised") );
+         m_dc = dc;
+         m_buffer = buffer;
++        dest_rect.SetX(offset.x);
++        dest_rect.SetY(offset.y);
+         UseBuffer();
+     }
+-
+-    void Init(wxDC *dc, const wxSize &area)
+-    {
+-        Init(dc, wxBitmap(area.GetWidth(), area.GetHeight()));
+-    }
+ 
+-    // Blits the buffer to the dc, and detaches the dc from the buffer (so it
++    // Blits the buffer to the dc, and detaches the dc from the wxBufferedDC (so it
+     // can be effectively used once only).
+     //
+@@ -82,7 +98,10 @@
+                       _T("No underlying DC associated with wxBufferedDC (anymore)") );
+ 
+-        m_dc->Blit( 0, 0,
+-                    m_buffer.GetWidth(), m_buffer.GetHeight(), this,
++        m_dc->Blit( dest_rect.GetX(), dest_rect.GetY(),
++                    dest_rect.GetWidth(), dest_rect.GetHeight(), this,
+                     0, 0 );
++
++        SelectObject( wxNullBitmap );
++
+         m_dc = NULL;
+     }
+@@ -92,6 +111,9 @@
+     void UseBuffer()
+     {
+-        wxASSERT_MSG( m_buffer.Ok(), _T("invalid bitmap in wxBufferedDC") );
++        wxASSERT_MSG( m_buffer.Ok() , _T("invalid bitmap in wxBufferedDC") );
+ 
++        dest_rect.SetWidth(m_buffer.GetWidth());
++        dest_rect.SetHeight(m_buffer.GetHeight());
++
+         SelectObject(m_buffer);
+     }
+@@ -100,6 +122,4 @@
+     // UnMask()
+     //
+-    // NB: Without the existence of a wxNullDC, this must be a pointer, else it
+-    //     could probably be a reference.
+     wxDC *m_dc;
+ 
+@@ -107,4 +127,7 @@
+     wxBitmap m_buffer;
+ 
++    // the destination offset and area to blit the buffer to on the DC
++    wxRect dest_rect;
++
+     DECLARE_NO_COPY_CLASS(wxBufferedDC)
+ };
+@@ -121,5 +144,5 @@
+ public:
+     // If no bitmap is supplied by the user, a temporary one wil; be created.
+-    wxBufferedPaintDC(wxWindow *window, const wxBitmap& buffer = wxNullBitmap)
++    wxBufferedPaintDC(wxWindow *window,wxBitmap& buffer = wxNullBitmap)
+         : m_paintdc(window)
+     {
+Index: include/wx/window.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/window.h,v
+retrieving revision 1.146
+diff -b -u -2 -r1.146 window.h
+--- include/wx/window.h	2004/06/09 15:37:25	1.146
++++ include/wx/window.h	2004/06/15 21:49:43
+@@ -969,8 +969,12 @@
+ //        void ProcessInternalIdle() ;
+ 
+-        // get the handle of the window for the underlying window system: this
+-        // is only used for wxWin itself or for user code which wants to call
+-        // platform-specific APIs
++        // these are only used for wxWin itself or for user code which wants
++        // to interface with platform-specific APIs
++        // get the handle of the window for the underlying window system
+     virtual WXWidget GetHandle() const = 0;
++        // associate the window with a new native handle
++    virtual void AssociateHandle(WXWidget WXUNUSED(handle)) {}
++        // unassociate the current native handle from the window
++    virtual void UnassociateHandle() {}
+ 
+ #if wxUSE_PALETTE
+Index: include/wx/mac/carbon/window.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/mac/carbon/window.h,v
+retrieving revision 1.12
+diff -b -u -2 -r1.12 window.h
+--- include/wx/mac/carbon/window.h	2004/06/04 07:21:50	1.12
++++ include/wx/mac/carbon/window.h	2004/06/15 21:49:44
+@@ -133,4 +133,7 @@
+     virtual WXWidget GetHandle() const ;
+ 
++    virtual void AssociateHandle(WXWidget handle);
++    virtual void DisassociateHandle();
++
+ #if WXWIN_COMPATIBILITY_2_4
+     bool GetTransparentBackground() const { return m_backgroundTransparent; }
+Index: include/wx/msw/glcanvas.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/msw/glcanvas.h,v
+retrieving revision 1.13
+diff -b -u -2 -r1.13 glcanvas.h
+--- include/wx/msw/glcanvas.h	2004/05/23 20:51:28	1.13
++++ include/wx/msw/glcanvas.h	2004/06/15 21:49:45
+@@ -3,5 +3,5 @@
+ // Purpose:     wxGLCanvas, for using OpenGL with wxWidgets under Windows
+ // Author:      Julian Smart
+-// Modified by:
++// Modified by: Greg Hazel
+ // Created:     04/01/98
+ // RCS-ID:      $Id: glcanvas.h,v 1.13 2004/05/23 20:51:28 JS Exp $
+@@ -66,7 +66,10 @@
+     ~wxGLContext();
+ 
++    bool IsCurrent(wxThread* thread = NULL);
+ 
+     void SetCurrent();
+ 
++    void UnsetCurrent();
++
+     void SetColour(const wxChar *colour);
+ 
+@@ -81,4 +84,7 @@
+ 
+ public:
++    wxMutex          m_glContextMutex;
++    bool             m_glContextMutexIsLocked;
++    wxThreadIdType   m_glContextThread;
+     HGLRC            m_glContext;
+     WXHDC            m_hDC;
+@@ -126,4 +132,6 @@
+     void SetCurrent();
+ 
++    void UnsetCurrent();
++
+ #ifdef __WXUNIVERSAL__
+     virtual bool SetCurrent(bool doit) { return wxWindow::SetCurrent(doit); };
+@@ -159,4 +167,28 @@
+     DECLARE_EVENT_TABLE()
+ };
++
++class WXDLLIMPEXP_GL wxGLCanvasScope
++{
++public:
++    wxGLCanvasScope::wxGLCanvasScope(wxGLCanvas* canvas)
++    {
++      wxCHECK_RET( canvas != NULL ,
++                   "wxGLCanvasScope ctor must have a valid wxGLCanvas" );
++
++      m_canvas = canvas;
++
++      //locks the mutex and sets current
++      m_canvas->SetCurrent();
++    }
++    wxGLCanvasScope::~wxGLCanvasScope()
++    {
++      //unlocks the mutex and sets current to NULL
++      m_canvas->UnsetCurrent();
++    }
++
++private:
++  wxGLCanvas* m_canvas;
++};
++
+ 
+ #endif
+Index: include/wx/msw/window.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/msw/window.h,v
+retrieving revision 1.115
+diff -b -u -2 -r1.115 window.h
+--- include/wx/msw/window.h	2004/05/23 20:51:29	1.115
++++ include/wx/msw/window.h	2004/06/15 21:49:46
+@@ -174,4 +174,8 @@
+     void UnsubclassWin();
+ 
++    // Window association (part of wxWindowBase)
++    void AssociateHandle(WXWidget handle);
++    void UnassociateHandle();
++
+     WXFARPROC MSWGetOldWndProc() const { return m_oldWndProc; }
+     void MSWSetOldWndProc(WXFARPROC proc) { m_oldWndProc = proc; }
+@@ -179,5 +183,5 @@
+     // return TRUE if the window is of a standard (i.e. not wxWidgets') class
+     //
+-    // to understand why does it work, look at SubclassWin() code and comments
++    // to understand why it works, look at SubclassWin() code and comments
+     bool IsOfStandardClass() const { return m_oldWndProc != NULL; }
+ 
+Index: src/common/memory.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/memory.cpp,v
+retrieving revision 1.66
+diff -b -u -2 -r1.66 memory.cpp
+--- src/common/memory.cpp	2004/06/08 14:46:07	1.66
++++ src/common/memory.cpp	2004/06/15 21:49:51
+@@ -911,9 +911,9 @@
+ };
+ 
+-MemoryCriticalSection &GetMemLocker()
+-{
++//MemoryCriticalSection &GetMemLocker()
++//{
+     static MemoryCriticalSection memLocker;
+-    return memLocker;
+-}
++//    return memLocker;
++//}
+ 
+ #endif
+@@ -923,5 +923,5 @@
+ {
+ #if USE_THREADSAFE_MEMORY_ALLOCATION
+-  MemoryCriticalSectionLocker lock(GetMemLocker());
++  MemoryCriticalSectionLocker lock(memLocker);
+ #endif
+ 
+@@ -983,5 +983,5 @@
+ {
+ #if USE_THREADSAFE_MEMORY_ALLOCATION
+-  MemoryCriticalSectionLocker lock(GetMemLocker());
++  MemoryCriticalSectionLocker lock(memLocker);
+ #endif
+ 
+Index: src/mac/carbon/window.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/mac/carbon/window.cpp,v
+retrieving revision 1.177
+diff -b -u -2 -r1.177 window.cpp
+--- src/mac/carbon/window.cpp	2004/06/04 07:28:59	1.177
++++ src/mac/carbon/window.cpp	2004/06/15 21:49:56
+@@ -655,5 +655,5 @@
+     {
+         // in case the callback might be called during destruction
+-        wxRemoveMacControlAssociation( this) ;
++        wxRemoveMacControlAssociation( this );
+         ::SetControlColorProc( *m_peer , NULL ) ;
+         ::DisposeControl( *m_peer ) ;
+@@ -690,4 +690,33 @@
+ }
+ 
++void wxWindowMac::AssociateHandle(WXWidget handle)
++{
++    if (!m_peer)
++    {
++      //an error might be in order here
++      return;
++    }
++
++    if ( m_peer->Ok() )
++    {
++        // maybe this shouldn't dispose the control?
++        wxRemoveMacControlAssociation( this );
++        ::SetControlColorProc( *m_peer , NULL ) ;
++        ::DisposeControl( *m_peer ) ;
++    }
++    else
++    {
++        (*m_peer) = handle;
++        wxAssociateControlWithMacControl( *m_peer , this ) ;
++        //should I associate the event handler here?
++    }
++}
++
++void wxWindowMac::DisassociateHandle()
++{
++    wxRemoveMacControlAssociation( this ) ;
++    //don't drop the pointer to m_peer, just the native control
++    (*m_peer) = (WXWidget) NULL;
++}
+ 
+ void wxWindowMac::MacInstallEventHandler()
+Index: src/msw/glcanvas.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/glcanvas.cpp,v
+retrieving revision 1.26
+diff -b -u -2 -r1.26 glcanvas.cpp
+--- src/msw/glcanvas.cpp	2004/05/23 20:52:59	1.26
++++ src/msw/glcanvas.cpp	2004/06/15 21:49:57
+@@ -3,5 +3,5 @@
+ // Purpose:     wxGLCanvas, for using OpenGL with wxWidgets under MS Windows
+ // Author:      Julian Smart
+-// Modified by:
++// Modified by: Greg Hazel
+ // Created:     04/01/98
+ // RCS-ID:      $Id: glcanvas.cpp,v 1.26 2004/05/23 20:52:59 JS Exp $
+@@ -80,5 +80,8 @@
+   wxCHECK_RET( m_glContext, wxT("Couldn't create OpenGl context") );
+ 
+-  wglMakeCurrent((HDC) m_hDC, m_glContext);
++  m_glContextMutexIsLocked = false;
++  m_glContextThread = 0;
++
++  SetCurrent();
+ }
+ 
+@@ -99,5 +102,8 @@
+     wglShareLists( other->m_glContext, m_glContext );
+ 
+-  wglMakeCurrent((HDC) m_hDC, m_glContext);
++  m_glContextMutexIsLocked = false;
++  m_glContextThread = 0;
++
++  SetCurrent();
+ }
+ 
+@@ -106,5 +112,17 @@
+   if (m_glContext)
+   {
+-    wglMakeCurrent(NULL, NULL);
++    if (IsCurrent())
++    {
++      UnsetCurrent();
++    }
++
++    wxASSERT_MSG( !m_glContextMutexIsLocked , "wxGLContext::~wxGLContext the mutex is locked"
++                                              " during dtor. (did you forget to call "
++                                              "UnsetCurrent?)" );
++
++    wxASSERT_MSG( m_glContextThread == 0, "wxGLContext::~wxGLContext there is a thread "
++                                          "set current (did you forget to call "
++                                          "UnsetCurrent?)" );
++
+     wglDeleteContext(m_glContext);
+   }
+@@ -115,7 +133,28 @@
+   if (m_glContext)
+   {
+-    wglMakeCurrent((HDC) m_hDC, m_glContext);
++    //prevent this function from unsetting current if the user already has it set
++    //but unset current if we have to set it
++    bool need_to_lock = !IsCurrent();
++    wxThreadIdType foo = wxThread::GetCurrentId();
++    if (need_to_lock)
++    {
++      SetCurrent();
++    }
+     ::SwapBuffers((HDC) m_hDC);    //blits the backbuffer into DC
++    if (need_to_lock)
++    {
++      UnsetCurrent();
++    }
++  }
++}
++
++bool wxGLContext::IsCurrent(wxThread* thread)
++{
++  if (thread != NULL)
++  {
++    return (m_glContextThread == thread->GetCurrentId());
+   }
++
++  return (m_glContextThread == wxThread::GetCurrentId());
+ }
+ 
+@@ -124,4 +163,27 @@
+   if (m_glContext)
+   {
++    //if the mutex is already locked, don't bother trying to lock it again
++    if (!IsCurrent())
++    {
++      if (m_glContextMutex.Lock() != wxMUTEX_NO_ERROR)
++      {
++        //maybe I should notify the user that the lock failed
++        return;
++      }
++  
++      m_glContextMutexIsLocked = true;
++      m_glContextThread = wxThread::GetCurrentId();
++    }
++    else
++    {
++      wxCHECK_RET( m_glContextMutexIsLocked ,
++                   "wxGLContext::SetCurrent() m_glContextMutex is not locked, "
++                   "but the thread is marked as current.");
++    }
++
++
++    //set current even if the thread is current maybe there's no way
++    //for this stuff to change, so maybe it's not needed but calling
++    //this twice is safe
+     wglMakeCurrent((HDC) m_hDC, m_glContext);
+   }
+@@ -133,4 +195,25 @@
+ }
+ 
++void wxGLContext::UnsetCurrent()
++{
++  wxCHECK_RET( IsCurrent() , 
++               "wxGLContext::UnsetCurrent this thread is not current "
++               "(did you call UnsetCurrent twice?)");
++
++  wxCHECK_RET( m_glContextMutexIsLocked, 
++               "wxGLContext::UnsetCurrent m_glContextMutex is not locked");
++
++  m_glContextMutexIsLocked = false;
++  m_glContextThread = 0;
++
++  wxMutexError unlock_retval = m_glContextMutex.Unlock();
++
++  wxCHECK_RET( unlock_retval == wxMUTEX_NO_ERROR , 
++               "wxGLContext::UnsetCurrent m_glContextMutex failed to unlock");
++
++  //safe to call more than once, really
++  wglMakeCurrent(NULL, NULL);
++}
++
+ void wxGLContext::SetColour(const wxChar *colour)
+ {
+@@ -534,4 +617,13 @@
+   }
+ }
++
++void wxGLCanvas::UnsetCurrent()
++{
++  if (m_glContext)
++  {
++    m_glContext->UnsetCurrent();
++  }
++}
++
+ 
+ void wxGLCanvas::SetColour(const wxChar *colour)
+Index: src/msw/window.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/window.cpp,v
+retrieving revision 1.488
+diff -b -u -2 -r1.488 window.cpp
+--- src/msw/window.cpp	2004/06/03 14:05:19	1.488
++++ src/msw/window.cpp	2004/06/15 21:50:04
+@@ -999,5 +999,5 @@
+     if ( hwnd )
+     {
+-        m_hWnd = 0;
++        SetHWND(0);
+ 
+         wxCHECK_RET( ::IsWindow(hwnd), wxT("invalid HWND in UnsubclassWin") );
+@@ -1013,4 +1013,20 @@
+         }
+     }
++}
++
++void wxWindowMSW::AssociateHandle(WXWidget handle) 
++{
++    SetHWND((WXHWND) handle);
++    SubclassWin((WXHWND) handle);
++    if (m_parent)
++    {
++        m_parent->AddChild(this);
++    }
++}
++
++void wxWindowMSW::UnassociateHandle()
++{ 
++    UnsubclassWin(); 
++    //UnsubclassWin() calls SetHWND(0) for us
+ }
+ 
+
+ 	  	 

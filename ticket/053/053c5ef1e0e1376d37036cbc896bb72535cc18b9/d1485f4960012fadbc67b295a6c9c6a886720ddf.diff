@@ -1,0 +1,245 @@
+Index: include/wx/utils.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/utils.h,v
+retrieving revision 1.135
+diff -u -t -r1.135 utils.h
+--- include/wx/utils.h	2006/07/25 18:39:58	1.135
++++ include/wx/utils.h	2007/01/05 21:48:34
+@@ -334,6 +334,14 @@
+     // that the user interacts with the program while the child process is
+     // running, you can use this flag to prevent this from happening
+     wxEXEC_NODISABLE = 8
++#ifdef __UNIX__
++,
++        // By default, the event loop is run while waiting for synchronous execution
++        // to complete.  You can use this flag to simply block the main process until
++        // the child process finishes.
++        wxEXEC_NOEVENTS = 16,
++        wxEXEC_BLOCK = wxEXEC_SYNC | wxEXEC_NOEVENTS
++#endif
+ };
+ 
+ // Execute another program.
+Index: src/unix/utilsunx.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/unix/utilsunx.cpp,v
+retrieving revision 1.138
+diff -u -t -r1.138 utilsunx.cpp
+--- src/unix/utilsunx.cpp	2006/08/09 11:18:21	1.138
++++ src/unix/utilsunx.cpp	2007/01/05 21:48:35
+@@ -1154,55 +1154,105 @@
+     }
+ 
+ 
++        if ( ! ( flags & wxEXEC_NOEVENTS ) )
++        {
+ #if defined(__DARWIN__) && (defined(__WXMAC__) || defined(__WXCOCOA__))
+-    endProcData->tag = wxAddProcessCallbackForPid(endProcData, execData.pid);
++                endProcData->tag = wxAddProcessCallbackForPid(endProcData, execData.pid);
+ #else
+-    endProcData->tag = wxAddProcessCallback
+-                (
+-                    endProcData,
+-                    execData.pipeEndProcDetect.Detach(wxPipe::Read)
+-                );
++                endProcData->tag = wxAddProcessCallback
++                                        (
++                                                endProcData,
++                                                execData.pipeEndProcDetect.Detach(wxPipe::Read)
++                                        );
+ 
+-    execData.pipeEndProcDetect.Close();
++                execData.pipeEndProcDetect.Close();
+ #endif // defined(__DARWIN__) && (defined(__WXMAC__) || defined(__WXCOCOA__))
+-
++        }
++        
+     if ( flags & wxEXEC_SYNC )
+     {
+         wxBusyCursor bc;
+-        wxWindowDisabler *wd = flags & wxEXEC_NODISABLE ? NULL
+-                                                        : new wxWindowDisabler;
+-
+-        // endProcData->pid will be set to 0 from GTK_EndProcessDetector when the
+-        // process terminates
+-        while ( endProcData->pid != 0 )
+-        {
+-            bool idle = true;
++                int exitcode = 0;
++                
++                wxWindowDisabler *wd = flags & ( wxEXEC_NODISABLE | wxEXEC_NOEVENTS ) ? NULL
++                                                                                                                                                          : new wxWindowDisabler;
++
++                if ( flags & wxEXEC_NOEVENTS )
++                {
++                        int status = 0;
++                        
++                        int result = waitpid( execData.pid,
++                                                                  &status,
++                                                                  0 );
++
++                        wxASSERT( !WIFSTOPPED(status) );
++                        // waitpid should not return if the child was paused.
++                        // We didn't pass WUNTRACED for this reason.
++
++                        #ifdef __WXDEBUG__
++                                if ( WIFSIGNALED(status) )
++                                        wxLogDebug( wxT("The child process exited due to a received signal:  %d"), (int)WTERMSIG(status) );
++                        #endif
++
++                        wxASSERT_MSG( !WCOREDUMP(status), wxT("The child process produced a core dump!") );
++                        // This isn't necessarily a failure condition for wxWidgets
++                        // or the parent process, but the child crashed!
++
++                        if ( result != execData.pid )
++                        {
++                                wxASSERT( result == -1 );
++                                // waitpid returns the pid of the process that exited.
++                                // If we received something other than either -1 or
++                                // the expected pid, then we have an implementation
++                                // error somewhere.
++
++                                exitcode = -1;
++                                wxLogDebug( wxT("waitpid() returned %d, waiting for %d, and failed with error %d:  %s"),
++                                                        (int)result,
++                                                        (int)endProcData->pid,
++                                                        (int)errno,
++                                                        wxString::FromAscii( strerror(errno) ).c_str() );
++                        }
++                        else
++                        {
++                                wxASSERT( WIFEXITED(status) );
++                                exitcode = WEXITSTATUS(status);
++                        }
++                }
++                else
++                {
++                        // endProcData->pid will be set to 0 from GTK_EndProcessDetector when the
++                        // process terminates
++                        while ( endProcData->pid != 0 )
++                        {
++                                bool idle = true;
+ 
+ #if HAS_PIPE_INPUT_STREAM
+-            if ( execData.bufOut )
+-            {
+-                execData.bufOut->Update();
+-                idle = false;
+-            }
+-
+-            if ( execData.bufErr )
+-            {
+-                execData.bufErr->Update();
+-                idle = false;
+-            }
++                                if ( execData.bufOut )
++                                {
++                                        execData.bufOut->Update();
++                                        idle = false;
++                                }
++
++                                if ( execData.bufErr )
++                                {
++                                        execData.bufErr->Update();
++                                        idle = false;
++                                }
+ #endif // HAS_PIPE_INPUT_STREAM
+-
+-            // don't consume 100% of the CPU while we're sitting in this
+-            // loop
+-            if ( idle )
+-                wxMilliSleep(1);
+-
+-            // give GTK+ a chance to call GTK_EndProcessDetector here and
+-            // also repaint the GUI
+-            wxYield();
+-        }
+ 
+-        int exitcode = endProcData->exitcode;
++                                // don't consume 100% of the CPU while we're sitting in this
++                                // loop
++                                if ( idle )
++                                        wxMilliSleep(1);
++
++                                // give GTK+ a chance to call GTK_EndProcessDetector here and
++                                // also repaint the GUI
++                                wxYield();
++                        }
++                        
++                        exitcode = endProcData->exitcode;
++                }
+ 
+         delete wd;
+         delete endProcData;
+Index: samples/exec/exec.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/exec/exec.cpp,v
+retrieving revision 1.38
+diff -u -t -r1.38 exec.cpp
+--- samples/exec/exec.cpp	2005/09/23 12:51:43	1.38
++++ samples/exec/exec.cpp	2007/01/05 21:48:36
+@@ -97,6 +97,7 @@
+     void OnClear(wxCommandEvent& event);
+ 
+     void OnSyncExec(wxCommandEvent& event);
++    void OnSyncNoEventsExec(wxCommandEvent& event);
+     void OnAsyncExec(wxCommandEvent& event);
+     void OnShell(wxCommandEvent& event);
+     void OnExecWithRedirect(wxCommandEvent& event);
+@@ -298,6 +299,7 @@
+     Exec_Kill,
+     Exec_ClearLog,
+     Exec_SyncExec = 200,
++    Exec_SyncNoEventsExec,
+     Exec_AsyncExec,
+     Exec_Shell,
+     Exec_POpen,
+@@ -330,6 +332,7 @@
+     EVT_MENU(Exec_ClearLog,  MyFrame::OnClear)
+ 
+     EVT_MENU(Exec_SyncExec, MyFrame::OnSyncExec)
++    EVT_MENU(Exec_SyncNoEventsExec, MyFrame::OnSyncNoEventsExec)
+     EVT_MENU(Exec_AsyncExec, MyFrame::OnAsyncExec)
+     EVT_MENU(Exec_Shell, MyFrame::OnShell)
+     EVT_MENU(Exec_Redirect, MyFrame::OnExecWithRedirect)
+@@ -430,6 +433,10 @@
+     wxMenu *execMenu = new wxMenu;
+     execMenu->Append(Exec_SyncExec, _T("Sync &execution...\tCtrl-E"),
+                      _T("Launch a program and return when it terminates"));
++#ifdef __UNIX__
++        execMenu->Append(Exec_SyncNoEventsExec, _T("Sync execution and &block...\tCtrl-B"),
++                     _T("Launch a program and block until it terminates"));
++#endif
+     execMenu->Append(Exec_AsyncExec, _T("&Async execution...\tCtrl-A"),
+                      _T("Launch a program and return immediately"));
+     execMenu->Append(Exec_Shell, _T("Execute &shell command...\tCtrl-S"),
+@@ -637,6 +644,27 @@
+         cmd.c_str(), code);
+ 
+     m_cmdLast = cmd;
++}
++
++void MyFrame::OnSyncNoEventsExec(wxCommandEvent& WXUNUSED(event))
++{
++#ifdef __UNIX__
++    wxString cmd = wxGetTextFromUser(_T("Enter the command: "),
++                                     DIALOG_TITLE,
++                                     m_cmdLast);
++
++    if ( !cmd )
++        return;
++
++    wxLogStatus( _T("'%s' is running please wait..."), cmd.c_str() );
++
++    int code = wxExecute(cmd, wxEXEC_BLOCK);
++
++    wxLogStatus(_T("Process '%s' terminated with exit code %d."),
++        cmd.c_str(), code);
++
++    m_cmdLast = cmd;
++#endif
+ }
+ 
+ void MyFrame::OnAsyncExec(wxCommandEvent& WXUNUSED(event))
+
+ 	  	 

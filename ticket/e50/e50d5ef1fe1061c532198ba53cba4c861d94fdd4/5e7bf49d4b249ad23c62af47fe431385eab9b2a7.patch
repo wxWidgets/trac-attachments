@@ -1,0 +1,359 @@
+Index: src/osx/core/printmac.cpp
+===================================================================
+--- src/osx/core/printmac.cpp	(revision 56762)
++++ src/osx/core/printmac.cpp	(working copy)
+@@ -127,6 +127,66 @@
+     }
+ }
+ 
++static int ResolutionSorter(const void *e1, const void *e2)
++{
++    const PMResolution *res1 = (const PMResolution *)e1;
++    const PMResolution *res2 = (const PMResolution *)e2;
++    int area1 = res1->hRes * res1->vRes;
++    int area2 = res2->hRes * res2->vRes;
++    
++    if (area1 < area2)
++        return -1;
++    else if (area1 > area2)
++        return 1;
++    else
++        return 0;
++}
++
++static PMResolution *GetSupportedResolutions(PMPrinter printer, UInt32 *count)
++{
++    PMResolution res, *resolutions = NULL;
++    OSStatus status = PMPrinterGetPrinterResolutionCount(printer, count);
++    if (status == kPMNotImplemented)
++    {
++#if MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_5
++        resolutions = (PMResolution *)malloc(sizeof(PMResolution) * 4);
++        *count = 0;
++        if (PMPrinterGetPrinterResolution(printer, kPMMinRange, &res) == noErr)
++            resolutions[(*count)++] = res;
++        if (PMPrinterGetPrinterResolution(printer, kPMMinSquareResolution, &res) == noErr)
++            resolutions[(*count)++] = res;
++        if (PMPrinterGetPrinterResolution(printer, kPMMaxSquareResolution, &res) == noErr)
++            resolutions[(*count)++] = res;
++        if (PMPrinterGetPrinterResolution(printer, kPMMaxRange, &res) == noErr)
++            resolutions[(*count)++] = res;
++        if (*count == 0)
++        {
++            if (PMPrinterGetPrinterResolution(printer, kPMDefaultResolution, &res) == noErr)
++                resolutions[(*count)++] = res;
++        }
++#endif
++    }
++    else if (status == noErr)
++    {
++        resolutions = (PMResolution *)malloc(sizeof(PMResolution) * (*count));
++        UInt32 realCount = 0;
++        for (UInt32 i = 0; i < *count; i++)
++        {
++            if (PMPrinterGetIndexedPrinterResolution(printer, i + 1, &res) == noErr)
++                resolutions[realCount++] = res;
++        }
++        qsort(resolutions, realCount, sizeof(PMResolution), ResolutionSorter);
++        
++        *count = realCount;
++    }
++    if ((*count == 0) && (resolutions))
++    {
++        free(resolutions);
++        resolutions = NULL;
++    }
++    return resolutions;
++}
++
+ bool wxMacCarbonPrintData::TransferFrom( const wxPrintData &data )
+ {
+     CFArrayRef printerList;
+@@ -188,8 +248,6 @@
+     }
+     PMSetDuplex( (PMPrintSettings) m_macPrintSettings, mode ) ;
+ 
+-    // PMQualityMode not yet accessible via API
+-    
+     PMResolution res;
+     PMSessionGetCurrentPrinter(m_macPrintSession, &printer);
+ 
+@@ -242,7 +300,8 @@
+         if (paper)
+         {
+             PMPageFormat temp;
+-            if (PMCreatePageFormatWithPMPaper(&temp, paper) == noErr) {
++            if (PMCreatePageFormatWithPMPaper(&temp, paper) == noErr)
++            {
+                 PMCopyPageFormat(temp, m_macPageFormat);
+                 PMRelease(temp);
+             }
+@@ -256,17 +315,24 @@
+     else
+         PMSetOrientation( (PMPageFormat) m_macPageFormat , ( data.GetOrientation() == wxLANDSCAPE ) ?
+             kPMLandscape : kPMPortrait , false ) ;
+-    
+-#if wxOSX_USE_CARBON
+-    PMTag tag = kPMMaxSquareResolution;
+-    PMPrinterGetPrinterResolution(printer, tag, &res);
+-    PMSetResolution((PMPageFormat) m_macPageFormat, &res);
++
++    UInt32 resCount;
++    PMResolution *resolutions = GetSupportedResolutions(printer, &resCount);
++    if (resolutions)
++    {
++        wxPrintQuality quality = data.GetQuality();
++        if (quality >= 0)
++            quality = wxPRINT_QUALITY_HIGH;
++        
++        res = resolutions[((quality - wxPRINT_QUALITY_DRAFT) * (resCount - 1)) / 3];
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5
++        PMPrinterSetOutputResolution(printer, m_macPrintSettings, &res);
+ #else
+-    PMPrinterGetOutputResolution( printer,  
+-        (PMPrintSettings) m_macPrintSettings,  &res) ;
+-    // TODO transfer ? into page format ?
+-    // may fail !
++        PMSetResolution(m_macPageFormat, &res);
+ #endif
++        free(resolutions);
++    }
++    
+     // after setting the new resolution the format has to be updated, otherwise the page rect remains 
+     // at the 'old' scaling
+     PMSessionValidatePageFormat((PMPrintSession) m_macPrintSession,
+@@ -338,8 +404,33 @@
+             data.SetDuplex(wxDUPLEX_SIMPLEX);
+             break ;
+     }
+-    // PMQualityMode not yet accessible via API
+     
++    /* assume high quality, will change below if we are able to */
++    data.SetQuality(wxPRINT_QUALITY_HIGH);
++    
++    PMResolution res, *resolutions;
++    UInt32 resCount;
++    resolutions = GetSupportedResolutions(printer, &resCount);
++    if (resolutions)
++    {
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5
++        if (PMPrinterGetOutputResolution(printer, m_macPrintSettings, &res) == noErr)
++#else
++        if (PMPrinterGetPrinterResolution(printer, kPMCurrentValue, &res) == noErr)
++#endif
++        {
++            UInt32 i;
++            for (i = 0; i < resCount; i++)
++            {
++                if ((resolutions[i].hRes == res.hRes) && (resolutions[i].vRes = res.vRes))
++                    break;
++            }
++            if (i < resCount)
++                data.SetQuality((((i + 1) * 3) / resCount) + wxPRINT_QUALITY_DRAFT);
++        }
++        free(resolutions);
++    }
++    
+     PMPaper paper ;
+     PMGetPageFormatPaper( m_macPageFormat, &paper );
+     
+@@ -500,15 +591,28 @@
+     // on the mac we have always pixels as addressing mode with 72 dpi
+     printout->SetPPIScreen(72, 72);
+     PMResolution res;
++    PMPrinter printer;
+     wxMacCarbonPrintData* nativeData = (wxMacCarbonPrintData*)
+           (m_printDialogData.GetPrintData().GetNativeData());
+-#if wxOSX_USE_CARBON
+-    PMGetResolution((PMPageFormat) (nativeData->m_macPageFormat), &res);
+-#else 
+-    PMPrinter printer;
+-    PMSessionGetCurrentPrinter(nativeData->m_macPrintSession, &printer);
+-    PMPrinterGetOutputResolution( printer, nativeData->m_macPrintSettings, &res) ;
++
++    if (PMSessionGetCurrentPrinter(nativeData->m_macPrintSession, &printer) == noErr)
++    {
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5 
++        if ( PMPrinterGetOutputResolution != NULL )
++        {
++            if (PMPrinterGetOutputResolution( printer, nativeData->m_macPrintSettings, &res) == -9589 /* kPMKeyNotFound */ )
++            {
++                res.hRes = res.vRes = 300;
++            }
++        }
++        else
+ #endif
++        {
++#if MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_5 
++            PMPrinterGetPrinterResolution(printer, kPMCurrentValue, &res);
++#endif
++        }
++    }
+     printout->SetPPIPrinter(int(res.hRes), int(res.vRes));
+ 
+     // Set printout parameters
+Index: src/osx/carbon/dcprint.cpp
+===================================================================
+--- src/osx/carbon/dcprint.cpp	(revision 56762)
++++ src/osx/carbon/dcprint.cpp	(working copy)
+@@ -84,13 +84,13 @@
+     m_maxY = wxCoord(rPage.bottom - rPage.top);
+ 
+     PMResolution res;
++    PMPrinter printer;
+ 
++    m_err = PMSessionGetCurrentPrinter(native->m_macPrintSession, &printer);
++    if (m_err == noErr)
++    {
+ #if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5 
+-    if ( PMPrinterGetOutputResolution != NULL )
+-    {
+-        PMPrinter printer;
+-        m_err = PMSessionGetCurrentPrinter(native->m_macPrintSession, &printer);
+-        if ( m_err == noErr )
++        if ( PMPrinterGetOutputResolution != NULL )
+         {
+             m_err = PMPrinterGetOutputResolution( printer, native->m_macPrintSettings, &res) ;
+             if ( m_err == -9589 /* kPMKeyNotFound */ )
+@@ -99,15 +99,20 @@
+                 res.hRes = res.vRes = 300;
+             }
+         }
+-    }
+-    else
++        else
+ #endif
+-    {
++        {
+ #if MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_5 
+-        m_err = PMGetResolution((PMPageFormat) (native->m_macPageFormat), &res);
++            m_err = PMPrinterGetPrinterResolution(printer, kPMCurrentValue, &res);
+ #endif
++        }
+     }
+-    
++
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5 
++    m_maxX = wxCoord((double)m_maxX * res.hRes / 72.0);
++    m_maxY = wxCoord((double)m_maxY * res.vRes / 72.0);
++#endif
++
+     m_ppi = wxSize(int(res.hRes), int(res.vRes));
+ }
+ 
+@@ -131,7 +136,9 @@
+ #if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_4
+     if ( PMPrintSettingsSetJobName != NULL )
+         PMPrintSettingsSetJobName(native->m_macPrintSettings, wxCFStringRef(message));
++    else
+ #endif
++        PMSetJobNameCFString(native->m_macPrintSettings, wxCFStringRef(message));
+ 
+     m_err = PMSessionBeginCGDocumentNoDialog(native->m_macPrintSession,
+               native->m_macPrintSettings,
+@@ -148,12 +155,13 @@
+     m_maxY = wxCoord(rPage.bottom - rPage.top);
+ 
+     PMResolution res;
++    PMPrinter printer;
++
++    m_err = PMSessionGetCurrentPrinter(native->m_macPrintSession, &printer);
++    if (m_err == noErr)
++    {
+ #if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5 
+-    if ( PMPrinterGetOutputResolution != NULL )
+-    {
+-        PMPrinter printer;
+-        m_err = PMSessionGetCurrentPrinter(native->m_macPrintSession, &printer);
+-        if ( m_err == noErr )
++        if ( PMPrinterGetOutputResolution != NULL )
+         {
+             m_err = PMPrinterGetOutputResolution( printer, native->m_macPrintSettings, &res) ;
+             if ( m_err == -9589 /* kPMKeyNotFound */ )
+@@ -162,15 +170,20 @@
+                 res.hRes = res.vRes = 300;
+             }
+         }
+-    }
+-    else
++        else
+ #endif
+-    {
++        {
+ #if MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_5 
+-       m_err = PMGetResolution((PMPageFormat) (native->m_macPageFormat), &res);
++            m_err = PMPrinterGetPrinterResolution(printer, kPMCurrentValue, &res);
+ #endif
++        }
+     }
+ 
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5 
++    m_maxX = wxCoord((double)m_maxX * res.hRes / 72.0);
++    m_maxY = wxCoord((double)m_maxY * res.vRes / 72.0);
++#endif
++
+     m_ppi = wxSize(int(res.hRes), int(res.vRes));
+     return true ;
+ }
+@@ -196,7 +209,7 @@
+ 
+     m_err = PMSessionBeginPageNoDialog(native->m_macPrintSession,
+                  native->m_macPageFormat,
+-                 nil);
++                 NULL);
+ 
+     CGContextRef pageContext;
+ 
+@@ -213,22 +226,23 @@
+     }
+     else
+     {
+-        PMRect rPage;
+-
+-        m_err = PMGetAdjustedPageRect(native->m_macPageFormat, &rPage);
+-        if ( !m_err )
+-        {
+-            PMRect paperRect ;
+-            PMGetAdjustedPaperRect( native->m_macPageFormat , &paperRect ) ;
+-            // make sure (0,0) is at the upper left of the printable area (wx conventions)
+-            // Core Graphics initially has the lower left of the paper as 0,0
+-            CGContextTranslateCTM( pageContext , (CGFloat) -paperRect.left , (CGFloat) paperRect.bottom ) ;
+-            CGContextScaleCTM( pageContext , 1 , -1 ) ;
+-        }
+-        // since this is a non-critical error, we set the flag back
+-        m_err = noErr ;
++        PMRect paperRect ;
++        PMGetAdjustedPaperRect( native->m_macPageFormat , &paperRect ) ;
++        // make sure (0,0) is at the upper left of the printable area (wx conventions)
++        // Core Graphics initially has the lower left of the paper as 0,0
++        CGContextTranslateCTM( pageContext , (CGFloat) -paperRect.left , (CGFloat) paperRect.bottom ) ;
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5
++        // Leopard deprecated PMSetResolution() which will not be available in 64 bit mode, so we avoid using it.
++        // To set the proper drawing resolution, the docs suggest the use of CGContextScaleCTM(), so here we go; as a
++        // consequence though, PMGetAdjustedPaperRect() and PMGetAdjustedPageRect() return unscaled rects, so we
++        // have to manually scale them later.
++        CGContextScaleCTM( pageContext, 72.0 / (double)m_ppi.x, -72.0 / (double)m_ppi.y);
++#else
++        CGContextScaleCTM( pageContext , 1 , -1 ) ;
++#endif
++        
++        impl->SetGraphicsContext( wxGraphicsContext::CreateFromNative( pageContext ) );
+     }
+-    impl->SetGraphicsContext( wxGraphicsContext::CreateFromNative( pageContext ) );
+ }
+ 
+ void wxMacCarbonPrinterDC::EndPage( wxPrinterDC* dc )
+@@ -355,6 +369,13 @@
+     err = PMGetAdjustedPaperRect(native->m_macPageFormat, &rPaper);
+     if ( err != noErr )
+         return pageRect;
++#if MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_5
++    wxSize ppi = GetOwner()->GetPPI();
++    rPaper.right *= (ppi.x / 72.0);
++    rPaper.bottom *= (ppi.y / 72.0);
++    rPaper.left *= (ppi.x / 72.0);
++    rPaper.top *= (ppi.y / 72.0);
++#endif
+     return wxRect(wxCoord(rPaper.left), wxCoord(rPaper.top),
+         wxCoord(rPaper.right - rPaper.left), wxCoord(rPaper.bottom - rPaper.top));
+ }

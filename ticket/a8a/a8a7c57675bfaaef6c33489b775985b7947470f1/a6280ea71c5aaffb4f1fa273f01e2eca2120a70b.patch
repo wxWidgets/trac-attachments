@@ -1,0 +1,107 @@
+--- src/mac/carbon/dialog.cpp	2007-11-21 17:43:24.000000000 +0500
++++ src/mac/carbon/dialog.cpp	2008-05-18 06:31:00.000000000 +0600
+@@ -50,6 +50,7 @@
+     // ...but not these styles
+     style &= ~(wxYES | wxOK | wxNO); // | wxCANCEL
+ 
++    if (parent) style &= ~wxDEFAULT_DIALOG_STYLE; // kSheetWindowClass
+     if ( !wxTopLevelWindow::Create( parent, id, title, pos, size, style, name ) )
+         return false;
+ 
+@@ -106,6 +107,18 @@
+ 
+ bool wxDialog::Show(bool show)
+ {
++    if (GetParent()) // kSheetWindowClass
++    {
++        WindowRef wref = (WindowRef) MacGetWindowRef();				
++        if (show)
++        {            
++            SetTransparent(240); //Cocoa probably set transparency automatically whereas Carbon doesn't
++            ShowSheetWindow (wref, (WindowRef)((wxTopLevelWindow*)GetParent())->MacGetWindowRef());
++        }
++        else 
++            HideSheetWindow(wref); 
++    } 
++    else
+     if ( !wxDialogBase::Show(show) )
+         // nothing to do
+         return false;
+--- src/mac/carbon/msgdlg.cpp	2007-11-21 17:43:25.000000000 +0500
++++ src/mac/carbon/msgdlg.cpp	2008-05-18 06:26:43.000000000 +0600
+@@ -23,6 +23,31 @@
+ 
+ IMPLEMENT_CLASS(wxMessageDialog, wxDialog)
+ 
++pascal OSStatus DialogHandler(EventHandlerCallRef inRef, EventRef inEvent, void *userData)
++{
++	ControlRef control;	
++	UInt32 cmd;
++	GetEventParameter(inEvent, kEventParamDirectObject, typeControlRef, NULL, sizeof(ControlRef), NULL, &control);
++	GetControlCommandID(control, &cmd);
++	short result = 0;
++	switch (cmd)
++	{
++		case kHICommandOK:
++			result = 1;
++			break;
++
++		case kHICommandCancel:
++			result = 2;
++			break;
++
++		case kHICommandOther:
++			result = 3;
++			break;
++	}		
++	*(short *) userData = result;
++	return noErr;
++}
++
+ 
+ wxMessageDialog::wxMessageDialog(
+     wxWindow *parent, const wxString& message, const wxString& caption,
+@@ -177,9 +202,27 @@
+         param.position = kWindowDefaultPosition;
+         if ( !skipDialog )
+         {
+-            DialogRef alertRef;
+-            CreateStandardAlert( alertType, cfTitle, cfText, &param, &alertRef );
+-            RunStandardAlert( alertRef, NULL, &result );
++            if (m_parent) //StandardSheet
++            {
++                DialogRef sheetref;
++                static EventTypeSpec controlEvent = { kEventClassControl, kEventControlHit };          
++                WindowRef parent = (WindowRef)((wxTopLevelWindow*) m_parent)->MacGetWindowRef();                   
++                CreateStandardSheet(alertType, cfTitle, cfText, &param, GetWindowEventTarget(parent), &sheetref); 
++                WindowPtr sheet = GetDialogWindow(sheetref);
++                InstallWindowEventHandler(sheet, NewEventHandlerUPP(DialogHandler), 1, &controlEvent, &result, NULL); 
++                ShowSheetWindow(sheet, parent);
++                result = 0;
++                while (!result) 
++                    wxYield();			
++                HideSheetWindow(sheet);
++                DisposeWindow(sheet);
++            } 
++            else
++            { 
++                DialogRef alertRef;
++                CreateStandardAlert( alertType, cfTitle, cfText, &param, &alertRef );
++                RunStandardAlert( alertRef, NULL, &result );
++            }
+         }
+         else
+         {
+--- src/mac/carbon/toplevel.cpp	2007-11-21 17:43:25.000000000 +0500
++++ src/mac/carbon/toplevel.cpp	2008-05-18 06:26:57.000000000 +0600
+@@ -1127,7 +1127,9 @@
+ 	bool activationScopeSet = false;
+ 	WindowActivationScope activationScope = kWindowActivationScopeNone;
+ 
+-    if ( HasFlag( wxFRAME_TOOL_WINDOW) )
++    if (parent) 
++    	wclass = kSheetWindowClass
++    else if ( HasFlag( wxFRAME_TOOL_WINDOW) )
+     {
+         if (
+             HasFlag( wxMINIMIZE_BOX ) || HasFlag( wxMAXIMIZE_BOX ) ||

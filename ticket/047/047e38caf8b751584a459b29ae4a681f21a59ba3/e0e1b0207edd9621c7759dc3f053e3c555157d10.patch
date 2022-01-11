@@ -1,0 +1,381 @@
+Index: include/wx/html/htmltag.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/html/htmltag.h,v
+retrieving revision 1.20
+diff -u -r1.20 htmltag.h
+--- include/wx/html/htmltag.h	2005/01/05 19:24:43	1.20
++++ include/wx/html/htmltag.h	2005/02/07 19:49:17
+@@ -38,6 +38,7 @@
+ 
+ private:
+     wxHtmlCacheItem *m_Cache;
++    
+     int m_CacheSize;
+     int m_CachePos;
+ 
+@@ -48,6 +49,9 @@
+ 
+     // Finds parameters for tag starting at at and fills the variables
+     void QueryTag(int at, int* end1, int* end2);
++    static wxInt32 EatComments ( wxInt32 pos, const wxChar * src, 
++                                 wxInt32 lng );
++    static bool IsComment ( wxInt32 pos, const wxChar * src, wxInt32 lng );
+ 
+     DECLARE_NO_COPY_CLASS(wxHtmlTagsCache)
+ };
+Index: src/html/htmlpars.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/html/htmlpars.cpp,v
+retrieving revision 1.47
+diff -u -r1.47 htmlpars.cpp
+--- src/html/htmlpars.cpp	2004/10/14 17:19:04	1.47
++++ src/html/htmlpars.cpp	2005/03/22 16:23:45
+@@ -155,6 +155,7 @@
+     wxChar c;
+     int i = begin_pos;
+     int textBeginning = begin_pos;
++    bool lastItemWasComment = false;
+ 
+     // If the tag contains CDATA text, we include the text between beginning
+     // and ending tag verbosely. Setting i=end_pos will skip to the very
+@@ -164,9 +165,9 @@
+     {
+         i = end_pos;
+     }
+-
+     while (i < end_pos)
+     {
++        lastItemWasComment = false;
+         c = m_Source.GetChar(i);
+ 
+         if (c == wxT('<'))
+@@ -177,31 +178,15 @@
+                     wxHtmlTextPiece(textBeginning, i - textBeginning));
+ 
+             // if it is a comment, skip it:
+-            if (i < end_pos-6 && m_Source.GetChar(i+1) == wxT('!') &&
+-                                 m_Source.GetChar(i+2) == wxT('-') &&
+-                                 m_Source.GetChar(i+3) == wxT('-'))
++            if ( wxHtmlTagsCache::IsComment ( i  ,  m_Source.c_str() , 
++                                              end_pos ) )
+             {
+-                // Comments begin with "<!--" and end with "--[ \t\r\n]*>"
+-                // according to HTML 4.0
+-                int dashes = 0;
+                 i += 4;
+-                while (i < end_pos)
+-                {
+-                    c = m_Source.GetChar(i++);
+-                    if ((c == wxT(' ') || c == wxT('\n') ||
+-                        c == wxT('\r') || c == wxT('\t')) && dashes >= 2) {}
+-                    else if (c == wxT('>') && dashes >= 2)
+-                    {
+-                        textBeginning = i;
+-                        break;
+-                    }
+-                    else if (c == wxT('-'))
+-                        dashes++;
+-                    else
+-                        dashes = 0;
+-                }
++                i = wxHtmlTagsCache::EatComments( i  , m_Source.c_str() , 
++                                                  end_pos );
++                textBeginning = i;
++                lastItemWasComment = true;
+             }
+-
+             // add another tag to the tree:
+             else if (i < end_pos-1 && m_Source.GetChar(i+1) != wxT('/'))
+             {
+@@ -252,7 +237,8 @@
+     }
+ 
+     // add remaining text to m_TextPieces:
+-    if (end_pos - textBeginning > 0)
++    if ( (end_pos - textBeginning > 0) || 
++         ( ( 0 == ( end_pos - textBeginning ) ) && lastItemWasComment ) ) 
+         m_TextPieces->Add(
+             wxHtmlTextPiece(textBeginning, end_pos - textBeginning));
+ }
+Index: src/html/htmltag.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/html/htmltag.cpp,v
+retrieving revision 1.46
+diff -u -r1.46 htmltag.cpp
+--- src/html/htmltag.cpp	2005/02/13 19:40:03	1.46
++++ src/html/htmltag.cpp	2005/03/22 17:27:02
+@@ -63,6 +63,68 @@
+            (wxStrcmp(tag, _T("STYLE")) == 0);
+ }
+ 
++/* static */ wxInt32 wxHtmlTagsCache::EatComments (
++                            wxInt32 pos, 
++                            const wxChar * src,
++                            wxInt32 lng )
++{
++    // called from wxHtmlTagsCache::wxHtmlTagsCache
++    // called from wxHtmlParser::CreateDOMSubTree
++
++    // just advanced pos to the end of the comment tag
++    // and returns the new pos
++
++    // if comment ending tag does not exist, the comment
++    // tag is just ignored / skipped
++
++    wxInt32 dashes = 0;
++    wxChar c;
++    wxInt32 pos_c_start = pos;
++    bool commentEndFound = false;
++    while (  pos < lng ) 
++    {
++        c = src[pos++];
++        if ((c == wxT(' ') || c == wxT('\n') ||
++            c == wxT('\r') || c == wxT('\t')) && dashes >= 2) {}
++        else if (c == wxT('>') && dashes >= 2) 
++        {
++            commentEndFound = true; 
++            break;
++        }
++        else if (c == wxT('-'))
++            dashes++;
++        else
++            dashes = 0;
++    }
++    // at this point pos is either pointing to the end of the doc 
++    // or the end of the comment
++    // if it's at the end of the document, just ignore the comment tag
++    if  ( ( pos >= lng ) && ( !commentEndFound ) ) // if end of doc not comment
++    {
++        pos = pos_c_start; // reset to beginning
++    }
++    return pos;
++} // end of function
++
++/* static */ bool wxHtmlTagsCache::IsComment ( 
++                            wxInt32 pos, 
++                            const wxChar * src,
++                            wxInt32 lng )
++{
++    // called from wxHtmlTagsCache::wxHtmlTagsCache
++    // called from wxHtmlParser::CreateDOMSubTree
++
++    // see if src points to a comment tag, i.e !-- 
++    
++    if ( ( pos + 3 < lng ) && ( wxT('!') == src[pos+1]
++                           &&   wxT('-') == src[pos+2]
++                           &&   wxT('-') == src[pos+3] ) )
++        return true; // it is a comment
++    return false; // not a comment
++}
++
++
++
+ wxHtmlTagsCache::wxHtmlTagsCache(const wxString& source)
+ {
+     const wxChar *src = source.c_str();
+@@ -78,106 +140,116 @@
+     {
+         if (src[pos] == wxT('<'))   // tag found:
+         {
+-            if (m_CacheSize % CACHE_INCREMENT == 0)
+-                m_Cache = (wxHtmlCacheItem*) realloc(m_Cache, (m_CacheSize + CACHE_INCREMENT) * sizeof(wxHtmlCacheItem));
+-            int tg = m_CacheSize++;
+-            int stpos = pos++;
+-            m_Cache[tg].Key = stpos;
+-
+-            int i;
+-            for ( i = 0;
+-                  pos < lng && i < (int)WXSIZEOF(tagBuffer) - 1 &&
+-                  src[pos] != wxT('>') && !wxIsspace(src[pos]);
+-                  i++, pos++ )
++            if ( IsComment ( pos , src , lng ) )
++            {
++                // if its a comment, we just eat it, don't cache it
++                pos +=4;
++                pos = EatComments( pos , src , lng );
++                pos--; // make it point to ">"
++            } // end if
++            else // not a comment 
+             {
+-                tagBuffer[i] = (wxChar)wxToupper(src[pos]);
+-            }
+-            tagBuffer[i] = _T('\0');
++                if (m_CacheSize % CACHE_INCREMENT == 0)
++                    m_Cache = (wxHtmlCacheItem*) realloc(m_Cache, (m_CacheSize + CACHE_INCREMENT) * sizeof(wxHtmlCacheItem));
++                int tg = m_CacheSize++;
++                int stpos = pos++;
++                m_Cache[tg].Key = stpos;
++
++                int i;
++                for ( i = 0;
++                    pos < lng && i < (int)WXSIZEOF(tagBuffer) - 1 &&
++                    src[pos] != wxT('>') && !wxIsspace(src[pos]);
++                    i++, pos++ )
++                {
++                    tagBuffer[i] = (wxChar)wxToupper(src[pos]);
++                }
++                tagBuffer[i] = _T('\0');
+ 
+-            m_Cache[tg].Name = new wxChar[i+1];
+-            memcpy(m_Cache[tg].Name, tagBuffer, (i+1)*sizeof(wxChar));
+ 
+-            while (pos < lng && src[pos] != wxT('>')) pos++;
++                m_Cache[tg].Name = new wxChar[i+1];
++                memcpy(m_Cache[tg].Name, tagBuffer, (i+1)*sizeof(wxChar));
+ 
+-            if (src[stpos+1] == wxT('/')) // ending tag:
+-            {
+-                m_Cache[tg].End1 = m_Cache[tg].End2 = -2;
+-                // find matching begin tag:
+-                for (i = tg; i >= 0; i--)
+-                    if ((m_Cache[i].End1 == -1) && (wxStrcmp(m_Cache[i].Name, tagBuffer+1) == 0))
+-                    {
+-                        m_Cache[i].End1 = stpos;
+-                        m_Cache[i].End2 = pos + 1;
+-                        break;
+-                    }
+-            }
+-            else
+-            {
+-                m_Cache[tg].End1 = m_Cache[tg].End2 = -1;
++            	while (pos < lng && src[pos] != wxT('>')) pos++;
++            	if (src[stpos+1] == wxT('/')) // ending tag:
++            	{
++                	m_Cache[tg].End1 = m_Cache[tg].End2 = -2;
++                	// find matching begin tag:
++                	for (i = tg; i >= 0; i--)
++                    	if ((m_Cache[i].End1 == -1) && (wxStrcmp(m_Cache[i].Name, tagBuffer+1) == 0))
++                    	{
++                        	m_Cache[i].End1 = stpos;
++                        	m_Cache[i].End2 = pos + 1;
++                        	break;
++                    	}
++            	}
++            	else
++             	{
++                	m_Cache[tg].End1 = m_Cache[tg].End2 = -1;
+                 
+-                if (wxIsCDATAElement(tagBuffer))
+-                {
+-                    // store the orig pos in case we are missing the closing
++                	if (wxIsCDATAElement(tagBuffer))
++                	{
++					// store the orig pos in case we are missing the closing
+                     // tag (see below)
+                     wxInt32 old_pos = pos; 
+                     bool foundCloseTag = false;
+-                    
+-                    // find next matching tag
+-                    int tag_len = wxStrlen(tagBuffer);
+-                    while (pos < lng)
+-                    {
+-                        // find the ending tag
+-                        while (pos + 1 < lng &&
+-                               (src[pos] != '<' || src[pos+1] != '/'))
+-                            ++pos;
+-                        if (src[pos] == '<')
+-                            ++pos;
+-
+-                        // see if it matches
+-                        int match_pos = 0;
+-                        while (pos < lng && match_pos < tag_len && src[pos] != '>' && src[pos] != '<') {
+-                            // cast to wxChar needed to suppress warning in
+-                            // Unicode build
+-                            if ((wxChar)wxToupper(src[pos]) == tagBuffer[match_pos]) {
+-                                ++match_pos;
++
++                        // find next matching tag
++                        int tag_len = wxStrlen(tagBuffer);
++                        while (pos < lng)
++                        {
++                            // find the ending tag
++                            while (pos + 1 < lng &&
++                                (src[pos] != '<' || src[pos+1] != '/'))
++                                ++pos;
++                            if (src[pos] == '<')
++                                ++pos;
++
++                            // see if it matches
++                            int match_pos = 0;
++                            while (pos < lng && match_pos < tag_len && src[pos] != '>' && src[pos] != '<') {
++                                // cast to wxChar needed to suppress warning in
++                                // Unicode build
++                                if ((wxChar)wxToupper(src[pos]) == tagBuffer[match_pos]) {
++                                    ++match_pos;
++                                }
++                                else if (src[pos] == wxT(' ') || src[pos] == wxT('\n') ||
++                                    src[pos] == wxT('\r') || src[pos] == wxT('\t')) {
++                                    // need to skip over these
++                                }
++                                else {
++                                    match_pos = 0;
++                                }
++                                ++pos;
+                             }
+-                            else if (src[pos] == wxT(' ') || src[pos] == wxT('\n') ||
+-                                src[pos] == wxT('\r') || src[pos] == wxT('\t')) {
+-                                // need to skip over these
++
++                            // found a match
++                            if (match_pos == tag_len) 
++                            {
++                                pos = pos - tag_len - 3;
++                                foundCloseTag = true;
++                                break;
+                             }
+-                            else {
+-                                match_pos = 0;
++                            else // keep looking for the closing tag
++                            {
++                                ++pos;
+                             }
+-                            ++pos;
+                         }
+-
+-                        // found a match
+-                        if (match_pos == tag_len) 
+-                        {
+-                            pos = pos - tag_len - 3;
+-                            foundCloseTag = true;
+-                            break;
+-                        }
+-                        else // keep looking for the closing tag
+-                        {
+-                            ++pos;
+-                        }
+-                    }
+-                    if (!foundCloseTag)
+-                    {
+-                        // we didn't find closing tag; this means the markup
+-                        // is incorrect and the best thing we can do is to
+-                        // ignore the unclosed tag and continue parsing as if
+-                        // it didn't exist:
+-                        pos = old_pos;
+-                    }
+-                }
+-            }
+-        }
+-
+-        pos++;
++                        if (!foundCloseTag) 
++						{
++	                        // we didn't find closing tag; this means the markup
++	                        // is incorrect and the best thing we can do is to
++	                        // ignore the unclosed tag and continue parsing as if
++	                        // it didn't exist:
++	                        pos = old_pos;
++                    	}
++                    } 
++                } 
++            } 
++        } 
++                        
++		pos++;
+     }
+-
++ 
+     // ok, we're done, now we'll free .Name members of cache - we don't need it anymore:
+     for (int i = 0; i < m_CacheSize; i++)
+     {
+
+ 	  	 

@@ -1,0 +1,383 @@
+diff --git a/include/wx/event.h b/include/wx/event.h
+index ec3c65d..740295d 100644
+--- a/include/wx/event.h
++++ b/include/wx/event.h
+@@ -3292,6 +3292,71 @@ protected:
+     wxDECLARE_NO_COPY_CLASS(wxEventHashTable);
+ };
+ 
++// This class based on https://groups.google.com/d/msg/wx-dev/xMlM6NjVMuE/NKjEez7zAQAJ
++//
++// Original code inserted at front and searched from front,
++// but wxVector<> inserts are more efficient at back, so do
++// all work from back
++//
++// WARNING:  Keeping m_iterators updated makes this code not
++// thread-safe when two different iterators are modified
++// simultaneously.
++// Should wxMutex be used to make this thread-safe?
++class wxDynamicEventTable
++{
++public:
++    class iterator;
++private:
++    typedef wxVector<wxDynamicEventTableEntry*> Entries;
++    typedef wxVector<iterator*> Iterators;
++
++public:
++    class iterator
++    {
++    public:
++        typedef Entries::value_type value_type;
++
++        iterator();
++        iterator(const iterator& other);
++        ~iterator();
++
++        iterator& operator=(const iterator& other);
++
++        iterator& operator++();
++
++        value_type& operator*();
++
++        // invalid iterators are equal to all other invalid iterators
++        bool operator==(const iterator& rhs) const;
++        bool operator!=(const iterator& rhs) const;
++
++    private:
++        iterator(wxDynamicEventTable* owner, Entries::size_type index);
++        void erase();
++
++        void Register() const;
++        void Unregister() const;
++
++        // !m_owner for invalid iterator
++        wxDynamicEventTable* m_owner;
++        Entries::size_type m_index;
++
++        friend wxDynamicEventTable;
++    };
++
++    iterator begin();
++    iterator end();
++
++    void insert(wxDynamicEventTableEntry* entry);
++    void erase(iterator it);
++
++
++private:
++    Entries m_entries;
++    // iterators pointing to this container
++    Iterators m_iterators;
++};
++
+ // ----------------------------------------------------------------------------
+ // wxEvtHandler: the base class for all objects handling wxWidgets events
+ // ----------------------------------------------------------------------------
+@@ -3587,7 +3652,7 @@ public:
+                             userData);
+     }
+ 
+-    wxList* GetDynamicEventTable() const { return m_dynamicEvents ; }
++    wxDynamicEventTable* GetDynamicEventTable() const { return m_dynamicEvents ; }
+ 
+     // User data can be associated with each wxEvtHandler
+     void SetClientObject( wxClientData *data ) { DoSetClientObject(data); }
+@@ -3680,7 +3745,7 @@ protected:
+ 
+     wxEvtHandler*       m_nextHandler;
+     wxEvtHandler*       m_previousHandler;
+-    wxList*             m_dynamicEvents;
++    wxDynamicEventTable* m_dynamicEvents;
+     wxList*             m_pendingEvents;
+ 
+ #if wxUSE_THREADS
+diff --git a/src/common/event.cpp b/src/common/event.cpp
+index 9d9eb18..cc4243a 100644
+--- a/src/common/event.cpp
++++ b/src/common/event.cpp
+@@ -1099,6 +1099,161 @@ void wxEventHashTable::GrowEventTypeTable()
+     delete[] oldEventTypeTable;
+ }
+ 
++// This class based on https://groups.google.com/d/msg/wx-dev/xMlM6NjVMuE/NKjEez7zAQAJ
++//
++// Original code inserted at front and searched from front,
++// but wxVector<> inserts are more efficient at back, so do
++// all work from back
++//
++// WARNING:  Keeping m_iterators updated makes this code not
++// thread-safe when two different iterators are modified
++// simultaneously.
++// Should wxMutex be used to make this thread-safe?
++
++wxDynamicEventTable::iterator::iterator() :
++    m_owner(NULL)
++{
++    Register();
++}
++
++wxDynamicEventTable::iterator::iterator(const iterator& other) :
++    m_owner(other.m_owner),
++    m_index(other.m_index)
++{
++    Register();
++}
++
++wxDynamicEventTable::iterator::~iterator()
++{
++    Unregister();
++}
++
++wxDynamicEventTable::iterator& wxDynamicEventTable::iterator::operator=(const iterator& other)
++{
++    if (m_owner != other.m_owner)
++    {
++        Unregister();
++        m_owner = other.m_owner;
++        Register();
++    }
++    m_index = other.m_index;
++    return *this;
++}
++
++wxDynamicEventTable::iterator& wxDynamicEventTable::iterator::operator++()
++{
++    wxASSERT(m_owner &&
++            0 + 1 <= m_index && m_index < m_owner->m_entries.size() + 1);
++    --m_index;
++    return *this;
++}
++
++wxDynamicEventTable::iterator::value_type& wxDynamicEventTable::iterator::operator*()
++{
++    wxASSERT(m_owner &&
++            0 + 1 <= m_index && m_index < m_owner->m_entries.size() + 1);
++    return m_owner->m_entries[m_index - 1];
++}
++
++// invalid iterators are equal to all other invalid iterators
++bool wxDynamicEventTable::iterator::operator==(const iterator& rhs) const
++{
++    if (m_owner)
++    {
++        return m_owner == rhs.m_owner && m_index == rhs.m_index;
++    }
++    else
++    {
++        return !rhs.m_owner;
++    }
++}
++
++bool wxDynamicEventTable::iterator::operator!=(const iterator& rhs) const
++{
++    return !(*this == rhs);
++}
++
++wxDynamicEventTable::iterator::iterator(wxDynamicEventTable* owner, Entries::size_type index) :
++    m_owner(owner),
++    m_index(index)
++{
++    Register();
++}
++
++void wxDynamicEventTable::iterator::erase()
++{
++    wxASSERT(m_owner &&
++            0 + 1 <= m_index && m_index < m_owner->m_entries.size() + 1);
++    for (Entries::size_type i = m_index - 1;
++         i < m_owner->m_entries.size() - 1;
++         ++i)
++    {
++        m_owner->m_entries[i] = m_owner->m_entries[i + 1];
++    }
++    m_owner->m_entries.resize(m_owner->m_entries.size() - 1);
++    // now update all owner's iterators
++    // this will be modified during loop, so save content
++    wxDynamicEventTable* owner = m_owner;
++    Entries::size_type index = m_index;
++    // reverse loop so erasing elements doesn't invalidate index
++    for (Iterators::size_type i = m_owner->m_iterators.size();
++         i != 0;
++         --i)
++    {
++        iterator* it = owner->m_iterators[i - 1];
++        // assert(*it was valid for owner before erase)
++        // (size() + 1 was the size before erase)
++        wxASSERT(it->m_owner == owner &&
++                0 <= it->m_index && it->m_index < (owner->m_entries.size() + 1) + 1);
++
++        if (it->m_index >= index)
++        {
++            // target was shifted down (or deleted)
++            --it->m_index;
++        }
++    }
++}
++
++void wxDynamicEventTable::iterator::Register() const
++{
++    if (m_owner)
++    {
++        wxASSERT(std::find(m_owner->m_iterators.begin(), m_owner->m_iterators.end(), this) == m_owner->m_iterators.end());
++        m_owner->m_iterators.push_back(wxConstCast(this, wxDynamicEventTable::iterator));
++    }
++}
++
++void wxDynamicEventTable::iterator::Unregister() const
++{
++    if (m_owner)
++    {
++         Iterators::iterator it = std::find(m_owner->m_iterators.begin(), m_owner->m_iterators.end(), this);
++         wxASSERT(it != m_owner->m_iterators.end());
++         m_owner->m_iterators.erase(it);
++    }
++}
++
++wxDynamicEventTable::iterator wxDynamicEventTable::begin()
++{
++    return iterator(this, m_entries.size());
++}
++
++wxDynamicEventTable::iterator wxDynamicEventTable::end()
++{
++    return iterator(this, 0);
++}
++
++void wxDynamicEventTable::insert(wxDynamicEventTableEntry* entry)
++{
++    m_entries.push_back(entry);
++    // no iterator's target is affected by push_back
++}
++
++void wxDynamicEventTable::erase(iterator it)
++{
++    it.erase();
++}
++
+ // ----------------------------------------------------------------------------
+ // wxEvtHandler
+ // ----------------------------------------------------------------------------
+@@ -1122,12 +1277,12 @@ wxEvtHandler::~wxEvtHandler()
+ 
+     if (m_dynamicEvents)
+     {
+-        for ( wxList::iterator it = m_dynamicEvents->begin(),
+-                               end = m_dynamicEvents->end();
++        for ( wxDynamicEventTable::iterator it = m_dynamicEvents->begin(),
++                                            end = m_dynamicEvents->end();
+               it != end;
+               ++it )
+         {
+-            wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)*it;
++            wxDynamicEventTableEntry *entry = *it;
+ 
+             // Remove ourselves from sink destructor notifications
+             // (this has usually been done, in wxTrackable destructor)
+@@ -1696,10 +1851,9 @@ void wxEvtHandler::DoBind(int id,
+         new wxDynamicEventTableEntry(eventType, id, lastId, func, userData);
+ 
+     if (!m_dynamicEvents)
+-        m_dynamicEvents = new wxList;
++        m_dynamicEvents =new wxDynamicEventTable;
+ 
+-    // Insert at the front of the list so most recent additions are found first
+-    m_dynamicEvents->Insert( (wxObject*) entry );
++    m_dynamicEvents->insert(entry);
+ 
+     // Make sure we get to know when a sink is destroyed
+     wxEvtHandler *eventSink = func->GetEvtHandler();
+@@ -1723,10 +1877,10 @@ wxEvtHandler::DoUnbind(int id,
+     if (!m_dynamicEvents)
+         return false;
+ 
+-    wxList::compatibility_iterator node = m_dynamicEvents->GetFirst();
+-    while (node)
++    wxDynamicEventTable::iterator it = m_dynamicEvents->begin();
++    while (it != m_dynamicEvents->end())
+     {
+-        wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)node->GetData();
++        wxDynamicEventTableEntry *entry = *it;
+ 
+         if ((entry->m_id == id) &&
+             ((entry->m_lastId == lastId) || (lastId == wxID_ANY)) &&
+@@ -1744,11 +1898,11 @@ wxEvtHandler::DoUnbind(int id,
+             }
+ 
+             delete entry->m_callbackUserData;
+-            m_dynamicEvents->Erase( node );
++            m_dynamicEvents->erase( it );
+             delete entry;
+             return true;
+         }
+-        node = node->GetNext();
++        ++it;
+     }
+     return false;
+ }
+@@ -1758,14 +1912,14 @@ bool wxEvtHandler::SearchDynamicEventTable( wxEvent& event )
+     wxCHECK_MSG( m_dynamicEvents, false,
+                  wxT("caller should check that we have dynamic events") );
+ 
+-    wxList::compatibility_iterator node = m_dynamicEvents->GetFirst();
+-    while (node)
++    wxDynamicEventTable::iterator it = m_dynamicEvents->begin();
++    while (it != m_dynamicEvents->end())
+     {
+-        wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)node->GetData();
++        wxDynamicEventTableEntry *entry = *it;
+ 
+         // get next node before (maybe) calling the event handler as it could
+         // call Disconnect() invalidating the current node
+-        node = node->GetNext();
++        ++it;
+ 
+         if ( event.GetEventType() == entry->m_eventType )
+         {
+@@ -1844,19 +1998,19 @@ void wxEvtHandler::OnSinkDestroyed( wxEvtHandler *sink )
+     wxASSERT(m_dynamicEvents);
+ 
+     // remove all connections with this sink
+-    wxList::compatibility_iterator node = m_dynamicEvents->GetFirst(), node_nxt;
+-    while (node)
++    wxDynamicEventTable::iterator it = m_dynamicEvents->begin(), it_nxt;
++    while (it != m_dynamicEvents->end())
+     {
+-        wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)node->GetData();
+-        node_nxt = node->GetNext();
++        wxDynamicEventTableEntry *entry = *it;
++        ++(it_nxt = it);
+ 
+         if ( entry->m_fn->GetEvtHandler() == sink )
+         {
+             delete entry->m_callbackUserData;
+-            m_dynamicEvents->Erase( node );
++            m_dynamicEvents->erase( it );
+             delete entry;
+         }
+-        node = node_nxt;
++        it = it_nxt;
+     }
+ }
+ 
+diff --git a/src/common/xtistrm.cpp b/src/common/xtistrm.cpp
+index 3439625..f6be5db 100644
+--- a/src/common/xtistrm.cpp
++++ b/src/common/xtistrm.cpp
+@@ -119,13 +119,13 @@ void wxObjectWriter::FindConnectEntry(const wxEvtHandler * evSource,
+                                 const wxObject* &sink, 
+                                 const wxHandlerInfo *&handler)
+ {
+-    wxList *dynamicEvents = evSource->GetDynamicEventTable();
++    wxDynamicEventTable *dynamicEvents = evSource->GetDynamicEventTable();
+ 
+     if ( dynamicEvents )
+     {
+-        for ( wxList::const_iterator node = dynamicEvents->begin(); node != dynamicEvents->end(); ++node )
++        for ( wxDynamicEventTable::iterator it = dynamicEvents->begin(); it != dynamicEvents->end(); ++it )
+         {
+-            wxDynamicEventTableEntry *entry = (wxDynamicEventTableEntry*)(*node);
++            wxDynamicEventTableEntry *entry = *it;
+ 
+             // find the match
+             if ( entry->m_fn &&

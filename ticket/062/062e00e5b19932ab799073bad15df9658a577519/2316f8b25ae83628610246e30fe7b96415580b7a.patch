@@ -1,0 +1,164 @@
+Index: wxWidgets-2.8/src/generic/logg.cpp
+===================================================================
+--- wxWidgets-2.8/src/generic/logg.cpp	(revision 48969)
++++ wxWidgets-2.8/src/generic/logg.cpp	(working copy)
+@@ -46,12 +46,18 @@
+ #include "wx/textfile.h"
+ #include "wx/statline.h"
+ #include "wx/artprov.h"
++#include "wx/list.h"
+ 
++#if wxUSE_THREADS
++#include "wx/thread.h"
++#endif // wxUSE_THREADS
++
+ #ifdef  __WXMSW__
+     // for OutputDebugString()
+     #include  "wx/msw/private.h"
+ #endif // Windows
+ 
++
+ #ifdef  __WXPM__
+     #include <time.h>
+ #endif
+@@ -454,9 +460,12 @@
+ #endif // wxUSE_FILE
+     void OnClear(wxCommandEvent& event);
+ 
+-    // accessors
+-    wxTextCtrl *TextCtrl() const { return m_pTextCtrl; }
++    // actually append the messages to the text control during idle time in the main thread (threadsafe)
++    virtual void OnInternalIdle() ;
+ 
++    // logging can be done from any thread, at any time (if threads are used)
++    void AddLogMessage(const wxString& message) ;
++
+ private:
+     // use standard ids for our commands!
+     enum
+@@ -472,6 +481,14 @@
+     wxTextCtrl  *m_pTextCtrl;
+     wxLogWindow *m_log;
+ 
++    // queue of log messages to be displayed
++    wxStringList m_pendingMessages ;
++
++#if wxUSE_THREADS
++    wxCriticalSection m_critSection ;
++#endif // wxUSE_THREADS
++
++
+     DECLARE_EVENT_TABLE()
+     DECLARE_NO_COPY_CLASS(wxLogFrame)
+ };
+@@ -586,6 +603,52 @@
+     m_pTextCtrl->Clear();
+ }
+ 
++void wxLogFrame::OnInternalIdle() 
++{
++    // specific scope for the wxCriticalSectionLocker
++    {
++#if wxUSE_THREADS
++        wxCriticalSectionLocker( (wxCriticalSection&) m_critSection ) ;
++#endif // wxUSE_THREADS
++
++        if ( !m_pendingMessages.IsEmpty() )
++        {
++
++#ifdef __WXMSW__
++            // remove selection (WriteText is in fact ReplaceSelection)
++            wxTextPos nLen = m_pTextCtrl->GetLastPosition();
++            m_pTextCtrl->SetSelection(nLen, nLen);
++#endif // Windows
++
++            while ( !m_pendingMessages.IsEmpty() )
++            {
++
++                wxString msg = m_pendingMessages.front() ;
++                m_pendingMessages.pop_front() ;
++
++                m_pTextCtrl->AppendText(msg);
++            }
++        }
++    } // m_critSection is released here
++
++    wxFrame::OnInternalIdle() ;
++}
++
++void wxLogFrame::AddLogMessage(const wxString& message)
++{
++    // specific scope for the wxCriticalSectionLocker
++    {
++#if wxUSE_THREADS
++        wxCriticalSectionLocker( (wxCriticalSection&) m_critSection ) ;
++#endif // wxUSE_THREADS
++
++        m_pendingMessages.Add( message ) ;
++    } // m_critSection is released here
++
++    // cause the idle handler to be called
++    wxWakeUpIdle() ;
++}
++
+ wxLogFrame::~wxLogFrame()
+ {
+     m_log->OnFrameDelete(this);
+@@ -597,7 +660,7 @@
+ wxLogWindow::wxLogWindow(wxWindow *pParent,
+                          const wxChar *szTitle,
+                          bool bShow,
+-                         bool bDoPass)
++                         bool bDoPass) 
+ {
+     PassMessages(bDoPass);
+ 
+@@ -646,20 +709,24 @@
+ 
+ void wxLogWindow::DoLogString(const wxChar *szString, time_t WXUNUSED(t))
+ {
+-    // put the text into our window
+-    wxTextCtrl *pText = m_pLogFrame->TextCtrl();
++    wxString msg ;
+ 
+-    // remove selection (WriteText is in fact ReplaceSelection)
+-#ifdef __WXMSW__
+-    wxTextPos nLen = pText->GetLastPosition();
+-    pText->SetSelection(nLen, nLen);
+-#endif // Windows
++    TimeStamp(&msg);
+ 
+-    wxString msg;
+-    TimeStamp(&msg);
++#if wxUSE_THREADS
++    // append the thread ID to the string to differentiate between log output of different threads
++    {
++        int threadId = ::wxThread::GetCurrentId() ;
++        wxChar *mainStr = wxT("") ; 
++        if ( wxThread::IsMain() )
++            mainStr = wxT("main ") ;
++        msg << wxString::Format( wxT("In %sthread %d:"), mainStr, threadId ) ;
++    }
++#endif // wxUSE_THREADS
++
+     msg << szString << wxT('\n');
+ 
+-    pText->AppendText(msg);
++    m_pLogFrame->AddLogMessage(msg) ;
+ 
+     // TODO ensure that the line can be seen
+ }
+Index: wxWidgets-2.8/include/wx/generic/logg.h
+===================================================================
+--- wxWidgets-2.8/include/wx/generic/logg.h	(revision 48969)
++++ wxWidgets-2.8/include/wx/generic/logg.h	(working copy)
+@@ -78,6 +78,7 @@
+ // target which was active when it was instantiated, but also collects them
+ // to the log window. This window has it's own menu which allows the user to
+ // close it, clear the log contents or save it to the file.
++// Using the log window is (now) threadsafe.
+ // ----------------------------------------------------------------------------
+ 
+ #if wxUSE_LOGWINDOW
+
+ 	  	 

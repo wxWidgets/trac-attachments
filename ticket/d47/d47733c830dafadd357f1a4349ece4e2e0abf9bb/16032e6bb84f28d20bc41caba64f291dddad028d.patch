@@ -1,0 +1,189 @@
+--- /home/igor/wxGTK.orig/src/gtk/tbargtk.cpp	2006-04-10 08:44:36.000000000 +0000
++++ ../src/gtk/tbargtk.cpp	2006-04-09 23:38:33.000000000 +0000
+@@ -44,6 +44,7 @@
+ extern bool       g_blockEventsOnDrag;
+ extern wxCursor   g_globalCursor;
+
++static guint32 gs_timeLastClick = 0;
+ // ----------------------------------------------------------------------------
+ // private functions
+ // ----------------------------------------------------------------------------
+@@ -161,6 +162,166 @@
+ //-----------------------------------------------------------------------------
+ // "clicked" (internal from gtk_toolbar)
+ //-----------------------------------------------------------------------------
++extern "C"
++{
++static gint gtk_toolbar_mouse_callback( GtkWidget *widget, GdkEventButton *gdk_event, wxToolBar *win )
++{
++     if( g_isIdle )
++            wxapp_install_idle_handler();
++     if( win->m_blockEvent )
++            return FALSE;
++     if( g_blockEventsOnDrag )
++            return TRUE;
++     if( gdk_event->type == GDK_BUTTON_PRESS )
++     {
++            GdkEvent *peek_event = gdk_event_peek();
++            if( peek_event )
++            {
++                   if( ( peek_event->type == GDK_2BUTTON_PRESS ) || ( peek_event->type == GDK_3BUTTON_PRESS ) )
++                   {
++                          gdk_event_free( peek_event );
++                          return TRUE;
++                   }
++                   else
++                   {
++                          gdk_event_free( peek_event );
++                   }
++            }
++     }
++     wxEventType event_type = wxEVT_NULL;
++#if defined(__WXGTK20__) && GTK_CHECK_VERSION(2, 2, 0)
++     if( gdk_event->type == GDK_2BUTTON_PRESS && !gtk_check_version( 2 ,2 ,0 ) && gdk_event->button >= 1 && gdk_event->button <= 3 )
++     {
++     // Reset GDK internal timestamp variables in order to disable GDK
++     // triple click events. GDK will then next time believe no button has
++     // been clicked just before, and send a normal button click event.
++            GdkDisplay* display = gtk_widget_get_display (widget);
++            display->button_click_time[1] = 0;
++            display->button_click_time[0] = 0;
++     }
++#endif // GTK 2+
++     if( gdk_event->button == 1 )
++     {
++     // note that GDK generates triple click events which are not supported
++     // by wxWidgets but still have to be passed to the app as otherwise
++     // clicks would simply go missing
++            switch( gdk_event->type )
++            {
++            // we shouldn't get triple clicks at all for GTK2 because we
++            // suppress them artificially using the code above but we still
++            // should map them to something for GTK1 and not just ignore them
++            // as this would lose clicks
++            case GDK_3BUTTON_PRESS:     // we could also map this to DCLICK...
++            case GDK_BUTTON_PRESS:
++                   event_type = wxEVT_LEFT_DOWN;
++                   break;
++            case GDK_2BUTTON_PRESS:
++                   event_type = wxEVT_LEFT_DCLICK;
++                   break;
++            default:
++            // just to silence gcc warnings
++                   ;
++            }
++     }
++     else if( gdk_event->button == 2 )
++     {
++            switch (gdk_event->type)
++            {
++                   case GDK_3BUTTON_PRESS:
++                   case GDK_BUTTON_PRESS:
++                          event_type = wxEVT_MIDDLE_DOWN;
++                          break;
++                   case GDK_2BUTTON_PRESS:
++                          event_type = wxEVT_MIDDLE_DCLICK;
++                          break;
++                   default:
++                          ;
++            }
++     }
++     else if( gdk_event->button == 3 )
++     {
++            switch( gdk_event->type )
++            {
++                   case GDK_3BUTTON_PRESS:
++                   case GDK_BUTTON_PRESS:
++                          event_type = wxEVT_RIGHT_DOWN;
++                          break;
++                   case GDK_2BUTTON_PRESS:
++                          event_type = wxEVT_RIGHT_DCLICK;
++                          break;
++                   default:
++                          ;
++            }
++     }
++     else if( gdk_event->button == 4 || gdk_event->button == 5 )
++     {
++            if( gdk_event->type == GDK_BUTTON_PRESS )
++            {
++                   event_type = wxEVT_MOUSEWHEEL;
++            }
++     }
++     if ( event_type == wxEVT_NULL )
++     {
++     // unknown mouse button or click type
++            return FALSE;
++     }
++     wxMouseEvent event( event_type );
++     event.SetTimestamp( gdk_event->time );
++     event.m_shiftDown = (gdk_event->state & GDK_SHIFT_MASK);
++     event.m_controlDown = (gdk_event->state & GDK_CONTROL_MASK);
++     event.m_altDown = (gdk_event->state & GDK_MOD1_MASK);
++     event.m_metaDown = (gdk_event->state & GDK_MOD2_MASK);
++     event.m_leftDown = (gdk_event->state & GDK_BUTTON1_MASK);
++     event.m_middleDown = (gdk_event->state & GDK_BUTTON2_MASK);
++     event.m_rightDown = (gdk_event->state & GDK_BUTTON3_MASK);
++     wxPoint pt = win->GetClientAreaOrigin();
++     event.m_x = (wxCoord)gdk_event->x - pt.x;
++     event.m_y = (wxCoord)gdk_event->y - pt.y;
++     event.SetEventObject( win );
++     event.SetId( win->GetId() );
++     event.SetTimestamp( gdk_event->time );
++     if( ( event.GetEventType() == wxEVT_LEFT_DOWN ) || ( event.GetEventType() == wxEVT_LEFT_DCLICK ) || ( event.GetEventType() == wxEVT_LEFT_UP ) )
++            event.m_leftDown = !event.m_leftDown;
++     if( ( event.GetEventType() == wxEVT_MIDDLE_DOWN ) || ( event.GetEventType() == wxEVT_MIDDLE_DCLICK ) || ( event.GetEventType() == wxEVT_MIDDLE_UP ) )
++            event.m_middleDown = !event.m_middleDown;
++     if( ( event.GetEventType() == wxEVT_RIGHT_DOWN ) || ( event.GetEventType() == wxEVT_RIGHT_DCLICK ) ||	( event.GetEventType() == wxEVT_RIGHT_UP ) )
++            event.m_rightDown = !event.m_rightDown;
++     gs_timeLastClick = gdk_event->time;
++#ifndef __WXGTK20__
++     if( event_type == wxEVT_LEFT_DCLICK )
++     {
++     // GTK 1.2 crashes when intercepting double
++     // click events from both wxSpinButton and
++     // wxSpinCtrl
++            if (GTK_IS_SPIN_BUTTON(win->m_widget))
++            {
++            // Just disable this event for now.
++                   return FALSE;
++            }
++     }
++#endif
++     if( win->GetEventHandler()->ProcessEvent( event ) )
++     {
++            gtk_signal_emit_stop_by_name( GTK_OBJECT(widget), "button_press_event" );
++            return TRUE;
++     }
++     if( event_type == wxEVT_RIGHT_DOWN )
++     {
++     // generate a "context menu" event: this is similar to right mouse
++     // click under many GUIs except that it is generated differently
++     // (right up under MSW, ctrl-click under Mac, right down here) and
++     //
++     // (a) it's a command event and so is propagated to the parent
++     // (b) under some ports it can be generated from kbd too
++     // (c) it uses screen coords (because of (a))
++            wxContextMenuEvent evtCtx( wxEVT_CONTEXT_MENU, win->GetId(), win->ClientToScreen(event.GetPosition()));
++            evtCtx.SetEventObject( win );
++            return win->GetEventHandler()->ProcessEvent(evtCtx);
++     }
++     return FALSE;
++}
++}
+ 
+ extern "C" {
+ static void gtk_toolbar_callback( GtkWidget *WXUNUSED(widget),
+@@ -329,9 +490,11 @@
+         ConnectWidget( m_widget );
+         gtk_widget_show(GTK_WIDGET(m_toolbar));
+     }
+-
+     gtk_toolbar_set_tooltips( GTK_TOOLBAR(m_toolbar), TRUE );
+-
++    gtk_signal_connect( GTK_OBJECT( m_toolbar ), "button_press_event", GTK_SIGNAL_FUNC( gtk_toolbar_mouse_callback ), (gpointer) this );
+     // FIXME: there is no such function for toolbars in 2.0
+ #ifndef __WXGTK20__
+     if (style & wxTB_FLAT)
+
+ 	  	 

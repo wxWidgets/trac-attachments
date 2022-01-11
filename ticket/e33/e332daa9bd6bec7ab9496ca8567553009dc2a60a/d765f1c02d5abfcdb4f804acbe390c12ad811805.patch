@@ -1,0 +1,226 @@
+Index: include/wx/protocol/ftp.h
+===================================================================
+--- include/wx/protocol/ftp.h	(revision 58160)
++++ include/wx/protocol/ftp.h	(working copy)
+@@ -20,7 +20,30 @@
+ #include "wx/sckaddr.h"
+ #include "wx/protocol/protocol.h"
+ #include "wx/url.h"
++#include "wx/log.h"
+ 
++class WXDLLIMPEXP_NET wxFTPLog : public wxObject
++{
++protected:
++    wxLogLevel m_level;
++    bool m_doLog;
++    // Use one of these two wxLogLevelValues
++    // wxLOG_Message: messages emitted by server
++    // wxLOG_Debug: more information + error messages
++public:    
++    wxFTPLog();
++
++    void EnableLogging(bool enable = true) { m_doLog = enable; }
++    bool IsEnabled() const { return m_doLog; }
++
++    void SetLevel(int level) { m_level = level; }
++    wxLogLevel GetLevel(void) const { return m_level; }
++
++    void LogString(const wxString&);
++protected:
++    virtual void DoLogString(const wxString&);
++};
++
+ class WXDLLIMPEXP_NET wxFTP : public wxProtocol
+ {
+ public:
+@@ -115,6 +138,21 @@
+                  const wxString& wildcard = wxEmptyString,
+                  bool details = false);
+ 
++    void SetLog(wxFTPLog* log)
++    {
++        wxDELETE(m_log);
++        m_log = log;
++    }
++    wxFTPLog* GetLog(void) const
++    {
++        return m_log;
++    }
++    wxFTPLog* DetachLog(void)
++    {
++        wxFTPLog* log = GetLog();
++        SetLog(NULL);
++        return log;
++    }
+ protected:
+     // this executes a simple ftp command with the given argument and returns
+     // true if it its return code starts with '2'
+@@ -155,6 +193,8 @@
+ 
+     bool            m_bPassive;
+ 
++    wxFTPLog* m_log;
++
+     // following is true when  a read or write times out, we then assume
+     // the connection is dead and abort. we avoid additional delays this way
+     bool            m_bEncounteredError;
+Index: src/common/ftp.cpp
+===================================================================
+--- src/common/ftp.cpp	(revision 58160)
++++ src/common/ftp.cpp	(working copy)
+@@ -36,7 +36,6 @@
+     #include <stdlib.h>
+     #include "wx/string.h"
+     #include "wx/utils.h"
+-    #include "wx/log.h"
+     #include "wx/intl.h"
+     #include "wx/wxcrtvararg.h"
+ #endif // WX_PRECOMP
+@@ -70,12 +69,44 @@
+ // implementation
+ // ============================================================================
+ 
++wxFTPLog::wxFTPLog() : wxObject()
++{
++#ifdef __WXDEBUG__
++    m_level = wxLOG_Debug;
++#else
++    m_level = wxLOG_Message;
++#endif
++    m_doLog = true;
++}
++
++void wxFTPLog::LogString(const wxString& str)
++{
++    if (m_doLog)
++    {
++        DoLogString(str);
++    }
++}
++
++void wxFTPLog::DoLogString(const wxString& WXUNUSED_UNLESS_DEBUG(str))
++{
++#ifdef __WXDEBUG__
++    wxLogTrace(FTP_TRACE_MASK, str);
++#endif
++}
++
+ // ----------------------------------------------------------------------------
+ // wxFTP constructor and destructor
+ // ----------------------------------------------------------------------------
+ 
+ wxFTP::wxFTP()
+ {
++#ifdef __WXDEBUG__
++    m_log = new wxFTPLog;
++#else
++    m_log = NULL;
++#endif
++    m_lastError = wxPROTO_NOERR;
++
+     m_streaming = false;
+     m_currentTransfermode = NONE;
+ 
+@@ -99,6 +130,7 @@
+ 
+     // now this issues a "QUIT" command to tell the server we are
+     Close();
++    wxDELETE(m_log);
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -257,7 +289,12 @@
+         cmd = command;
+     }
+ 
+-    wxLogTrace(FTP_TRACE_MASK, _T("==> %s"), cmd.c_str());
++    if (m_log)
++    {
++        m_log->LogString((m_log->GetLevel() == wxLOG_Debug) 
++           ? wxString::Format(wxT("==> %s"), cmd.c_str()).c_str()
++           : cmd.c_str());
++    }
+ #endif // __WXDEBUG__
+ 
+     m_lastError = wxPROTO_NOERR;
+@@ -317,10 +354,10 @@
+             {
+                 badReply = true;
+             }
+-            else
++            else if (m_log && (m_log->GetLevel() == wxLOG_Debug) )
+             {
+-                wxLogTrace(FTP_TRACE_MASK, _T("<== %s %s"),
+-                           code.c_str(), line.c_str());
++                m_log->LogString(wxString::Format(wxT("<== %s %s"),
++                       code.c_str(), line.c_str()));
+             }
+         }
+         else // line has at least 4 chars
+@@ -331,8 +368,13 @@
+             if ( firstLine )
+             {
+                 code = wxString(line, LEN_CODE);
+-                wxLogTrace(FTP_TRACE_MASK, _T("<== %s %s"),
+-                           code.c_str(), line.c_str() + LEN_CODE + 1);
++                
++                if (m_log)
++                {
++                    m_log->LogString((m_log->GetLevel() == wxLOG_Debug) 
++                       ? wxString::Format(wxT("<== %s %s"), code.c_str(), line.c_str() + LEN_CODE + 1).c_str()
++                       : (line.c_str() + LEN_CODE + 1));
++                }
+ 
+                 switch ( chMarker )
+                 {
+@@ -358,14 +400,19 @@
+                         endOfReply = true;
+                     }
+ 
+-                    wxLogTrace(FTP_TRACE_MASK, _T("<== %s %s"),
+-                               code.c_str(), line.c_str() + LEN_CODE + 1);
++                    if (m_log)
++                    {
++                        m_log->LogString((m_log->GetLevel() == wxLOG_Debug) 
++                            ? wxString::Format(wxT("<== %s %s"), code.c_str(), line.c_str() + LEN_CODE + 1).c_str()
++                            : (line.c_str() + LEN_CODE + 1));
++                    }
+                 }
+-                else
++                else if (m_log)
+                 {
+                     // just part of reply
+-                    wxLogTrace(FTP_TRACE_MASK, _T("<== %s %s"),
+-                               code.c_str(), line.c_str());
++                    m_log->LogString((m_log->GetLevel() == wxLOG_Debug) 
++                        ? wxString::Format(wxT("<== %s %s"), code.c_str(), line.c_str()).c_str()
++                        : line.c_str());
+                 }
+             }
+         }
+@@ -1008,8 +1055,10 @@
+                                           &filesize) != 9 )
+                             {
+                                 // Hmm... Invalid response
+-                                wxLogTrace(FTP_TRACE_MASK,
+-                                           _T("Invalid LIST response"));
++                                if (m_log && (m_log->GetLevel() == wxLOG_Debug) )
++                                {
++                                    m_log->LogString(wxT("Invalid LIST response"));
++                                }
+                             }
+                         }
+                         else // Windows-style response (?)
+@@ -1019,8 +1068,10 @@
+                                           &filesize) != 4 )
+                             {
+                                 // something bad happened..?
+-                                wxLogTrace(FTP_TRACE_MASK,
+-                                           _T("Invalid or unknown LIST response"));
++                                if (m_log && (m_log->GetLevel() == wxLOG_Debug) )
++                                {
++                                    m_log->LogString(wxT("Invalid or unknown LIST response"));
++                                }
+                             }
+                         }
+                     }

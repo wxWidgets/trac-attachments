@@ -1,0 +1,405 @@
+Index: include/wx/zstream.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/zstream.h,v
+retrieving revision 1.22
+diff -u -2 -r1.22 zstream.h
+--- include/wx/zstream.h	2003/08/09 12:37:15	1.22
++++ include/wx/zstream.h	2003/08/23 12:45:25
+@@ -3,5 +3,5 @@
+ // Purpose:     Memory stream classes
+ // Author:      Guilhem Lavaux
+-// Modified by:
++// Modified by: Mike Wetherell
+ // Created:     11/07/98
+ // RCS-ID:      $Id: zstream.h,v 1.22 2003/08/09 12:37:15 VS Exp $
+@@ -22,11 +22,28 @@
+ #include "wx/stream.h"
+ 
++// Compression level
++enum {
++    wxZ_DEFAULT_COMPRESSION = -1,
++    wxZ_NO_COMPRESSION = 0,
++    wxZ_BEST_SPEED = 1,
++    wxZ_BEST_COMPRESSION = 9
++};
++
++// Flags
++enum {
++    wxZLIB_NOWRAP = 1   // required for use in Gzip and Zip files
++};
++
+ class WXDLLIMPEXP_BASE wxZlibInputStream: public wxFilterInputStream {
+  public:
+-  wxZlibInputStream(wxInputStream& stream);
++  wxZlibInputStream(wxInputStream& stream, int flags = 0);
+   virtual ~wxZlibInputStream();
+ 
++  char Peek() { return wxInputStream::Peek(); }
++  size_t GetSize() const { return wxInputStream::GetSize(); }
++
+  protected:
+   size_t OnSysRead(void *buffer, size_t size);
++  off_t OnSysTell() const { return m_pos; }
+ 
+  protected:
+@@ -34,4 +51,5 @@
+   unsigned char *m_z_buffer;
+   struct z_stream_s *m_inflate;
++  off_t m_pos;
+ 
+     DECLARE_NO_COPY_CLASS(wxZlibInputStream)
+@@ -40,11 +58,15 @@
+ class WXDLLIMPEXP_BASE wxZlibOutputStream: public wxFilterOutputStream {
+  public:
+-  wxZlibOutputStream(wxOutputStream& stream, int level = -1);
++  wxZlibOutputStream(wxOutputStream& stream, int level = -1, int flags = 0);
+   virtual ~wxZlibOutputStream();
+ 
+-  void Sync();
++  void Sync() { DoFlush(false); }
++  size_t GetSize() const { return (size_t)m_pos; }
+ 
+  protected:
+   size_t OnSysWrite(const void *buffer, size_t size);
++  off_t OnSysTell() const { return m_pos; }
++
++  virtual void DoFlush(bool final);
+ 
+  protected:
+@@ -52,4 +74,5 @@
+   unsigned char *m_z_buffer;
+   struct z_stream_s *m_deflate;
++  off_t m_pos;
+ 
+     DECLARE_NO_COPY_CLASS(wxZlibOutputStream)
+Index: src/common/zstream.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/zstream.cpp,v
+retrieving revision 1.40
+diff -u -2 -r1.40 zstream.cpp
+--- src/common/zstream.cpp	2003/08/09 12:45:49	1.40
++++ src/common/zstream.cpp	2003/08/23 12:45:26
+@@ -1,7 +1,7 @@
+-/////////////////////////////////////////////////////////////////////////////
++//////////////////////////////////////////////////////////////////////////////
+ // Name:        zstream.cpp
+ // Purpose:     Compressed stream classes
+ // Author:      Guilhem Lavaux
+-// Modified by:
++// Modified by: Mike Wetherell
+ // Created:     11/07/98
+ // RCS-ID:      $Id: zstream.cpp,v 1.40 2003/08/09 12:45:49 VS Exp $
+@@ -38,5 +38,11 @@
+ #endif
+ 
+-#define ZSTREAM_BUFFER_SIZE 1024
++enum {
++#ifdef __WIN16__
++    ZSTREAM_BUFFER_SIZE = 4096
++#else
++    ZSTREAM_BUFFER_SIZE = 16384
++#endif
++};
+ 
+ //////////////////////
+@@ -44,26 +50,32 @@
+ //////////////////////
+ 
+-wxZlibInputStream::wxZlibInputStream(wxInputStream& stream)
++wxZlibInputStream::wxZlibInputStream(wxInputStream& stream, int flags)
+   : wxFilterInputStream(stream)
+ {
+-  // I need a private stream buffer.
+-  m_inflate = new z_stream_s;
++  m_inflate = NULL;
++  m_z_buffer = new unsigned char[ZSTREAM_BUFFER_SIZE];
++  m_z_size = ZSTREAM_BUFFER_SIZE;
++  m_pos = 0;
+ 
+-  m_inflate->zalloc = (alloc_func)0;
+-  m_inflate->zfree = (free_func)0;
+-  m_inflate->opaque = (voidpf)0;
++  if (m_z_buffer) {
++    m_inflate = new z_stream_s;
+ 
+-  int err = inflateInit(m_inflate);
+-  if (err != Z_OK) {
+-    inflateEnd(m_inflate);
+-    delete m_inflate;
+-    return;
+-  }
++    if (m_inflate) {
++      m_inflate->zalloc = (alloc_func)0;
++      m_inflate->zfree = (free_func)0;
++      m_inflate->opaque = (voidpf)0;
++      m_inflate->avail_in = 0;
++      m_inflate->next_in = NULL;
++      m_inflate->next_out = NULL;
+ 
+-  m_z_buffer = new unsigned char[ZSTREAM_BUFFER_SIZE];
+-  m_z_size = ZSTREAM_BUFFER_SIZE;
++      int bits = (flags & wxZLIB_NOWRAP) ? -MAX_WBITS : MAX_WBITS;
++
++      if (inflateInit2(m_inflate, bits) == Z_OK)
++        return;
++    }
++  }
+ 
+-  m_inflate->avail_in = 0;
+-  m_inflate->next_in = NULL;
++  wxLogError(_("can't initialize inflate stream"));
++  m_lasterror = wxSTREAM_READ_ERROR;
+ }
+ 
+@@ -78,36 +90,48 @@
+ size_t wxZlibInputStream::OnSysRead(void *buffer, size_t size)
+ {
+-  int err;
++  wxASSERT_MSG(m_inflate && m_z_buffer, wxT("Inflate stream not open"));
+ 
++  if (!m_inflate || !m_z_buffer)
++    m_lasterror = wxSTREAM_READ_ERROR;
++  if (!IsOk() || !size)
++    return 0;
++
++  int err = Z_OK;
+   m_inflate->next_out = (unsigned char *)buffer;
+   m_inflate->avail_out = size;
+ 
+-  while (m_inflate->avail_out > 0) {
++  while (err == Z_OK && m_inflate->avail_out > 0) {
+     if (m_inflate->avail_in == 0) {
+-
+-      m_parent_i_stream->Read(m_z_buffer, wxMin(m_z_size, size));
++      m_parent_i_stream->Read(m_z_buffer, m_z_size);
+       m_inflate->next_in = m_z_buffer;
+       m_inflate->avail_in = m_parent_i_stream->LastRead();
+ 
+-      wxStreamError err = m_parent_i_stream->GetLastError();
+-      if ( err != wxSTREAM_NO_ERROR && err != wxSTREAM_EOF)
+-      { 
+-        m_lasterror = err;
+-        return 0; // failed to read anything
++      if (m_inflate->avail_in == 0) {
++        if (m_parent_i_stream->Eof())
++          wxLogError(_("can't read inflate stream: unexpected EOF in underlying stream"));
++        m_lasterror = wxSTREAM_READ_ERROR;
++        break;
+       }
++    }
++    err = inflate(m_inflate, Z_NO_FLUSH);
++  }
+ 
+-      if ( m_inflate->avail_in == 0 )
+-      {
+-          // EOF
+-          m_lasterror = wxSTREAM_EOF;
+-          break;
+-      }
++  if (err == Z_STREAM_END) {
++    // Unread any data taken from past the end of the deflate stream, so that
++    // any additional data can be read from the underlying stream (the crc
++    // in a gzip for example)
++    if (m_inflate->avail_in) {
++      m_parent_i_stream->Ungetch(m_inflate->next_in, m_inflate->avail_in);
++      m_inflate->avail_in = 0;
+     }
+-    err = inflate(m_inflate, Z_FINISH);
+-    if (err == Z_STREAM_END)
+-      return (size - m_inflate->avail_out);
++    m_lasterror = wxSTREAM_EOF;
++  } else if (err != Z_OK) {
++    wxLogError(_("can't read inflate stream: inflate() returns %d"), err);
++    m_lasterror = wxSTREAM_READ_ERROR;
+   }
+ 
+-  return size-m_inflate->avail_out;
++  size -= m_inflate->avail_out;
++  m_pos += size;
++  return size;
+ }
+ 
+@@ -116,18 +140,17 @@
+ //////////////////////
+ 
+-wxZlibOutputStream::wxZlibOutputStream(wxOutputStream& stream, int level)
++wxZlibOutputStream::wxZlibOutputStream(wxOutputStream& stream,
++                                       int level,
++                                       int flags)
+  : wxFilterOutputStream(stream)
+ {
+-  int err;
+-
+-  m_deflate = new z_stream_s;
+-
+-  m_deflate->zalloc = (alloc_func)0;
+-  m_deflate->zfree = (free_func)0;
+-  m_deflate->opaque = (voidpf)0;
++  m_deflate = NULL;
++  m_z_buffer = new unsigned char[ZSTREAM_BUFFER_SIZE];
++  m_z_size = ZSTREAM_BUFFER_SIZE;
++  m_pos = 0;
+ 
+   if ( level == -1 )
+   {
+-      level = Z_DEFAULT_COMPRESSION;
++    level = Z_DEFAULT_COMPRESSION;
+   }
+   else
+@@ -136,31 +159,31 @@
+   }
+ 
+-  err = deflateInit(m_deflate, level);
+-  if (err != Z_OK) {
+-    deflateEnd(m_deflate);
+-    return;
+-  }
++  if (m_z_buffer) {
++     m_deflate = new z_stream_s;
+ 
+-  m_z_buffer = new unsigned char[ZSTREAM_BUFFER_SIZE];
+-  m_z_size = ZSTREAM_BUFFER_SIZE;
++     if (m_deflate) {
++        m_deflate->zalloc = (alloc_func)0;
++        m_deflate->zfree = (free_func)0;
++        m_deflate->opaque = (voidpf)0;
++        m_deflate->avail_in = 0;
++        m_deflate->next_out = m_z_buffer;
++        m_deflate->avail_out = m_z_size;
++
++        int bits = (flags & wxZLIB_NOWRAP) ? -MAX_WBITS : MAX_WBITS;
++
++        if (deflateInit2(m_deflate, level, Z_DEFLATED, bits, 
++                         8, Z_DEFAULT_STRATEGY) == Z_OK)
++          return;
++     }
++  }
+ 
+-  m_deflate->avail_in = 0;
+-  m_deflate->next_out = m_z_buffer;
+-  m_deflate->avail_out = m_z_size;
++  wxLogError(_("can't initialize deflate stream"));
++  m_lasterror = wxSTREAM_WRITE_ERROR;
+ }
+ 
+ wxZlibOutputStream::~wxZlibOutputStream()
+ {
+-  int err;
+-
+-  Sync();
+-
+-  err = deflate(m_deflate, Z_FINISH);
+-  if (err != Z_STREAM_END) 
+-  {
+-    wxLogDebug( wxT("wxZlibOutputStream: an error occured while closing the stream.\n") );
+-    return;
+-  }
+-
++  if (m_deflate && m_z_buffer)
++    DoFlush(true);
+   deflateEnd(m_deflate);
+   delete m_deflate;
+@@ -169,48 +192,56 @@
+ }
+ 
+-void wxZlibOutputStream::Sync()
++void wxZlibOutputStream::DoFlush(bool final)
+ {
+-  int err;
+-
+-  m_parent_o_stream->Write(m_z_buffer, m_z_size-m_deflate->avail_out);
+-  m_deflate->next_out  = m_z_buffer;
+-  m_deflate->avail_out = m_z_size;
++  wxASSERT_MSG(m_deflate && m_z_buffer, wxT("Deflate stream not open"));
+ 
+-  err = deflate(m_deflate, Z_FULL_FLUSH);
+-  if (err != Z_OK) {
++  if (!m_deflate || !m_z_buffer)
++    m_lasterror = wxSTREAM_WRITE_ERROR;
++  if (!IsOk())
+     return;
+-  }
+ 
+-  // Fixed by "Stefan Csomor" <csomor@advancedconcepts.ch>
+-  while( m_deflate->avail_out == 0 )
+-  {
+-     m_parent_o_stream->Write(m_z_buffer, m_z_size );
+-     m_deflate->next_out  = m_z_buffer;
+-     m_deflate->avail_out = m_z_size;
+-     err = deflate(m_deflate, Z_FULL_FLUSH);
+-     if (err != Z_OK) {
+-        return;
+-     }
+-  }
+-  // End
++  int err = Z_OK;
++  bool done = false;
+ 
+-  m_parent_o_stream->Write(m_z_buffer, m_z_size-m_deflate->avail_out);
+-  m_deflate->next_out  = m_z_buffer;
+-  m_deflate->avail_out = m_z_size;
++  while (err == Z_OK || err == Z_STREAM_END) {
++    size_t len = m_z_size  - m_deflate->avail_out;
++    if (len) {
++      if (m_parent_o_stream->Write(m_z_buffer, len).LastWrite() != len) {
++        m_lasterror = wxSTREAM_WRITE_ERROR;
++        wxLogDebug(wxT("wxZlibOutputStream: Error writing to underlying stream"));
++        break;
++      }
++      m_deflate->next_out = m_z_buffer;
++      m_deflate->avail_out = m_z_size;
++    }
++
++    if (done)
++      break;
++    err = deflate(m_deflate, final ? Z_FINISH : Z_FULL_FLUSH);
++    done = m_deflate->avail_out != 0 || err == Z_STREAM_END;
++  }
+ }
+ 
+ size_t wxZlibOutputStream::OnSysWrite(const void *buffer, size_t size)
+ {
+-  int err;
++  wxASSERT_MSG(m_deflate && m_z_buffer, wxT("Deflate stream not open"));
+ 
++  if (!m_deflate || !m_z_buffer)
++    m_lasterror = wxSTREAM_WRITE_ERROR;
++  if (!IsOk() || !size)
++    return 0;
++
++  int err = Z_OK;
+   m_deflate->next_in = (unsigned char *)buffer;
+   m_deflate->avail_in = size;
+-
+-  while (m_deflate->avail_in > 0) {
+ 
++  while (err == Z_OK && m_deflate->avail_in > 0) {
+     if (m_deflate->avail_out == 0) {
+       m_parent_o_stream->Write(m_z_buffer, m_z_size);
+-      if ( !*m_parent_o_stream )
+-        return (size - m_deflate->avail_in);
++      if (m_parent_o_stream->LastWrite() != m_z_size) {
++        m_lasterror = wxSTREAM_WRITE_ERROR;
++        wxLogDebug(wxT("wxZlibOutputStream: Error writing to underlying stream"));
++        break;
++      }
+ 
+       m_deflate->next_out = m_z_buffer;
+@@ -219,7 +250,13 @@
+ 
+     err = deflate(m_deflate, Z_NO_FLUSH);
+-    if (err != Z_OK)
+-      return (size - m_deflate->avail_in);
+   }
++
++  if (err != Z_OK) {
++    m_lasterror = wxSTREAM_WRITE_ERROR;
++    wxLogError(_("can't write to deflate stream: deflate() returns %d"), err);
++  }
++
++  size -= m_deflate->avail_in;
++  m_pos += size;
+   return size;
+ }
+
+ 	  	 

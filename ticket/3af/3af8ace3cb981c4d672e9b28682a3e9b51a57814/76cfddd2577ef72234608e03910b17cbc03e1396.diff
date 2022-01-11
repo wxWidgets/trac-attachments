@@ -1,0 +1,1165 @@
+commit a709274f9c1336e99f02defdacea9c19ac779a95
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Sun Apr 4 17:21:06 2010 +0200
+
+    Add support for gradient stops to wxGraphicsContext.
+    
+    Allow specifying a set of gradient stops instead of just the beginning and
+    ending colours. Add the new wxGraphicsGradientStop(s) classes and new
+    wxGraphicsContext::Create{Linear,Radial}GradientBrush() overloads. Also change
+    the same methods of wxGraphicsRenderer to take wxGraphicsGradientStops instead
+    of a pair of colours.
+    
+    Implement the new API for MSW and Cairo. OS X still uses just the two colours
+    for now.
+    
+    Closes #11897.
+
+diff --git a/docs/changes.txt b/docs/changes.txt
+index 9deb7ab..2f66a5f 100644
+--- a/docs/changes.txt
++++ b/docs/changes.txt
+@@ -499,6 +499,7 @@ All (GUI):
+ - Add "initial selection" parameter to wxGetSingleChoice() (Nikolay Tjushkov).
+ - Implement wxDocument::Revert() (troelsk).
+ - Allow overriding print preview frame creation in docview (troelsk).
++- Added support for gradient stops in wxGraphicsContext (Kit Bishop).
+ 
+ GTK:
+ 
+diff --git a/include/wx/graphics.h b/include/wx/graphics.h
+index 34f92d7..20f9908 100644
+--- a/include/wx/graphics.h
++++ b/include/wx/graphics.h
+@@ -19,6 +19,7 @@
+ #include "wx/geometry.h"
+ #include "wx/dynarray.h"
+ #include "wx/dc.h"
++#include "wx/vector.h"
+ 
+ enum wxAntialiasMode
+ {
+@@ -304,6 +305,81 @@ private:
+ extern WXDLLIMPEXP_DATA_CORE(wxGraphicsPath) wxNullGraphicsPath;
+ 
+ 
++// Describes a single gradient stop.
++class wxGraphicsGradientStop
++{
++public:
++    wxGraphicsGradientStop(wxColour col, float pos)
++        : m_col(col),
++          m_pos(pos)
++    {
++    }
++
++    // default copy ctor, assignment operator and dtor are ok
++
++    const wxColour& GetColour() const { return m_col; }
++    void SetColour(const wxColour& col) { m_col = col; }
++
++    float GetPosition() const { return m_pos; }
++    void SetPosition(float pos)
++    {
++        wxASSERT_MSG( pos >= 0 && pos < 1, "invalid gradient stop position" );
++
++        m_pos = pos;
++    }
++
++private:
++    // The colour of this gradient band.
++    wxColour m_col;
++
++    // Its starting position: 0 is the beginning and 1 is the end.
++    float m_pos;
++};
++
++// A collection of gradient stops ordered by their positions (from lowest to
++// highest). The first stop (index 0, position 0.0) is always the starting
++// colour and the last one (index GetCount() - 1, position 1.0) is the end
++// colour.
++class WXDLLIMPEXP_CORE wxGraphicsGradientStops
++{
++public:
++    wxGraphicsGradientStops(wxColour startCol = wxNullColour,
++                            wxColour endCol = wxNullColour)
++    {
++        // we can't use Add() here as it relies on having start/end stops as
++        // first/last array elements so do it manually
++        m_stops.push_back(wxGraphicsGradientStop(startCol, 0.));
++        m_stops.push_back(wxGraphicsGradientStop(endCol, 1.));
++    }
++
++    // default copy ctor, assignment operator and dtor are ok for this class
++
++
++    // Add a stop in correct order.
++    void Add(const wxGraphicsGradientStop& stop);
++    void Add(wxColour col, float pos) { Add(wxGraphicsGradientStop(col, pos)); }
++
++    // Get the number of stops.
++    unsigned GetCount() const { return m_stops.size(); }
++
++    // Return the stop at the given index (which must be valid).
++    wxGraphicsGradientStop Item(unsigned n) const { return m_stops.at(n); }
++
++    // Get/set start and end colours.
++    void SetStartColour(wxColour col)
++        { m_stops[0].SetColour(col); }
++    wxColour GetStartColour() const
++        { return m_stops[0].GetColour(); }
++    void SetEndColour(wxColour col)
++        { m_stops[m_stops.size() - 1].SetColour(col); }
++    wxColour GetEndColour() const
++        { return m_stops[m_stops.size() - 1].GetColour(); }
++
++private:
++    // All the stops stored in ascending order of positions.
++    wxVector<wxGraphicsGradientStop> m_stops;
++};
++
+ class WXDLLIMPEXP_CORE wxGraphicsContext : public wxGraphicsObject
+ {
+ public:
+@@ -348,14 +424,29 @@ public:
+ 
+     virtual wxGraphicsBrush CreateBrush(const wxBrush& brush ) const;
+ 
+-    // sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-    virtual wxGraphicsBrush CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2) const;
+-
+-    // sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-    // with radius r and color cColor
+-    virtual wxGraphicsBrush CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-        const wxColour &oColor, const wxColour &cColor) const;
++    // sets the brush to a linear gradient, starting at (x1,y1) and ending at
++    // (x2,y2) with the given boundary colours or the specified stops
++    wxGraphicsBrush
++    CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                              wxDouble x2, wxDouble y2,
++                              const wxColour& c1, const wxColour& c2) const;
++    wxGraphicsBrush
++    CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                              wxDouble x2, wxDouble y2,
++                              const wxGraphicsGradientStops& stops) const;
++
++    // sets the brush to a radial gradient originating at (xo,yc) and ending
++    // on a circle around (xc,yc) with the given radius; the colours may be
++    // specified by just the two extremes or the full array of gradient stops
++    wxGraphicsBrush
++    CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                              wxDouble xc, wxDouble yc, wxDouble radius,
++                              const wxColour& oColor, const wxColour& cColor) const;
++
++    wxGraphicsBrush
++    CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                              wxDouble xc, wxDouble yc, wxDouble radius,
++                              const wxGraphicsGradientStops& stops) const;
+ 
+     // sets the font
+     virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK ) const;
+@@ -644,14 +735,19 @@ public:
+ 
+     virtual wxGraphicsBrush CreateBrush(const wxBrush& brush ) = 0;
+ 
+-    // sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-    virtual wxGraphicsBrush CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2) = 0;
+-
+-    // sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-    // with radius r and color cColor
+-    virtual wxGraphicsBrush CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-        const wxColour &oColor, const wxColour &cColor) = 0;
++    // Gradient brush creation functions may not honour all the stops specified
++    // stops and use just its boundary colours (this is currently the case
++    // under OS X)
++    virtual wxGraphicsBrush
++    CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                              wxDouble x2, wxDouble y2,
++                              const wxGraphicsGradientStops& stops) = 0;
++
++    virtual wxGraphicsBrush
++    CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                              wxDouble xc, wxDouble yc,
++                              wxDouble radius,
++                              const wxGraphicsGradientStops& stops) = 0;
+ 
+    // sets the font
+     virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK ) = 0;
+diff --git a/interface/wx/graphics.h b/interface/wx/graphics.h
+index 10c2ea7..7af5af3 100644
+--- a/interface/wx/graphics.h
++++ b/interface/wx/graphics.h
+@@ -361,15 +361,25 @@ public:
+     static wxGraphicsContext* CreateFromNativeWindow(void* window);
+ 
+     /**
+-        Creates a native brush, having a linear gradient, starting at
+-        (@a x1, @a y1) with color @a c1 to (@a x2, @a y2) with color @a c2.
++        Creates a native brush with a linear gradient.
++
++        The brush starts at (@a x1, @a y1) and ends at (@a x2, @a y2). Either
++        just the start and end gradient colours (@a c1 and @a c2) or full set
++        of gradient @a stops can be specified.
++
++        The version taking wxGraphicsGradientStops is new in wxWidgets 2.9.1.
+     */
+-    virtual wxGraphicsBrush CreateLinearGradientBrush(wxDouble x1,
+-                                                      wxDouble y1,
+-                                                      wxDouble x2,
+-                                                      wxDouble y2,
+-                                                      const wxColour& c1,
+-                                                      const wxColour& c2) const;
++    //@{
++    wxGraphicsBrush
++    CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                              wxDouble x2, wxDouble y2,
++                              const wxColour& c1, const wxColour& c2) const;
++
++    wxGraphicsBrush
++    CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                              wxDouble x2, wxDouble y2,
++                              const wxGraphicsGradientStops& stops) const;
++    //@}
+ 
+     /**
+         Creates a native affine transformation matrix from the passed in
+@@ -391,16 +401,31 @@ public:
+     virtual wxGraphicsPen CreatePen(const wxPen& pen) const;
+ 
+     /**
+-        Creates a native brush, having a radial gradient originating at
+-        (@a xo, @a yc) with color @a oColour and ends on a circle around
+-        (@a xc, @a yc) with the given @a radius and color @a cColour.
++        Creates a native brush with a radial gradient.
++
++        The brush originats at (@a xo, @a yc) and ends on a circle around
++        (@a xc, @a yc) with the given @a radius.
++
++        The gradient may be specified either by its start and end colours @a
++        oColor and @a cColor or by a full set of gradient @a stops.
++
++        The version taking wxGraphicsGradientStops is new in wxWidgets 2.9.1.
+     */
+-    virtual wxGraphicsBrush CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++    //@{
++    virtual wxGraphicsBrush
++    CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
+                                                       wxDouble xc, wxDouble yc,
+                                                       wxDouble radius,
+                                                       const wxColour& oColor,
+                                                       const wxColour& cColor) const;
+ 
++    virtual wxGraphicsBrush
++    CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                              wxDouble xc, wxDouble yc,
++                              wxDouble radius,
++                              const wxGraphicsGradientStops& stops) = 0;
++    //@}
++
+     /**
+         Draws the bitmap. In case of a mono bitmap, this is treated as a mask
+         and the current brushed is used for filling.
+@@ -643,7 +668,122 @@ public:
+     
+ };
+ 
++/**
++    Represents a single gradient stop in a collection of gradient stops as
++    represented by wxGraphicsGradientStops.
++
++    @library{wxcore}
++    @category{gdi}
++
++    @since 2.9.1
++*/
++class wxGraphicsGradientStop
++{
++public:
++    /**
++        Creates a stop with the given colour and position.
++
++        @param col The colour of this stop. It can be set to wxNullColour which
++            will be interpreted as a fully transparent colour allowing
++            background to show through. More generally, the alpha values in the
++            colour is honoured thus allowing the background colours to
++            partially show through.
++        @param pos The stop position, must be in [0, 1) range with 0 being the
++            beginning and 1 the end of the gradient (but it doesn't make sense
++            to create a stop at position 1 because it would never be visible
++            anyhow).
++    */
++    wxGraphicsGradientStop(wxColour col, float pos);
++
++    /// Return the stop colour.
++    const wxColour& GetColour() const;
++
++    /**
++        Change the stop colour.
++
++        @param col The new colour.
++    */
++    void SetColour(const wxColour& col);
++
++    /// Return the stop position.
++    float GetPosition() const;
++
++    /**
++        Change the stop position.
++
++        @param pos The new position, must always be in [0, 1) range.
++    */
++    void SetPosition(float pos);
++};
++
++/**
++    Represents a collection of wxGraphicGradientStop values for use with
++    CreateLinearGradientBrush and CreateRadialGradientBrush.
++
++    The stops are maintained in order of position.  If two or more stops are
++    added with the same position then the one(s) added later come later.
++    This can be useful for producing discontinuities in the colour gradient.
++
++    Notice that this class is write-once, you can't modify the stops once they
++    had been added.
++
++    @library{wxcore}
++    @category{gdi}
++
++    @since 2.9.1
++*/
++class wxGraphicsGradientStops
++{
++public:
++    /**
++        Initializes the gradient stops with the given boundary colours.
++
++        Creates a wxGraphicsGradientStops instance with start colour given
++        by @a startCol and end colour given by @a endCol.
++    */
++    wxGraphicsGradientStops(wxColour startCol = wxNullColour,
++                            wxColour endCol = wxNullColour);
++
++    /**
++        Add a new stop.
++    */
++    //@{
++    void Add(const wxGraphicsGradientStop& stop);
++    void Add(wxColour col, float pos);
++    //@}
++
++    /**
++        Returns the stop at the given index.
+ 
++        @param n The index, must be in [0, GetCount()) range.
++    */
++    wxGraphicsGradientStop Item(unsigned n) const;
++
++    /**
++        Returns the number of stops.
++    */
++    unsigned GetCount() const;
++
++    /**
++        Set the start colour to @a col
++    */
++    void SetStartColour(wxColour col);
++
++    /**
++        Returns the start colour.
++    */
++    wxColour GetStartColour() const;
++
++    /**
++        Set the end colour to @a col
++    */
++    void SetEndColour(wxColour col);
++
++    /**
++        Returns the end colour.
++    */
++    wxColour GetEndColour() const;
++};
+ 
+ /**
+     @class wxGraphicsRenderer
+@@ -718,16 +858,18 @@ public:
+     virtual wxGraphicsFont CreateFont(const wxFont& font,
+                                       const wxColour& col = *wxBLACK) = 0;
+ 
++
+     /**
+-        Creates a native brush, having a linear gradient, starting at
+-        (@a x1, @a y1) with color @a c1 to (@a x2, @a y2) with color @a c2.
++        Creates a native brush with a linear gradient.
++
++        Stops support is new since wxWidgets 2.9.1, previously only the start
++        and end colours could be specified.
+     */
+     virtual wxGraphicsBrush CreateLinearGradientBrush(wxDouble x1,
+                                                       wxDouble y1,
+                                                       wxDouble x2,
+                                                       wxDouble y2,
+-                                                      const wxColour& c1,
+-                                                      const wxColour& c2) = 0;
++                                                      const wxGraphicsGradientStops& stops) = 0;
+ 
+     /**
+         Creates a native affine transformation matrix from the passed in
+@@ -749,15 +891,15 @@ public:
+     virtual wxGraphicsPen CreatePen(const wxPen& pen) = 0;
+ 
+     /**
+-        Creates a native brush, having a radial gradient originating at
+-        (@a xo, @a yc) with color @a oColour and ends on a circle around
+-        (@a xc, @a yc) with the given @a radius and color @a cColour.
++        Creates a native brush with a radial gradient.
++
++        Stops support is new since wxWidgets 2.9.1, previously only the start
++        and end colours could be specified.
+     */
+     virtual wxGraphicsBrush CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
+                                                       wxDouble xc, wxDouble yc,
+                                                       wxDouble radius,
+-                                                      const wxColour& oColour,
+-                                                      const wxColour& cColour) = 0;
++                                                      const wxGraphicsGradientStops& stops) = 0;
+ 
+     /**
+         Returns the default renderer on this platform. On OS X this is the Core
+diff --git a/samples/drawing/drawing.cpp b/samples/drawing/drawing.cpp
+index 5069eb5..f1d090b 100644
+--- a/samples/drawing/drawing.cpp
++++ b/samples/drawing/drawing.cpp
+@@ -1231,6 +1231,7 @@ void MyCanvas::DrawGradients(wxDC& dc)
+     r.Offset(0, TEXT_HEIGHT);
+     dc.GradientFillLinear(r, *wxWHITE, *wxBLUE, wxUP);
+ 
++    wxRect  gfr = wxRect(r);
+ 
+     // RHS: concentric
+     r = wxRect(200, 10, 50, 50);
+@@ -1283,6 +1284,126 @@ void MyCanvas::DrawGradients(wxDC& dc)
+     dc.DrawRectangle(r4);
+     r4.Deflate(1);
+     dc.GradientFillLinear(r4, wxColour(0,0,0), wxColour(0,255,0), wxWEST);
++
++#if wxUSE_GRAPHICS_CONTEXT
++    if (m_useContext)
++    {
++        wxGCDC                      &gdc = (wxGCDC&)dc;
++        wxGraphicsContext           *gc = gdc.GetGraphicsContext();
++        wxGraphicsPath              pth;
++        wxGraphicsGradientStops     stops;
++
++        gfr.Offset(0, gfr.height + 10);
++        dc.DrawText(wxT("Linear Gradient with Stops"), gfr.x, gfr.y);
++        gfr.Offset(0, TEXT_HEIGHT);
++
++        stops = wxGraphicsGradientStops(wxColour(255,0,0), wxColour(0,0,255));
++        stops.Add(wxColour(255,255,0), 0.33f);
++        stops.Add(wxColour(0,255,0), 0.67f);
++
++        gc->SetBrush(gc->CreateLinearGradientBrush(gfr.x, gfr.y,
++                                                   gfr.x + gfr.width, gfr.y + gfr.height,
++                                                   stops));
++        pth = gc->CreatePath();
++        pth.MoveToPoint(gfr.x,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y+gfr.height);
++        pth.AddLineToPoint(gfr.x,gfr.y+gfr.height);
++        pth.CloseSubpath();
++        gc->FillPath(pth);
++
++        gfr.Offset(0, gfr.height + 10);
++        dc.DrawText(wxT("Radial Gradient with Stops"), gfr.x, gfr.y);
++        gfr.Offset(0, TEXT_HEIGHT);
++
++        gc->SetBrush(gc->CreateRadialGradientBrush(gfr.x + gfr.width / 2,
++                                                   gfr.y + gfr.height / 2,
++                                                   gfr.x + gfr.width / 2,
++                                                   gfr.y + gfr.height / 2,
++                                                   gfr.width / 2,
++                                                   stops));
++        pth = gc->CreatePath();
++        pth.MoveToPoint(gfr.x,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y+gfr.height);
++        pth.AddLineToPoint(gfr.x,gfr.y+gfr.height);
++        pth.CloseSubpath();
++        gc->FillPath(pth);
++
++        gfr.Offset(0, gfr.height + 10);
++        dc.DrawText(wxT("Linear Gradient with Stops and Gaps"), gfr.x, gfr.y);
++        gfr.Offset(0, TEXT_HEIGHT);
++
++        stops = wxGraphicsGradientStops(wxColour(255,0,0), wxColour(0,0,255));
++        stops.Add(wxColour(255,255,0), 0.33f);
++        stops.Add(wxNullColour, 0.33f);
++        stops.Add(wxNullColour, 0.67f);
++        stops.Add(wxColour(0,255,0), 0.67f);
++
++        gc->SetBrush(gc->CreateLinearGradientBrush(gfr.x, gfr.y + gfr.height,
++                                                   gfr.x + gfr.width, gfr.y,
++                                                   stops));
++        pth = gc->CreatePath();
++        pth.MoveToPoint(gfr.x,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y+gfr.height);
++        pth.AddLineToPoint(gfr.x,gfr.y+gfr.height);
++        pth.CloseSubpath();
++        gc->FillPath(pth);
++
++        gfr.Offset(0, gfr.height + 10);
++        dc.DrawText(wxT("Radial Gradient with Stops and Gaps"), gfr.x, gfr.y);
++        gfr.Offset(0, TEXT_HEIGHT);
++
++        gc->SetBrush(gc->CreateRadialGradientBrush(gfr.x + gfr.width / 2,
++                                                   gfr.y + gfr.height / 2,
++                                                   gfr.x + gfr.width / 2,
++                                                   gfr.y + gfr.height / 2,
++                                                   gfr.width / 2,
++                                                   stops));
++        pth = gc->CreatePath();
++        pth.MoveToPoint(gfr.x,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y+gfr.height);
++        pth.AddLineToPoint(gfr.x,gfr.y+gfr.height);
++        pth.CloseSubpath();
++        gc->FillPath(pth);
++
++        gfr.Offset(0, gfr.height + 10);
++        dc.DrawText(wxT("Gradients with Stops and Transparency"), gfr.x, gfr.y);
++        gfr.Offset(0, TEXT_HEIGHT);
++
++        stops = wxGraphicsGradientStops(wxColour(255,0,0), wxNullColour);
++        stops.Add(wxColour(255,0,0), 0.33f);
++        stops.Add(wxNullColour, 0.33f);
++        stops.Add(wxNullColour, 0.67f);
++        stops.Add(wxColour(0,0,255), 0.67f);
++
++        pth = gc->CreatePath();
++        pth.MoveToPoint(gfr.x,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y);
++        pth.AddLineToPoint(gfr.x + gfr.width,gfr.y+gfr.height);
++        pth.AddLineToPoint(gfr.x,gfr.y+gfr.height);
++        pth.CloseSubpath();
++
++        gc->SetBrush(gc->CreateRadialGradientBrush(gfr.x + gfr.width / 2,
++                                                   gfr.y + gfr.height / 2,
++                                                   gfr.x + gfr.width / 2,
++                                                   gfr.y + gfr.height / 2,
++                                                   gfr.width / 2,
++                                                   stops));
++        gc->FillPath(pth);
++
++        stops = wxGraphicsGradientStops(wxColour(255,0,0, 128), wxColour(0,0,255, 128));
++        stops.Add(wxColour(255,255,0,128), 0.33f);
++        stops.Add(wxColour(0,255,0,128), 0.67f);
++
++        gc->SetBrush(gc->CreateLinearGradientBrush(gfr.x, gfr.y,
++                                                   gfr.x + gfr.width, gfr.y,
++                                                   stops));
++        gc->FillPath(pth);
++    }
++#endif // wxUSE_GRAPHICS_CONTEXT
+ }
+ 
+ void MyCanvas::DrawRegions(wxDC& dc)
+@@ -1658,8 +1779,8 @@ MyFrame::MyFrame(const wxString& title, const wxPoint& pos, const wxSize& size)
+     m_xAxisReversed =
+     m_yAxisReversed = false;
+     m_backgroundMode = wxSOLID;
+-    m_colourForeground = *wxRED;
+-    m_colourBackground = *wxBLUE;
++    m_colourForeground = *wxBLACK;
++    m_colourBackground = *wxLIGHT_GREY;
+     m_textureBackground = false;
+ 
+     m_canvas = new MyCanvas( this );
+diff --git a/src/common/graphcmn.cpp b/src/common/graphcmn.cpp
+index dcdf848..fd34352 100644
+--- a/src/common/graphcmn.cpp
++++ b/src/common/graphcmn.cpp
+@@ -490,6 +490,34 @@ void wxGraphicsPathData::AddArcToPoint( wxDouble x1, wxDouble y1 , wxDouble x2,
+ }
+ 
+ //-----------------------------------------------------------------------------
++// wxGraphicsGradientStops
++//-----------------------------------------------------------------------------
++
++void wxGraphicsGradientStops::Add(const wxGraphicsGradientStop& stop)
++{
++    for ( wxVector<wxGraphicsGradientStop>::iterator it = m_stops.begin();
++          it != m_stops.end();
++          ++it )
++    {
++        if ( stop.GetPosition() < it->GetPosition() )
++        {
++            if ( it != m_stops.begin() )
++            {
++                m_stops.insert(it, stop);
++            }
++            else // we shouldn't be inserting it at the beginning
++            {
++                wxFAIL_MSG( "invalid gradient stop position < 0" );
++            }
++
++            return;
++        }
++    }
++
++    wxFAIL_MSG( "invalid gradient stop position >= 1" );
++}
++
++//-----------------------------------------------------------------------------
+ // wxGraphicsContext Convenience Methods
+ //-----------------------------------------------------------------------------
+ 
+@@ -753,19 +781,55 @@ wxGraphicsBrush wxGraphicsContext::CreateBrush(const wxBrush& brush ) const
+     return GetRenderer()->CreateBrush(brush);
+ }
+ 
+-// sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-wxGraphicsBrush wxGraphicsContext::CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-                                                   const wxColour&c1, const wxColour&c2) const
++wxGraphicsBrush
++wxGraphicsContext::CreateLinearGradientBrush(
++    wxDouble x1, wxDouble y1,
++    wxDouble x2, wxDouble y2,
++    const wxColour& c1, const wxColour& c2) const
++{
++    return GetRenderer()->CreateLinearGradientBrush
++                          (
++                            x1, y1,
++                            x2, y2,
++                            wxGraphicsGradientStops(c1,c2)
++                          );
++}
++
++wxGraphicsBrush
++wxGraphicsContext::CreateLinearGradientBrush(
++    wxDouble x1, wxDouble y1,
++    wxDouble x2, wxDouble y2,
++    const wxGraphicsGradientStops& gradientStops) const
+ {
+-    return GetRenderer()->CreateLinearGradientBrush(x1,y1,x2,y2,c1,c2);
++    return GetRenderer()->CreateLinearGradientBrush(x1,y1,x2,y2, gradientStops);
+ }
+ 
+-// sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-// with radius r and color cColor
+-wxGraphicsBrush wxGraphicsContext::CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
++wxGraphicsBrush
++wxGraphicsContext::CreateRadialGradientBrush(
++        wxDouble xo, wxDouble yo,
++        wxDouble xc, wxDouble yc, wxDouble radius,
+                                                    const wxColour &oColor, const wxColour &cColor) const
+ {
+-    return GetRenderer()->CreateRadialGradientBrush(xo,yo,xc,yc,radius,oColor,cColor);
++    return GetRenderer()->CreateRadialGradientBrush
++                          (
++                            xo, yo,
++                            xc, yc, radius,
++                            wxGraphicsGradientStops(oColor, cColor)
++                          );
++}
++
++wxGraphicsBrush
++wxGraphicsContext::CreateRadialGradientBrush(
++        wxDouble xo, wxDouble yo,
++        wxDouble xc, wxDouble yc, wxDouble radius,
++        const wxGraphicsGradientStops& gradientStops) const
++{
++    return GetRenderer()->CreateRadialGradientBrush
++                          (
++                            xo, yo,
++                            xc, yc, radius,
++                            gradientStops
++                          );
+ }
+ 
+ // sets the font
+diff --git a/src/generic/graphicc.cpp b/src/generic/graphicc.cpp
+index 2767ab8..d2a7d30 100644
+--- a/src/generic/graphicc.cpp
++++ b/src/generic/graphicc.cpp
+@@ -248,14 +248,20 @@ public:
+     ~wxCairoBrushData ();
+ 
+     virtual void Apply( wxGraphicsContext* context );
+-    void CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2 );
+-    void CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-        const wxColour &oColor, const wxColour &cColor );
++
++    void CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                   wxDouble x2, wxDouble y2,
++                                   const wxGraphicsGradientStops& stops);
++    void CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                   wxDouble xc, wxDouble yc, wxDouble radius,
++                                   const wxGraphicsGradientStops& stops);
+ 
+ protected:
+     virtual void Init();
+ 
++    // common part of Create{Linear,Radial}GradientBrush()
++    void AddGradientStops(const wxGraphicsGradientStops& stops);
++
+ private :
+     double m_red;
+     double m_green;
+@@ -683,26 +689,53 @@ void wxCairoBrushData::Apply( wxGraphicsContext* context )
+     }
+ }
+ 
+-void wxCairoBrushData::CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2 )
++void wxCairoBrushData::AddGradientStops(const wxGraphicsGradientStops& stops)
++{
++    // loop over all the stops, they include the beginning and ending ones
++    const unsigned numStops = stops.GetCount();
++    for ( unsigned n = 0; n < numStops; n++ )
++    {
++        wxGraphicsGradientStop stop = stops.Item(n);
++
++        // invalid colours are treated as transparent here
++        wxColour col = stop.GetColour();
++        if ( col == wxNullColour )
++           col = wxColour(0,0,0,0);
++
++        cairo_pattern_add_color_stop_rgba
++        (
++            m_brushPattern,
++            stop.GetPosition(),
++            col.Red()/255.0,
++            col.Green()/255.0,
++            col.Blue()/255.0,
++            col.Alpha()/255.0
++        );
++    }
++
++    wxASSERT_MSG(cairo_pattern_status(m_brushPattern) == CAIRO_STATUS_SUCCESS,
++                 wxT("Couldn't create cairo pattern"));
++}
++
++void
++wxCairoBrushData::CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                            wxDouble x2, wxDouble y2,
++                                            const wxGraphicsGradientStops& stops)
+ {
+     m_brushPattern = cairo_pattern_create_linear(x1,y1,x2,y2);
+-    cairo_pattern_add_color_stop_rgba(m_brushPattern,0.0,c1.Red()/255.0,
+-        c1.Green()/255.0, c1.Blue()/255.0,c1.Alpha()/255.0);
+-    cairo_pattern_add_color_stop_rgba(m_brushPattern,1.0,c2.Red()/255.0,
+-        c2.Green()/255.0, c2.Blue()/255.0,c2.Alpha()/255.0);
+-    wxASSERT_MSG(cairo_pattern_status(m_brushPattern) == CAIRO_STATUS_SUCCESS, wxT("Couldn't create cairo pattern"));
++
++    AddGradientStops(stops);
+ }
+ 
+-void wxCairoBrushData::CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-        const wxColour &oColor, const wxColour &cColor )
++void
++wxCairoBrushData::CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                            wxDouble xc, wxDouble yc,
++                                            wxDouble radius,
++                                            const wxGraphicsGradientStops& stops)
+ {
+     m_brushPattern = cairo_pattern_create_radial(xo,yo,0.0,xc,yc,radius);
+-    cairo_pattern_add_color_stop_rgba(m_brushPattern,0.0,oColor.Red()/255.0,
+-        oColor.Green()/255.0, oColor.Blue()/255.0,oColor.Alpha()/255.0);
+-    cairo_pattern_add_color_stop_rgba(m_brushPattern,1.0,cColor.Red()/255.0,
+-        cColor.Green()/255.0, cColor.Blue()/255.0,cColor.Alpha()/255.0);
+-    wxASSERT_MSG(cairo_pattern_status(m_brushPattern) == CAIRO_STATUS_SUCCESS, wxT("Couldn't create cairo pattern"));
++
++    AddGradientStops(stops);
+ }
+ 
+ void wxCairoBrushData::Init()
+@@ -1735,14 +1768,16 @@ public :
+ 
+     virtual wxGraphicsBrush CreateBrush(const wxBrush& brush ) ;
+ 
+-    // sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-    virtual wxGraphicsBrush CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2) ;
++    virtual wxGraphicsBrush
++    CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                              wxDouble x2, wxDouble y2,
++                              const wxGraphicsGradientStops& stops);
+ 
+-    // sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-    // with radius r and color cColor
+-    virtual wxGraphicsBrush CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-        const wxColour &oColor, const wxColour &cColor) ;
++    virtual wxGraphicsBrush
++    CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                              wxDouble xc, wxDouble yc,
++                              wxDouble radius,
++                              const wxGraphicsGradientStops& stops);
+ 
+     // sets the font
+     virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK ) ;
+@@ -1874,25 +1909,26 @@ wxGraphicsBrush wxCairoRenderer::CreateBrush(const wxBrush& brush )
+     }
+ }
+ 
+-// sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-wxGraphicsBrush wxCairoRenderer::CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-                                                                      const wxColour&c1, const wxColour&c2)
++wxGraphicsBrush
++wxCairoRenderer::CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                           wxDouble x2, wxDouble y2,
++                                           const wxGraphicsGradientStops& stops)
+ {
+     wxGraphicsBrush p;
+     wxCairoBrushData* d = new wxCairoBrushData( this );
+-    d->CreateLinearGradientBrush(x1, y1, x2, y2, c1, c2);
++    d->CreateLinearGradientBrush(x1, y1, x2, y2, stops);
+     p.SetRefData(d);
+     return p;
+ }
+ 
+-// sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-// with radius r and color cColor
+-wxGraphicsBrush wxCairoRenderer::CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-                                                                      const wxColour &oColor, const wxColour &cColor)
++wxGraphicsBrush
++wxCairoRenderer::CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                           wxDouble xc, wxDouble yc, wxDouble r,
++                                           const wxGraphicsGradientStops& stops)
+ {
+     wxGraphicsBrush p;
+     wxCairoBrushData* d = new wxCairoBrushData( this );
+-    d->CreateRadialGradientBrush(xo,yo,xc,yc,radius,oColor,cColor);
++    d->CreateRadialGradientBrush(xo, yo, xc, yc, r, stops);
+     p.SetRefData(d);
+     return p;
+ }
+diff --git a/src/msw/graphics.cpp b/src/msw/graphics.cpp
+index 62d56a1..ecc6c46 100644
+--- a/src/msw/graphics.cpp
++++ b/src/msw/graphics.cpp
+@@ -235,16 +235,34 @@ public:
+     wxGDIPlusBrushData( wxGraphicsRenderer* renderer, const wxBrush &brush );
+     ~wxGDIPlusBrushData ();
+ 
+-    void CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2 );
+-    void CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-        const wxColour &oColor, const wxColour &cColor );
++    void CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                   wxDouble x2, wxDouble y2,
++                                   const wxGraphicsGradientStops& stops);
++    void CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                   wxDouble xc, wxDouble yc,
++                                   wxDouble radius,
++                                   const wxGraphicsGradientStops& stops);
++
+     virtual Brush* GetGDIPlusBrush() { return m_brush; }
+ 
+ protected:
+     virtual void Init();
+ 
+-private :
++private:
++    // translate a wxColour to a brush Color
++    Color BrushColour(const wxColour& col)
++    {
++        return col == wxNullColour ? Color(0, 0, 0, 0)
++                                   : Color(col.Alpha(),
++                                           col.Red(),
++                                           col.Green(),
++                                           col.Blue());
++    }
++
++    // common part of Create{Linear,Radial}GradientBrush()
++    template <typename T>
++    void SetGradientStops(T *brush, const wxGraphicsGradientStops& stops);
++
+     Brush* m_brush;
+     Image* m_brushImage;
+     GraphicsPath* m_brushPath;
+@@ -611,28 +629,67 @@ void wxGDIPlusBrushData::Init()
+     m_brushPath= NULL;
+ }
+ 
+-void wxGDIPlusBrushData::CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2, const wxColour&c1, const wxColour&c2)
++template <typename T>
++void
++wxGDIPlusBrushData::SetGradientStops(T *brush,
++                                     const wxGraphicsGradientStops& stops)
++{
++    const unsigned numStops = stops.GetCount();
++    if ( numStops <= 2 )
++    {
++        // initial and final colours are set during the brush creation, nothing
++        // more to do
++        return;
++    }
++
++    wxVector<Color> colors(numStops);
++    wxVector<REAL> positions(numStops);
++
++    for ( unsigned i = 0; i < numStops; i++ )
++    {
++        wxGraphicsGradientStop stop = stops.Item(i);
++
++        colors[i] = BrushColour(stop.GetColour());
++        positions[i] = stop.GetPosition();
++    }
++
++    brush->SetInterpolationColors(&colors[0], &positions[0], numStops);
++}
++
++void
++wxGDIPlusBrushData::CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                              wxDouble x2, wxDouble y2,
++                                              const wxGraphicsGradientStops& stops)
+ {
+-    m_brush = new LinearGradientBrush( PointF( x1,y1) , PointF( x2,y2),
+-        Color( c1.Alpha(), c1.Red(),c1.Green() , c1.Blue() ),
+-        Color( c2.Alpha(), c2.Red(),c2.Green() , c2.Blue() ));
++    LinearGradientBrush * const
++        brush = new LinearGradientBrush(PointF(x1, y1) , PointF(x2, y2),
++                                        BrushColour(stops.GetStartColour()),
++                                        BrushColour(stops.GetEndColour()));
++    m_brush =  brush;
++
++    SetGradientStops(brush, stops);
+ }
+ 
+-void wxGDIPlusBrushData::CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-                                               const wxColour &oColor, const wxColour &cColor)
++void
++wxGDIPlusBrushData::CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                              wxDouble xc, wxDouble yc,
++                                              wxDouble radius,
++                                              const wxGraphicsGradientStops& stops)
+ {
+-    // Create a path that consists of a single circle.
+     m_brushPath = new GraphicsPath();
+-    m_brushPath->AddEllipse( (REAL)(xc-radius), (REAL)(yc-radius), (REAL)(2*radius), (REAL)(2*radius));
++    m_brushPath->AddEllipse( (REAL)(xc-radius), (REAL)(yc-radius),
++                             (REAL)(2*radius), (REAL)(2*radius));
+ 
+-    PathGradientBrush *b = new PathGradientBrush(m_brushPath);
+-    m_brush = b;
+-    b->SetCenterPoint( PointF(xo,yo));
+-    b->SetCenterColor(Color( oColor.Alpha(), oColor.Red(),oColor.Green() , oColor.Blue() ));
++    PathGradientBrush * const brush = new PathGradientBrush(m_brushPath);
++    m_brush = brush;
++    brush->SetCenterPoint(PointF(xo, yo));
++    brush->SetCenterColor(BrushColour(stops.GetStartColour()));
+ 
+-    Color colors[] = {Color( cColor.Alpha(), cColor.Red(),cColor.Green() , cColor.Blue() )};
++    const Color col(BrushColour(stops.GetEndColour()));
+     int count = 1;
+-    b->SetSurroundColors(colors, &count);
++    brush->SetSurroundColors(&col, &count);
++
++    SetGradientStops(brush, stops);
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -1580,15 +1637,16 @@ public :
+ 
+     virtual wxGraphicsBrush CreateBrush(const wxBrush& brush ) ;
+ 
+-    // sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-    virtual wxGraphicsBrush CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2) ;
+-
+-    // sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-    // with radius r and color cColor
+-    virtual wxGraphicsBrush CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-        const wxColour &oColor, const wxColour &cColor) ;
++    virtual wxGraphicsBrush
++    CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                              wxDouble x2, wxDouble y2,
++                              const wxGraphicsGradientStops& stops);
+ 
++    virtual wxGraphicsBrush
++    CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                              wxDouble xc, wxDouble yc,
++                              wxDouble radius,
++                              const wxGraphicsGradientStops& stops);
+     // sets the font
+     virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK ) ;
+ 
+@@ -1773,27 +1831,29 @@ wxGraphicsBrush wxGDIPlusRenderer::CreateBrush(const wxBrush& brush )
+     }
+ }
+ 
+-// sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-wxGraphicsBrush wxGDIPlusRenderer::CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-                                                                      const wxColour&c1, const wxColour&c2)
++wxGraphicsBrush
++wxGDIPlusRenderer::CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                             wxDouble x2, wxDouble y2,
++                                             const wxGraphicsGradientStops& stops)
+ {
+     ENSURE_LOADED_OR_RETURN(wxNullGraphicsBrush);
+     wxGraphicsBrush p;
+     wxGDIPlusBrushData* d = new wxGDIPlusBrushData( this );
+-    d->CreateLinearGradientBrush(x1, y1, x2, y2, c1, c2);
++    d->CreateLinearGradientBrush(x1, y1, x2, y2, stops);
+     p.SetRefData(d);
+     return p;
+  }
+ 
+-// sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-// with radius r and color cColor
+-wxGraphicsBrush wxGDIPlusRenderer::CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-                                                                      const wxColour &oColor, const wxColour &cColor)
++wxGraphicsBrush
++wxGDIPlusRenderer::CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                             wxDouble xc, wxDouble yc,
++                                             wxDouble radius,
++                                             const wxGraphicsGradientStops& stops)
+ {
+     ENSURE_LOADED_OR_RETURN(wxNullGraphicsBrush);
+     wxGraphicsBrush p;
+     wxGDIPlusBrushData* d = new wxGDIPlusBrushData( this );
+-    d->CreateRadialGradientBrush(xo,yo,xc,yc,radius,oColor,cColor);
++    d->CreateRadialGradientBrush(xo,yo,xc,yc,radius,stops);
+     p.SetRefData(d);
+     return p;
+ }
+diff --git a/src/osx/carbon/graphics.cpp b/src/osx/carbon/graphics.cpp
+index 99e1921..75f74d7 100644
+--- a/src/osx/carbon/graphics.cpp
++++ b/src/osx/carbon/graphics.cpp
+@@ -666,15 +666,18 @@ public:
+     ~wxMacCoreGraphicsBrushData ();
+ 
+     virtual void Apply( wxGraphicsContext* context );
+-    void CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2 );
+-    void CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-    const wxColour &oColor, const wxColour &cColor );
++    void CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                   wxDouble x2, wxDouble y2,
++                                   const wxGraphicsGradientStops& stops);
++    void CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                   wxDouble xc, wxDouble yc, wxDouble radius,
++                                   const wxGraphicsGradientStops& stops);
+ 
+     virtual bool IsShading() { return m_isShading; }
+     CGShadingRef GetShading() { return m_shading; }
+ protected:
+-    CGFunctionRef CreateGradientFunction( const wxColour& c1, const wxColour& c2 );
++    CGFunctionRef CreateGradientFunction(const wxGraphicsGradientStops& stops);
++
+     static void CalculateShadingValues (void *info, const CGFloat *in, CGFloat *out);
+     virtual void Init();
+ 
+@@ -691,19 +694,24 @@ wxMacCoreGraphicsBrushData::wxMacCoreGraphicsBrushData( wxGraphicsRenderer* rend
+     Init();
+ }
+ 
+-void wxMacCoreGraphicsBrushData::CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2 )
++void
++wxMacCoreGraphicsBrushData::CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                                      wxDouble x2, wxDouble y2,
++                                                      const wxGraphicsGradientStops& stops)
+ {
+-    m_gradientFunction = CreateGradientFunction( c1, c2 );
++    m_gradientFunction = CreateGradientFunction(stops);
+     m_shading = CGShadingCreateAxial( wxMacGetGenericRGBColorSpace(), CGPointMake((CGFloat) x1, (CGFloat) y1),
+                                         CGPointMake((CGFloat) x2,(CGFloat) y2), m_gradientFunction, true, true ) ;
+     m_isShading = true ;
+ }
+ 
+-void wxMacCoreGraphicsBrushData::CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-    const wxColour &oColor, const wxColour &cColor )
++void
++wxMacCoreGraphicsBrushData::CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                                      wxDouble xc, wxDouble yc,
++                                                      wxDouble radius,
++                                                      const wxGraphicsGradientStops& stops)
+ {
+-    m_gradientFunction = CreateGradientFunction( oColor, cColor );
++    m_gradientFunction = CreateGradientFunction(stops);
+     m_shading = CGShadingCreateRadial( wxMacGetGenericRGBColorSpace(), CGPointMake((CGFloat) xo,(CGFloat) yo), 0,
+                                         CGPointMake((CGFloat) xc,(CGFloat) yc), (CGFloat) radius, m_gradientFunction, true, true ) ;
+     m_isShading = true ;
+@@ -759,8 +767,13 @@ void wxMacCoreGraphicsBrushData::CalculateShadingValues (void *info, const CGFlo
+     }
+ }
+ 
+-CGFunctionRef wxMacCoreGraphicsBrushData::CreateGradientFunction( const wxColour& c1, const wxColour& c2 )
++CGFunctionRef
++wxMacCoreGraphicsBrushData::CreateGradientFunction(const wxGraphicsGradientStops& stops)
+ {
++    // TODO: implement support for intermediate gradient stops
++    const wxColour c1 = stops.GetStartColour();
++    const wxColour c2 = stops.GetEndColour();
++
+     static const CGFunctionCallbacks callbacks = { 0, &CalculateShadingValues, NULL };
+     static const CGFloat input_value_range [2] = { 0, 1 };
+     static const CGFloat output_value_ranges [8] = { 0, 1, 0, 1, 0, 1, 0, 1 };
+@@ -2618,14 +2631,16 @@ public :
+ 
+     virtual wxGraphicsBrush CreateBrush(const wxBrush& brush ) ;
+ 
+-    // sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-    virtual wxGraphicsBrush CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-        const wxColour&c1, const wxColour&c2) ;
++    virtual wxGraphicsBrush
++    CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                              wxDouble x2, wxDouble y2,
++                              const wxGraphicsGradientStops& stops);
+ 
+-    // sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-    // with radius r and color cColor
+-    virtual wxGraphicsBrush CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-        const wxColour &oColor, const wxColour &cColor) ;
++    virtual wxGraphicsBrush
++    CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                              wxDouble xc, wxDouble yc,
++                              wxDouble radius,
++                              const wxGraphicsGradientStops& stops);
+ 
+    // sets the font
+     virtual wxGraphicsFont CreateFont( const wxFont &font , const wxColour &col = *wxBLACK ) ;
+@@ -2819,25 +2834,27 @@ wxGraphicsBitmap wxMacCoreGraphicsRenderer::CreateSubBitmap( const wxGraphicsBit
+         return wxNullGraphicsBitmap;
+ }
+ 
+-// sets the brush to a linear gradient, starting at (x1,y1) with color c1 to (x2,y2) with color c2
+-wxGraphicsBrush wxMacCoreGraphicsRenderer::CreateLinearGradientBrush( wxDouble x1, wxDouble y1, wxDouble x2, wxDouble y2,
+-    const wxColour&c1, const wxColour&c2)
++wxGraphicsBrush
++wxMacCoreGraphicsRenderer::CreateLinearGradientBrush(wxDouble x1, wxDouble y1,
++                                                     wxDouble x2, wxDouble y2,
++                                                     const wxGraphicsGradientStops& stops)
+ {
+     wxGraphicsBrush p;
+     wxMacCoreGraphicsBrushData* d = new wxMacCoreGraphicsBrushData( this );
+-    d->CreateLinearGradientBrush(x1, y1, x2, y2, c1, c2);
++    d->CreateLinearGradientBrush(x1, y1, x2, y2, stops);
+     p.SetRefData(d);
+     return p;
+ }
+ 
+-// sets the brush to a radial gradient originating at (xo,yc) with color oColor and ends on a circle around (xc,yc)
+-// with radius r and color cColor
+-wxGraphicsBrush wxMacCoreGraphicsRenderer::CreateRadialGradientBrush( wxDouble xo, wxDouble yo, wxDouble xc, wxDouble yc, wxDouble radius,
+-    const wxColour &oColor, const wxColour &cColor)
++wxGraphicsBrush
++wxMacCoreGraphicsRenderer::CreateRadialGradientBrush(wxDouble xo, wxDouble yo,
++                                                     wxDouble xc, wxDouble yc,
++                                                     wxDouble radius,
++                                                     const wxGraphicsGradientStops& stops)
+ {
+     wxGraphicsBrush p;
+     wxMacCoreGraphicsBrushData* d = new wxMacCoreGraphicsBrushData( this );
+-    d->CreateRadialGradientBrush(xo,yo,xc,yc,radius,oColor,cColor);
++    d->CreateRadialGradientBrush(xo, yo, xc, yc, radius, stops);
+     p.SetRefData(d);
+     return p;
+ }

@@ -1,0 +1,342 @@
+Index: e:/dev/wxWindows/src/common/event.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/event.cpp,v
+retrieving revision 1.117
+diff -u -2 -r1.117 event.cpp
+--- e:/dev/wxWindows/src/common/event.cpp	2003/06/01 14:37:25	1.117
++++ e:/dev/wxWindows/src/common/event.cpp	2003/06/11 21:08:41
+@@ -95,7 +95,12 @@
+     { return &wxEvtHandler::sm_eventTable; }
+ 
++wxEventHashTable &wxEvtHandler::GetEventHashTable() const
++    { return wxEvtHandler::sm_eventHashTable; }
++
+ const wxEventTable wxEvtHandler::sm_eventTable =
+     { (const wxEventTable *)NULL, &wxEvtHandler::sm_eventTableEntries[0] };
+ 
++wxEventHashTable wxEvtHandler::sm_eventHashTable(wxEvtHandler::sm_eventTable);
++
+ const wxEventTableEntry wxEvtHandler::sm_eventTableEntries[] =
+     { DECLARE_EVENT_TABLE_ENTRY(wxEVT_NULL, 0, 0, (wxObjectEventFunction)NULL, NULL) };
+@@ -337,5 +342,6 @@
+     m_extraLong = 0;
+     m_commandInt = 0;
+-    m_commandString = wxEmptyString;
++    // m_commandString = wxEmptyString; // No need to do this, as the wxString 
++                                        // is by default empty. It only eats CPU cycles.
+     m_isCommandEvent = TRUE;
+ }
+@@ -600,4 +606,180 @@
+ 
+ // ----------------------------------------------------------------------------
++// wxEventHashTable
++// ----------------------------------------------------------------------------
++
++#define EVENT_TYPE_TABLE_INIT_SIZE      31
++
++wxEventHashTable::wxEventHashTable(const wxEventTable &table)
++    :m_table(table),
++     m_rebuildHash(TRUE)
++{
++    AllocEventTypeTable(EVENT_TYPE_TABLE_INIT_SIZE);
++}
++
++wxEventHashTable::~wxEventHashTable()
++{
++    size_t i;
++    for(i = 0; i < m_size; i++)
++    {
++        EventTypeTablePointer  eTTnode = m_eventTypeTable[i];
++        if (eTTnode)
++        {
++            delete eTTnode;
++        }
++    }
++    
++    delete[] m_eventTypeTable;
++}
++
++bool wxEventHashTable::HandleEvent(wxEvent &event, wxEvtHandler *self)
++{
++    if (m_rebuildHash)
++    {
++        InitHashTable();        
++        m_rebuildHash = FALSE;
++    }
++    
++    // Find all entries for the given event type.
++    wxEventType eventType = event.GetEventType();
++    const EventTypeTablePointer eTTnode = m_eventTypeTable[eventType % m_size];
++    if (eTTnode && eTTnode->eventType == eventType)
++    {
++        // Now start the search for an event handler
++        // that can handle an event with the given ID.
++        int eventId = event.GetId();
++        const wxEventTableEntryPointerArray &eventEntryTable = eTTnode->eventEntryTable;
++        
++        size_t n;
++        size_t count = eventEntryTable.GetCount();
++        for (n = 0; n < count; n++)
++        {
++            const wxEventTableEntry* entry = eventEntryTable[n];
++            int tableId1 = entry->m_id,
++                tableId2 = entry->m_lastId;
++            
++            if ((tableId1 == -1) ||
++                (tableId2 == -1 && tableId1 == eventId) ||
++                (tableId2 != -1 &&
++                 (eventId >= tableId1 && eventId <= tableId2)))
++            {
++                event.Skip(FALSE);
++                event.m_callbackUserData = entry->m_callbackUserData;
++                
++                (self->*((wxEventFunction) (entry->m_fn)))(event);
++                
++                if (!event.GetSkipped())
++                    return TRUE;
++            }
++        }
++        
++        return FALSE;
++    }
++    
++    return FALSE;
++}
++
++void wxEventHashTable::InitHashTable()
++{
++    // Loop over the event tables and all its base tables.
++    const wxEventTable *table = &m_table;
++    while (table)
++    {
++        // Retrieve all valid event handler entries
++        const wxEventTableEntry *entry = table->entries;
++        while (entry->m_fn != 0)
++        {
++            // Add the event entry in the Hash.
++            AddEntry(*entry);
++            
++            entry++;
++        }
++        
++        table = table->baseTable;
++    }
++    
++    // Lets free some memory.
++    size_t i;
++    for(i = 0; i < m_size; i++)
++    {
++        EventTypeTablePointer  eTTnode = m_eventTypeTable[i];
++        if (eTTnode)
++        {
++            eTTnode->eventEntryTable.Shrink();
++        }
++    }
++}
++
++void wxEventHashTable::AddEntry(const wxEventTableEntry &entry)
++{
++    EventTypeTablePointer *peTTnode = &m_eventTypeTable[entry.m_eventType % m_size];
++    EventTypeTablePointer  eTTnode = *peTTnode;
++    
++    if (eTTnode)
++    {
++        if (eTTnode->eventType != entry.m_eventType)
++        {
++            // Resize the table!
++            GrowEventTypeTable();
++            // Try again to add it.
++            AddEntry(entry);
++            return;
++        }
++    }
++    else
++    {
++        eTTnode = new EventTypeTable;
++        eTTnode->eventType = entry.m_eventType;
++        *peTTnode = eTTnode;
++    }
++    
++    // Fill all hash entries between entry.m_id and entry.m_lastId...
++    eTTnode->eventEntryTable.Add(&entry);
++}
++
++void wxEventHashTable::AllocEventTypeTable(size_t size)
++{
++    m_eventTypeTable = new EventTypeTablePointer[size];
++    memset((void *)m_eventTypeTable, 0, sizeof(EventTypeTablePointer)*size);
++    m_size = size;
++}
++
++void wxEventHashTable::GrowEventTypeTable()
++{
++    size_t oldSize = m_size;
++    EventTypeTablePointer *oldEventTypeTable = m_eventTypeTable;
++    
++    AllocEventTypeTable(/* GetNextPrime(oldSize) */oldSize*2+1);
++    
++    size_t i;
++    for(i = 0; i < oldSize; /* */)
++    {
++        EventTypeTablePointer  eTToldNode = oldEventTypeTable[i];
++        if (eTToldNode)
++        {
++            EventTypeTablePointer *peTTnode = &m_eventTypeTable[eTToldNode->eventType % m_size];
++            EventTypeTablePointer  eTTnode = *peTTnode;
++            
++            // Check for collision, we don't want any.
++            if (eTTnode)
++            {
++                GrowEventTypeTable();
++                continue; // Don't increment the counter, 
++                          // as we still need to add this element.
++            }
++            else
++            {
++                // Get the old value and put it in the new table.
++                *peTTnode = oldEventTypeTable[i];                   
++            }
++        }
++        
++        i++;
++    }
++    
++    delete[] oldEventTypeTable;
++}
++
++// ----------------------------------------------------------------------------
+ // wxEvtHandler
+ // ----------------------------------------------------------------------------
+@@ -818,8 +1000,11 @@
+ #endif // wxUSE_GUI
+ 
+-    // allow the application to hook into event processing
+-    if ( wxTheApp )
++    // Using a local variable helps the optimizer produce faster code...
++    wxApp *theApp = wxTheApp;
++
++    // allow the application to hook into event processing    
++    if ( theApp )
+     {
+-        int rc = wxTheApp->FilterEvent(event);
++        int rc = theApp->FilterEvent(event);
+         if ( rc != -1 )
+         {
+@@ -852,7 +1037,4 @@
+             return TRUE;
+ 
+-        // Then static per-class event tables
+-        const wxEventTable *table = GetEventTable();
+-
+ #if wxUSE_GUI && wxUSE_VALIDATORS
+         // Try the associated validator first, if this is a window.
+@@ -881,4 +1063,9 @@
+ #endif
+ 
++#define wxUSE_HASH_EVENTTABLE 1
++#if !wxUSE_HASH_EVENTTABLE
++        // Then static per-class event tables
++        const wxEventTable *table = GetEventTable();
++
+         // Search upwards through the inheritance hierarchy
+         while (table)
+@@ -888,4 +1075,8 @@
+             table = table->baseTable;
+         }
++#else
++        if (GetEventHashTable().HandleEvent(event, this))
++            return TRUE;
++#endif
+     }
+ 
+@@ -919,5 +1110,5 @@
+ 
+     // Last try - application object.
+-    if ( wxTheApp && (this != wxTheApp) )
++    if ( theApp && (this != theApp) )
+     {
+         // Special case: don't pass wxEVT_IDLE to wxApp, since it'll always
+@@ -926,5 +1117,5 @@
+         if ( event.GetEventType() != wxEVT_IDLE )
+         {
+-            if ( wxTheApp->ProcessEvent(event) )
++            if ( theApp->ProcessEvent(event) )
+                 return TRUE;
+         }
+Index: e:/dev/wxWindows/include/wx/event.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/event.h,v
+retrieving revision 1.164
+diff -u -2 -r1.164 event.h
+--- e:/dev/wxWindows/include/wx/event.h	2003/06/01 20:47:50	1.164
++++ e:/dev/wxWindows/include/wx/event.h	2003/06/11 21:08:50
+@@ -1997,4 +1997,40 @@
+ 
+ // ----------------------------------------------------------------------------
++// wxEventHashTable: a helper of wxEvtHandler to speed up wxEventTable lookups.
++// ----------------------------------------------------------------------------
++WX_DEFINE_ARRAY(const wxEventTableEntry*, wxEventTableEntryPointerArray);
++class WXDLLEXPORT wxEvtHandler;
++
++class wxEventHashTable
++{
++private:
++    struct EventTypeTable
++    {
++        wxEventType                   eventType;
++        wxEventTableEntryPointerArray eventEntryTable;
++    };
++    typedef EventTypeTable* EventTypeTablePointer;
++
++public:
++    wxEventHashTable(const wxEventTable &table);
++    ~wxEventHashTable();
++
++    bool HandleEvent(wxEvent &event, wxEvtHandler *self);
++
++protected:
++    void InitHashTable();
++    void AddEntry(const wxEventTableEntry &entry);
++    void AllocEventTypeTable(size_t size);
++    void GrowEventTypeTable();
++
++protected:
++    const wxEventTable    &m_table;
++    bool                   m_rebuildHash;
++
++    size_t                 m_size;
++    EventTypeTablePointer *m_eventTypeTable;
++};
++
++// ----------------------------------------------------------------------------
+ // wxEvtHandler: the base class for all objects handling wxWindows events
+ // ----------------------------------------------------------------------------
+@@ -2096,6 +2132,8 @@
+ protected:
+     static const wxEventTable sm_eventTable;
++    static wxEventHashTable	  sm_eventHashTable;
+ 
+     virtual const wxEventTable *GetEventTable() const;
++    virtual wxEventHashTable& GetEventHashTable() const;
+ 
+     wxEvtHandler*       m_nextHandler;
+@@ -2192,11 +2230,16 @@
+     protected: \
+         static const wxEventTable        sm_eventTable; \
+-        virtual const wxEventTable*        GetEventTable() const;
++		static wxEventHashTable			 sm_eventHashTable; \
++        virtual const wxEventTable*        GetEventTable() const; \
++        virtual wxEventHashTable&        GetEventHashTable() const;
+ 
+ #define BEGIN_EVENT_TABLE(theClass, baseClass) \
+     const wxEventTable *theClass::GetEventTable() const \
+         { return &theClass::sm_eventTable; } \
++    wxEventHashTable &theClass::GetEventHashTable() const \
++        { return theClass::sm_eventHashTable; } \
+     const wxEventTable theClass::sm_eventTable = \
+         { &baseClass::sm_eventTable, &theClass::sm_eventTableEntries[0] }; \
++    wxEventHashTable theClass::sm_eventHashTable(theClass::sm_eventTable); \
+     const wxEventTableEntry theClass::sm_eventTableEntries[] = { \
+ 
+
+ 	  	 

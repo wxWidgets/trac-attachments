@@ -1,0 +1,329 @@
+Index: src/generic/grid.cpp
+===================================================================
+--- src/generic/grid.cpp	(revision 72422)
++++ src/generic/grid.cpp	(working copy)
+@@ -2,7 +2,7 @@
+ // Name:        src/generic/grid.cpp
+ // Purpose:     wxGrid and related classes
+ // Author:      Michael Bedward (based on code by Julian Smart, Robin Dunn)
+-// Modified by: Robin Dunn, Vadim Zeitlin, Santiago Palacios
++// Modified by: Robin Dunn, Vadim Zeitlin, Santiago Palacios, Michael Richards
+ // Created:     1/08/1999
+ // RCS-ID:      $Id$
+ // Copyright:   (c) Michael Bedward (mbedward@ozemail.com.au)
+@@ -2564,13 +2564,19 @@
+ 
+ int wxGrid::GetColWidth(int col) const
+ {
+-    return m_colWidths.IsEmpty() ? m_defaultColWidth : m_colWidths[col];
++    if ( m_colWidths.IsEmpty() ) 
++        return m_defaultColWidth;
++    // a negative width indicates a hidden column
++    return ( m_colWidths[col] > 0) ? m_colWidths[col] : 0;
+ }
+ 
+ int wxGrid::GetColLeft(int col) const
+ {
+-    return m_colRights.IsEmpty() ? GetColPos( col ) * m_defaultColWidth
+-                                 : m_colRights[col] - m_colWidths[col];
++    if ( m_colRights.IsEmpty() )
++        return GetColPos( col ) * m_defaultColWidth;
++
++    // a negative width indicates a hidden column
++    return ( m_colWidths[col] > 0 ) ? m_colRights[col] - m_colWidths[col] : 0;
+ }
+ 
+ int wxGrid::GetColRight(int col) const
+@@ -2581,13 +2587,26 @@
+ 
+ int wxGrid::GetRowHeight(int row) const
+ {
+-    return m_rowHeights.IsEmpty() ? m_defaultRowHeight : m_rowHeights[row];
++    // no custom heights / hidden rows 
++    if ( m_rowHeights.IsEmpty() ) {
++        return m_defaultRowHeight;
++    }
++    int height=m_rowHeights[row];
++
++    // a height less than 1 really means the row is hidden
++    return ( height < 1 ) ? 0 : height;
+ }
+ 
+ int wxGrid::GetRowTop(int row) const
+ {
+-    return m_rowBottoms.IsEmpty() ? row * m_defaultRowHeight
+-                                  : m_rowBottoms[row] - m_rowHeights[row];
++    if ( m_rowBottoms.IsEmpty() ) 
++    {
++        return row * m_defaultRowHeight;
++    }
++    int height = m_rowHeights[row];
++
++    // a height less than 1 really means the row is hidden
++    return ( height < 1 ) ? m_rowBottoms[row] : m_rowBottoms[row] - height;
+ }
+ 
+ int wxGrid::GetRowBottom(int row) const
+@@ -6502,8 +6521,8 @@
+ 
+ // compute row or column from some (unscrolled) coordinate value, using either
+ // m_defaultRowHeight/m_defaultColWidth or binary search on array of
+-// m_rowBottoms/m_colRights to do it quickly (linear search shouldn't be used
+-// for large grids)
++// m_rowBottoms/m_colRights to do it quickly in O(log n) time. 
++// NOTE: This may not work correctly for reordered columns.
+ int wxGrid::PosToLinePos(int coord,
+                          bool clipToMinMax,
+                          const wxGridOperations& oper) const
+@@ -6531,27 +6550,12 @@
+     }
+ 
+ 
+-    // adjust maxPos before starting the binary search
+-    if ( maxPos >= numLines )
+-    {
+-        maxPos = numLines  - 1;
+-    }
+-    else
+-    {
+-        if ( coord >= lineEnds[oper.GetLineAt(this, maxPos)])
+-        {
+-            minPos = maxPos;
+-            const int minDist = oper.GetMinimalAcceptableLineSize(this);
+-            if ( minDist )
+-                maxPos = coord / minDist;
+-            else
+-                maxPos = numLines - 1;
+-        }
+-
+-        if ( maxPos >= numLines )
+-            maxPos = numLines  - 1;
+-    }
+-
++    // binary search is quite efficient and we can't really make any assumptions
++    // on where to start here since row and columns could be of size 0 if they are 
++    // hidden. While this could be made more efficient, some profiling will be 
++    // necessary to determine if it really is a performance bottleneck
++    maxPos = numLines  - 1;
++   
+     // check if the position is beyond the last column
+     const int lineAtMaxPos = oper.GetLineAt(this, maxPos);
+     if ( coord >= lineEnds[lineAtMaxPos] )
+@@ -6562,7 +6566,6 @@
+     if ( coord < lineEnds[lineAt0] )
+         return 0;
+ 
+-
+     // finally do perform the binary search
+     while ( minPos < maxPos )
+     {
+@@ -8036,19 +8039,6 @@
+ {
+     wxCHECK_RET( row >= 0 && row < m_numRows, wxT("invalid row index") );
+ 
+-    // if < 0 then calculate new height from label
+-    if ( height < 0 )
+-    {
+-        long w, h;
+-        wxArrayString lines;
+-        wxClientDC dc(m_rowLabelWin);
+-        dc.SetFont(GetLabelFont());
+-        StringToLines(GetRowLabelValue( row ), lines);
+-        GetTextBoxSize( dc, lines, &w, &h );
+-        //check that it is not less than the minimal height
+-        height = wxMax(h, GetRowMinimalAcceptableHeight());
+-    }
+-
+     // See comment in SetColSize
+     if ( height > 0 && height < GetRowMinimalAcceptableHeight())
+         return;
+@@ -8059,10 +8049,50 @@
+         InitRowHeights();
+     }
+ 
+-    int h = wxMax( 0, height );
+-    int diff = h - m_rowHeights[row];
++    // get the current height. If hidden it will be lastheight*-1
++    int curHeight=m_rowHeights[row];
+ 
+-    m_rowHeights[row] = h;
++    // we shouldn't restore a row's height if it's not hidden
++    // we also shouldn't do anything if it's already hidden and they're asking us to hide it
++    if ( ( height < 0 && curHeight > 0 ) || ( height == 0 && curHeight < 1 ) )
++      return;
++
++    // the height we're proposing for this row
++    int newHeight=height;
++
++    // a special case, if height is -1 it means restore a hidden row to the last visible height
++    if ( height < 0 )
++    {
++        // restore the height from the saved one
++        newHeight=curHeight*-1;
++        curHeight=0;
++    }
++
++    // if the height is 0 then they must be hiding this row, save the last height as -1*current height
++    if (height==0) 
++    {
++        m_rowHeights[row]*=-1;
++        newHeight=0;
++    }
++    else 
++    {
++        // not hiding it we can update the height
++        m_rowHeights[row] = newHeight;
++    }
++
++    // if the row is already that size we don't need to do anything
++    if ( curHeight == newHeight )
++      return;
++
++
++    // a hidden row really has a current height of 0
++    if (curHeight<0)
++    {
++      curHeight=0;
++    }
++
++    int diff = newHeight - curHeight;
++
+     for ( int i = row; i < m_numRows; i++ )
+     {
+         m_rowBottoms[i] += diff;
+@@ -8097,23 +8127,6 @@
+ {
+     wxCHECK_RET( col >= 0 && col < m_numCols, wxT("invalid column index") );
+ 
+-    // if < 0 then calculate new width from label
+-    if ( width < 0 )
+-    {
+-        long w, h;
+-        wxArrayString lines;
+-        wxClientDC dc(m_colWindow);
+-        dc.SetFont(GetLabelFont());
+-        StringToLines(GetColLabelValue(col), lines);
+-        if ( GetColLabelTextOrientation() == wxHORIZONTAL )
+-            GetTextBoxSize( dc, lines, &w, &h );
+-        else
+-            GetTextBoxSize( dc, lines, &h, &w );
+-        width = w + 6;
+-        //check that it is not less than the minimal width
+-        width = wxMax(width, GetColMinimalAcceptableWidth());
+-    }
+-
+     // we intentionally don't test whether the width is less than
+     // GetColMinimalWidth() here but we do compare it with
+     // GetColMinimalAcceptableWidth() as otherwise things currently break (see
+@@ -8128,8 +8141,50 @@
+         InitColWidths();
+     }
+ 
+-    const int diff = width - m_colWidths[col];
+-    m_colWidths[col] = width;
++    // get the current width. If hidden it will be lastwidth*-1
++    int curWidth=m_colWidths[col];
++
++    // we shouldn't restore a column's width if it's not hidden
++    // we also shouldn't do anything if it's already hidden and they're asking us to hide it
++    if ( ( width < 0 && curWidth > 0 ) || ( width == 0 && curWidth < 1 ) )
++      return;
++
++    // the width we're proposing for this column
++    int newWidth=width;
++
++    // a special case, if width is -1 it means restore a hidden column to the last visible width
++    if ( width < 0 )
++    {
++        // restore the height from the saved one
++        newWidth=curWidth*-1;
++        curWidth=0;
++    }
++
++    // if the width is 0 then they must be hiding this column, save the last width as -1*current width
++    if (width==0) 
++    {
++        m_colWidths[col]*=-1;
++        newWidth=0;
++    }
++    else 
++    {
++        // not hiding it we can update the height
++        m_colWidths[col] = newWidth;
++    }
++
++    // if the row is already that size we don't need to do anything
++    if ( curWidth == newWidth )
++      return;
++
++
++    // a hidden row really has a current height of 0
++    if (curWidth<0)
++    {
++      curWidth=0;
++    }
++
++    int diff = newWidth - curWidth;
++
+     if ( m_useNativeHeader )
+         GetGridColHeader()->UpdateColumn(col);
+     //else: will be refreshed when the header is redrawn
+@@ -8498,7 +8553,17 @@
+     }
+ 
+     // autosize row height depending on label text
+-    SetRowSize(row, -1);
++    long w, h;
++    wxArrayString lines;
++    wxClientDC dc(m_rowLabelWin);
++    dc.SetFont(GetLabelFont());
++    StringToLines(GetRowLabelValue( row ), lines);
++    GetTextBoxSize( dc, lines, &w, &h );
++    //check that it is not less than the minimal height
++    int height = wxMax(h, GetRowMinimalAcceptableHeight());
++    // set the row height
++    SetRowSize(row, height);
++
+     ForceRefresh();
+ }
+ 
+@@ -8513,7 +8578,21 @@
+     }
+ 
+     // autosize column width depending on label text
+-    SetColSize(col, -1);
++    long w, h;
++    wxArrayString lines;
++    wxClientDC dc(m_colWindow);
++    dc.SetFont(GetLabelFont());
++    StringToLines(GetColLabelValue(col), lines);
++    if ( GetColLabelTextOrientation() == wxHORIZONTAL )
++        GetTextBoxSize( dc, lines, &w, &h );
++    else
++        GetTextBoxSize( dc, lines, &h, &w );
++    int width = w + 6;
++    //check that it is not less than the minimal width
++    width = wxMax(width, GetColMinimalAcceptableWidth());
++    // set the column width
++    SetColSize(col, width);
++
+     ForceRefresh();
+ }
+ 
+@@ -8928,8 +9007,15 @@
+ int wxGridSizesInfo::GetSize(unsigned pos) const
+ {
+     wxUnsignedToIntHashMap::const_iterator it = m_customSizes.find(pos);
++    // if it's not found return the default
++    if ( it == m_customSizes.end() )
++      return m_sizeDefault;
++    // otherwise return 0 if it's hidden. NOTE: We should add an additional 
++    // method to return the hidden size. 
++    if ( it->second < 0 )
++      return 0;
+ 
+-    return it == m_customSizes.end() ? m_sizeDefault : it->second;
++    return it->second;
+ }
+ 
+ // ----------------------------------------------------------------------------

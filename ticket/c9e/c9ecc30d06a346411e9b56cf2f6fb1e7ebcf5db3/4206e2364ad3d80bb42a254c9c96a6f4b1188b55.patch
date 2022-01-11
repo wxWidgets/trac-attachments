@@ -1,0 +1,357 @@
+Index: src/common/filefn.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/filefn.cpp,v
+retrieving revision 1.266
+diff -u -r1.266 filefn.cpp
+--- src/common/filefn.cpp	2006/06/30 14:24:14	1.266
++++ src/common/filefn.cpp	2006/07/13 15:28:48
+@@ -34,6 +34,8 @@
+ #include "wx/filename.h"
+ #include "wx/dir.h"
+ 
++#include "wx/tokenzr.h"
++
+ // there are just too many of those...
+ #ifdef __VISUALC__
+     #pragma warning(disable:4706)   // assignment within conditional expression
+@@ -143,24 +145,24 @@
+ // ----------------------------------------------------------------------------
+ // wxPathList
+ // ----------------------------------------------------------------------------
+-
+-// IMPLEMENT_DYNAMIC_CLASS(wxPathList, wxStringList)
+ 
+-static inline wxChar* MYcopystring(const wxString& s)
+-{
+-    wxChar* copy = new wxChar[s.length() + 1];
+-    return wxStrcpy(copy, s.c_str());
+-}
++// IMPLEMENT_DYNAMIC_CLASS(wxPathList, wxArrayString)
+ 
+-static inline wxChar* MYcopystring(const wxChar* s)
++void wxPathList::Add (const wxString& path)
+ {
+-    wxChar* copy = new wxChar[wxStrlen(s) + 1];
+-    return wxStrcpy(copy, s);
++    // add only the path part of the given string (not the filename, in case it's present)
++    wxFileName fn(path + wxFileName::GetPathSeparator());
++    fn.Normalize();     // add only normalized paths
++    
++    wxString toadd = fn.GetPath();
++    if (Index(toadd) == wxNOT_FOUND)
++        wxArrayString::Add(toadd);      // do not add duplicates
+ }
+ 
+-void wxPathList::Add (const wxString& path)
++void wxPathList::Add(const wxArrayString &arr)
+ {
+-    wxStringList::Add (WXSTRINGCAST path);
++    for (size_t j=0; j < arr.GetCount(); j++)
++        Add(arr[j]);
+ }
+ 
+ // Add paths e.g. from the PATH environment variable
+@@ -168,43 +170,24 @@
+ {
+     // No environment variables on WinCE
+ #ifndef __WXWINCE__
++
++    // The space has been removed from the tokenizers, otherwise a
++    // path such as "C:\Program Files" would be split into 2 paths:
++    // "C:\Program" and "Files"; this is true for both Windows and Unix.
++
+     static const wxChar PATH_TOKS[] =
+ #if defined(__WINDOWS__) || defined(__OS2__)
+-        /*
+-        The space has been removed from the tokenizers, otherwise a
+-        path such as "C:\Program Files" would be split into 2 paths:
+-        "C:\Program" and "Files"
+-        */
+-//        wxT(" ;"); // Don't separate with colon in DOS (used for drive)
+         wxT(";"); // Don't separate with colon in DOS (used for drive)
+ #else
+-        wxT(" :;");
++        wxT(":;");
+ #endif
+ 
+     wxString val ;
+-    if (wxGetEnv (WXSTRINGCAST envVariable, &val))
++    if (wxGetEnv (envVariable, &val))
+     {
+-        wxChar *s = MYcopystring (val);
+-        wxChar *save_ptr, *token = wxStrtok (s, PATH_TOKS, &save_ptr);
+-
+-        if (token)
+-        {
+-            Add(token);
+-            while (token)
+-            {
+-                if ( (token = wxStrtok ((wxChar *) NULL, PATH_TOKS, &save_ptr))
+-                    != NULL )
+-                {
+-                    Add(token);
+-                }
+-            }
+-        }
+-
+-        // suppress warning about unused variable save_ptr when wxStrtok() is a
+-        // macro which throws away its third argument
+-        save_ptr = token;
+-
+-        delete [] s;
++        // split into an array of string the value of the env var
++        wxArrayString arr = wxStringTokenize(val, PATH_TOKS);
++        WX_APPEND_ARRAY(*this, arr);
+     }
+ #endif // !__WXWINCE__
+ }
+@@ -217,60 +200,42 @@
+     wxString path_only(wxPathOnly(path));
+     if ( !path_only.empty() )
+     {
+-        if ( !Member(path_only) )
++        if ( Index(path_only) == wxNOT_FOUND )
+             Add(path_only);
+     }
+ }
+ 
+-bool wxPathList::Member (const wxString& path)
++// deprecated !
++bool wxPathList::Member (const wxString& path) const
+ {
+-  for (wxStringList::compatibility_iterator node = GetFirst(); node; node = node->GetNext())
+-  {
+-      wxString path2( node->GetData() );
+-      if (
+-#if defined(__WINDOWS__) || defined(__OS2__) || defined(__VMS__) || defined(__WXMAC__)
+-      // Case INDEPENDENT
+-          path.CompareTo (path2, wxString::ignoreCase) == 0
+-#else
+-      // Case sensitive File System
+-          path.CompareTo (path2) == 0
+-#endif
+-        )
+-        return true;
+-  }
+-  return false;
++    return Index(path) != wxNOT_FOUND;
+ }
+ 
+-wxString wxPathList::FindValidPath (const wxString& file)
++wxString wxPathList::FindValidPath (const wxString& file) const
+ {
+-  wxExpandPath(wxFileFunctionsBuffer, file);
+-
+-  wxChar buf[_MAXPATHLEN];
+-  wxStrcpy(buf, wxFileFunctionsBuffer);
+-
+-  wxChar *filename = wxIsAbsolutePath (buf) ? wxFileNameFromPath (buf) : (wxChar *)buf;
++    wxFileName fn(file);
++    wxString strend;
++    
++    fn.Normalize();
++    if (fn.IsAbsolute())
++        strend = fn.GetFullName();
++    else
++        strend = fn.GetFullPath();
+ 
+-  for (wxStringList::compatibility_iterator node = GetFirst(); node; node = node->GetNext())
++    for (size_t i=0; i<GetCount(); i++)
+     {
+-      const wxString path(node->GetData());
+-      wxStrcpy (wxFileFunctionsBuffer, path);
+-      wxChar ch = wxFileFunctionsBuffer[wxStrlen(wxFileFunctionsBuffer)-1];
+-      if (ch != wxT('\\') && ch != wxT('/'))
+-        wxStrcat (wxFileFunctionsBuffer, wxT("/"));
+-      wxStrcat (wxFileFunctionsBuffer, filename);
+-#ifdef __WINDOWS__
+-      wxUnix2DosFilename (wxFileFunctionsBuffer);
+-#endif
+-      if (wxFileExists (wxFileFunctionsBuffer))
+-      {
+-        return wxString(wxFileFunctionsBuffer);        // Found!
+-      }
+-    }                                // for()
+-
+-  return wxEmptyString;                    // Not found
++        wxString strstart = Item(i);
++        if (!strstart.IsEmpty() && strstart.Last() != wxFileName::GetPathSeparator())
++            strstart += wxFileName::GetPathSeparator();
++            
++        if (wxFileExists(strstart + strend))
++            return strstart + strend;        // Found!
++    }
++    
++    return wxEmptyString;                    // Not found
+ }
+ 
+-wxString wxPathList::FindAbsoluteValidPath (const wxString& file)
++wxString wxPathList::FindAbsoluteValidPath (const wxString& file) const
+ {
+     wxString f = FindValidPath(file);
+     if ( f.empty() || wxIsAbsolutePath(f) )
+@@ -286,6 +251,23 @@
+ 
+     return buf;
+ }
++
++// ----------------------------------------------------------------------------
++// miscellaneous global functions (TOFIX!)
++// ----------------------------------------------------------------------------
++
++static inline wxChar* MYcopystring(const wxString& s)
++{
++    wxChar* copy = new wxChar[s.length() + 1];
++    return wxStrcpy(copy, s.c_str());
++}
++
++static inline wxChar* MYcopystring(const wxChar* s)
++{
++    wxChar* copy = new wxChar[wxStrlen(s) + 1];
++    return wxStrcpy(copy, s);
++}
++
+ 
+ bool
+ wxFileExists (const wxString& filename)
+Index: include/wx/filefn.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/filefn.h,v
+retrieving revision 1.134
+diff -u -r1.134 filefn.h
+--- include/wx/filefn.h	2006/04/16 21:13:56	1.134
++++ include/wx/filefn.h	2006/07/13 15:17:30
+@@ -595,25 +595,35 @@
+ 
+ 
+ // Path searching
+-class WXDLLIMPEXP_BASE wxPathList : public wxStringList
++class WXDLLIMPEXP_BASE wxPathList : public wxArrayString
+ {
+ public:
++    wxPathList() {}
++    wxPathList(const wxArrayString &arr)
++        { Add(arr); }
++
+     // avoid GCC warning about virtual functions w/o virtual dtor
+     virtual ~wxPathList() {}
+ 
+     // Adds all paths in environment variable
+     void AddEnvList(const wxString& envVariable);
+ 
++    // Adds given path to this list
+     void Add(const wxString& path);
++    void Add(const wxArrayString &paths);
++    
+     // Find the first full path for which the file exists
+-    wxString FindValidPath(const wxString& filename);
++    wxString FindValidPath(const wxString& filename) const;
++    
+     // Find the first full path for which the file exists; ensure it's an
+     // absolute path that gets returned.
+-    wxString FindAbsoluteValidPath(const wxString& filename);
++    wxString FindAbsoluteValidPath(const wxString& filename) const;
++    
+     // Given full path and filename, add path to list
+     void EnsureFileAccessible(const wxString& path);
++    
+     // Returns true if the path is in the list
+-    bool Member(const wxString& path);
++    wxDEPRECATED( bool Member(const wxString& path) const );
+ 
+ private:
+     // DECLARE_DYNAMIC_CLASS(wxPathList)
+Index: docs/latex/wx/pathlist.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/pathlist.tex,v
+retrieving revision 1.5
+diff -u -r1.5 pathlist.tex
+--- docs/latex/wx/pathlist.tex	2004/09/28 11:54:59	1.5
++++ docs/latex/wx/pathlist.tex	2006/07/13 15:21:36
+@@ -6,13 +6,12 @@
+ using a locally-defined list of directories makes the application and its files more
+ portable.
+ 
+-Use the {\it wxFileNameFromPath} global function to extract the filename
+-from the path.
++Use the \helpref{wxFileName::SplitPath}{wxfilenamesplitpath} global function 
++to extract the filename from the path.
+ 
+ \wxheading{Derived from}
+ 
+-\helpref{wxList}{wxlist}\\
+-\helpref{wxObject}{wxobject}
++\helpref{wxArrayString}{wxarraystring}
+ 
+ \wxheading{Include files}
+ 
+@@ -20,7 +19,7 @@
+ 
+ \wxheading{See also}
+ 
+-\helpref{wxList}{wxlist}
++\helpref{wxArrayString}{wxarraystring}
+ 
+ \latexignore{\rtfignore{\wxheading{Members}}}
+ 
+@@ -29,9 +28,13 @@
+ 
+ \func{}{wxPathList}{\void}
+ 
+-Constructor.
++Empty constructor.
+ 
++\func{}{wxPathList}{\param{const wxArrayString\& }{arr}}
+ 
++Constructs the object calling the \helpref{Add}{wxpathlistadd} function.
++
++
+ \membersection{wxPathList::AddEnvList}\label{wxpathlistaddenvlist}
+ 
+ \func{void}{AddEnvList}{\param{const wxString\& }{env\_variable}}
+@@ -44,10 +47,13 @@
+ \membersection{wxPathList::Add}\label{wxpathlistadd}
+ 
+ \func{void}{Add}{\param{const wxString\& }{path}}
++
++\func{void}{Add}{\param{const wxArrayString\& }{arr}}
++
++The first form adds the given directory (the filename if present is removed)
++to the path list, if the path is not already in the list.
+ 
+-Adds the given directory to the path list, but does not
+-check if the path was already on the list (use 
+-\helpref{wxPathList::Member()}{wxpathlistmember} for this).
++The second form just calls the first form on all elements of the given array.
+ 
+ 
+ \membersection{wxPathList::EnsureFileAccessible}\label{wxpathlistensurefileaccessible}
+@@ -61,7 +67,7 @@
+ 
+ \membersection{wxPathList::FindAbsoluteValidPath}\label{wxpathlistfindabsolutepath}
+ 
+-\func{wxString}{FindAbsoluteValidPath}{\param{const wxString\& }{file}}
++\constfunc{wxString}{FindAbsoluteValidPath}{\param{const wxString\& }{file}}
+ 
+ Searches for a full path for an existing file by appending {\it file} to
+ successive members of the path list.  If the file wasn't found, an empty
+@@ -70,16 +76,9 @@
+ 
+ \membersection{wxPathList::FindValidPath}\label{wxpathlistfindvalidpath}
+ 
+-\func{wxString}{FindValidPath}{\param{const wxString\& }{file}}
++\constfunc{wxString}{FindValidPath}{\param{const wxString\& }{file}}
+ 
+ Searches for a full path for an existing file by appending {\it file} to
+ successive members of the path list.  If the file wasn't found, an empty string
+ is returned. This path may be relative to the current working directory.
+-
+-
+-\membersection{wxPathList::Member}\label{wxpathlistmember}
+-
+-\func{bool}{Member}{\param{const wxString\& }{file}}
+-
+-true if the path is in the path list (ignoring case).
+ 
+
+ 	  	 

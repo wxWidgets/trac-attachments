@@ -1,0 +1,168 @@
+diff --git a/src/msw/toplevel.cpp b/src/msw/toplevel.cpp
+index a9a331a..2011cef 100644
+--- a/src/msw/toplevel.cpp
++++ b/src/msw/toplevel.cpp
+@@ -60,6 +60,22 @@
+ LONG APIENTRY
+ wxDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+ 
++
++// ----------------------------------------------------------------------------
++// wxTLWHiddenParentDestroyer: used to destroy a hidden parent in a delayed manner
++// ----------------------------------------------------------------------------
++class wxTLWHiddenParentDestroyer : public wxEvtHandler
++{
++public:
++    void DestroyHWND(HWND hwnd)
++    {
++        if ( !::DestroyWindow(hwnd) )
++        {
++            wxLogLastError(wxT("DestroyWindow(hidden TLW parent)"));
++        }
++    }
++};
++
+ // ----------------------------------------------------------------------------
+ // wxTLWHiddenParentModule: used to manage the hidden parent window (we need a
+ // module to ensure that the window is always deleted)
+@@ -72,12 +88,13 @@ public:
+     virtual bool OnInit() wxOVERRIDE;
+     virtual void OnExit() wxOVERRIDE;
+ 
+-    // get the hidden window (creates on demand)
+-    static HWND GetHWND();
++    // get a new hidden window
++    static HWND GetNewHWND();
++
++    // need a wxEvtHandler to use CallAfter
++    static wxTLWHiddenParentDestroyer *ms_destroyer;
+ 
+ private:
+-    // the HWND of the hidden parent
+-    static HWND ms_hwnd;
+ 
+     // the class used to create it
+     static const wxChar *ms_className;
+@@ -249,7 +266,7 @@ WXHWND wxTopLevelWindowMSW::MSWGetParent() const
+     if ( HasFlag(wxFRAME_NO_TASKBAR) && !hwndParent )
+     {
+         // use hidden parent
+-        hwndParent = wxTLWHiddenParentModule::GetHWND();
++        hwndParent = wxTLWHiddenParentModule::GetNewHWND();
+     }
+ 
+     return (WXHWND)hwndParent;
+@@ -521,8 +538,20 @@ wxTopLevelWindowMSW::~wxTopLevelWindowMSW()
+             ::BringWindowToTop(GetHwndOf(parent));
+         }
+     }
++    else if ( HasFlag(wxFRAME_NO_TASKBAR) )
++    {
++        HWND hwnd = GetHwndOf(this);
++
++        // We made a hidden TLW, need to destroy it but destroying it now
++        // would recursively destroy ourselves too early
++        // Can't use ::GetParent because it fails (returns NULL) when
++        // the hidden parent window is a WS_OVERLAPPEDWINDOW
++        HWND parent = ::GetWindow(hwnd, GW_OWNER);
++        wxTLWHiddenParentModule::ms_destroyer->CallAfter(&wxTLWHiddenParentDestroyer::DestroyHWND, parent);
++    }
+ }
+ 
++
+ // ----------------------------------------------------------------------------
+ // wxTopLevelWindowMSW showing
+ // ----------------------------------------------------------------------------
+@@ -1270,13 +1299,12 @@ wxDlgProc(HWND WXUNUSED(hDlg),
+ // wxTLWHiddenParentModule implementation
+ // ============================================================================
+ 
+-HWND wxTLWHiddenParentModule::ms_hwnd = NULL;
+-
++wxTLWHiddenParentDestroyer *wxTLWHiddenParentModule::ms_destroyer = NULL;
+ const wxChar *wxTLWHiddenParentModule::ms_className = NULL;
+ 
+ bool wxTLWHiddenParentModule::OnInit()
+ {
+-    ms_hwnd = NULL;
++    ms_destroyer = new wxTLWHiddenParentDestroyer();
+     ms_className = NULL;
+ 
+     return true;
+@@ -1284,15 +1312,7 @@ bool wxTLWHiddenParentModule::OnInit()
+ 
+ void wxTLWHiddenParentModule::OnExit()
+ {
+-    if ( ms_hwnd )
+-    {
+-        if ( !::DestroyWindow(ms_hwnd) )
+-        {
+-            wxLogLastError(wxT("DestroyWindow(hidden TLW parent)"));
+-        }
+-
+-        ms_hwnd = NULL;
+-    }
++    delete ms_destroyer;
+ 
+     if ( ms_className )
+     {
+@@ -1306,38 +1326,35 @@ void wxTLWHiddenParentModule::OnExit()
+ }
+ 
+ /* static */
+-HWND wxTLWHiddenParentModule::GetHWND()
++HWND wxTLWHiddenParentModule::GetNewHWND()
+ {
+-    if ( !ms_hwnd )
++    if ( !ms_className )
+     {
+-        if ( !ms_className )
+-        {
+-            static const wxChar *HIDDEN_PARENT_CLASS = wxT("wxTLWHiddenParent");
++        static const wxChar *HIDDEN_PARENT_CLASS = wxT("wxTLWHiddenParent");
+ 
+-            WNDCLASS wndclass;
+-            wxZeroMemory(wndclass);
++        WNDCLASS wndclass;
++        wxZeroMemory(wndclass);
+ 
+-            wndclass.lpfnWndProc   = DefWindowProc;
+-            wndclass.hInstance     = wxGetInstance();
+-            wndclass.lpszClassName = HIDDEN_PARENT_CLASS;
++        wndclass.lpfnWndProc   = DefWindowProc;
++        wndclass.hInstance     = wxGetInstance();
++        wndclass.lpszClassName = HIDDEN_PARENT_CLASS;
+ 
+-            if ( !::RegisterClass(&wndclass) )
+-            {
+-                wxLogLastError(wxT("RegisterClass(\"wxTLWHiddenParent\")"));
+-            }
+-            else
+-            {
+-                ms_className = HIDDEN_PARENT_CLASS;
+-            }
++        if ( !::RegisterClass(&wndclass) )
++        {
++            wxLogLastError(wxT("RegisterClass(\"wxTLWHiddenParent\")"));
+         }
+-
+-        ms_hwnd = ::CreateWindow(ms_className, wxEmptyString, 0, 0, 0, 0, 0, NULL,
+-                                 (HMENU)NULL, wxGetInstance(), NULL);
+-        if ( !ms_hwnd )
++        else
+         {
+-            wxLogLastError(wxT("CreateWindow(hidden TLW parent)"));
++            ms_className = HIDDEN_PARENT_CLASS;
+         }
+     }
+ 
+-    return ms_hwnd;
++    HWND hwnd = ::CreateWindow(ms_className, wxEmptyString, 0, 0, 0, 0, 0, NULL,
++                               (HMENU)NULL, wxGetInstance(), NULL);
++    if ( !hwnd )
++    {
++        wxLogLastError(wxT("CreateWindow(hidden TLW parent)"));
++    }
++
++    return hwnd;
+ }

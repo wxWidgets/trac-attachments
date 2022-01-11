@@ -1,0 +1,425 @@
+diff -uNr wxWidgets-orig/include/wx/process.h wxWidgets/include/wx/process.h
+--- wxWidgets-orig/include/wx/process.h	2010-06-28 02:21:54.000000000 -0700
++++ wxWidgets/include/wx/process.h	2012-12-20 15:58:34.000000000 -0800
+@@ -30,6 +30,10 @@
+     wxPROCESS_REDIRECT = 1
+ };
+ 
++#if defined(__WXCOCOA__) || ( defined(__WXOSX_MAC__) && wxOSX_USE_COCOA_OR_CARBON )
++#include "wx/osx/private.h"
++#endif
++
+ // ----------------------------------------------------------------------------
+ // A wxProcess object should be passed to wxExecute - than its OnTerminate()
+ // function will be called when the process terminates.
+@@ -110,11 +114,26 @@
+     // needs to be public since it needs to be used from wxExecute() global func
+     void SetPid(long pid) { m_pid = pid; }
+ 
++#if defined(__WXCOCOA__) || ( defined(__WXOSX_MAC__) && wxOSX_USE_COCOA_OR_CARBON )
++    // needs to be public since it must be used from wxMacLaunch() global func
++    bool SetTerminationHandler(bool enable);
++    long SetProcessNumber(const ProcessSerialNumber *psn);
++#endif
++
+ protected:
+     void Init(wxEvtHandler *parent, int id, int flags);
+ 
+     int m_id;
+     long m_pid;
++#if defined(__WXCOCOA__) || ( defined(__WXOSX_MAC__) && wxOSX_USE_COCOA_OR_CARBON )
++    ProcessSerialNumber m_psn;          // OS X process number
++    EventHandlerRef m_sCarbonEventsRef; // registered Carbon event reference
++    
++    static OSStatus CarbonEventHandler(EventHandlerCallRef inHandlerCallRef, 
++                                       EventRef inEvent, 
++                                       void *inUserData
++                                       );
++#endif
+ 
+ #if wxUSE_STREAMS
+     // these streams are connected to stdout, stderr and stdin of the child
+diff -uNr wxWidgets-orig/src/common/process.cpp wxWidgets/src/common/process.cpp
+--- wxWidgets-orig/src/common/process.cpp	2011-03-19 18:30:37.000000000 -0700
++++ wxWidgets/src/common/process.cpp	2012-12-20 15:55:22.000000000 -0800
+@@ -52,6 +52,11 @@
+     m_pid        = 0;
+     m_redirect   = (flags & wxPROCESS_REDIRECT) != 0;
+ 
++#if defined(__WXCOCOA__) || ( defined(__WXOSX_MAC__) && wxOSX_USE_COCOA_OR_CARBON )
++    m_sCarbonEventsRef = NULL;
++    memset(&m_psn, 0, sizeof(ProcessSerialNumber));
++#endif
++    
+ #if wxUSE_STREAMS
+     m_inputStream  = NULL;
+     m_errorStream  = NULL;
+@@ -88,6 +93,10 @@
+     delete m_errorStream;
+     delete m_outputStream;
+ #endif // wxUSE_STREAMS
++    
++#if defined(__WXCOCOA__) || ( defined(__WXOSX_MAC__) && wxOSX_USE_COCOA_OR_CARBON )    
++    SetTerminationHandler(false);
++#endif
+ }
+ 
+ void wxProcess::OnTerminate(int pid, int status)
+@@ -111,6 +120,133 @@
+     m_nextHandler = NULL;
+ }
+ 
++#if defined(__WXCOCOA__) || ( defined(__WXOSX_MAC__) && wxOSX_USE_COCOA_OR_CARBON )
++
++/*
++ * Install or remove a notification handler for OS X process termination
++ * events (internal use only).
++ */
++bool wxProcess::SetTerminationHandler(bool enable)
++{
++    if (NULL != m_sCarbonEventsRef)
++    {
++        // Remove current notification event handler
++        ::RemoveEventHandler(m_sCarbonEventsRef);
++        m_sCarbonEventsRef = NULL;
++    }
++
++    if (!enable)
++        return true; // the event handler has been removed
++    
++    static const EventTypeSpec kEvents[] = {
++        //{ kEventClassApplication, kEventAppLaunched },    // launch events
++        { kEventClassApplication, kEventAppTerminated }     // termination events
++    };
++    
++    // Install a notification handler to catch process terminations
++    EventTargetRef targetRef = ::GetApplicationEventTarget();
++    OSStatus status = ::InstallEventHandler(targetRef,
++                                            (EventHandlerUPP) CarbonEventHandler,
++                                            GetEventTypeCount(kEvents),
++                                            kEvents,
++                                            (void *)this,
++                                            &m_sCarbonEventsRef
++                                            );
++    if (noErr != status)
++    {
++        wxLogDebug(wxT("SetTerminationHandler: InstallEventHandler failed: %d"), status);
++        return false;
++    }
++    return true;
++}
++
++/*
++ * Save the given OS X process number and return the corresponding
++ * unix-like pid (internal use only).
++ */
++long wxProcess::SetProcessNumber(const ProcessSerialNumber *psn)
++{
++    if ( psn )
++    {
++        // Save the process number
++        memcpy(&m_psn, psn, sizeof(ProcessSerialNumber));
++        pid_t pid;
++        if (noErr == ::GetProcessPID(psn, (pid_t *)&pid))
++        {
++            SetPid(pid);    // save pid in this object
++            return pid;
++        }
++    }
++    return 0;   // error
++}
++
++/*
++ * This function is called by the system when any process launches or terminates
++ * (depending on the event types specified by the call to InstallEventHandler).
++ * For a termination, if the event's process serial number value matches that
++ * saved for the launched process, OnTerminate() is dispatched.
++ */
++/* static */
++OSStatus wxProcess::CarbonEventHandler(EventHandlerCallRef WXUNUSED(inHandlerCallRef), 
++                                       EventRef            inEvent, 
++                                       void *              inUserData
++                                       )
++{
++    // Get the event's process number
++    ProcessSerialNumber psnSource;
++    OSErr err = ::GetEventParameter(inEvent, 
++                                    kEventParamProcessID, 
++                                    typeProcessSerialNumber, 
++                                    NULL, 
++                                    sizeof(psnSource), 
++                                    NULL, 
++                                    &psnSource
++                                    );
++    if (noErr != err)
++        return err;
++    
++    // Get our target process number from the object's pid value
++    wxProcess *pThis = (wxProcess *)inUserData;
++    
++    switch ( ::GetEventKind(inEvent) )
++    {
++        case kEventAppLaunched:
++        {
++            /*wxLogDebug(wxT("launched psn %u.%u"), 
++                       (unsigned int) psnSource.highLongOfPSN, 
++                       (unsigned int) psnSource.lowLongOfPSN
++                       ); */
++            // A process has been launched
++            
++            break;
++        }
++        case kEventAppTerminated:
++        {
++            /*wxLogDebug(wxT("terminated psn %u.%u"), 
++                       (unsigned int) psnSource.highLongOfPSN, 
++                       (unsigned int) psnSource.lowLongOfPSN
++                       ); */
++            // A process has terminated
++            if (memcmp(&psnSource, &pThis->m_psn, sizeof(ProcessSerialNumber)) == 0)
++            {
++                // Our process has terminated
++                
++                // Notify interested parties of the termination
++                wxLogDebug(wxT("launched process %d has terminated"), pThis->GetPid());
++                pThis->OnTerminate(pThis->GetPid(), 0 /* status */);
++                pThis = NULL;   // "this" likely deleted
++            }
++            break;
++        }
++            
++        default:
++            wxASSERT_MSG(true, "unexpected Carbon event kind");
++            break;
++    }
++    return noErr;
++}
++#endif
++
+ // ----------------------------------------------------------------------------
+ // process IO redirection
+ // ----------------------------------------------------------------------------
+diff -uNr wxWidgets-orig/src/osx/core/utilsexc_base.cpp wxWidgets/src/osx/core/utilsexc_base.cpp
+--- wxWidgets-orig/src/osx/core/utilsexc_base.cpp	2012-04-05 17:30:21.000000000 -0700
++++ wxWidgets/src/osx/core/utilsexc_base.cpp	2012-12-20 15:59:45.000000000 -0800
+@@ -38,6 +38,7 @@
+ #endif
+ 
+ // More WX Includes
++#include "wx/process.h"
+ #include "wx/filename.h"
+ #include "wx/osx/core/cfstring.h"
+ #include "wx/osx/core/private.h"
+@@ -112,16 +113,21 @@
+ //  IMPLEMENTATION
+ //===========================================================================
+ 
++// Mutually exclusive - old method vs new
++#undef __OPENURL_METHOD__
++#define __OPENAPP_METHOD__   // define this to receive wxProcess::OnTerminate
++
+ //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ //
+ //    wxMacLaunch
+ //
+ // argv is the command line split up, with the application path first
+-// flags are the flags from wxExecute
+-// process is the process passed from wxExecute for pipe streams etc.
+-// returns -1 on error for wxEXEC_SYNC and 0 on error for wxEXEC_ASYNC
++// flags wxEXEC_ASYNC only
++// process is the wxProcess passed from wxExecute
++// env is the environment passed from wxExecute
++// returns unix-like process id (-1 if none available) or 0 on error
+ //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+-bool wxMacLaunch(char **argv)
++long wxMacLaunch(char **argv, wxProcess *process, const wxExecuteEnv *env)
+ {
+     // Obtains the number of arguments for determining the size of
+     // the CFArray used to hold them
+@@ -136,7 +142,7 @@
+     if(cfiCount == 0)
+     {
+         wxLogDebug(wxT("wxMacLaunch No file to launch!"));
+-        return false ;
++        return 0 ;
+     }
+ 
+     // Path to bundle
+@@ -155,7 +161,7 @@
+     if(!cfurlApp)
+     {
+         wxLogDebug(wxT("wxMacLaunch Can't open path: %s"), path.c_str());
+-        return false ;
++        return 0 ;
+     }
+ 
+     // Create a CFBundle from the CFURL created earlier
+@@ -168,7 +174,7 @@
+     {
+         wxLogDebug(wxT("wxMacLaunch Bad bundle: %s"), path.c_str());
+         CFRelease(cfurlApp);
+-        return false ;
++        return 0 ;
+     }
+ 
+     // Get the bundle type and make sure its an 'APPL' bundle
+@@ -180,7 +186,7 @@
+         wxLogDebug(wxT("wxMacLaunch Not an APPL bundle: %s"), path.c_str());
+         CFRelease(cfbApp);
+         CFRelease(cfurlApp);
+-        return false ;
++        return 0 ;
+     }
+ 
+     // Create a CFArray for dealing with the command line
+@@ -192,7 +198,7 @@
+         wxLogDebug(wxT("wxMacLaunch Could not create CFMutableArray"));
+         CFRelease(cfbApp);
+         CFRelease(cfurlApp);
+-        return false ;
++        return 0 ;
+     }
+ 
+     // Loop through command line arguments to the bundle,
+@@ -206,7 +212,7 @@
+         if (wxStrcmp(*argv, wxT("<")) == 0)
+             continue;
+ 
+-
++#ifdef __OPENURL_METHOD__
+         CFURLRef cfurlCurrentFile;    // CFURL to hold file path
+         wxFileName argfn(*argv);     // Filename for path
+ 
+@@ -256,8 +262,18 @@
+             cfurlCurrentFile
+                         );
+         CFRelease(cfurlCurrentFile); // array has retained it
++#endif
++        
++#ifdef __OPENAPP_METHOD__
++        
++        // Add this argument string to the argument array
++        CFStringRef argRef = CFStringCreateWithCString(kCFAllocatorDefault, *argv, kCFStringEncodingMacRoman);
++        CFArrayAppendValue(cfaFiles, argRef);
++        CFRelease(argRef);
++#endif
+     }
+ 
++#ifdef __OPENURL_METHOD__
+     // Create a LSLaunchURLSpec for use with LSOpenFromURLSpec
+     // Note that there are several flag options (launchFlags) such
+     // as kLSLaunchDontSwitch etc. and maybe we could be more
+@@ -273,22 +289,75 @@
+     // 2nd parameter is a pointer to a CFURL that gets
+     // the actual path launched by the function
+     OSStatus status = LSOpenFromURLSpec(&launchspec, NULL);
+-
++#endif
++    
++#ifdef __OPENAPP_METHOD__
++    if ( process )
++    {
++        // Set up a process termination event callback
++        process->SetTerminationHandler(true);
++    }
++    
++    // Get the app bundle path as an FSRef
++    FSRef fsrefApp;
++    CFURLGetFSRef(cfurlApp, &fsrefApp);
++    
++    // Create the params object for executing the app
++    LSApplicationParameters params = {0, kLSLaunchDontAddToRecents, &fsrefApp, NULL, NULL, NULL};
++    params.argv = cfaFiles;  // include the args array in params
++    
++    // Asynchronously execute the app bundle and get its ProcessSerialNumber
++    ProcessSerialNumber psn;
++    OSStatus status = LSOpenApplication(&params, &psn);
++    
++    long resultPid = 0; // return value that indicates error
++    if (noErr != status)
++    {
++        wxLogDebug(wxT("wxMacLaunch LSOpenApplication error: %d"),
++                   (int)status);
++    }
++    else if ( process )
++    {
++        // Save the process number for Terminate notifications and
++        // get the corresponding unix-like PID to return
++        resultPid = process->SetProcessNumber(&psn);
++    }
++    else
++    {
++        // Get the unix-like PID to return
++        ::GetProcessPID(&psn, (pid_t *)&resultPid);
++    }
++#endif  // __OPENAPP_METHOD__
++    
+     // Cleanup corefoundation references
+     CFRelease(cfbApp);
+     CFRelease(cfurlApp);
+     CFRelease(cfaFiles);
+ 
++    
++#ifdef __OPENURL_METHOD__    
+     // Check for error from LSOpenFromURLSpec
+     if(status != noErr)
+     {
+         wxLogDebug(wxT("wxMacLaunch LSOpenFromURLSpec Error: %d"),
+                    (int)status);
+-        return false ;
++        return 0 ;
+     }
+-
++    
+     // No error from LSOpenFromURLSpec, so app was launched
+-    return true ;
++    return -1 ;
++#endif
++    
++    
++#ifdef __OPENAPP_METHOD__
++    if ( (0 == resultPid) && process )
++    {
++        // Remove the termination handler since error occurred
++        process->SetTerminationHandler(false);
++    }
++    
++    return resultPid;   // return new process's ID
++#endif
+ }
+ 
+ #endif // wxOSX_USE_COCOA_OR_CARBON
+diff -uNr wxWidgets-orig/src/unix/utilsunx.cpp wxWidgets/src/unix/utilsunx.cpp
+--- wxWidgets-orig/src/unix/utilsunx.cpp	2012-07-28 07:51:10.000000000 -0700
++++ wxWidgets/src/unix/utilsunx.cpp	2012-12-20 15:56:01.000000000 -0800
+@@ -458,7 +458,7 @@
+ // ----------------------------------------------------------------------------
+ 
+ #if defined(__DARWIN__)
+-bool wxMacLaunch(char **argv);
++long wxMacLaunch(char **argv, wxProcess *process, const wxExecuteEnv *env);
+ #endif
+ 
+ long wxExecute(const wxString& command, int flags, wxProcess *process,
+@@ -506,13 +506,15 @@
+ #endif // wxUSE_THREADS
+ 
+ #if defined(__WXCOCOA__) || ( defined(__WXOSX_MAC__) && wxOSX_USE_COCOA_OR_CARBON )
+-    // wxMacLaunch() only executes app bundles and only does it asynchronously.
+-    // It returns false if the target is not an app bundle, thus falling
+-    // through to the regular code for non app bundles.
+-    if ( !(flags & wxEXEC_SYNC) && wxMacLaunch(argv) )
+     {
+-        // we don't have any PID to return so just make up something non null
+-        return -1;
++        // wxMacLaunch() only executes app bundles and only does it asynchronously.
++        // It returns ERROR_RETURN_CODE if the target is not an app bundle, thus falling
++        // through to the regular code for non app bundles.
++        long pid;
++        if ( !(flags & wxEXEC_SYNC) && ((pid = wxMacLaunch(argv, process, env)) != ERROR_RETURN_CODE ))
++        {
++            return pid; // return the launched app's process id
++        }
+     }
+ #endif // __DARWIN__
+ 

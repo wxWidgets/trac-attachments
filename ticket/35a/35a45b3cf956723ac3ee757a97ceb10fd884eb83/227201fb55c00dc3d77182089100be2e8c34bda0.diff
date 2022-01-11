@@ -1,0 +1,203 @@
+Index: src/html/m_list.cpp
+===================================================================
+--- src/html/m_list.cpp	(revision 76396)
++++ src/html/m_list.cpp	(working copy)
+@@ -74,6 +74,13 @@
+     int maxWidth;
+ };
+ 
++enum wxHtmlListItemType 
++{
++    wxHTML_LISTTYPE_DECIMAL, wxHTML_LISTTYPE_ALPHALOWER, 
++    wxHTML_LISTTYPE_ALPHAUPPER, wxHTML_LISTTYPE_ROMANLOWER, 
++    wxHTML_LISTTYPE_ROMANUPPER
++};
++
+ class wxHtmlListCell : public wxHtmlContainerCell
+ {
+     private:
+@@ -95,6 +102,75 @@
+     wxDECLARE_NO_COPY_CLASS(wxHtmlListCell);
+ };
+ 
++// Convert a decimal to Roman numerals (copied directly from 
++// wxRichTextDecimalToRoman)
++wxString wxHtmlDecimalToRoman(long n)
++{
++    static wxArrayInt decimalNumbers;
++    static wxArrayString romanNumbers;
++    
++    // Clean up arrays
++    if (n == -1)
++    {
++        decimalNumbers.Clear();
++        romanNumbers.Clear();
++        return wxEmptyString;
++    }
++
++    if (decimalNumbers.GetCount() == 0)
++    {
++        #define wxHtmlAddDecRom(n, r) decimalNumbers.Add(n); romanNumbers.Add(r);
++
++        wxHtmlAddDecRom(1000, wxT("m"));
++        wxHtmlAddDecRom(900, wxT("cm"));
++        wxHtmlAddDecRom(500, wxT("d"));
++        wxHtmlAddDecRom(400, wxT("cd"));        
++        wxHtmlAddDecRom(100, wxT("c"));
++        wxHtmlAddDecRom(90, wxT("xc"));
++        wxHtmlAddDecRom(50, wxT("l"));
++        wxHtmlAddDecRom(40, wxT("xl"));
++        wxHtmlAddDecRom(10, wxT("x"));
++        wxHtmlAddDecRom(9, wxT("ix"));
++        wxHtmlAddDecRom(5, wxT("v"));
++        wxHtmlAddDecRom(4, wxT("iv"));
++        wxHtmlAddDecRom(1, wxT("i"));
++    }
++
++    int i = 0;
++    wxString roman;
++
++    while (n > 0 && i < 13)
++    {
++        if (n >= decimalNumbers[i])
++        {
++            n -= decimalNumbers[i];
++            roman += romanNumbers[i];
++        }
++        else
++            i ++;
++    }
++    if (roman.IsEmpty())
++        roman = wxT("0");
++    return roman;
++}
++
++// Convert a decimal to alpha numerals
++wxString wxHtmlDecimalToAlpha(long n)
++{
++    char const digits[] = "abcdefghijklmnopqrstuvwxyz";
++    size_t const base = sizeof(digits) - 1;
++    char result[sizeof(unsigned long)*CHAR_BIT + 1];
++    char* current = result + sizeof(result);
++    *--current = '\0';
++
++    while (n != 0) {
++        n--;
++        *--current = digits[n % base];
++        n /= base;
++    }
++    return current;
++}
++
+ wxHtmlListCell::wxHtmlListCell(wxHtmlContainerCell *parent) : wxHtmlContainerCell(parent)
+ {
+     m_NumRows = 0;
+@@ -221,12 +297,13 @@
+ 
+     TAG_HANDLER_VARS
+         wxHtmlListCell *m_List;
+-        int m_Numbering;
+-                // this is number of actual item of list or 0 for dots
++        char m_ListType;  // type of numbering (decimal, alpha, roman)
++        int m_Numbering;  // holds the item number or 0 for a 'bullet'
+ 
+     TAG_HANDLER_CONSTR(OLULLI)
+     {
+         m_List = NULL;
++        m_ListType = '1';
+         m_Numbering = 0;
+     }
+ 
+@@ -233,7 +310,7 @@
+     TAG_HANDLER_PROC(tag)
+     {
+         wxHtmlContainerCell *c;
+-
++        
+         // List Item:
+         if (m_List && tag.GetName() == wxT("LI"))
+         {
+@@ -241,18 +318,37 @@
+             c->SetAlignVer(wxHTML_ALIGN_TOP);
+ 
+             wxHtmlContainerCell *mark = c;
+-            c->SetWidthFloat(2 * m_WParser->GetCharWidth(), wxHTML_UNITS_PIXELS);
++            c->SetWidthFloat(4 * m_WParser->GetCharWidth(), wxHTML_UNITS_PIXELS);
+             if (m_Numbering == 0)
+             {
+                 // Centering gives more space after the bullet
+                 c->SetAlignHor(wxHTML_ALIGN_CENTER);
+-                c->InsertCell(new wxHtmlListmarkCell(m_WParser->GetDC(), m_WParser->GetActualColor()));
++                c->InsertCell(new wxHtmlListmarkCell(m_WParser->GetDC(), 
++                                                m_WParser->GetActualColor()));
+             }
+             else
+             {
+                 c->SetAlignHor(wxHTML_ALIGN_RIGHT);
+                 wxString markStr;
+-                markStr.Printf(wxT("%i. "), m_Numbering);
++                switch (m_ListType)
++                {
++                    case '1':   markStr.Printf(wxT("%i. "), 
++                                        m_Numbering);
++                                break;
++                    case 'a':   markStr.Printf(wxT("%s. "), 
++                                        wxHtmlDecimalToAlpha(m_Numbering));
++                                break;
++                    case 'A':   markStr.Printf(wxT("%s. "), 
++                                        wxHtmlDecimalToAlpha(m_Numbering).MakeUpper());
++                                break;
++                    case 'i':   markStr.Printf(wxT("%s. "), 
++                                        wxHtmlDecimalToRoman(m_Numbering));
++                                break;
++                    case 'I':   markStr.Printf(wxT("%s. "), 
++                                        wxHtmlDecimalToRoman(m_Numbering).MakeUpper());
++                                break;
++                }
++                
+                 c->InsertCell(new wxHtmlWordCell(markStr, *(m_WParser->GetDC())));
+             }
+             m_WParser->CloseContainer();
+@@ -269,10 +365,23 @@
+         // Begin of List (not-numbered): "UL", "OL"
+         else if (tag.GetName() == wxT("UL") || tag.GetName() == wxT("OL"))
+         {
++            char oldtype = m_ListType;
+             int oldnum = m_Numbering;
+ 
+-            if (tag.GetName() == wxT("UL")) m_Numbering = 0;
+-            else m_Numbering = 1;
++            if (tag.GetName() == wxT("UL")) 
++                m_Numbering = 0;
++            else 
++            {
++                if (tag.HasParam("TYPE"))
++                {
++                    wxString param = tag.GetParam("TYPE");
++                    if (param.Len() == 1)
++                        param.at(0).GetAsChar(&m_ListType);
++                }
++                else
++                    m_ListType = '1'; // ordered list use decimal by default
++                m_Numbering = 1;
++            }
+ 
+             wxHtmlContainerCell *oldcont;
+             oldcont = c = m_WParser->OpenContainer();
+@@ -279,7 +388,7 @@
+ 
+             wxHtmlListCell *oldList = m_List;
+             m_List = new wxHtmlListCell(c);
+-            m_List->SetIndent(2 * m_WParser->GetCharWidth(), wxHTML_INDENT_LEFT);
++            m_List->SetIndent(0 * m_WParser->GetCharWidth(), wxHTML_INDENT_LEFT);
+ 
+             ParseInner(tag);
+ 
+@@ -286,6 +395,7 @@
+             m_WParser->SetContainer(oldcont);
+             m_WParser->CloseContainer();
+ 
++            m_ListType = oldtype;
+             m_Numbering = oldnum;
+             m_List = oldList;
+             return true;

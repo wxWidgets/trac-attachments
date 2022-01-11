@@ -1,0 +1,191 @@
+Index: src/gtk/listbox.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/listbox.cpp,v
+retrieving revision 1.163
+diff -b -u -2 -r1.163 listbox.cpp
+--- src/gtk/listbox.cpp	2006/03/02 09:55:03	1.163
++++ src/gtk/listbox.cpp	2006/03/06 19:58:45
+@@ -496,6 +496,22 @@
+                                                 WXLISTBOX_DATACOLUMN, NULL);
+ 
+-    // Now create+set the model (GtkListStore) - first argument # of columns
+ 
++    // NB: OK, this is a bit of a hack but sort of a clever one - basically
++    // for DoGetBestSize we want only the area covered the text and
++    // checkboxes but the GtkTreeView cell functions only let us know 
++    // how much it is DRAWING to which is the size of the greater of
++    // either of the current size of the window or the text size - the problem
++    // is that it will never decrease pass the x size of the window. Here
++    // what we do is insert a "dummy" column which makes the cell functions
++    // return the real x bounds of the text and checkboxes.
++    // RN: The only real problem with this approach is that you can focus
++    //     on this column as well, but then you can focus on the toggle
++    //     column also...
++    gtk_tree_view_insert_column_with_attributes(m_treeview, -1, "", 
++                                                gtk_cell_renderer_pixbuf_new(), 
++                                                NULL);
++
++
++    // Now create+set the model (GtkListStore) - first argument # of columns
+ #if wxUSE_CHECKLISTBOX && wxUSE_NATIVEGTKCHECKLIST
+     if(m_hasCheckBoxes)
+@@ -617,4 +633,5 @@
+ 
+     GtkTreeIter* pIter;
++    GtkTreeIter iter;
+     if (pos == nCurCount)
+     {
+@@ -623,5 +640,4 @@
+     else
+     {
+-        GtkTreeIter iter;
+         gboolean res = gtk_tree_model_iter_nth_child(
+                         GTK_TREE_MODEL(m_liststore),
+@@ -684,10 +700,5 @@
+ int wxListBox::DoAppend( const wxString& item )
+ {
+-    InvalidateBestSize();
+-
+-    //Just call DoInsertItems for now
+-    //RN: Originally I had gtk_list_store_append etc.
+-    //    here as an optimization but now the insert
+-    //    has been streamlined and its quite a bit of code duplication
++    // Call DoInsertItems
+     int nWhere = wxListBox::GetCount();
+     wxArrayString aItems;
+@@ -712,4 +723,6 @@
+     wxCHECK_RET( m_treeview != NULL, wxT("invalid listbox") );
+ 
++    InvalidateBestSize();
++
+     gtk_list_store_clear( m_liststore ); /* well, THAT was easy :) */
+ }
+@@ -719,4 +732,6 @@
+     wxCHECK_RET( m_treeview != NULL, wxT("invalid listbox") );
+ 
++    InvalidateBestSize();
++
+     GtkTreeIter iter;
+     gboolean res = gtk_tree_model_iter_nth_child(
+@@ -987,40 +1002,20 @@
+     if (gdk_pointer_is_grabbed () && GTK_WIDGET_HAS_GRAB (m_treeview))
+         return;
+-
+-    // terribly efficient (RN:???)
+-    // RN: Note that evidently the vadjustment property "vadjustment" from
+-    // GtkTreeView is different from the "gtk-vadjustment"...
+-    // (i.e. gtk_tree_view_get_vadjustment)
+-    const gchar *vadjustment_key = "gtk-vadjustment";
+-    guint vadjustment_key_id = g_quark_from_static_string (vadjustment_key);
+-
+-    GtkAdjustment *adjustment =
+-       (GtkAdjustment*) g_object_get_qdata(G_OBJECT (m_treeview), vadjustment_key_id);
+-    wxCHECK_RET( adjustment, wxT("invalid listbox code") );
+-
+-    // Get the greater of the item heights from each column
+-    gint cellheight = 0, cellheightcur;
+-    GList* columnlist = gtk_tree_view_get_columns(m_treeview);
+-    GList* curlist = columnlist;
+ 
+-    while(curlist)
+-    {
+-        gtk_tree_view_column_cell_get_size(
+-            GTK_TREE_VIEW_COLUMN(curlist->data),
+-            NULL, NULL, NULL, NULL,
+-            &cellheightcur);
+-
+-        cellheight = cellheightcur > cellheight ? 
+-                      cellheightcur : cellheight;
++    GtkTreeIter iter;
++    gtk_tree_model_iter_nth_child(
++                 GTK_TREE_MODEL(m_liststore),
++                 &iter, NULL, //NULL = parent = get first
++                 n
++                                        );
+ 
+-        curlist = curlist->next;
+-    }
++    GtkTreePath* path = gtk_tree_model_get_path(
++                            GTK_TREE_MODEL(m_liststore), &iter);
+ 
+-    g_list_free(columnlist);
++    // Scroll to the desired cell (0.0 == topleft alignment)
++    gtk_tree_view_scroll_to_cell(m_treeview, path, NULL,
++                                 TRUE, 0.0f, 0.0f);
+ 
+-    float y = (float) (cellheight * n);
+-    if (y > adjustment->upper - adjustment->page_size)
+-        y = adjustment->upper - adjustment->page_size;
+-    gtk_adjustment_set_value( adjustment, y );
++    gtk_tree_path_free(path);
+ }
+ 
+@@ -1089,24 +1084,53 @@
+     wxCHECK_MSG(m_treeview, wxDefaultSize, wxT("invalid tree view"));
+ 
+-    int lbWidth;
+-    int lbHeight;
++    int lbWidth = 0;
++    int lbHeight = 0;
+ 
+-    // Get the visible area of the tree view
+-    GdkRectangle rect;
+-    gtk_tree_view_get_visible_rect(m_treeview, &rect);
+-    lbWidth = rect.width;
+-    lbHeight = rect.height;
++    // Get the visible area of the tree view (limit to the 10th item    
++    // so that it isn't too big)
++    int count = GetCount();
++    if(count)
++    {
++        GtkTreeIter iter;
++        gtk_tree_model_iter_nth_child(
++                        GTK_TREE_MODEL(m_liststore),
++                        &iter, NULL, //NULL = parent = get first
++                        count > 10 ? 9 : count - 1
++                                                );
+ 
+-    // Add room for the scrollbar
+-    lbWidth += wxSystemSettings::GetMetric(wxSYS_VSCROLL_X);
++        GtkTreePath* path = gtk_tree_model_get_path(
++                                GTK_TREE_MODEL(m_liststore), &iter);
+ 
+-    // And just a bit more
++        // Get the greatest x,y combo of either column of the last item
++        for(int iColumn = 0; iColumn <= WXLISTBOX_DATACOLUMN; ++iColumn)
++        {
++            GdkRectangle backrect;
++            gtk_tree_view_get_background_area(m_treeview, 
++                        path,
++                        gtk_tree_view_get_column(m_treeview, iColumn),              
++                        &backrect); 
++
++            int lbCellWidth = backrect.x + backrect.width;
++            int lbCellHeight = backrect.y + backrect.height;
++
++            if(lbCellWidth > lbWidth) 
++                lbWidth = lbCellWidth;
++            if(lbCellHeight > lbHeight) 
++                lbHeight = lbCellHeight;
++        }
++
++        gtk_tree_path_free(path);
++    }
++    else
++    {
++        // Make a minimum size that's not too small
+     int cx, cy;
+     GetTextExtent( wxT("X"), &cx, &cy);
+     lbWidth += 3 * cx;
++        lbHeight += 10;
++    }
+ 
+-    // don't make the listbox too tall (limit height to around 10 items) but don't
+-    // make it too small neither
+-    lbHeight = (cy+4) * wxMin(wxMax(GetCount(), 3), 10);
++    // Add room for the scrollbar
++    lbWidth += wxSystemSettings::GetMetric(wxSYS_VSCROLL_X);
+ 
+     wxSize best(lbWidth, lbHeight);
+
+ 	  	 

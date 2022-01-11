@@ -1,0 +1,242 @@
+Index: include/wx/docview.h
+===================================================================
+--- include/wx/docview.h	(revision 73897)
++++ include/wx/docview.h	(working copy)
+@@ -434,6 +434,7 @@
+     virtual wxDocTemplate *MatchTemplate(const wxString& path);
+     virtual wxDocTemplate *SelectDocumentPath(wxDocTemplate **templates,
+             int noTemplates, wxString& path, long flags, bool save = false);
++    virtual bool OpenFileDialog(const wxDocTemplateVector& templates, wxArrayString& paths, wxDocTemplate** selectedTemplate);
+     virtual wxDocTemplate *SelectDocumentType(wxDocTemplate **templates,
+             int noTemplates, bool sort = false);
+     virtual wxDocTemplate *SelectViewType(wxDocTemplate **templates,
+Index: interface/wx/docview.h
+===================================================================
+--- interface/wx/docview.h	(revision 73897)
++++ interface/wx/docview.h	(working copy)
+@@ -696,7 +696,7 @@
+         On other platforms, if there is more than one document template a
+         choice list is popped up, followed by a file selector.
+ 
+-        This function is used in CreateDocument().
++        This function is used in OpenFileDialog().
+ 
+         @beginWxPerlOnly
+         In wxPerl @a templates is a reference to a list of templates.
+@@ -713,6 +713,18 @@
+                                               long flags, bool save = false);
+ 
+     /**
++        This method simply calls SelectDocumentPath(). It is used in CreateDocument().
++        Override if you want to customize the file open dialog, ie adding 
++        the wxFD_MULTIPLE flag to your dialog.
++
++        @param selectedTemplate
++            Returns a pointer to a specific template, or @NULL to use any template.
++
++        @since 2.9.5
++    */
++    virtual bool OpenFileDialog(const wxDocTemplateVector& templates, wxArrayString& paths, wxDocTemplate** selectedTemplate);
++
++    /**
+         Returns a document template by asking the user (if there is more than
+         one template). This function is used in CreateDocument().
+ 
+Index: src/common/docview.cpp
+===================================================================
+--- src/common/docview.cpp	(revision 73897)
++++ src/common/docview.cpp	(working copy)
+@@ -1437,101 +1437,106 @@
+     // const-correct and can't be changed as, being virtual, this risks
+     // breaking user code overriding them
+     wxDocTemplateVector templates(GetVisibleTemplates(m_templates));
+-    const size_t numTemplates = templates.size();
+-    if ( !numTemplates )
+-    {
+-        // no templates can be used, can't create document
+-        return NULL;
+-    }
++    if ( templates.empty() )
++        return NULL; // no templates can be used, can't create document
+ 
+-
+     // normally user should select the template to use but wxDOC_SILENT flag we
+     // choose one ourselves
+-    wxString path = pathOrig;   // may be modified below
+-    wxDocTemplate *temp;
++    wxArrayString paths;
++    wxDocTemplate* selectedTemplate = NULL;
++    wxDocument* docNew = NULL;
++
+     if ( flags & wxDOC_SILENT )
+     {
+-        wxASSERT_MSG( !path.empty(),
++        wxASSERT_MSG( !pathOrig.empty(),
+                       "using empty path with wxDOC_SILENT doesn't make sense" );
+ 
+-        temp = FindTemplateForPath(path);
+-        if ( !temp )
+-        {
+-            wxLogWarning(_("The format of file '%s' couldn't be determined."),
+-                         path);
+-        }
++        paths.push_back(pathOrig);
+     }
+     else // not silent, ask the user
+     {
+         // for the new file we need just the template, for an existing one we
+         // need the template and the path, unless it's already specified
+-        if ( (flags & wxDOC_NEW) || !path.empty() )
+-            temp = SelectDocumentType(&templates[0], numTemplates);
+-        else
+-            temp = SelectDocumentPath(&templates[0], numTemplates, path, flags);
++        if ( (flags & wxDOC_NEW) || !pathOrig.empty() )
++        {
++            selectedTemplate = SelectDocumentType(&templates[0], templates.size());
++            if ( !selectedTemplate )
++                return NULL;
++            paths.push_back(pathOrig); // may be empty
++        }
++        else if (!OpenFileDialog(templates, paths, &selectedTemplate))
++            return NULL;
+     }
+ 
+-    if ( !temp )
+-        return NULL;
++    for (wxArrayString::const_iterator it = paths.begin(); it != paths.end(); it++)
++    {
++        const wxString path = *it;
+ 
+-    // check whether the document with this path is already opened
+-    if ( !path.empty() )
+-    {
+-        wxDocument * const doc = FindDocumentByPath(path);
+-        if (doc)
++        // check whether the document with this path is already opened
++        if (!path.empty())
+         {
+-            // file already open, just activate it and return
+-            doc->Activate();
+-            return doc;
++            wxDocument * const doc = FindDocumentByPath(path);
++            if (doc)
++            {
++                // file already open, just activate it
++                doc->Activate();
++                docNew = doc;
++                continue; // go to next one
++            }
+         }
+-    }
++        // no, we need to create a new document
+ 
+-    // no, we need to create a new document
++        // if we've reached the max number of docs, close the first one.
++        if ( (int)GetDocuments().size() >= m_maxDocsOpen )
++        {
++            if ( !CloseDocument((wxDocument *)GetDocuments().GetFirst()->GetData()) )
++            {
++                // can't open the new document if closing the old one failed
++                return NULL;
++            }
++        }
+ 
+-
+-    // if we've reached the max number of docs, close the first one.
+-    if ( (int)GetDocuments().GetCount() >= m_maxDocsOpen )
+-    {
+-        if ( !CloseDocument((wxDocument *)GetDocuments().GetFirst()->GetData()) )
++        wxDocTemplate* temp = selectedTemplate ? selectedTemplate : FindTemplateForPath(path);
++        if ( !temp )
+         {
+-            // can't open the new document if closing the old one failed
++            wxLogWarning(_("The format of file '%s' couldn't be determined."),
++                         path);
+             return NULL;
+-        }
+-    }
++        }    
+ 
++        // do create and initialize the new document finally
++        docNew = temp->CreateDocument(path, flags);
++        if ( !docNew )
++            break;
+ 
+-    // do create and initialize the new document finally
+-    wxDocument * const docNew = temp->CreateDocument(path, flags);
+-    if ( !docNew )
+-        return NULL;
++        docNew->SetDocumentName(temp->GetDocumentName());
++        docNew->SetDocumentTemplate(temp);
+ 
+-    docNew->SetDocumentName(temp->GetDocumentName());
+-    docNew->SetDocumentTemplate(temp);
+-
+-    wxTRY
+-    {
+-        // call the appropriate function depending on whether we're creating a
+-        // new file or opening an existing one
+-        if ( !(flags & wxDOC_NEW ? docNew->OnNewDocument()
+-                                 : docNew->OnOpenDocument(path)) )
++        wxTRY
+         {
+-            docNew->DeleteAllViews();
+-            return NULL;
++            // call the appropriate function depending on whether we're creating a
++            // new file or opening an existing one
++            if ( !(flags & wxDOC_NEW ? docNew->OnNewDocument()
++                                     : docNew->OnOpenDocument(path)) )
++            {
++                docNew->DeleteAllViews();
++                docNew = NULL;
++                break;
++            }
+         }
+-    }
+-    wxCATCH_ALL( docNew->DeleteAllViews(); throw; )
++        wxCATCH_ALL( docNew->DeleteAllViews(); throw; )
+ 
+-    // add the successfully opened file to MRU, but only if we're going to be
+-    // able to reopen it successfully later which requires the template for
+-    // this document to be retrievable from the file extension
+-    if ( !(flags & wxDOC_NEW) && temp->FileMatchesTemplate(path) )
+-        AddFileToHistory(path);
++        // add the successfully opened file to MRU, but only if we're going to be
++        // able to reopen it successfully later which requires the template for
++        // this document to be retrievable from the file extension
++        if ( !(flags & wxDOC_NEW) && temp->FileMatchesTemplate(path) )
++            AddFileToHistory(path);
+ 
+-    // at least under Mac (where views are top level windows) it seems to be
+-    // necessary to manually activate the new document to bring it to the
+-    // forefront -- and it shouldn't hurt doing this under the other platforms
+-    docNew->Activate();
+-
++        // at least under Mac (where views are top level windows) it seems to be
++        // necessary to manually activate the new document to bring it to the
++        // forefront -- and it shouldn't hurt doing this under the other platforms
++        docNew->Activate();
++    }
+     return docNew;
+ }
+ 
+@@ -1802,6 +1807,19 @@
+     return theTemplate;
+ }
+ 
++bool wxDocManager::OpenFileDialog(const wxDocTemplateVector& templates, wxArrayString& paths, wxDocTemplate** selectedTemplate)
++{
++    wxDocTemplateVector templatesCopy = templates; // drop const, for SelectDocumentPath() compatibility
++    wxString path;
++    wxDocTemplate* temp = SelectDocumentPath(&templatesCopy[0], templatesCopy.size(), path, 0 /*WXUNUSED*/, false /*WXUNUSED*/);
++
++    if (!temp)
++        return false;
++    paths.push_back(path);
++    *selectedTemplate = temp;
++    return true;
++}
++
+ wxDocTemplate *wxDocManager::SelectDocumentType(wxDocTemplate **templates,
+                                                 int noTemplates, bool sort)
+ {

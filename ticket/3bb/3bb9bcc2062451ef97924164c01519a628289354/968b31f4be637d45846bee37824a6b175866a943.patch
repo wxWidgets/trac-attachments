@@ -1,0 +1,188 @@
+diff --git a/src/stc/ScintillaWX.cpp b/src/stc/ScintillaWX.cpp
+index 14349aaafb..cd75e598c5 100644
+--- a/src/stc/ScintillaWX.cpp
++++ b/src/stc/ScintillaWX.cpp
+@@ -56,16 +56,18 @@
+ 
+ class wxSTCTimer : public wxTimer {
+ public:
+-    wxSTCTimer(ScintillaWX* swx) {
++    wxSTCTimer(ScintillaWX* swx, ScintillaWX::TickReason reason) {
+         m_swx = swx;
++        m_reason = reason;
+     }
+ 
+     void Notify() wxOVERRIDE {
+-        m_swx->DoTick();
++        m_swx->TickFor(m_reason);
+     }
+ 
+ private:
+     ScintillaWX* m_swx;
++    ScintillaWX::TickReason m_reason;
+ };
+ 
+ 
+@@ -263,11 +265,20 @@ ScintillaWX::ScintillaWX(wxStyledTextCtrl* win) {
+ #endif
+ #endif // wxHAVE_STC_RECT_FORMAT
+ 
++    //A timer is needed for each member of TickReason enum except tickPlatform
++    timers[tickCaret] = new wxSTCTimer(this,tickCaret);
++    timers[tickScroll] = new wxSTCTimer(this,tickScroll);
++    timers[tickWiden] = new wxSTCTimer(this,tickWiden);
++    timers[tickDwell] = new wxSTCTimer(this,tickDwell);
+ }
+ 
+ 
+ ScintillaWX::~ScintillaWX() {
+     Finalise();
++    for ( TimersHash::iterator i=timers.begin(); i!=timers.end(); ++i ) {
++        delete i->second;
++    }
++    timers.clear();
+ }
+ 
+ //----------------------------------------------------------------------
+@@ -306,7 +317,6 @@ void ScintillaWX::Initialise() {
+ 
+ void ScintillaWX::Finalise() {
+     ScintillaBase::Finalise();
+-    SetTicking(false);
+     SetIdle(false);
+     DestroySystemCaret();
+ }
+@@ -357,25 +367,6 @@ bool ScintillaWX::SetIdle(bool on) {
+ }
+ 
+ 
+-void ScintillaWX::SetTicking(bool on) {
+-    wxSTCTimer* steTimer;
+-    if (timer.ticking != on) {
+-        timer.ticking = on;
+-        if (timer.ticking) {
+-            steTimer = new wxSTCTimer(this);
+-            steTimer->Start(timer.tickSize);
+-            timer.tickerID = steTimer;
+-        } else {
+-            steTimer = (wxSTCTimer*)timer.tickerID;
+-            steTimer->Stop();
+-            delete steTimer;
+-            timer.tickerID = 0;
+-        }
+-    }
+-    timer.ticksToWait = caret.period;
+-}
+-
+-
+ void ScintillaWX::SetMouseCapture(bool on) {
+     if (mouseDownCaptures) {
+         if (on && !capturedMouse)
+@@ -741,6 +732,34 @@ bool ScintillaWX::DestroySystemCaret() {
+ #endif
+ }
+ 
++bool ScintillaWX::FineTickerAvailable() {
++    return true;
++}
++
++bool ScintillaWX::FineTickerRunning(TickReason reason) {
++    bool running = false;
++    TimersHash::iterator i = timers.find(reason);
++
++    if ( i != timers.end() ) {
++        running = i->second->IsRunning();
++    }
++    return running;
++}
++
++void ScintillaWX::FineTickerStart(TickReason reason, int millis,
++                                  int WXUNUSED(tolerance)) {
++    TimersHash::iterator i = timers.find(reason);
++    if ( i != timers.end() ) {
++        i->second->Start(millis);
++    }
++}
++
++void ScintillaWX::FineTickerCancel(TickReason reason) {
++    TimersHash::iterator i = timers.find(reason);
++    if ( i != timers.end() ) {
++        i->second->Stop();
++    }
++}
+ 
+ //----------------------------------------------------------------------
+ 
+@@ -971,7 +990,6 @@ void ScintillaWX::DoLoseFocus(){
+     SetFocusState(false);
+     focusEvent = false;
+     DestroySystemCaret();
+-    SetTicking(false);
+ }
+ 
+ void ScintillaWX::DoGainFocus(){
+@@ -980,7 +998,6 @@ void ScintillaWX::DoGainFocus(){
+     focusEvent = false;
+     DestroySystemCaret();
+     CreateSystemCaret();
+-    SetTicking(true);
+ }
+ 
+ void ScintillaWX::DoSysColourChange() {
+diff --git a/src/stc/ScintillaWX.h b/src/stc/ScintillaWX.h
+index 720efc3134..14b7b8c23a 100644
+--- a/src/stc/ScintillaWX.h
++++ b/src/stc/ScintillaWX.h
+@@ -86,7 +86,8 @@
+ class WXDLLIMPEXP_FWD_CORE wxDC;
+ class WXDLLIMPEXP_FWD_STC wxStyledTextCtrl;           // forward
+ class ScintillaWX;
+-
++class wxSTCTimer;
++WX_DECLARE_HASH_MAP(int, wxSTCTimer*, wxIntegerHash, wxIntegerEqual, TimersHash);
+ 
+ //----------------------------------------------------------------------
+ // Helper classes
+@@ -121,7 +122,6 @@ public:
+     virtual void Finalise() wxOVERRIDE;
+     virtual void StartDrag() wxOVERRIDE;
+     virtual bool SetIdle(bool on) wxOVERRIDE;
+-    virtual void SetTicking(bool on) wxOVERRIDE;
+     virtual void SetMouseCapture(bool on) wxOVERRIDE;
+     virtual bool HaveMouseCapture() wxOVERRIDE;
+     virtual void ScrollText(int linesToMove) wxOVERRIDE;
+@@ -149,6 +149,10 @@ public:
+     virtual void CancelModes() wxOVERRIDE;
+ 
+     virtual void UpdateSystemCaret() wxOVERRIDE;
++    virtual bool FineTickerAvailable() wxOVERRIDE;
++    virtual bool FineTickerRunning(TickReason reason) wxOVERRIDE;
++    virtual void FineTickerStart(TickReason reason, int millis, int tolerance) wxOVERRIDE;
++    virtual void FineTickerCancel(TickReason reason) wxOVERRIDE;
+ 
+     // Event delegates
+     void DoPaint(wxDC* dc, wxRect rect);
+@@ -168,7 +172,6 @@ public:
+                       bool ctrlDown, bool isPageScroll);
+     void DoAddChar(int key);
+     int  DoKeyDown(const wxKeyEvent& event, bool* consumed);
+-    void DoTick() { Tick(); }
+     void DoOnIdle(wxIdleEvent& evt);
+ 
+ #if wxUSE_DRAG_AND_DROP
+@@ -198,6 +201,7 @@ private:
+     bool                capturedMouse;
+     bool                focusEvent;
+     wxStyledTextCtrl*   stc;
++    TimersHash          timers;
+ 
+ #if wxUSE_DRAG_AND_DROP
+     wxSTCDropTarget*    dropTarget;
+@@ -227,6 +231,7 @@ private:
+ #endif
+ 
+     friend class wxSTCCallTip;
++    friend class wxSTCTimer;
+ };
+ 
+ //----------------------------------------------------------------------

@@ -1,0 +1,288 @@
+Index: ole/droptgt.cpp
+===================================================================
+--- ole/droptgt.cpp	(working copy)
++++ ole/droptgt.cpp	(revision 61756)
+@@ -49,7 +49,6 @@
+ #include "wx/dnd.h"
+ 
+ #include "wx/msw/ole/oleutils.h"
+-#include "wx/utils.h"
+ 
+ // ----------------------------------------------------------------------------
+ // IDropTarget interface: forward all interesting things to wxDropTarget
+@@ -92,37 +91,6 @@
+ 
+ static wxDragResult ConvertDragEffectToResult(DWORD dwEffect);
+ static DWORD ConvertDragResultToEffect(wxDragResult result);
+-static wxString GetTempFilePath();
+-static HRESULT StreamToFile(IStream *stream, const char *file_name);
+-static HRESULT createDropData(IDataObject *pDataObj, STGMEDIUM &stm);   
+-
+-
+-// CDropFiles. The class is used in the  following way:
+-// * First function AddFile enters all the paths of transferred files
+-// * Then the function CreateBuffer creates a necessary data structure. For access to the structure the functions GetBuffer and GetBuffSize are used. When using Copy or Cut command, the data generated in CDropFile:: m_pBuff are entered in the exchange buffer between the applications by function SetClipboardData.
+-class CDropFiles
+-{
+-  public:
+-    CDropFiles();
+-    ~CDropFiles();
+-
+-    void  AddFile(const wxString &sFile);
+-    void  CreateBuffer();
+-
+-    void*  GetBuffer() const;
+-    int    GetBuffSize() const;
+-
+-
+-  private:
+-
+-    wxArrayString m_aFiles;
+-    
+-    wxChar *m_pBuff;
+-    int   m_nBuffSize;
+-};
+-
+-
+-
+ 
+ // ============================================================================
+ // wxIDropTarget implementation
+@@ -134,7 +102,7 @@
+ // Params  : [in] DWORD flags                 kbd & mouse flags as passed to
+ //                                            IDropTarget methods
+ //           [in] wxDragResult defaultAction  the default action of the drop target
+-//           [in] DWORD pdwEffect             the supported actions of the drop 
++//           [in] DWORD pdwEffect             the supported actions of the drop
+ //                                            source passed to IDropTarget methods
+ // Notes   : We do "move" normally and "copy" if <Ctrl> is pressed,
+ //           which is the standard behaviour (currently there is no
+@@ -233,7 +201,7 @@
+ 
+     // for use in OnEnter and OnDrag calls
+     m_pTarget->MSWSetDataSource(pIDataSource);
+-    
++
+     // get hold of the data object
+     m_pIDataObject = pIDataSource;
+     m_pIDataObject->AddRef();
+@@ -484,15 +452,8 @@
+     fmtMemory.tymed     = TYMED_HGLOBAL;  // TODO to add other media
+ 
+     bool rc = false;
+-    HRESULT hr;
+-    if (format == CFSTR_FILEDESCRIPTOR) {
+-        hr = createDropData(m_pIDataSource, stm);
+-        fmtMemory.cfFormat = wxDF_FILENAME;
+-    }
+-    else {
+-        hr = m_pIDataSource->GetData(&fmtMemory, &stm);
+-    }
+-    
++
++    HRESULT hr = m_pIDataSource->GetData(&fmtMemory, &stm);
+     if ( SUCCEEDED(hr) ) {
+         IDataObject *dataObject = m_dataObject->GetInterface();
+ 
+@@ -556,8 +517,6 @@
+ 
+     m_dataObject->GetAllFormats(formats, wxDataObject::Set);
+ 
+-    unsigned short cp_format_descriptor = RegisterClipboardFormat(CFSTR_FILEDESCRIPTOR);
+-
+     // cycle through all supported formats
+     size_t n;
+     for ( n = 0; n < nFormats; n++ ) {
+@@ -570,14 +529,6 @@
+ 
+             break;
+         }
+-        // This will accept a virtual drop, if *normal* drop is accepted.
+-        if (s_fmtMemory.cfFormat == wxDF_FILENAME) {
+-          s_fmtMemory.cfFormat = cp_format_descriptor;
+-          if ( pIDataSource->QueryGetData(&s_fmtMemory) == S_OK ) {
+-            format = CFSTR_FILEDESCRIPTOR;
+-            break;
+-          }
+-        }
+     }
+ 
+     if ( formats != &format ) {
+@@ -634,177 +585,4 @@
+     }
+ }
+ 
+-
+-const unsigned int BLOCK_SIZE = 1024;
+-HRESULT StreamToFile(IStream *stream, const wxString file_name)  
+-{
+-    byte buffer[BLOCK_SIZE];
+-    unsigned long bytes_read = 0;
+-    int bytes_written = 0;
+-    int new_file;
+-    HRESULT hr = S_OK;
+-
+-    new_file = _sopen(file_name, O_RDWR | O_BINARY | O_CREAT, SH_DENYNO, S_IREAD | S_IWRITE);
+-    if (new_file != -1) {
+-      do {
+-        hr = stream->Read(buffer, BLOCK_SIZE, &bytes_read);
+-        if (bytes_read)
+-          bytes_written = _write(new_file, buffer, bytes_read);
+-      } while (S_OK == hr && bytes_read == BLOCK_SIZE);
+-      _close(new_file);
+-      if (bytes_written == 0)
+-        _unlink(file_name);
+-    }
+-    else {
+-      unsigned long error;
+-      if ((error = GetLastError()) == 0L)
+-        error = _doserrno;
+-      hr = HRESULT_FROM_WIN32(errno);
+-    }
+-    return hr;
+-}
+-
+-wxString GetTempFilePath() 
+-{
+-    wxString retval;
+-    wxChar *tmppath;
+-    tmppath = wxGetenv(wxT("TEMP"));
+-    if (tmppath == NULL) {
+-        tmppath = wxGetenv(wxT("TMP"));
+-    }
+-    if (tmppath != NULL) {
+-        retval = wxString(tmppath);
+-        retval += wxT("\\");
+-    }
+-    else {
+-        retval = wxT("C:\\");
+-    }
+-    return retval;
+-}
+-
+-
+-HRESULT createDropData(IDataObject *pDataObj, STGMEDIUM &stm) {
+-    // Function gets information from IdataObject, it contains the "virtual drop" (filenames + binary content)
+-    // Eatch filecontent is saved to a tempoerery file and we generate a new STGMEDIUM object and tell the rest of the world this is a *normal* drag/drop.
+-    HRESULT hr = S_OK;
+-    if (pDataObj) {
+-        FILEGROUPDESCRIPTOR *file_group_descriptor;
+-        FILEDESCRIPTOR      file_descriptor;
+-
+-        // Important: these strings need to be non-Unicode (don't compile UNICODE)
+-        unsigned short cp_format_descriptor = RegisterClipboardFormat(CFSTR_FILEDESCRIPTOR);
+-        unsigned short cp_format_contents   = RegisterClipboardFormat(CFSTR_FILECONTENTS);
+-
+-        //Set up format structure for the descriptor and contents
+-        FORMATETC descriptor_format = {cp_format_descriptor, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+-        FORMATETC contents_format =   {cp_format_contents,   NULL, DVASPECT_CONTENT, -1, TYMED_ISTREAM};
+-
+-        // Get the descriptor information
+-        STGMEDIUM storage;
+-
+-        hr = pDataObj->GetData(&descriptor_format, &storage);
+-        CDropFiles dropFiles;
+-        
+-        if (hr == S_OK) {
+-            file_group_descriptor = (FILEGROUPDESCRIPTOR *) GlobalLock(storage.hGlobal);
+-
+-            // For each file, get the name and copy the stream to a file
+-            for (unsigned int file_index = 0; file_index < file_group_descriptor->cItems; file_index++) {
+-                file_descriptor = file_group_descriptor->fgd[file_index];
+-                contents_format.lindex = file_index;
+-                hr = pDataObj->GetData(&contents_format, &storage);
+-
+-                if (hr == S_OK) {      // Dump stream to a file
+-                    //add temp path
+-                    wxString filePathStr = GetTempFilePath() + wxString(file_descriptor.cFileName);
+-
+-                    hr = StreamToFile(storage.pstm, filePathStr);
+-                    if (hr == S_OK) {
+-                        dropFiles.AddFile(filePathStr);
+-                  }
+-    }
+-}
+-          GlobalUnlock(storage.hGlobal);
+-          GlobalFree(storage.hGlobal);
+-        }
+-
+-      // http://msdn.microsoft.com/en-us/library/bb776902%28VS.85%29.aspx#CF_HDROP
+-      // the documentation states that the first member of DROPFILES structure is
+-      // a "DWORD offset of double NUL terminated file list". What they mean by
+-      // this (I wonder if you see it immediately) is that the list starts at
+-      // ((char *)&(pDropFiles.pFiles)) + pDropFiles.pFiles.
+-
+-      // http://www.codeproject.com/KB/files/cppfilesdragdrop.aspx?display=Print -- nice thanks a lot!
+-      dropFiles.CreateBuffer();
+-      
+-      stm.tymed   = TYMED_HGLOBAL;
+-      stm.pUnkForRelease = NULL;
+-      
+-      // allocate and lock a global memory buffer. Make it fixed
+-      // data so we don't have to use GlobalLock
+-      void  *ptr;
+-      ptr = (void *)::GlobalAlloc(GPTR, dropFiles.GetBuffSize()); 
+-      memcpy(ptr, dropFiles.GetBuffer(), dropFiles.GetBuffSize() );
+-      stm.hGlobal = ptr;
+-    }
+-    return hr;
+-}
+-
+-CDropFiles::CDropFiles()
+-{
+-    m_pBuff = NULL;
+-    m_nBuffSize = 0;
+-}
+-CDropFiles::~CDropFiles()
+-{
+-    delete m_pBuff;
+-}
+-void CDropFiles::AddFile(const wxString &sFile)
+-{
+-    m_aFiles.Add(sFile);
+-}
+-void CDropFiles::CreateBuffer()
+-{
+-    // CreateBuffer must be called once, when all Files are added!!!
+-    wxASSERT(m_pBuff == NULL);
+-    wxASSERT(m_nBuffSize == 0);
+-  
+-
+-    for(unsigned int i=0;i<m_aFiles.size();i++) {
+-      m_nBuffSize += m_aFiles[i].length()+1;
+-    }
+-
+-    m_nBuffSize += sizeof(DROPFILES)+2;
+-    m_nBuffSize = (m_nBuffSize/32 + 1)*32;
+-    m_pBuff = new wxChar[m_nBuffSize];
+-
+-    ZeroMemory(m_pBuff, m_nBuffSize);
+-    ((DROPFILES*)m_pBuff)->pFiles = sizeof(DROPFILES);
+-
+-    char* pCurrent = m_pBuff + sizeof(DROPFILES);
+-
+-    for(unsigned int i=0;i<m_aFiles.size();i++) {
+-        strcpy(pCurrent, m_aFiles[i].c_str());
+-        pCurrent += m_aFiles[i].length(); 
+-        *pCurrent = 0;
+-        pCurrent++;
+-    }
+-
+-    //check buffer bound
+-    wxASSERT(pCurrent - m_nBuffSize - 1 <= m_pBuff);
+-
+-}
+-
+-void* CDropFiles::GetBuffer() const
+-{
+-    wxASSERT(m_pBuff);
+-    return (void *)m_pBuff;
+-}
+-int  CDropFiles::GetBuffSize() const
+-{
+-    wxASSERT(m_nBuffSize);
+-    return m_nBuffSize;
+-}
+-
+-
+ #endif // wxUSE_OLE && wxUSE_DRAG_AND_DROP

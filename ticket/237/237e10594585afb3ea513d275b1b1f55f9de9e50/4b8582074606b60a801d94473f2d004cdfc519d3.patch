@@ -1,0 +1,277 @@
+diff -ru2 -xCVS -x'.#*' -x'*.orig' -x'*.rej' -x'*~' wxWindows.orig/include/wx/memory.h wxWindows/include/wx/memory.h
+--- wxWindows.orig/include/wx/memory.h	2004-02-08 16:06:29.000000000 +0100
++++ wxWindows/include/wx/memory.h	2004-02-20 11:00:44.510416000 +0100
+@@ -300,4 +300,24 @@
+ };
+ 
++// Final cleanup (e.g. deleting the log object and doing memory leak checking)
++// will be delayed until all wxDebugContextDumpDelayCounter objects have been
++// destructed. Adding one wxDebugContextDumpDelayCounter per file will delay
++// memory leak checking until after destructing all global objects.
++class WXDLLIMPEXP_BASE wxDebugContextDumpDelayCounter
++{
++public:
++    wxDebugContextDumpDelayCounter() {
++        sm_count++;
++    }
++
++    ~wxDebugContextDumpDelayCounter() {
++        sm_count--;
++        if(!sm_count) DoDump();
++    }
++private:
++    void DoDump();
++    static int sm_count;
++};
++
+ // Output a debug message, in a system dependent fashion.
+ void WXDLLIMPEXP_BASE wxTrace(const wxChar *fmt ...) ATTRIBUTE_PRINTF_1;
+@@ -307,5 +327,5 @@
+ #define WXTRACELEVEL wxTraceLevel
+ 
+-#else // else part for the #if __WXDEBUG__
++#else // (defined(__WXDEBUG__) && wxUSE_MEMORY_TRACING) || wxUSE_DEBUG_CONTEXT
+ 
+ // Borland C++ Builder 6 seems to have troubles with inline functions (see bug
+@@ -322,5 +342,5 @@
+ #define WXTRACELEVEL TRUE ? (void)0 : wxTraceLevel
+ 
+-#endif // __WXDEBUG__
++#endif // (defined(__WXDEBUG__) && wxUSE_MEMORY_TRACING) || wxUSE_DEBUG_CONTEXT
+ 
+ #endif
+diff -ru2 -xCVS -x'.#*' -x'*.orig' -x'*.rej' -x'*~' wxWindows.orig/include/wx/object.h wxWindows/include/wx/object.h
+--- wxWindows.orig/include/wx/object.h	2004-02-15 13:59:51.118019200 +0100
++++ wxWindows/include/wx/object.h	2004-02-20 11:16:27.336132800 +0100
+@@ -586,4 +586,16 @@
+ #endif
+ 
++// ----------------------------------------------------------------------------
++// make leak dump after all globals have been destructed
++// ----------------------------------------------------------------------------
++
++#if (defined(__WXDEBUG__) && wxUSE_MEMORY_TRACING) || wxUSE_DEBUG_CONTEXT
++    static wxDebugContextDumpDelayCounter wxDebugContextDumpDelayCounter_File;
++    #define WXDEBUG_DUMPDELAYCOUNTER \
++        static wxDebugContextDumpDelayCounter wxDebugContextDumpDelayCounter_Extra;
++#else
++    #define WXDEBUG_DUMPDELAYCOUNTER
++#endif
++
+ #endif  // _WX_OBJECTH__
+ 
+diff -ru2 -xCVS -x'.#*' -x'*.orig' -x'*.rej' -x'*~' wxWindows.orig/src/common/init.cpp wxWindows/src/common/init.cpp
+--- wxWindows.orig/src/common/init.cpp	2003-12-14 17:36:08.000000000 +0100
++++ wxWindows/src/common/init.cpp	2004-02-20 11:25:39.460048000 +0100
+@@ -339,18 +339,13 @@
+ #endif // wxUSE_UNICODE
+ 
+-    // check for memory leaks
+-#if (defined(__WXDEBUG__) && wxUSE_MEMORY_TRACING) || wxUSE_DEBUG_CONTEXT
+-    if (wxDebugContext::CountObjectsLeft(TRUE) > 0)
+-    {
+-        wxLogDebug(wxT("There were memory leaks.\n"));
+-        wxDebugContext::Dump();
+-        wxDebugContext::PrintStatistics();
+-    }
+-#endif // Debug
+-
+-#if wxUSE_LOG
+-    // and now delete the last logger as well
+-    delete wxLog::SetActiveTarget(NULL);
+-#endif // wxUSE_LOG
++    // Note: check for memory leaks is now done via wxDebugContextDumpDelayCounter
++    // The last log is also deleted there.
++    // Only delete it here, if wxDebugContextDumpDelayCounter is not used
++    #if ! ( (defined(__WXDEBUG__) && wxUSE_MEMORY_TRACING) || wxUSE_DEBUG_CONTEXT )
++        #if wxUSE_LOG
++            // and now delete the last logger as well
++            delete wxLog::SetActiveTarget(NULL);
++        #endif // wxUSE_LOG
++    #endif
+ }
+ 
+diff -ru2 -xCVS -x'.#*' -x'*.orig' -x'*.rej' -x'*~' wxWindows.orig/src/common/log.cpp wxWindows/src/common/log.cpp
+--- wxWindows.orig/src/common/log.cpp	2003-08-09 14:45:47.000000000 +0200
++++ wxWindows/src/common/log.cpp	2004-02-19 22:15:55.168276800 +0100
+@@ -97,5 +97,8 @@
+ 
+ // the critical section protecting the static buffer
+-static wxCriticalSection gs_csLogBuf;
++// This object is possibly still needed when it is already destructed.
++// So use a pointer that can be set to an object known to exist when needed
++static wxCriticalSection gs_csTheLogBuf;
++static wxCriticalSection *gs_csLogBuf = &gs_csTheLogBuf;
+ 
+ #endif // wxUSE_THREADS
+@@ -129,5 +132,5 @@
+ {
+     if ( IsLoggingEnabled() ) {
+-        wxCRIT_SECT_LOCKER(locker, gs_csLogBuf);
++        wxCRIT_SECT_LOCKER(locker, *gs_csLogBuf);
+ 
+         PrintfInLogBug(szFormat, argptr);
+@@ -149,5 +152,5 @@
+   {                                                                 \
+     if ( IsLoggingEnabled() ) {                                     \
+-      wxCRIT_SECT_LOCKER(locker, gs_csLogBuf);                      \
++      wxCRIT_SECT_LOCKER(locker, *gs_csLogBuf);                     \
+                                                                     \
+       PrintfInLogBug(szFormat, argptr);                             \
+@@ -209,5 +212,5 @@
+         wxLog *pLog = wxLog::GetActiveTarget();
+         if ( pLog != NULL && pLog->GetVerbose() ) {
+-            wxCRIT_SECT_LOCKER(locker, gs_csLogBuf);
++            wxCRIT_SECT_LOCKER(locker, *gs_csLogBuf);
+ 
+             wxVsnprintf(s_szBuf, s_szBufSize, szFormat, argptr);
+@@ -232,5 +235,5 @@
+   {                                                                 \
+     if ( IsLoggingEnabled() ) {                                     \
+-      wxCRIT_SECT_LOCKER(locker, gs_csLogBuf);                      \
++      wxCRIT_SECT_LOCKER(locker, *gs_csLogBuf);                     \
+                                                                     \
+       wxVsnprintf(s_szBuf, s_szBufSize, szFormat, argptr);    \
+@@ -250,5 +253,5 @@
+   {
+     if ( IsLoggingEnabled() && wxLog::IsAllowedTraceMask(mask) ) {
+-      wxCRIT_SECT_LOCKER(locker, gs_csLogBuf);
++      wxCRIT_SECT_LOCKER(locker, *gs_csLogBuf);
+ 
+       wxChar *p = s_szBuf;
+@@ -286,5 +289,5 @@
+     // if both bits are set.
+     if ( IsLoggingEnabled() && ((wxLog::GetTraceMask() & mask) == mask) ) {
+-      wxCRIT_SECT_LOCKER(locker, gs_csLogBuf);
++      wxCRIT_SECT_LOCKER(locker, *gs_csLogBuf);
+ 
+       wxVsnprintf(s_szBuf, s_szBufSize, szFormat, argptr);
+@@ -326,5 +329,5 @@
+ {
+     if ( IsLoggingEnabled() ) {
+-        wxCRIT_SECT_LOCKER(locker, gs_csLogBuf);
++        wxCRIT_SECT_LOCKER(locker, *gs_csLogBuf);
+ 
+         wxVsnprintf(s_szBuf, s_szBufSize, szFormat, argptr);
+@@ -345,5 +348,5 @@
+ {
+     if ( IsLoggingEnabled() ) {
+-        wxCRIT_SECT_LOCKER(locker, gs_csLogBuf);
++        wxCRIT_SECT_LOCKER(locker, *gs_csLogBuf);
+ 
+         wxVsnprintf(s_szBuf, s_szBufSize, szFormat, argptr);
+@@ -554,5 +557,5 @@
+     {
+         wxAppTraits *traits = wxTheApp ? wxTheApp->GetTraits() : NULL;
+-        if ( traits && !traits->HasStderr() )
++        if ( !traits || !traits->HasStderr() )
+         {
+             wxMessageOutputDebug().Printf(_T("%s"), str.c_str());
+@@ -787,4 +790,26 @@
+ }
+ 
++// ----------------------------------------------------------------------------
++// clean-up
++// ----------------------------------------------------------------------------
++
++void CleanupAfterGlobalsBegin_wxLog( wxCriticalSection *cs_local, wxCriticalSection **cs_old )
++{
++#if wxUSE_THREADS
++    *cs_old = gs_csLogBuf;
++    gs_csLogBuf = cs_local;
++#endif // wxUSE_THREADS
++}
++
++void CleanupAfterGlobalsEnd_wxLog( wxCriticalSection *cs_old )
++{
++    // and now delete the last logger as well
++    delete wxLog::SetActiveTarget(NULL);
++
++#if wxUSE_THREADS
++    gs_csLogBuf = cs_old;
++#endif // wxUSE_THREADS
++}
++
+ #endif // wxUSE_LOG
+ 
+diff -ru2 -xCVS -x'.#*' -x'*.orig' -x'*.rej' -x'*~' wxWindows.orig/src/common/memory.cpp wxWindows/src/common/memory.cpp
+--- wxWindows.orig/src/common/memory.cpp	2004-01-27 18:47:24.000000000 +0100
++++ wxWindows/src/common/memory.cpp	2004-02-20 11:37:00.879881600 +0100
+@@ -886,5 +886,8 @@
+ };
+ 
+-static MemoryCriticalSection memLocker;
++// theMemLocker is possibly destructed when it is still needed
++// So use a pointer that can be set to an object that is known to exist
++static MemoryCriticalSection theMemLocker;
++static MemoryCriticalSection *memLocker = &theMemLocker;
+ #endif
+ 
+@@ -893,5 +896,5 @@
+ {
+ #if USE_THREADSAFE_MEMORY_ALLOCATION
+-  MemoryCriticalSectionLocker lock(memLocker);
++  MemoryCriticalSectionLocker lock(*memLocker);
+ #endif
+ 
+@@ -953,5 +956,5 @@
+ {
+ #if USE_THREADSAFE_MEMORY_ALLOCATION
+-  MemoryCriticalSectionLocker lock(memLocker);
++  MemoryCriticalSectionLocker lock(*memLocker);
+ #endif
+ 
+@@ -1076,4 +1079,51 @@
+ }
+ 
++//----------------------------------------------------------------------------
++// Final cleanup after all global objects in all files have been destructed
++//----------------------------------------------------------------------------
++
++// Don't set it to 0 by dynamic initialization
++// Some compilers will realy do the asignment later
++// All global variables are initialized to 0 at the very beginning, and this is just fine.
++int wxDebugContextDumpDelayCounter::sm_count;
++
++// These are not in the log.h header, because these functions
++// should only be called here and not anywhere else.
++extern void CleanupAfterGlobalsBegin_wxLog( wxCriticalSection *cs_local, wxCriticalSection **cs_old );
++extern void CleanupAfterGlobalsEnd_wxLog( wxCriticalSection *cs_old );
++
++void wxDebugContextDumpDelayCounter::DoDump()
++{
++#if USE_THREADSAFE_MEMORY_ALLOCATION
++    MemoryCriticalSection localMemLocker;
++    MemoryCriticalSection *oldMemLocker = memLocker;
++    memLocker = &localMemLocker;
++#endif
++
++#if wxUSE_LOG
++    wxCriticalSection csLog, *csLogOld;
++    CleanupAfterGlobalsBegin_wxLog( &csLog, &csLogOld );
++#endif
++
++    if (wxDebugContext::CountObjectsLeft(TRUE) > 0)
++    {
++        wxLogDebug(wxT("There were memory leaks.\n"));
++        wxDebugContext::Dump();
++        wxDebugContext::PrintStatistics();
++    }
++
++#if wxUSE_LOG
++    CleanupAfterGlobalsEnd_wxLog( csLogOld );
++#endif
++
++#if USE_THREADSAFE_MEMORY_ALLOCATION
++    memLocker = oldMemLocker;
+ #endif
++}
++
++// Even if there is nothing else, make sure that there is at
++// least one clenup counter object
++static wxDebugContextDumpDelayCounter wxDebugContextDumpDelayCounter_One;
++
++#endif // (defined(__WXDEBUG__) && wxUSE_MEMORY_TRACING) || wxUSE_DEBUG_CONTEXT
+ 
+
+ 	  	 

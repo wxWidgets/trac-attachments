@@ -1,0 +1,219 @@
+Index: include/wx/app.h
+===================================================================
+--- include/wx/app.h	(revision 72338)
++++ include/wx/app.h	(working copy)
+@@ -766,7 +766,19 @@
+ // your compiler really, really wants main() to be in your main program (e.g.
+ // hello.cpp). Now wxIMPLEMENT_APP should add this code if required.
+ 
++#if wxUSE_UNICODE && defined(__WINDOWS__) && defined(__VISUALC__)
++
+ #define wxIMPLEMENT_WXWIN_MAIN_CONSOLE                                        \
++    int wmain(int argc, wchar_t **argv)                                       \
++    {                                                                         \
++        wxDISABLE_DEBUG_SUPPORT();                                            \
++                                                                              \
++        return wxEntry(argc, argv);                                           \
++    }
++
++#else
++
++#define wxIMPLEMENT_WXWIN_MAIN_CONSOLE                                        \
+     int main(int argc, char **argv)                                           \
+     {                                                                         \
+         wxDISABLE_DEBUG_SUPPORT();                                            \
+@@ -774,6 +786,8 @@
+         return wxEntry(argc, argv);                                           \
+     }
+ 
++#endif
++
+ // port-specific header could have defined it already in some special way
+ #ifndef wxIMPLEMENT_WXWIN_MAIN
+     #define wxIMPLEMENT_WXWIN_MAIN          wxIMPLEMENT_WXWIN_MAIN_CONSOLE
+Index: src/msw/main.cpp
+===================================================================
+--- src/msw/main.cpp	(revision 72338)
++++ src/msw/main.cpp	(working copy)
+@@ -64,6 +64,73 @@
+ extern int wxEntryReal(int& argc, wxChar **argv);
+ extern int wxEntryCleanupReal(int& argc, wxChar **argv);
+ 
++// command line arguments
++struct wxMSWCommandLineArguments
++{
++    wxMSWCommandLineArguments() { argc = 0; argv = NULL; }
++
++    void Init(const wxArrayString& args)
++    {
++        argc = args.size();
++
++        // +1 here for the terminating NULL
++        argv = new wxChar *[argc + 1];
++        for ( int i = 0; i < argc; i++ )
++        {
++            argv[i] = wxStrdup(args[i].t_str());
++        }
++
++        // argv[] must be NULL-terminated
++        argv[argc] = NULL;
++    }
++
++    void Free()
++    {
++        if ( !argc )
++            return;
++
++        for ( int i = 0; i < argc; i++ )
++        {
++            free(argv[i]);
++        }
++
++        wxDELETEA(argv);
++        argc = 0;
++    }
++
++    int argc;
++    wxChar **argv;
++};
++
++static wxMSWCommandLineArguments wxArgs;
++
++// reading command line parameters
++static void wxMSWParseCommandLine()
++{
++    // parse the command line:
++	// it is simpler use GetCommandLine fuction - even in console application
++	// this works in Unicode and non-Unicode
++	// in console version we can define main function as entry point and
++	// do not convert parameters from ANSI to Unicode
++    // (this also results in a more correct argv[0])
++
++    // break the command line in words
++    wxArrayString args;
++
++    const wxChar *cmdLine = ::GetCommandLine();
++    if ( cmdLine )
++    {
++        args = wxCmdLineParser::ConvertStringToArgs(cmdLine);
++    }
++
++#ifdef __WXWINCE__
++    // WinCE doesn't insert the program itself, so do it ourselves.
++    args.Insert(wxGetFullModuleName(), 0);
++#endif
++
++    wxArgs.Init(args);
++}
++
+ // ============================================================================
+ // implementation: various entry points
+ // ============================================================================
+@@ -180,22 +247,29 @@
+     return true;
+ }
+ 
+-int wxEntry(int& argc, wxChar **argv)
++static int wxMSWConsoleEntry()
+ {
++	wxMSWParseCommandLine();
++	wxON_BLOCK_EXIT_OBJ0(wxArgs, wxMSWCommandLineArguments::Free);
++	return wxEntryReal(wxArgs.argc, wxArgs.argv);
++}
++
++int wxEntry(int& WXUNUSED(argc), wxChar **WXUNUSED(argv))
++{
+     DisableAutomaticSETranslator();
+ 
+     wxSEH_TRY
+     {
+-        return wxEntryReal(argc, argv);
++		return wxMSWConsoleEntry();
+     }
+     wxSEH_HANDLE(-1)
+ }
+ 
+ #else // !wxUSE_ON_FATAL_EXCEPTION
+ 
+-int wxEntry(int& argc, wxChar **argv)
++int wxEntry(int& WXUNUSED(argc), wxChar **WXUNUSED(argv))
+ {
+-    return wxEntryReal(argc, argv);
++	return wxMSWConsoleEntry();
+ }
+ 
+ #endif // wxUSE_ON_FATAL_EXCEPTION/!wxUSE_ON_FATAL_EXCEPTION
+@@ -304,45 +378,8 @@
+ // Windows-specific wxEntry
+ // ----------------------------------------------------------------------------
+ 
+-struct wxMSWCommandLineArguments
+-{
+-    wxMSWCommandLineArguments() { argc = 0; argv = NULL; }
+ 
+-    void Init(const wxArrayString& args)
+-    {
+-        argc = args.size();
+ 
+-        // +1 here for the terminating NULL
+-        argv = new wxChar *[argc + 1];
+-        for ( int i = 0; i < argc; i++ )
+-        {
+-            argv[i] = wxStrdup(args[i].t_str());
+-        }
+-
+-        // argv[] must be NULL-terminated
+-        argv[argc] = NULL;
+-    }
+-
+-    void Free()
+-    {
+-        if ( !argc )
+-            return;
+-
+-        for ( int i = 0; i < argc; i++ )
+-        {
+-            free(argv[i]);
+-        }
+-
+-        wxDELETEA(argv);
+-        argc = 0;
+-    }
+-
+-    int argc;
+-    wxChar **argv;
+-};
+-
+-static wxMSWCommandLineArguments wxArgs;
+-
+ // common part of wxMSW-specific wxEntryStart() and wxEntry() overloads
+ static bool
+ wxMSWEntryCommon(HINSTANCE hInstance, int nCmdShow)
+@@ -363,25 +400,9 @@
+ #endif
+ 
+     // parse the command line: we can't use pCmdLine in Unicode build so it is
+-    // simpler to never use it at all (this also results in a more correct
+-    // argv[0])
++    // simpler to never use it at all
++	wxMSWParseCommandLine();
+ 
+-    // break the command line in words
+-    wxArrayString args;
+-
+-    const wxChar *cmdLine = ::GetCommandLine();
+-    if ( cmdLine )
+-    {
+-        args = wxCmdLineParser::ConvertStringToArgs(cmdLine);
+-    }
+-
+-#ifdef __WXWINCE__
+-    // WinCE doesn't insert the program itself, so do it ourselves.
+-    args.Insert(wxGetFullModuleName(), 0);
+-#endif
+-
+-    wxArgs.Init(args);
+-
+     return true;
+ }
+ 

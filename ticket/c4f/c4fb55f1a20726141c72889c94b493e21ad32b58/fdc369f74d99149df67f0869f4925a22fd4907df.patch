@@ -1,0 +1,164 @@
+--- C:/dev-fix/2.3.wx/dev/sdk/wxWidgets-ec/include/wx/cmdline.h	(revision 978)
++++ C:/dev-fix/2.3.wx/dev/sdk/wxWidgets-ec/include/wx/cmdline.h	(revision 993)
+@@ -42,7 +42,8 @@
+     wxCMD_LINE_PARAM_OPTIONAL   = 0x02, // the parameter may be omitted
+     wxCMD_LINE_PARAM_MULTIPLE   = 0x04, // the parameter may be repeated
+     wxCMD_LINE_OPTION_HELP      = 0x08, // this option is a help request
+-    wxCMD_LINE_NEEDS_SEPARATOR  = 0x10  // must have sep before the value
++    wxCMD_LINE_NEEDS_SEPARATOR  = 0x10, // must have sep before the value
++	wxCMD_LINE_SWITCH_NEGATABLE = 0x20  // switch can be negated (i.e. -S-)
+ };
+ 
+ // an option value or parameter may be a string (the most common case), a
+@@ -210,7 +211,7 @@
+     // ------------------------------
+ 
+     // returns true if the given switch was found
+-    bool Found(const wxString& name) const;
++    bool Found(const wxString& name, bool *negated=NULL) const;
+ 
+     // returns true if an option taking a string value was found and stores the
+     // value in the provided pointer
+
+--- C:/dev-fix/2.3.wx/dev/sdk/wxWidgets-ec/src/common/cmdline.cpp	(revision 981)
++++ C:/dev-fix/2.3.wx/dev/sdk/wxWidgets-ec/src/common/cmdline.cpp	(revision 982)
+@@ -105,6 +105,7 @@
+         flags = fl;
+ 
+         m_hasVal = false;
++		m_isNegated = false;
+     }
+ 
+     // can't use union easily here, so just store all possible data fields, we
+@@ -139,8 +140,9 @@
+         { Check(wxCMD_LINE_VAL_DATE); m_dateVal = val; m_hasVal = true; }
+ #endif // wxUSE_DATETIME
+ 
+-    void SetHasValue(bool hasValue = true) { m_hasVal = hasValue; }
++    void SetHasValue(bool hasValue = true, bool negated = false) { m_hasVal = hasValue; m_isNegated = negated; }
+     bool HasValue() const { return m_hasVal; }
++    bool IsNegated() const { return m_isNegated; }
+ 
+ public:
+     wxCmdLineEntryType kind;
+@@ -152,6 +154,7 @@
+ 
+ private:
+     bool m_hasVal;
++    bool m_isNegated;
+ 
+     double m_doubleVal;
+     long m_longVal;
+@@ -483,7 +486,7 @@
+ // access to parse command line
+ // ----------------------------------------------------------------------------
+ 
+-bool wxCmdLineParser::Found(const wxString& name) const
++bool wxCmdLineParser::Found(const wxString& name, bool *negated) const
+ {
+     int i = m_data->FindOption(name);
+     if ( i == wxNOT_FOUND )
+@@ -494,7 +497,13 @@
+     wxCmdLineOption& opt = m_data->m_options[(size_t)i];
+     if ( !opt.HasValue() )
+         return false;
++    if (negated!=NULL)
++    {
++       wxCHECK_MSG( (opt.flags&wxCMD_LINE_SWITCH_NEGATABLE) != 0, false, _T("switch is not negatable") );
+ 
++       *negated = opt.IsNegated();
++    }
++
+     return true;
+ }
+ 
+@@ -721,6 +730,12 @@
+                     if ( m_data->m_options[(size_t)optInd].kind
+                             == wxCMD_LINE_SWITCH )
+                     {
++                        // if the switch is negatable and it is just followed by '-'
++                        // the '-' is considered to be part of this switch
++                        if ( (m_data->m_options[(size_t)optInd].flags & wxCMD_LINE_SWITCH_NEGATABLE) != 0 &&
++                            arg[len] == '-')
++                            ++len;
++                                                
+                         // pretend that all the rest of the argument is the
+                         // next argument, in fact
+                         wxString arg2 = arg[0u];
+@@ -758,7 +773,12 @@
+             if ( opt.kind == wxCMD_LINE_SWITCH )
+             {
+                 // we must check that there is no value following the switch
+-                if ( p != arg.end() )
++				bool negated = false;
++ 
++                negated = ((opt.flags & wxCMD_LINE_SWITCH_NEGATABLE) != 0 && p != arg.end() &&
++                    *p == '-');
++
++                if ( !negated && p != arg.end() )
+                 {
+                     errorMsg << wxString::Format(_("Unexpected characters following option '%s'."), name.c_str())
+                              << wxT('\n');
+@@ -767,7 +787,7 @@
+                 else // no value, as expected
+                 {
+                     // nothing more to do
+-                    opt.SetHasValue();
++                    opt.SetHasValue(true, negated);
+ 
+                     if ( opt.flags & wxCMD_LINE_OPTION_HELP )
+                     {
+@@ -1061,7 +1081,7 @@
+     for ( n = 0; n < count; n++ )
+     {
+         wxCmdLineOption& opt = m_data->m_options[n];
+-        wxString option;
++        wxString option, negator;
+ 
+         if ( opt.kind != wxCMD_LINE_USAGE_TEXT )
+         {
+@@ -1071,13 +1091,16 @@
+                 usage << wxT('[');
+             }
+ 
++            if ((opt.flags & wxCMD_LINE_SWITCH_NEGATABLE) != 0)
++                negator = _T("[-]");
++
+             if ( !opt.shortName.empty() )
+             {
+-                usage << chSwitch << opt.shortName;
++                usage << chSwitch << opt.shortName << negator;
+             }
+             else if ( areLongOptionsEnabled && !opt.longName.empty() )
+             {
+-                usage << wxT("--") << opt.longName;
++                usage << wxT("--") << opt.longName << negator;
+             }
+             else
+             {
+@@ -1111,6 +1134,7 @@
+                 option << (!opt.longName ? wxT(':') : wxT('=')) << val;
+             }
+ 
++            usage << negator;
+             if ( !(opt.flags & wxCMD_LINE_OPTION_MANDATORY) )
+             {
+                 usage << wxT(']');
+@@ -1118,7 +1142,7 @@
+         }
+ 
+         namesOptions.push_back(option);
+-        descOptions.push_back(opt.description);
++        descOptions.push_back(wxGetTranslation(opt.description));
+     }
+ 
+     count = m_data->m_paramDesc.GetCount();
+@@ -1132,7 +1156,7 @@
+             usage << wxT('[');
+         }
+ 
+-        usage << param.description;
++        usage << wxGetTranslation(param.description);
+ 
+         if ( param.flags & wxCMD_LINE_PARAM_MULTIPLE )
+         {

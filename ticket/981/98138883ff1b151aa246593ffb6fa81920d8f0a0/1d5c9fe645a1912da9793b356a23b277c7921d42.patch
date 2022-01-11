@@ -1,0 +1,1899 @@
+Index: src/cocoa/app.mm
+===================================================================
+--- src/cocoa/app.mm	(revisione 58432)
++++ src/cocoa/app.mm	(copia locale)
+@@ -295,7 +295,7 @@
+ }
+
+ // Yield to other processes
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+ #if wxUSE_LOG
+     // disable log flushing from here because a call to wxYield() shouldn't
+@@ -314,10 +314,13 @@
+     }
+
+     m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
+
+     // Run the event loop until it is out of events
+     while(1)
+     {
++        // TODO: implement event filtering using the eventsToProcess mask
++
+         wxAutoNSAutoreleasePool pool;
+         /*  NOTE: It may be better to use something like
+             NSEventTrackingRunLoopMode since we don't necessarily want all
+Index: src/gtk/clipbrd.cpp
+===================================================================
+--- src/gtk/clipbrd.cpp	(revisione 58432)
++++ src/gtk/clipbrd.cpp	(copia locale)
+@@ -74,8 +74,9 @@
+
+     ~wxClipboardSync()
+     {
++        // with the following YieldFor call we will only process GDK clipboard events
+         while ( ms_clipboard )
+-            gtk_main_iteration();
++            wxTheApp->YieldFor(wxEVT_CATEGORY_CLIPBOARD);
+     }
+
+     // this method must be called by GTK+ callbacks to indicate that we got the
+@@ -439,7 +440,7 @@
+     g_signal_connect (m_targetsWidget, "selection_received",
+                       G_CALLBACK (targets_selection_received), this);
+
+-    // we use m_targetsWidgetAsync to query what formats asynchronously
++    // we use m_targetsWidgetAsync to query what formats are available asynchronously
+     m_targetsWidgetAsync = gtk_window_new( GTK_WINDOW_POPUP );
+     gtk_widget_realize( m_targetsWidgetAsync );
+
+Index: src/gtk/app.cpp
+===================================================================
+--- src/gtk/app.cpp	(revisione 58432)
++++ src/gtk/app.cpp	(copia locale)
+@@ -49,12 +49,13 @@
+ //-----------------------------------------------------------------------------
+
+ static GtkWidget *gs_RootWindow = NULL;
++static wxArrayPtrVoid g_arrGdkEvents;
+
+ //-----------------------------------------------------------------------------
+ // wxYield
+ //-----------------------------------------------------------------------------
+
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+     if ( m_isInsideYield )
+     {
+@@ -75,6 +76,7 @@
+ #endif // wxUSE_THREADS
+
+     m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
+
+ #if wxUSE_LOG
+     // disable log flushing from here because a call to wxYield() shouldn't
+@@ -82,16 +84,116 @@
+     wxLog::Suspend();
+ #endif
+
+-    while (EventsPending())
+-        gtk_main_iteration();
++    // NOTE: gtk_main_iteration() doesn't allow us to filter events, so we
++    //       rather use gtk_main_do_event() after filtering the events at
++    //       GDK level
++
++    GdkDisplay* disp = gtk_widget_get_display(gs_RootWindow);
++
++    // gdk_display_get_event() will transform X11 events into GDK events
++    // and will queue all of them in the display (private) structure;
++    // finally it will "unqueue" the last one and return it to us
++    GdkEvent* event = gdk_display_get_event(disp);
++    while (event)
++    {
++        // categorize the GDK event according to wxEventCategory.
++        // See http://library.gnome.org/devel/gdk/unstable/gdk-Events.html#GdkEventType
++        // for more info.
++
++        wxEventCategory cat = wxEVT_CATEGORY_UNKNOWN;
++        switch (event->type)
++        {
++        case GDK_SELECTION_REQUEST:
++        case GDK_SELECTION_NOTIFY:
++        case GDK_SELECTION_CLEAR:
++        case GDK_OWNER_CHANGE:
++            cat = wxEVT_CATEGORY_CLIPBOARD;
++            break;
++
++
++        case GDK_KEY_PRESS:
++        case GDK_KEY_RELEASE:
++        case GDK_BUTTON_PRESS:
++        case GDK_2BUTTON_PRESS:
++        case GDK_3BUTTON_PRESS:
++        case GDK_BUTTON_RELEASE:
++        case GDK_SCROLL:        // generated from mouse buttons
++        case GDK_CLIENT_EVENT:
++            cat = wxEVT_CATEGORY_USER_INPUT;
++            break;
++
++
++        case GDK_PROXIMITY_IN:
++        case GDK_PROXIMITY_OUT:
++
++        case GDK_MOTION_NOTIFY:
++        case GDK_ENTER_NOTIFY:
++        case GDK_LEAVE_NOTIFY:
++        case GDK_VISIBILITY_NOTIFY:
++        case GDK_PROPERTY_NOTIFY:
++
++        case GDK_FOCUS_CHANGE:
++        case GDK_CONFIGURE:
++        case GDK_WINDOW_STATE:
++        case GDK_SETTING:
++        case GDK_DELETE:
++        case GDK_DESTROY:
++
++        case GDK_EXPOSE:
++        case GDK_NO_EXPOSE:
++        case GDK_MAP:
++        case GDK_UNMAP:
++        //case GDK_DAMAGE:
++
++        case GDK_DRAG_ENTER:
++        case GDK_DRAG_LEAVE:
++        case GDK_DRAG_MOTION:
++        case GDK_DRAG_STATUS:
++        case GDK_DROP_START:
++        case GDK_DROP_FINISHED:
++        case GDK_GRAB_BROKEN:
++            cat = wxEVT_CATEGORY_UI;
++            break;
++
++        default:
++            cat = wxEVT_CATEGORY_UNKNOWN;
++            break;
++        }
++
++        if (eventsToProcess & cat)
++            gtk_main_do_event(event);       // process it now
++        else
++            g_arrGdkEvents.Add(event);      // process it later
+
++        // get next event
++        event = gdk_display_get_event(disp);
++    }
++
++    if (eventsToProcess != wxEVT_CATEGORY_CLIPBOARD)
++    {
+     // It's necessary to call ProcessIdle() to update the frames sizes which
+     // might have been changed (it also will update other things set from
+     // OnUpdateUI() which is a nice (and desired) side effect). But we
+     // call ProcessIdle() only once since this is not meant for longish
+     // background jobs (controlled by wxIdleEvent::RequestMore() and the
+     // return value of Processidle().
+-    ProcessIdle();
++        ProcessIdle();      // ProcessIdle() also calls ProcessPendingEvents()
++    }
++    //else: if we are inside ~wxClipboardSync() and we call ProcessIdle() and
++    //      the user app contains an UI update handler which calls wxClipboard::IsSupported,
++    //      then we fall into a never-ending loop...
++
++    // put all unprocessed GDK events back in the queue
++    for (size_t i=0; i<g_arrGdkEvents.GetCount(); i++)
++    {
++        GdkEvent* ev = (GdkEvent*)g_arrGdkEvents[i];
++
++        // NOTE: gdk_display_put_event makes a copy of the event passed to it
++        gdk_display_put_event(disp, ev);
++        gdk_event_free(ev);
++    }
++
++    g_arrGdkEvents.Clear();
+
+ #if wxUSE_LOG
+     // let the logs be flashed again
+Index: src/motif/app.cpp
+===================================================================
+--- src/motif/app.cpp	(revisione 58432)
++++ src/motif/app.cpp	(copia locale)
+@@ -470,7 +470,7 @@
+
+ // Yield to other processes
+
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+     if ( m_isInsideYield )
+     {
+@@ -483,9 +483,11 @@
+     }
+
+     m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
+
+     wxEventLoopGuarantor dummyLoopIfNeeded;
+     while (wxTheApp && wxTheApp->Pending())
++        // TODO: implement event filtering using the eventsToProcess mask
+         wxTheApp->Dispatch();
+
+     m_isInsideYield = false;
+Index: src/mgl/app.cpp
+===================================================================
+--- src/mgl/app.cpp	(revisione 58432)
++++ src/mgl/app.cpp	(copia locale)
+@@ -48,7 +48,7 @@
+ // wxYield
+ //-----------------------------------------------------------------------------
+
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+     if ( m_isInsideYield )
+     {
+@@ -69,12 +69,15 @@
+ #endif // wxUSE_THREADS
+
+     m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
+
+     wxLog::Suspend();
+
+     wxEventLoopBase * const eventLoop = wxEventLoop::GetActive();
+     if ( eventLoop )
+     {
++        // TODO: implement event filtering using the eventsToProcess mask
++
+         while (eventLoop->Pending())
+             eventLoop->Dispatch();
+     }
+Index: src/common/init.cpp
+===================================================================
+--- src/common/init.cpp	(revisione 58432)
++++ src/common/init.cpp	(copia locale)
+@@ -63,6 +63,7 @@
+     wxDummyConsoleApp() { }
+
+     virtual int OnRun() { wxFAIL_MSG( _T("unreachable code") ); return 0; }
++    virtual bool DoYield(bool, long) { return true; }
+
+     DECLARE_NO_COPY_CLASS(wxDummyConsoleApp)
+ };
+Index: src/common/event.cpp
+===================================================================
+--- src/common/event.cpp	(revisione 58432)
++++ src/common/event.cpp	(copia locale)
+@@ -65,6 +65,7 @@
+
+ #if wxUSE_GUI
+     IMPLEMENT_DYNAMIC_CLASS(wxCommandEvent, wxEvent)
++    IMPLEMENT_DYNAMIC_CLASS(wxThreadEvent, wxEvent)
+     IMPLEMENT_DYNAMIC_CLASS(wxNotifyEvent, wxCommandEvent)
+     IMPLEMENT_DYNAMIC_CLASS(wxScrollEvent, wxCommandEvent)
+     IMPLEMENT_DYNAMIC_CLASS(wxScrollWinEvent, wxEvent)
+@@ -147,6 +148,7 @@
+ // List containing event handlers with pending events (each handler can occur
+ // at most once here)
+ wxList *wxHandlersWithPendingEvents = NULL;
++wxList *wxHandlersWithPendingDelayedEvents = NULL;
+
+ #if wxUSE_THREADS
+     // protects wxHandlersWithPendingEvents list
+@@ -316,6 +318,9 @@
+ wxDEFINE_EVENT( wxEVT_HELP, wxHelpEvent )
+ wxDEFINE_EVENT( wxEVT_DETAILED_HELP, wxHelpEvent )
+
++// Thread event
++DEFINE_EVENT_TYPE(wxEVT_COMMAND_THREAD)
++
+ #endif // wxUSE_GUI
+
+ #if wxUSE_BASE
+@@ -350,9 +355,8 @@
+ // ----------------------------------------------------------------------------
+
+ /*
+- * General wxWidgets events, covering
+- * all interesting things that might happen (button clicking, resizing,
+- * setting text in widgets, etc.).
++ * General wxWidgets events, covering all interesting things that might happen
++ * (button clicking, resizing, setting text in widgets, etc.).
+  *
+  * For each completely new event type, derive a new event class.
+  *
+@@ -1103,6 +1107,14 @@
+         }
+         //else: we weren't in this list at all, it's ok
+
++        if ( wxHandlersWithPendingDelayedEvents->DeleteObject(this) )
++        {
++            // check that we were present only once in the list
++            wxASSERT_MSG( !wxHandlersWithPendingDelayedEvents->Find(this),
++                          "Handler occurs twice in wxHandlersWithPendingDelayedEvents list" );
++        }
++        //else: we weren't in this list at all, it's ok
++
+ #if wxUSE_THREADS
+         if (wxHandlersWithPendingEventsLocker)
+             wxLEAVE_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
+@@ -1188,6 +1200,10 @@
+
+ void wxEvtHandler::ProcessPendingEvents()
+ {
++    // we need to process only a single pending event in this call because
++    // each call to ProcessEvent() could result in the destruction of this
++    // same event handler (see the comment at the end of this function)
++
+     wxENTER_CRIT_SECT( m_pendingEventsLock );
+
+     // this method is only called by wxApp if this handler does have
+@@ -1196,7 +1212,40 @@
+                  "should have pending events if called" );
+
+     wxList::compatibility_iterator node = m_pendingEvents->GetFirst();
+-    wxEventPtr event(static_cast<wxEvent *>(node->GetData()));
++    wxEvent* pEvent = static_cast<wxEvent *>(node->GetData());
++
++    // find the first event which can be processed now:
++    if (wxTheApp && wxTheApp->IsYielding())
++    {
++        while (node && pEvent && !wxTheApp->IsEventAllowedInsideYield(pEvent->GetEventCategory()))
++        {
++            node = node->GetNext();
++            pEvent = node ? static_cast<wxEvent *>(node->GetData()) : NULL;
++        }
++
++        if (!node)
++        {
++            // all our events are NOT processable now... signal this:
++#if wxUSE_THREADS
++            if (wxHandlersWithPendingEventsLocker)
++                wxENTER_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
++#endif
++            // move us from the list of handlers with processable pending events
++            // to the list of handlers with pending events which needs to be processed later
++            wxHandlersWithPendingEvents->DeleteObject(this);
++            if ( !wxHandlersWithPendingDelayedEvents->Find(this) )
++                wxHandlersWithPendingDelayedEvents->Append(this);
++#if wxUSE_THREADS
++            if (wxHandlersWithPendingEventsLocker)
++                wxLEAVE_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
++#endif
++            wxLEAVE_CRIT_SECT( m_pendingEventsLock );
++
++            return;
++        }
++    }
++
++    wxEventPtr event(pEvent);
+
+     // it's important we remove event from list before processing it, else a
+     // nested event loop, for example from a modal dialog, might process the
+Index: src/common/appbase.cpp
+===================================================================
+--- src/common/appbase.cpp	(revisione 58432)
++++ src/common/appbase.cpp	(copia locale)
+@@ -164,6 +164,7 @@
+
+ #if wxUSE_THREADS
+     wxHandlersWithPendingEventsLocker = new wxCriticalSection;
++    wxHandlersWithPendingDelayedEvents = new wxList;
+ #endif
+
+ #ifndef __WXPALMOS__
+@@ -193,6 +194,9 @@
+     delete wxHandlersWithPendingEvents;
+     wxHandlersWithPendingEvents = NULL;
+
++    delete wxHandlersWithPendingDelayedEvents;
++    wxHandlersWithPendingDelayedEvents = NULL;
++
+ #if wxUSE_THREADS
+     delete wxHandlersWithPendingEventsLocker;
+     wxHandlersWithPendingEventsLocker = NULL;
+@@ -336,6 +340,16 @@
+     return has;
+ }
+
++void wxAppConsoleBase::SuspendProcessOfPendingEvents()
++{
++    wxENTER_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
++}
++
++void wxAppConsoleBase::ResumeProcessOfPendingEvents()
++{
++    wxLEAVE_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
++}
++
+ /* static */
+ bool wxAppConsoleBase::IsMainLoopRunning()
+ {
+@@ -353,6 +367,9 @@
+
+     wxENTER_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
+
++    wxCHECK_RET( wxHandlersWithPendingDelayedEvents->IsEmpty(),
++                 "this helper list should be empty" );
++
+     if (wxHandlersWithPendingEvents)
+     {
+         // iterate until the list becomes empty: the handlers remove themselves
+@@ -360,7 +377,7 @@
+         wxList::compatibility_iterator node = wxHandlersWithPendingEvents->GetFirst();
+         while (node)
+         {
+-            // In ProcessPendingEvents(), new handlers might be add
++            // In ProcessPendingEvents(), new handlers might be added
+             // and we can safely leave the critical section here.
+             wxLEAVE_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
+
+@@ -374,6 +391,20 @@
+         }
+     }
+
++    // now the wxHandlersWithPendingEvents is surely empty; however some event
++    // handlers may have moved themselves into wxHandlersWithPendingDelayedEvents
++    // because of a selective wxYield call in progress.
++    // Now we need to move them back to wxHandlersWithPendingEvents so the next
++    // call to this function has the chance of processing them:
++    if (!wxHandlersWithPendingDelayedEvents->IsEmpty())
++    {
++        if (!wxHandlersWithPendingEvents)
++            wxHandlersWithPendingEvents = new wxList;
++
++        WX_APPEND_LIST(wxHandlersWithPendingEvents, wxHandlersWithPendingDelayedEvents);
++        wxHandlersWithPendingDelayedEvents->Clear();
++    }
++
+     wxLEAVE_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
+ }
+
+Index: src/common/appcmn.cpp
+===================================================================
+--- src/common/appcmn.cpp	(revisione 58432)
++++ src/common/appcmn.cpp	(copia locale)
+@@ -79,6 +79,7 @@
+     m_isActive = true;
+
+     m_isInsideYield = false;
++    m_eventsToProcessInsideYield = wxEVT_CATEGORY_ALL;
+
+     // We don't want to exit the app if the user code shows a dialog from its
+     // OnInit() -- but this is what would happen if we set m_exitOnFrameDelete
+@@ -325,6 +326,26 @@
+     (void)ProcessEvent(event);
+ }
+
++bool wxAppBase::IsEventAllowedInsideYield(wxEventCategory cat) const
++{
++    return m_eventsToProcessInsideYield & cat;
++}
++
++bool wxAppBase::SafeYield(wxWindow *win, bool onlyIfNeeded)
++{
++    wxWindowDisabler wd(win);
++
++    return Yield(onlyIfNeeded);
++}
++
++bool wxAppBase::SafeYieldFor(wxWindow *win, long eventsToProcess)
++{
++    wxWindowDisabler wd(win);
++
++    return YieldFor(eventsToProcess);
++}
++
++
+ // ----------------------------------------------------------------------------
+ // idle handling
+ // ----------------------------------------------------------------------------
+Index: src/dfb/app.cpp
+===================================================================
+--- src/dfb/app.cpp	(revisione 58432)
++++ src/dfb/app.cpp	(copia locale)
+@@ -164,7 +164,7 @@
+ }
+
+
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+ #if wxUSE_THREADS
+     if ( !wxThread::IsMain() )
+@@ -182,6 +182,7 @@
+     }
+
+     m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
+
+ #if wxUSE_LOG
+     wxLog::Suspend();
+Index: src/dfb/evtloop.cpp
+===================================================================
+--- src/dfb/evtloop.cpp	(revisione 58432)
++++ src/dfb/evtloop.cpp	(copia locale)
+@@ -155,6 +155,8 @@
+
+ void wxGUIEventLoop::Yield()
+ {
++    // TODO: implement event filtering using the eventsToProcess mask
++
+     // process all pending events:
+     while ( Pending() )
+         Dispatch();
+Index: src/palmos/app.cpp
+===================================================================
+--- src/palmos/app.cpp	(revisione 58432)
++++ src/palmos/app.cpp	(copia locale)
+@@ -287,7 +287,7 @@
+
+ // Yield to incoming messages
+
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+     return true;
+ }
+Index: src/os2/app.cpp
+===================================================================
+--- src/os2/app.cpp	(revisione 58432)
++++ src/os2/app.cpp	(copia locale)
+@@ -507,7 +507,7 @@
+ //
+ // Yield to incoming messages
+ //
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+     if ( m_isInsideYield )
+     {
+@@ -529,6 +529,7 @@
+     wxLog::Suspend();
+
+     m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
+
+     //
+     // We want to go back to the main message loop
+@@ -537,6 +538,8 @@
+     wxEventLoopGuarantor dummyLoopIfNeeded;
+     while (::WinPeekMsg(vHab, &vMsg, (HWND)NULL, 0, 0, PM_NOREMOVE) && vMsg.msg != WM_QUIT)
+     {
++        // TODO: implement event filtering using the eventsToProcess mask
++
+ #if wxUSE_THREADS
+         wxMutexGuiLeaveOrEnter();
+ #endif // wxUSE_THREADS
+Index: src/gtk1/app.cpp
+===================================================================
+--- src/gtk1/app.cpp	(revisione 58432)
++++ src/gtk1/app.cpp	(copia locale)
+@@ -103,7 +103,7 @@
+ // wxYield
+ //-----------------------------------------------------------------------------
+
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+     if ( m_isInsideYield )
+     {
+@@ -124,6 +124,7 @@
+ #endif // wxUSE_THREADS
+
+     m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
+
+     // We need to remove idle callbacks or the loop will
+     // never finish.
+@@ -135,6 +136,7 @@
+     wxLog::Suspend();
+ #endif
+
++    // TODO: implement event filtering using the eventsToProcess mask
+     while (gtk_events_pending())
+         gtk_main_iteration();
+
+Index: src/msw/app.cpp
+===================================================================
+--- src/msw/app.cpp	(revisione 58432)
++++ src/msw/app.cpp	(copia locale)
+@@ -1015,7 +1015,14 @@
+ // Yield to incoming messages
+ // ----------------------------------------------------------------------------
+
+-bool wxApp::Yield(bool onlyIfNeeded)
++WX_DECLARE_OBJARRAY(MSG, wxMSGArray);
++
++#include <wx/arrimpl.cpp>
++WX_DEFINE_OBJARRAY(wxMSGArray);
++
++static wxMSGArray g_arrMSG;
++
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+     if ( m_isInsideYield )
+     {
+@@ -1029,8 +1036,9 @@
+
+     // set the flag and don't forget to reset it before returning
+     m_isInsideYield = true;
+-    wxON_BLOCK_EXIT_SET(m_isInsideYield, false);
++    m_eventsToProcessInsideYield = eventsToProcess;
+
++    wxON_BLOCK_EXIT_SET(m_isInsideYield, false);
+
+ #if wxUSE_LOG
+     // disable log flushing from here because a call to wxYield() shouldn't
+@@ -1041,7 +1049,6 @@
+     wxON_BLOCK_EXIT0(wxLog::Resume);
+ #endif // wxUSE_LOG
+
+-
+     // we don't want to process WM_QUIT from here - it should be processed in
+     // the main event loop in order to stop it
+     wxEventLoopGuarantor dummyLoopIfNeeded;
+@@ -1053,13 +1060,123 @@
+         wxMutexGuiLeaveOrEnter();
+ #endif // wxUSE_THREADS
+
++        if (msg.message == WM_PAINT)
++        {
++            // WM_PAINT messages are the last ones of the queue...
++            break;
++        }
++
++        // choose a wxEventCategory for this Windows message
++        wxEventCategory cat;
++        switch (msg.message)
++        {
++        case WM_NCMOUSEMOVE:
++        case WM_NCLBUTTONDOWN:
++        case WM_NCLBUTTONUP:
++        case WM_NCLBUTTONDBLCLK:
++        case WM_NCRBUTTONDOWN:
++        case WM_NCRBUTTONUP:
++        case WM_NCRBUTTONDBLCLK:
++        case WM_NCMBUTTONDOWN:
++        case WM_NCMBUTTONUP:
++        case WM_NCMBUTTONDBLCLK:
++
++        case WM_KEYFIRST:
++        //case WM_KEYDOWN:
++        case WM_KEYUP:
++        case WM_CHAR:
++        case WM_DEADCHAR:
++        case WM_SYSKEYDOWN:
++        case WM_SYSKEYUP:
++        case WM_SYSCHAR:
++        case WM_SYSDEADCHAR:
++        case WM_KEYLAST:
++        case WM_HOTKEY:
++        case WM_IME_STARTCOMPOSITION:
++        case WM_IME_ENDCOMPOSITION:
++        case WM_IME_COMPOSITION:
++        //case WM_IME_KEYLAST:
++        case WM_COMMAND:
++        case WM_SYSCOMMAND:
++
++        case WM_IME_SETCONTEXT:
++        case WM_IME_NOTIFY:
++        case WM_IME_CONTROL:
++        case WM_IME_COMPOSITIONFULL:
++        case WM_IME_SELECT:
++        case WM_IME_CHAR:
++        case WM_IME_KEYDOWN:
++        case WM_IME_KEYUP:
++
++        case WM_MOUSEHOVER:
++        case WM_NCMOUSELEAVE:
++        case WM_MOUSELEAVE:
++
++        case WM_CUT:
++        case WM_COPY:
++        case WM_PASTE:
++        case WM_CLEAR:
++        case WM_UNDO:
++
++        case WM_MOUSEFIRST:
++        //case WM_MOUSEMOVE:
++        case WM_LBUTTONDOWN:
++        case WM_LBUTTONUP:
++        case WM_LBUTTONDBLCLK:
++        case WM_RBUTTONDOWN:
++        case WM_RBUTTONUP:
++        case WM_RBUTTONDBLCLK:
++        case WM_MBUTTONDOWN:
++        case WM_MBUTTONUP:
++        case WM_MBUTTONDBLCLK:
++        case WM_MOUSELAST:
++        case WM_MOUSEWHEEL:
++            cat = wxEVT_CATEGORY_USER_INPUT;
++            break;
++
++        case WM_TIMER:
++            cat = wxEVT_CATEGORY_TIMER;
++            break;
++
++        default:
++            if (msg.message < WM_USER)
++            {
++                // 0;WM_USER-1 is the range of message IDs reserved for use by the system.
++
++                // there are too many of these types of messages to handle them in this switch
++                cat = wxEVT_CATEGORY_UI;
++            }
++            else
++                cat = wxEVT_CATEGORY_UNKNOWN;
++        }
++
++        // should we process this event now?
++        if (cat & eventsToProcess)
++        {
+         if ( !wxTheApp->Dispatch() )
+             break;
+     }
++        else
++        {
++            // remove the message and store it
++            ::GetMessage(&msg, NULL, 0, 0);
++            g_arrMSG.Add(msg);
++        }
++    }
+
+     // if there are pending events, we must process them.
+     ProcessPendingEvents();
+
++    // put back unprocessed events in the queue
++    DWORD id = GetCurrentThreadId();
++    for (size_t i=0; i<g_arrMSG.GetCount(); i++)
++    {
++        PostThreadMessage(id, g_arrMSG[i].message,
++                          g_arrMSG[i].wParam, g_arrMSG[i].lParam);
++    }
++
++    g_arrMSG.Clear();
++
+     return true;
+ }
+
+Index: src/msw/evtloop.cpp
+===================================================================
+--- src/msw/evtloop.cpp	(revisione 58432)
++++ src/msw/evtloop.cpp	(copia locale)
+@@ -361,6 +361,11 @@
+
+ #else // !wxUSE_GUI
+
++
++// ============================================================================
++// wxConsoleEventLoop implementation
++// ============================================================================
++
+ #if wxUSE_CONSOLE_EVENTLOOP
+
+ void wxConsoleEventLoop::WakeUp()
+Index: src/x11/app.cpp
+===================================================================
+--- src/x11/app.cpp	(revisione 58432)
++++ src/x11/app.cpp	(copia locale)
+@@ -769,7 +769,7 @@
+
+ // Yield to other processes
+
+-bool wxApp::Yield(bool onlyIfNeeded)
++bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
+     // Sometimes only 2 yields seem
+     // to do the trick, e.g. in the
+@@ -788,6 +788,7 @@
+         }
+
+         m_isInsideYield = true;
++        m_eventsToProcessInsideYield = eventsToProcess;
+
+         // Make sure we have an event loop object,
+         // or Pending/Dispatch will fail
+@@ -797,6 +798,7 @@
+         // can be tested
+         wxTheApp->Dispatch();
+
++        // TODO: implement event filtering using the eventsToProcess mask
+         while (wxTheApp && wxTheApp->Pending())
+             wxTheApp->Dispatch();
+
+Index: src/generic/progdlgg.cpp
+===================================================================
+--- src/generic/progdlgg.cpp	(revisione 58432)
++++ src/generic/progdlgg.cpp	(copia locale)
+@@ -401,7 +401,7 @@
+                 m_msg->SetLabel(_("Done."));
+             }
+
+-            wxYieldIfNeeded();
++            wxTheApp->YieldFor(wxEVT_CATEGORY_UI);
+
+             (void)ShowModal();
+         }
+@@ -451,7 +451,7 @@
+ {
+     // we have to yield because not only we want to update the display but
+     // also to process the clicks on the cancel and skip buttons
+-    wxYieldIfNeeded();
++    wxTheApp->YieldFor(wxEVT_CATEGORY_UI|wxEVT_CATEGORY_USER_INPUT);
+
+     Update();
+
+@@ -670,7 +670,7 @@
+
+         Fit();   // adapt to the new label size
+
+-        wxYieldIfNeeded() ;
++        wxTheApp->YieldFor(wxEVT_CATEGORY_UI);
+     }
+ }
+
+Index: src/generic/busyinfo.cpp
+===================================================================
+--- src/generic/busyinfo.cpp	(revisione 58432)
++++ src/generic/busyinfo.cpp	(copia locale)
+@@ -25,6 +25,11 @@
+
+ #include "wx/busyinfo.h"
+
++
++// ----------------------------------------------------------------------------
++// wxInfoFrame
++// ----------------------------------------------------------------------------
++
+ class WXDLLEXPORT wxInfoFrame : public wxFrame
+ {
+ public:
+@@ -112,6 +117,11 @@
+ #endif
+ }
+
++
++// ----------------------------------------------------------------------------
++// wxBusyInfo
++// ----------------------------------------------------------------------------
++
+ wxBusyInfo::wxBusyInfo(const wxString& message, wxWindow *parent)
+ {
+     m_InfoFrame = new wxInfoFrame( parent, message);
+@@ -125,6 +135,7 @@
+     m_InfoFrame->Refresh();
+     m_InfoFrame->Update();
+
++
+ #ifdef __WXGTK20__
+     // FIXME: this is pretty bad, as any call to Yield(), but without it, the
+     //         static text is never shown and neither gdk_display_flush() nor
+Index: include/wx/app.h
+===================================================================
+--- include/wx/app.h	(revisione 58432)
++++ include/wx/app.h	(copia locale)
+@@ -32,6 +32,7 @@
+
+ #if wxUSE_GUI
+     struct WXDLLIMPEXP_FWD_CORE wxVideoMode;
++    class WXDLLIMPEXP_FWD_CORE wxWindow;
+ #endif
+
+ // ----------------------------------------------------------------------------
+@@ -254,6 +255,13 @@
+     // (already) be dispatched
+     static bool IsMainLoopRunning();
+
++    // temporary suspends processing of the pending events
++    virtual void SuspendProcessOfPendingEvents();
++
++    // resume processing of the pending events previously stopped because of a
++    // call to SuspendProcessOfPendingEvents()
++    virtual void ResumeProcessOfPendingEvents();
++
+     // process all events in the wxHandlersWithPendingEvents list -- it is necessary
+     // to call this function to process posted events. This happens during each
+     // event loop iteration in GUI mode but if there is no main loop, it may be
+@@ -263,9 +271,6 @@
+     // check if there are pending events on global pending event list
+     bool HasPendingEvents() const;
+
+-    // doesn't do anything in this class, just a hook for GUI wxApp
+-    virtual bool Yield(bool WXUNUSED(onlyIfNeeded) = false) { return true; }
+-
+     // make sure that idle events are sent again
+     virtual void WakeUpIdle();
+
+@@ -300,6 +305,30 @@
+     virtual bool OnExceptionInMainLoop();
+ #endif // wxUSE_EXCEPTIONS
+
++    // Yield-related hooks
++    // -------------------
++
++        // process all currently pending events right now
++        //
++        // it is an error to call Yield() recursively unless the value of
++        // onlyIfNeeded is true
++        //
++        // WARNING: this function is dangerous as it can lead to unexpected
++        //          reentrancies (i.e. when called from an event handler it
++        //          may result in calling the same event handler again), use
++        //          with _extreme_ care or, better, don't use at all!
++        // NOTE: in wxConsoleBase it doesn't do anything, just a hook for GUI wxApp
++    bool Yield(bool onlyIfNeeded = false)
++        { return DoYield(onlyIfNeeded, wxEVT_CATEGORY_ALL); }
++    bool YieldFor(long eventsToProcess)
++        { return DoYield(true, eventsToProcess); }
++    virtual bool IsYielding() const
++        { return false; }
++    virtual bool IsEventAllowedInsideYield(wxEventCategory WXUNUSED(cat)) const
++        { return true; }
++    // no SafeYield hooks since it uses wxWindow which is not available when wxUSE_GUI=0
++
++
+     // debugging support
+     // -----------------
+
+@@ -366,6 +395,9 @@
+     // for the first time
+     virtual wxAppTraits *CreateTraits();
+
++    // the real yield function hook:
++    virtual bool DoYield(bool WXUNUSED(onlyIfNeeded), long WXUNUSED(eventsToProcess))
++        { return true; }
+
+     // function used for dynamic wxApp creation
+     static wxAppInitializerFunction ms_appInitFn;
+@@ -392,6 +424,15 @@
+     // been started yet or has already terminated)
+     wxEventLoopBase *m_mainLoop;
+
++    // the array of the handlers with pending events which needs to be processed
++    // inside ProcessPendingEvents()
++    // wxEvtHandlerArray m_handlersWithPendingEvents;    FIXME: enable this and remove global lists
++
++    // helper array used by ProcessPendingEvents()
++    // wxEvtHandlerArray m_handlersWithPendingDelayedEvents;    FIXME: enable this and remove global lists
++
++    friend class WXDLLIMPEXP_BASE wxEvtHandler;
++
+     // the application object is a singleton anyhow, there is no sense in
+     // copying it
+     DECLARE_NO_COPY_CLASS(wxAppConsoleBase)
+@@ -451,23 +492,19 @@
+     // the worker functions - usually not used directly by the user code
+     // -----------------------------------------------------------------
+
+-
+-
+-        // process all currently pending events right now
+-        //
+-        // it is an error to call Yield() recursively unless the value of
+-        // onlyIfNeeded is true
+-        //
+-        // WARNING: this function is dangerous as it can lead to unexpected
+-        //          reentrancies (i.e. when called from an event handler it
+-        //          may result in calling the same event handler again), use
+-        //          with _extreme_ care or, better, don't use at all!
+-    virtual bool Yield(bool onlyIfNeeded = false) = 0;
++        // safer alternatives to Yield(), using wxWindowDisabler
++    virtual bool SafeYield(wxWindow *win, bool onlyIfNeeded);
++    virtual bool SafeYieldFor(wxWindow *win, long eventsToProcess);
+
+         // returns true if the main thread is inside a Yield() call
+-    bool IsYielding() const
++    virtual bool IsYielding() const
+         { return m_isInsideYield; }
+
++        // returns true if events of the given event category should be immediately
++        // processed inside a wxApp::Yield() call or rather should be queued for
++        // later processing by the main event loop
++    virtual bool IsEventAllowedInsideYield(wxEventCategory cat) const;
++
+         // this virtual function is called in the GUI mode when the application
+         // becomes idle and normally just sends wxIdleEvent to all interested
+         // parties
+@@ -590,7 +627,9 @@
+     // does any of our windows have focus?
+     bool m_isActive;
+
++    // Yield() helpers:
+     bool m_isInsideYield;
++    long m_eventsToProcessInsideYield;
+
+     DECLARE_NO_COPY_CLASS(wxAppBase)
+ };
+@@ -660,7 +699,7 @@
+ // Force an exit from main loop
+ WXDLLIMPEXP_BASE void wxExit();
+
+-// avoid redeclaring this function here if it had been already declated by
++// avoid redeclaring this function here if it had been already declared by
+ // wx/utils.h, this results in warnings from g++ with -Wredundant-decls
+ #ifndef wx_YIELD_DECLARED
+ #define wx_YIELD_DECLARED
+Index: include/wx/list.h
+===================================================================
+--- include/wx/list.h	(revisione 58432)
++++ include/wx/list.h	(copia locale)
+@@ -1277,4 +1277,15 @@
+         (list).clear();                                                      \
+     }
+
++// append all element of one list to another one
++#define WX_APPEND_LIST(list, other)                                           \
++    {                                                                         \
++        wxList::compatibility_iterator node = other->GetFirst();              \
++        while ( node )                                                        \
++        {                                                                     \
++            (list)->push_back(node->GetData());                               \
++            node = node->GetNext();                                           \
++        }                                                                     \
++    }
++
+ #endif // _WX_LISTH__
+Index: include/wx/motif/app.h
+===================================================================
+--- include/wx/motif/app.h	(revisione 58432)
++++ include/wx/motif/app.h	(copia locale)
+@@ -53,7 +53,6 @@
+
+     virtual void Exit();
+
+-    virtual bool Yield(bool onlyIfNeeded = false);
+     virtual void WakeUpIdle(); // implemented in motif/evtloop.cpp
+
+     // implementation from now on
+@@ -66,6 +65,7 @@
+     // Implementation
+     virtual bool Initialize(int& argc, wxChar **argv);
+     virtual void CleanUp();
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     // Motif-specific
+     WXAppContext   GetAppContext() const { return m_appContext; }
+Index: include/wx/gtk1/app.h
+===================================================================
+--- include/wx/gtk1/app.h	(revisione 58432)
++++ include/wx/gtk1/app.h	(copia locale)
+@@ -38,7 +38,6 @@
+     virtual bool OnInitGui();
+
+     // override base class (pure) virtuals
+-    virtual bool Yield(bool onlyIfNeeded = FALSE);
+     virtual void WakeUpIdle();
+
+     virtual bool Initialize(int& argc, wxChar **argv);
+@@ -71,6 +70,8 @@
+     bool m_isInAssert;
+ #endif // __WXDEBUG__
+
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+     DECLARE_DYNAMIC_CLASS(wxApp)
+ };
+
+Index: include/wx/palmos/app.h
+===================================================================
+--- include/wx/palmos/app.h	(revisione 58432)
++++ include/wx/palmos/app.h	(copia locale)
+@@ -35,7 +35,6 @@
+     virtual bool Initialize(int& argc, wxChar **argv);
+     virtual void CleanUp();
+
+-    virtual bool Yield(bool onlyIfNeeded = false);
+     virtual void WakeUpIdle();
+
+     virtual void SetPrintMode(int mode) { m_printMode = mode; }
+@@ -52,6 +51,8 @@
+ protected:
+     int    m_printMode; // wxPRINT_WINDOWS, wxPRINT_POSTSCRIPT
+
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+ public:
+     // Implementation
+     static bool RegisterWindowClasses();
+Index: include/wx/event.h
+===================================================================
+--- include/wx/event.h	(revisione 58432)
++++ include/wx/event.h	(copia locale)
+@@ -522,6 +522,9 @@
+ wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_CORE, wxEVT_COMMAND_TOOL_DROPDOWN_CLICKED, wxCommandEvent)
+ wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_CORE, wxEVT_COMMAND_TOOL_ENTER, wxCommandEvent)
+
++    // Thread events
++wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_CORE, wxEVT_COMMAND_THREAD, wxCommandEvent)
++
+     // Mouse event types
+ wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_CORE, wxEVT_LEFT_DOWN, wxMouseEvent)
+ wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_CORE, wxEVT_LEFT_UP, wxMouseEvent)
+@@ -666,9 +669,14 @@
+ // still, any new code using it should include wx/textctrl.h explicitly
+ wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_CORE, wxEVT_COMMAND_TEXT_UPDATED, wxCommandEvent)
+
++
++// ----------------------------------------------------------------------------
++// wxEvent(-derived) classes
++// ----------------------------------------------------------------------------
++
+ // the predefined constants for the number of times we propagate event
+ // upwards window child-parent chain
+-enum Propagation_state
++enum wxEventPropagation
+ {
+     // don't propagate it at all
+     wxEVENT_PROPAGATE_NONE = 0,
+@@ -677,6 +685,58 @@
+     wxEVENT_PROPAGATE_MAX = INT_MAX
+ };
+
++// The different categories for a wxEvent; see wxEvent::GetEventCategory.
++// NOTE: they are used as OR-combinable flags by wxApp::Yield
++enum wxEventCategory
++{
++    // this is the category for those events which are generated to update
++    // the appearance of the GUI but which (usually) do not comport data
++    // processing, i.e. which do not provide input or output data
++    // (e.g. size events, scroll events, etc).
++    // They are events NOT directly generated by the user's input devices.
++    wxEVT_CATEGORY_UI = 1,
++
++    // this category groups those events which are generated directly from the
++    // user through input devices like mouse and keyboard and usually result in
++    // data to be processed from the application.
++    // (e.g. mouse clicks, key presses, etc)
++    wxEVT_CATEGORY_USER_INPUT = 2,
++
++    // this category is for wxSocketEvent
++    wxEVT_CATEGORY_SOCKET = 4,
++
++    // this category is for wxTimerEvent
++    wxEVT_CATEGORY_TIMER = 8,
++
++    // this category is for any event used to send notifications from the
++    // secondary threads to the main one or in general for notifications among
++    // different threads (which may or may not be user-generated)
++    wxEVT_CATEGORY_THREAD = 16,
++
++
++    // implementation only
++
++    // used in the implementations of DoYield()
++    wxEVT_CATEGORY_UNKNOWN = 32,
++
++    // a special category used as an argument to wxApp::Yield() to indicate that
++    // Yield() should leave all wxEvents on the queue while emptying the native event queue
++    // (native events will be processed but the wxEvents they generate will be queued)
++    wxEVT_CATEGORY_CLIPBOARD = 64,
++
++
++    // shortcut masks
++
++    // this category groups those events which are emitted in response to
++    // events of the native toolkit and which typically are not-"delayable".
++    wxEVT_CATEGORY_NATIVE_EVENTS = wxEVT_CATEGORY_UI|wxEVT_CATEGORY_USER_INPUT,
++
++    // used in wxApp::Yield to specify all event categories should be processed:
++    wxEVT_CATEGORY_ALL =
++        wxEVT_CATEGORY_UI|wxEVT_CATEGORY_USER_INPUT|wxEVT_CATEGORY_SOCKET| \
++        wxEVT_CATEGORY_TIMER|wxEVT_CATEGORY_THREAD
++};
++
+ /*
+  * wxWidgets events, covering all interesting things that might happen
+  * (button clicking, resizing, setting text in widgets, etc.).
+@@ -696,10 +756,13 @@
+
+     void SetEventType(wxEventType typ) { m_eventType = typ; }
+     wxEventType GetEventType() const { return m_eventType; }
++
+     wxObject *GetEventObject() const { return m_eventObject; }
+     void SetEventObject(wxObject *obj) { m_eventObject = obj; }
++
+     long GetTimestamp() const { return m_timeStamp; }
+     void SetTimestamp(long ts = 0) { m_timeStamp = ts; }
++
+     int GetId() const { return m_id; }
+     void SetId(int Id) { m_id = Id; }
+
+@@ -715,6 +778,12 @@
+     // for them wouldn't work (it needs to do a copy of the event)
+     virtual wxEvent *Clone() const = 0;
+
++    // this function is used to selectively process events in wxApp::YieldFor
++    // NOTE: by default it returns wxEVT_CATEGORY_UI just because the major
++    //       part of wxWidgets events belong to that category.
++    virtual wxEventCategory GetEventCategory() const
++        { return wxEVT_CATEGORY_UI; }
++
+     // Implementation only: this test is explicitly anti OO and this function
+     // exists only for optimization purposes.
+     bool IsCommandEvent() const { return m_isCommandEvent; }
+@@ -766,9 +835,6 @@
+ protected:
+     // the propagation level: while it is positive, we propagate the event to
+     // the parent window (if any)
+-    //
+-    // this one doesn't have to be public, we don't have to worry about
+-    // backwards compatibility as it is new
+     int               m_propagationLevel;
+
+     bool              m_skipped;
+@@ -904,6 +970,7 @@
+     int GetInt() const { return m_commandInt; }
+
+     virtual wxEvent *Clone() const { return new wxCommandEvent(*this); }
++    virtual wxEventCategory GetEventCategory() const { return wxEVT_CATEGORY_USER_INPUT; }
+
+ protected:
+     wxString          m_cmdString;     // String event argument
+@@ -947,6 +1014,36 @@
+     DECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxNotifyEvent)
+ };
+
++
++// Thread event
++
++class WXDLLIMPEXP_BASE wxThreadEvent : public wxCommandEvent
++{
++public:
++    wxThreadEvent(int id = wxID_ANY)
++        : wxCommandEvent(wxEVT_COMMAND_THREAD, id)
++        { }
++
++    virtual wxEvent *Clone() const
++    {
++        // make sure our string member (which uses COW aka refcounting) is not
++        // shared by other string instances:
++        const_cast<wxThreadEvent*>(this)->SetString(GetString().c_str());
++
++        return new wxThreadEvent(*this);
++    }
++
++    // this is important to avoid that calling wxApp::Yield() thread events
++    // gets processed when this is unwanted:
++    virtual wxEventCategory GetEventCategory() const
++        { return wxEVT_CATEGORY_THREAD; }
++
++private:
++    DECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxThreadEvent)
++};
++
++
++
+ // Scroll event class, derived form wxCommandEvent. wxScrollEvents are
+ // sent by wxSlider and wxScrollBar.
+ /*
+@@ -1015,6 +1112,8 @@
+     DECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxScrollWinEvent)
+ };
+
++
++
+ // Mouse event class
+
+ /*
+@@ -1195,6 +1294,7 @@
+     bool IsPageScroll() const { return ((unsigned int)m_linesPerAction == UINT_MAX); }
+
+     virtual wxEvent *Clone() const { return new wxMouseEvent(*this); }
++    virtual wxEventCategory GetEventCategory() const { return wxEVT_CATEGORY_USER_INPUT; }
+
+     wxMouseEvent& operator=(const wxMouseEvent& event)
+     {
+@@ -1318,6 +1418,7 @@
+     wxCoord GetY() const { return m_y; }
+
+     virtual wxEvent *Clone() const { return new wxKeyEvent(*this); }
++    virtual wxEventCategory GetEventCategory() const { return wxEVT_CATEGORY_USER_INPUT; }
+
+     // we do need to copy wxKeyEvent sometimes (in wxTreeCtrl code, for
+     // example)
+@@ -2485,6 +2586,7 @@
+ */
+
+
++
+ // ============================================================================
+ // event handler and related classes
+ // ============================================================================
+@@ -2652,6 +2754,13 @@
+ // ----------------------------------------------------------------------------
+ // wxEvtHandler: the base class for all objects handling wxWidgets events
+ // ----------------------------------------------------------------------------
++/*
++enum wxProcessEventReturnCode
++{
++    wxEVT_PROCESSED,
++    wxEVT_NOT_PROCESSED,
++    wxEVT_DELAYED
++}*/
+
+ class WXDLLIMPEXP_BASE wxEvtHandler : public wxObject
+                                     , public wxTrackable
+@@ -3205,6 +3314,8 @@
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxEvtHandler)
+ };
+
++WX_DEFINE_EXPORTED_ARRAY_PTR(wxEvtHandler*, wxEvtHandlerArray);
++
+ // ----------------------------------------------------------------------------
+ // wxEventConnectionRef represents all connections between two event handlers
+ // and enables automatic disconnect when an event handler sink goes out of
+@@ -3310,6 +3421,7 @@
+ };
+
+ typedef void (wxEvtHandler::*wxCommandEventFunction)(wxCommandEvent&);
++typedef void (wxEvtHandler::*wxThreadEventFunction)(wxThreadEvent&);
+ typedef void (wxEvtHandler::*wxScrollEventFunction)(wxScrollEvent&);
+ typedef void (wxEvtHandler::*wxScrollWinEventFunction)(wxScrollWinEvent&);
+ typedef void (wxEvtHandler::*wxSizeEventFunction)(wxSizeEvent&);
+@@ -3349,6 +3461,8 @@
+
+ #define wxCommandEventHandler(func) \
+     wxEVENT_HANDLER_CAST(wxCommandEventFunction, func)
++#define wxThreadEventHandler(func) \
++    wxEVENT_HANDLER_CAST(wxThreadEventFunction, func)
+ #define wxScrollEventHandler(func) \
+     wxEVENT_HANDLER_CAST(wxScrollEventFunction, func)
+ #define wxScrollWinEventHandler(func) \
+@@ -3828,6 +3942,9 @@
+ #define EVT_TEXT_COPY(winid, func) wx__DECLARE_EVT1(wxEVT_COMMAND_TEXT_COPY, winid, wxClipboardTextEventHandler(func))
+ #define EVT_TEXT_PASTE(winid, func) wx__DECLARE_EVT1(wxEVT_COMMAND_TEXT_PASTE, winid, wxClipboardTextEventHandler(func))
+
++// Thread events
++#define EVT_THREAD(id, func)  wx__DECLARE_EVT1(wxEVT_COMMAND_THREAD, id, wxThreadEventHandler(func))
++
+ // ----------------------------------------------------------------------------
+ // Global data
+ // ----------------------------------------------------------------------------
+@@ -3836,10 +3953,16 @@
+ //
+ // notice that each event handler should occur at most once in this list
+ extern WXDLLIMPEXP_BASE wxList *wxHandlersWithPendingEvents;
++extern WXDLLIMPEXP_BASE wxList *wxHandlersWithPendingDelayedEvents;
+ #if wxUSE_THREADS
++    // this critical section protectes both the lists above
+     extern WXDLLIMPEXP_BASE wxCriticalSection *wxHandlersWithPendingEventsLocker;
+ #endif
+
++// old list names:
++#define wxPendingEvents         wxHandlersWithPendingEvents
++#define wxPendingEventsLocker   wxHandlersWithPendingEventsLocker
++
+ // ----------------------------------------------------------------------------
+ // Helper functions
+ // ----------------------------------------------------------------------------
+Index: include/wx/dfb/app.h
+===================================================================
+--- include/wx/dfb/app.h	(revisione 58432)
++++ include/wx/dfb/app.h	(copia locale)
+@@ -32,7 +32,6 @@
+     virtual void CleanUp();
+
+     virtual void WakeUpIdle();
+-    virtual bool Yield(bool onlyIfNeeded = false);
+
+     virtual wxVideoMode GetDisplayMode() const;
+     virtual bool SetDisplayMode(const wxVideoMode& mode);
+@@ -40,6 +39,8 @@
+ private:
+     wxVideoMode m_videoMode;
+
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+     DECLARE_DYNAMIC_CLASS(wxApp)
+ };
+
+Index: include/wx/msw/app.h
+===================================================================
+--- include/wx/msw/app.h	(revisione 58432)
++++ include/wx/msw/app.h	(copia locale)
+@@ -33,7 +33,6 @@
+     virtual bool Initialize(int& argc, wxChar **argv);
+     virtual void CleanUp();
+
+-    virtual bool Yield(bool onlyIfNeeded = false);
+     virtual void WakeUpIdle();
+
+     virtual void SetPrintMode(int mode) { m_printMode = mode; }
+@@ -79,6 +78,8 @@
+ protected:
+     int    m_printMode; // wxPRINT_WINDOWS, wxPRINT_POSTSCRIPT
+
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+ public:
+     // unregister any window classes registered by GetRegisteredClassName()
+     static void UnregisterWindowClasses();
+Index: include/wx/x11/app.h
+===================================================================
+--- include/wx/x11/app.h	(revisione 58432)
++++ include/wx/x11/app.h	(copia locale)
+@@ -45,7 +45,6 @@
+
+     virtual void Exit();
+
+-    virtual bool Yield(bool onlyIfNeeded = FALSE);
+     virtual void WakeUpIdle();
+
+     virtual bool OnInitGui();
+@@ -64,6 +63,7 @@
+     // Implementation
+     virtual bool Initialize(int& argc, wxChar **argv);
+     virtual void CleanUp();
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     WXWindow       GetTopLevelWidget() const { return m_topLevelWidget; }
+     WXColormap     GetMainColormap(WXDisplay* display);
+Index: include/wx/socket.h
+===================================================================
+--- include/wx/socket.h	(revisione 58432)
++++ include/wx/socket.h	(copia locale)
+@@ -382,6 +382,7 @@
+     void *GetClientData() const { return m_clientData; }
+
+     virtual wxEvent *Clone() const { return new wxSocketEvent(*this); }
++    virtual wxEventCategory GetEventCategory() const { return wxEVT_CATEGORY_SOCKET; }
+
+ public:
+     wxSocketNotify  m_event;
+Index: include/wx/os2/app.h
+===================================================================
+--- include/wx/os2/app.h	(revisione 58432)
++++ include/wx/os2/app.h	(copia locale)
+@@ -75,7 +75,6 @@
+
+     virtual bool OnInitGui(void);
+
+-    virtual bool Yield(bool onlyIfNeeded = false);
+     virtual void WakeUpIdle(void);
+
+     virtual void SetPrintMode(int mode) { m_nPrintMode = mode; }
+@@ -111,6 +110,8 @@
+     // Implementation
+     static bool  RegisterWindowClasses(HAB vHab);
+
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+ public:
+     int                             m_nCmdShow;
+     HMQ                             m_hMq;
+Index: include/wx/mgl/app.h
+===================================================================
+--- include/wx/mgl/app.h	(revisione 58432)
++++ include/wx/mgl/app.h	(copia locale)
+@@ -44,7 +44,6 @@
+
+     virtual void Exit();
+     virtual void WakeUpIdle();
+-    virtual bool Yield(bool onlyIfNeeded = FALSE);
+
+     virtual wxVideoMode GetDisplayMode() const { return m_displayMode; }
+     virtual bool SetDisplayMode(const wxVideoMode& mode);
+@@ -52,6 +51,8 @@
+ private:
+     DECLARE_DYNAMIC_CLASS(wxApp)
+
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+     wxVideoMode m_displayMode;
+ };
+
+Index: include/wx/osx/app.h
+===================================================================
+--- include/wx/osx/app.h	(revisione 58432)
++++ include/wx/osx/app.h	(copia locale)
+@@ -38,7 +38,6 @@
+     wxApp();
+     virtual ~wxApp() {}
+
+-    virtual bool Yield(bool onlyIfNeeded = FALSE);
+     virtual void WakeUpIdle();
+
+     virtual void SetPrintMode(int mode) { m_printMode = mode; }
+@@ -67,6 +66,7 @@
+     // Implementation
+     virtual bool Initialize(int& argc, wxChar **argv);
+     virtual void CleanUp();
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     // the installed application event handler
+     WXEVENTHANDLERREF    MacGetEventHandler() { return m_macEventHandler ; }
+Index: include/wx/gtk/app.h
+===================================================================
+--- include/wx/gtk/app.h	(revisione 58432)
++++ include/wx/gtk/app.h	(copia locale)
+@@ -1,6 +1,6 @@
+ /////////////////////////////////////////////////////////////////////////////
+ // Name:        wx/gtk/app.h
+-// Purpose:
++// Purpose:     wxApp definition for wxGTK
+ // Author:      Robert Roebling
+ // Id:          $Id$
+ // Copyright:   (c) 1998 Robert Roebling, Julian Smart
+@@ -40,7 +40,6 @@
+     virtual bool OnInitGui();
+
+     // override base class (pure) virtuals
+-    virtual bool Yield(bool onlyIfNeeded = FALSE);
+     virtual void WakeUpIdle();
+
+     virtual bool Initialize(int& argc, wxChar **argv);
+@@ -79,6 +78,10 @@
+     bool EventsPending();
+     bool DoIdle();
+
++protected:
++
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+ private:
+     // true if we're inside an assert modal dialog
+ #ifdef __WXDEBUG__
+Index: include/wx/cocoa/app.h
+===================================================================
+--- include/wx/cocoa/app.h	(revisione 58432)
++++ include/wx/cocoa/app.h	(copia locale)
+@@ -57,7 +57,7 @@
+     // Implement wxAppBase pure virtuals
+     virtual void Exit();
+
+-    virtual bool Yield(bool onlyIfNeeded = FALSE);
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+     virtual void WakeUpIdle();
+
+     virtual bool Initialize(int& argc, wxChar **argv);
+Index: include/wx/timer.h
+===================================================================
+--- include/wx/timer.h	(revisione 58432)
++++ include/wx/timer.h	(copia locale)
+@@ -172,6 +172,7 @@
+
+     // implement the base class pure virtual
+     virtual wxEvent *Clone() const { return new wxTimerEvent(*this); }
++    virtual wxEventCategory GetEventCategory() const { return wxEVT_CATEGORY_TIMER; }
+
+ private:
+     wxTimer* m_timer;
+Index: interface/wx/app.h
+===================================================================
+--- interface/wx/app.h	(revisione 58432)
++++ interface/wx/app.h	(copia locale)
+@@ -162,7 +162,26 @@
+         @a onlyIfNeeded parameter is @true, the method will just silently
+         return @false instead.
+     */
+-    virtual bool Yield(bool onlyIfNeeded = false);
++    bool Yield(bool onlyIfNeeded = false);
++
++    /**
++        Works like Yield() with @e onlyIfNeeded == @true, except that it allows
++        the caller to specify a mask of the ::wxEventCategory values which
++        indicates which events should be processed and which should instead
++        be "delayed" (i.e. processed by the main loop later).
++
++        Note that this is a safer alternative to Yield() since it ensures that
++        only the events you're interested to are processed; i.e. helps to avoid
++        unwanted reentrancies.
++    */
++    bool YieldFor(long eventsToProcess);
++
++    /**
++        Returns @true if the given event category is allowed inside
++        a YieldFor() call (i.e. compares the given category against the
++        last mask passed to YieldFor()).
++    */
++    virtual bool IsEventAllowedInsideYield(wxEventCategory cat) const;
+
+     //@}
+
+@@ -622,6 +641,25 @@
+     virtual bool IsActive() const;
+
+     /**
++        This function is similar to wxYield(), except that it disables the user
++        input to all program windows before calling wxAppConsole::Yield and re-enables it
++        again afterwards. If @a win is not @NULL, this window will remain enabled,
++        allowing the implementation of some limited user interaction.
++        Returns the result of the call to wxAppConsole::Yield.
++
++        @see wxSafeYield
++    */
++    virtual bool SafeYield(wxWindow *win, bool onlyIfNeeded);
++
++    /**
++        Works like SafeYield() with @e onlyIfNeeded == @true except that
++        it allows the caller to specify a mask of events to be processed.
++
++        See wxAppConsole::YieldFor for more info.
++    */
++    virtual bool SafeYieldFor(wxWindow *win, long eventsToProcess);
++
++    /**
+         Windows-only function for processing a message. This function is called
+         from the main message loop, checking for windows that may wish to process it.
+
+@@ -857,22 +895,18 @@
+ void wxWakeUpIdle();
+
+ /**
+-    Calls wxApp::Yield.
++    Calls wxAppConsole::Yield.
+
+     @deprecated
+     This function is kept only for backwards compatibility. Please use
+-    the wxApp::Yield method instead in any new code.
++    the wxAppConsole::Yield method instead in any new code.
+
+     @header{wx/app.h}
+ */
+ bool wxYield();
+
+ /**
+-    This function is similar to wxYield(), except that it disables the user
+-    input to all program windows before calling wxYield() and re-enables it
+-    again afterwards. If @a win is not @NULL, this window will remain enabled,
+-    allowing the implementation of some limited user interaction.
+-    Returns the result of the call to ::wxYield.
++    Calls wxApp::SafeYield.
+
+     @header{wx/app.h}
+ */
+Index: interface/wx/event.h
+===================================================================
+--- interface/wx/event.h	(revisione 58432)
++++ interface/wx/event.h	(copia locale)
+@@ -7,6 +7,64 @@
+ // Licence:     wxWindows license
+ /////////////////////////////////////////////////////////////////////////////
+
++/**
++    The predefined constants for the number of times we propagate event
++    upwards window child-parent chain.
++*/
++enum wxEventPropagation
++{
++    /// don't propagate it at all
++    wxEVENT_PROPAGATE_NONE = 0,
++
++    /// propagate it until it is processed
++    wxEVENT_PROPAGATE_MAX = INT_MAX
++};
++
++/**
++    The different categories for a wxEvent; see wxEvent::GetEventCategory.
++
++    @note They are used as OR-combinable flags by wxApp::Yield.
++*/
++enum wxEventCategory
++{
++    /**
++        This is the category for those events which are generated to update
++        the appearance of the GUI but which (usually) do not comport data
++        processing, i.e. which do not provide input or output data
++        (e.g. size events, scroll events, etc).
++        They are events NOT directly generated by the user's input devices.
++    */
++    wxEVT_CATEGORY_UI = 1,
++
++    /**
++        This category groups those events which are generated directly from the
++        user through input devices like mouse and keyboard and usually result in
++        data to be processed from the application
++        (e.g. mouse clicks, key presses, etc).
++    */
++    wxEVT_CATEGORY_USER_INPUT = 2,
++
++    /// This category is for wxSocketEvent
++    wxEVT_CATEGORY_SOCKET = 4,
++
++    /// This category is for wxTimerEvent
++    wxEVT_CATEGORY_TIMER = 8,
++
++    /**
++        This category is for any event used to send notifications from the
++        secondary threads to the main one or in general for notifications among
++        different threads (which may or may not be user-generated).
++    */
++    wxEVT_CATEGORY_THREAD = 16,
++
++    /**
++        This mask is used in wxApp::Yield to specify that all event categories should
++        be processed.
++    */
++    wxEVT_CATEGORY_ALL =
++        wxEVT_CATEGORY_UI|wxEVT_CATEGORY_USER_INPUT|wxEVT_CATEGORY_SOCKET| \
++        wxEVT_CATEGORY_TIMER|wxEVT_CATEGORY_THREAD
++};
+
+ /**
+     @class wxEvent
+@@ -88,6 +146,13 @@
+     wxEventType GetEventType() const;
+
+     /**
++        Returns a generic category for this event.
++
++        This function is used to selectively process events in wxApp::Yield.
++    */
++    virtual wxEventCategory GetEventCategory() const;
++
++    /**
+         Returns the identifier associated with this event, such as a button command id.
+     */
+     int GetId() const;
+@@ -2450,18 +2515,45 @@
+ };
+
+
++/**
++    @class wxThreadEvent
++
++    This class adds some simple functionalities to wxCommandEvent coinceived
++    for inter-threads communications.
+
++    @library{wxcore}
++    @category{events}
+
+-enum wxHelpEventOrigin
++    @see @ref overview_thread, wxApp::YieldFor
++*/
++class wxThreadEvent : public wxCommandEvent
+ {
+-    wxHE_ORIGIN_UNKNOWN = -1,
+-    wxHE_ORIGIN_KEYBOARD,
++public:
++    /**
++        Constructor.
+
+-    /** event generated by wxContextHelp or from the [?] button on
+-        the title bar (Windows). */
+-    wxHE_ORIGIN_HELPBUTTON
++        Initializes the event type to @c wxEVT_THREAD (but you can change it
++        using wxEvent::SetEventType.
++    */
++    wxThreadEvent(int id = wxID_ANY);
++
++    /**
++        Clones this event making sure that all internal members which use
++        COW (only @c m_commandString for now; see @ref overview_refcount)
++        are unshared (see wxObject::UnShare).
++    */
++    virtual wxEvent *Clone() const;
++
++    /**
++        Returns @c wxEVT_CATEGORY_THREAD.
++
++        This is important to avoid that calling wxApp::Yield() thread events
++        gets processed when this is unwanted:
++    */
++    virtual wxEventCategory GetEventCategory() const;
+ };
+
++
+ /**
+     @class wxHelpEvent
+
+Index: samples/clipboard/clipboard.cpp
+===================================================================
+--- samples/clipboard/clipboard.cpp	(revisione 58432)
++++ samples/clipboard/clipboard.cpp	(copia locale)
+@@ -27,7 +27,7 @@
+ #endif
+
+
+-#define USE_ASYNCHRONOUS_CLIPBOARD_REQUEST 1
++#define USE_ASYNCHRONOUS_CLIPBOARD_REQUEST  0
+
+ class MyApp : public wxApp
+ {
+@@ -198,6 +198,7 @@
+
+ void MyFrame::OnAbout(wxCommandEvent& WXUNUSED(event))
+ {
++    wxMessageBox("Clipboard sample", "About clipboard", wxOK|wxICON_INFORMATION, this);
+ }
+
+
+Index: samples/thread/thread.cpp
+===================================================================
+--- samples/thread/thread.cpp	(revisione 58432)
++++ samples/thread/thread.cpp	(copia locale)
+@@ -105,7 +105,7 @@
+     void OnResumeThread(wxCommandEvent& event);
+
+     void OnStartWorker(wxCommandEvent& event);
+-    void OnWorkerEvent(wxCommandEvent& event);
++    void OnWorkerEvent(wxThreadEvent& event);
+     void OnUpdateWorker(wxUpdateUIEvent& event);
+
+     void OnExecMain(wxCommandEvent& event);
+@@ -169,7 +169,7 @@
+
+     THREAD_SHOWCPUS,
+
+-    WORKER_EVENT    // this one gets sent from the worker thread
++    WORKER_EVENT = wxID_HIGHEST+1   // this one gets sent from the worker thread
+ };
+
+ // ----------------------------------------------------------------------------
+@@ -292,8 +292,22 @@
+ {
+ }
+
++#define TEST_YIELD_RACE_CONDITION       0
++
+ void *MyWorkerThread::Entry()
+ {
++#if TEST_YIELD_RACE_CONDITION
++    if ( TestDestroy() )
++        return NULL;
++
++    wxThreadEvent event( WORKER_EVENT );
++
++    event.SetInt( 50 );
++    wxQueueEvent( m_frame, new wxThreadEvent(event) );
++
++    event.SetInt(-1);
++    wxQueueEvent( m_frame, new wxThreadEvent(event) );
++#else
+     for ( m_count = 0; !m_frame->Cancelled() && (m_count < 100); m_count++ )
+     {
+         // check if we were asked to exit
+@@ -301,18 +315,19 @@
+             break;
+
+         // create any type of command event here
+-        wxCommandEvent event( wxEVT_COMMAND_MENU_SELECTED, WORKER_EVENT );
++        wxThreadEvent event( WORKER_EVENT );
+         event.SetInt( m_count );
+
+         // send in a thread-safe way
+-        wxQueueEvent( m_frame, new wxCommandEvent(event) );
++        wxQueueEvent( m_frame, new wxThreadEvent(event) );
+
+         wxMilliSleep(200);
+     }
+
+-    wxCommandEvent event( wxEVT_COMMAND_MENU_SELECTED, WORKER_EVENT );
++    wxThreadEvent event( WORKER_EVENT );
+     event.SetInt(-1); // that's all
+-    wxQueueEvent( m_frame, new wxCommandEvent(event) );
++    wxQueueEvent( m_frame, new wxThreadEvent(event) );
++#endif
+
+     return NULL;
+ }
+@@ -360,7 +375,8 @@
+
+     EVT_UPDATE_UI(THREAD_START_WORKER, MyFrame::OnUpdateWorker)
+     EVT_MENU(THREAD_START_WORKER, MyFrame::OnStartWorker)
+-    EVT_MENU(WORKER_EVENT, MyFrame::OnWorkerEvent)
++
++    EVT_THREAD(WORKER_EVENT, MyFrame::OnWorkerEvent)
+
+     EVT_IDLE(MyFrame::OnIdle)
+ END_EVENT_TABLE()
+@@ -442,7 +458,6 @@
+
+     m_txtctrl = new wxTextCtrl(this, wxID_ANY, _T(""), wxPoint(0, 0), wxSize(0, 0),
+                                wxTE_MULTILINE | wxTE_READONLY);
+-
+ }
+
+ MyFrame::~MyFrame()
+@@ -758,7 +773,7 @@
+     thread->Run();
+ }
+
+-void MyFrame::OnWorkerEvent(wxCommandEvent& event)
++void MyFrame::OnWorkerEvent(wxThreadEvent& event)
+ {
+     int n = event.GetInt();
+     if ( n == -1 )

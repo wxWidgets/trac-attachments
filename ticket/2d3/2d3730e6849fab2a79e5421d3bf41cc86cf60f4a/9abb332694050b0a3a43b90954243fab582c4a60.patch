@@ -1,0 +1,209 @@
+--- wxWidgets.orig/include/wx/defs.h	Sun Apr  8 09:09:32 2007
++++ wxWidgets/include/wx/defs.h	Tue Apr 10 22:14:10 2007
+@@ -882,4 +882,12 @@
+ typedef wxUint32 wxDword;
+ 
++#ifdef LLONG_MAX
++    #define wxINT64_MAX LLONG_MAX
++    #define wxINT64_MIN LLONG_MIN
++#else
++    #define wxINT64_MAX wxLL(9223372036854775807)
++    #define wxINT64_MIN wxLL(-9223372036854775807-1)
++#endif
++
+ /*
+    Define an integral type big enough to contain all of long, size_t and void *.
+--- wxWidgets.orig/include/wx/wxcrt.h	Sun Apr  8 09:09:34 2007
++++ wxWidgets/include/wx/wxcrt.h	Tue Apr 10 22:24:01 2007
+@@ -587,8 +587,4 @@
+ #endif /* TCHAR-aware compilers/the others */
+ 
+-#ifdef wxStrtoll
+-    #define wxHAS_STRTOLL
+-#endif
+-
+ /*
+     various special cases
+@@ -806,4 +802,12 @@
+     #define wxUSE_WXVSNPRINTF 0
+ #endif
++
++#ifndef wxStrtoll
++    /* supply strtoll and strtoull, if needed */
++    WXDLLIMPEXP_BASE wxLongLong_t wxStrtoll(const wxChar* nptr, wxChar** endptr, int base);
++    WXDLLIMPEXP_BASE wxULongLong_t wxStrtoull(const wxChar* nptr, wxChar** endptr, int base);
++#endif
++
++#define wxHAS_STRTOLL
+ 
+ /*
+--- wxWidgets.orig/src/common/string.cpp	Tue Apr 10 18:11:01 2007
++++ wxWidgets/src/common/string.cpp	Tue Apr 10 22:19:52 2007
+@@ -1286,24 +1286,10 @@
+ bool wxString::ToLongLong(wxLongLong_t *val, int base) const
+ {
+-#ifdef wxHAS_STRTOLL
+     return wxStringToIntType((const wxChar*)c_str(), val, base, wxStrtoll);
+-#else
+-    // TODO: implement this ourselves
+-    wxUnusedVar(val);
+-    wxUnusedVar(base);
+-    return false;
+-#endif // wxHAS_STRTOLL
+ }
+ 
+ bool wxString::ToULongLong(wxULongLong_t *val, int base) const
+ {
+-#ifdef wxHAS_STRTOLL
+     return wxStringToIntType((const wxChar*)c_str(), val, base, wxStrtoull);
+-#else
+-    // TODO: implement this ourselves
+-    wxUnusedVar(val);
+-    wxUnusedVar(base);
+-    return false;
+-#endif
+ }
+ 
+--- wxWidgets.orig/src/common/wxcrt.cpp	Mon Mar 19 16:38:33 2007
++++ wxWidgets/src/common/wxcrt.cpp	Tue Apr 10 22:24:38 2007
+@@ -1133,4 +1133,138 @@
+ #endif // wxUSE_WCHAR_T
+ 
++#ifndef wxStrtoll
++static wxULongLong_t wxStrtoullBase(const wxChar* nptr, wxChar** endptr, int base, wxChar* sign)
++{
++    wxULongLong_t sum = 0;
++    wxString wxstr(nptr);
++    wxString::const_iterator i = wxstr.begin();
++    wxString::const_iterator end = wxstr.end();
++
++    // Skip spaces
++    while ( i != end && wxIsspace(*i) ) i++;
++
++    // Starts with sign?
++    *sign = wxT(' ');
++    if ( i != end )
++    {
++        wxChar c = *i;
++        if ( c == wxT('+') || c == wxT('-') )
++        {
++            *sign = c;
++            i++;
++        }
++    }
++
++    // Starts with 0x?
++    if ( i != end && *i == wxT('0') )
++    {
++        i++;
++        if ( i != end )
++        {
++            if ( *i == wxT('x') && (base == 16 || base == 0) )
++            {
++                base = 16;
++                i++;
++            }
++            else
++            {
++                if ( endptr )
++                    *endptr = (wxChar*) nptr;
++                errno = EINVAL;
++                return sum;
++            }
++        }
++        else
++            i--;
++    }
++
++    if ( base == 0 )
++        base = 10;
++
++    for ( ; i != end; i++ )
++    {
++        unsigned int n;
++
++        wxChar c = *i;
++        if ( c >= wxT('0') )
++        {
++            if ( c <= wxT('9') )
++                n = c - wxT('0');
++            else
++                n = wxTolower(c) - wxT('a') + 10;
++        }
++        else
++            break;
++
++        if ( n >= (unsigned int)base )
++            // Invalid character (for this base)
++            break;
++
++        wxULongLong_t prevsum = sum;
++        sum = (sum * base) + n;
++
++        if ( sum < prevsum )
++        {
++            errno = ERANGE;
++            break;
++        }
++    }
++
++    if ( endptr )
++    {
++        const wxChar& endref = *i;
++        *endptr = &(wxChar&)endref;
++    }
++
++    return sum;
++}
++
++wxULongLong_t wxStrtoull(const wxChar* nptr, wxChar** endptr, int base)
++{
++    wxChar sign;
++    wxULongLong_t uval = wxStrtoullBase(nptr, endptr, base, &sign);
++
++    if ( sign == wxT('-') )
++    {
++        errno = ERANGE;
++        uval = 0;
++    }
++
++    return uval;
++}
++
++wxLongLong_t wxStrtoll(const wxChar* nptr, wxChar** endptr, int base)
++{
++    wxChar sign;
++    wxULongLong_t uval = wxStrtoullBase(nptr, endptr, base, &sign);
++    wxLongLong_t val = 0;
++
++    if ( sign == wxT('-') )
++    {
++        if ( uval <= wxULL(wxINT64_MAX+1) )
++        {
++            if ( uval == wxULL(wxINT64_MAX+1))
++                val = -((wxLongLong_t)wxINT64_MAX) - 1;
++            else
++                val = -((wxLongLong_t)uval);
++        }
++        else
++        {
++            errno = ERANGE;
++        }
++    }
++    else if ( uval <= wxINT64_MAX )
++    {
++        val = uval;
++    }
++    else
++    {
++        errno = ERANGE;
++    }
++
++    return val;
++}
++#endif // wxStrtoll
++
+ // ----------------------------------------------------------------------------
+ // functions which we may need even if !wxUSE_WCHAR_T
+
+ 	  	 

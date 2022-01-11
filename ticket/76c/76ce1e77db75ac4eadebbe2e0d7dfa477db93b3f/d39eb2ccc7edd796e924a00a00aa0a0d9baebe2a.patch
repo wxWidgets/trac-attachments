@@ -1,0 +1,128 @@
+Index: include/wx/msw/window.h
+===================================================================
+--- include/wx/msw/window.h	(revision 62504)
++++ include/wx/msw/window.h	(working copy)
+@@ -13,6 +13,8 @@
+ #ifndef _WX_WINDOW_H_
+ #define _WX_WINDOW_H_
+ 
++#include "wx/msw/wrapwin.h"
++
+ // if this is set to 1, we use deferred window sizing to reduce flicker when
+ // resizing complicated window hierarchies, but this can in theory result in
+ // different behaviour than the old code so we keep the possibility to use it
+@@ -366,6 +368,9 @@
+     // Create and process a clipboard event specified by type.
+     bool HandleClipboardEvent( WXUINT nMsg );
+ 
++    // check if IME is converting
++    bool IsImmConverting();
++
+     bool HandleQueryDragIcon(WXHICON *hIcon);
+ 
+     bool HandleSetCursor(WXHWND hWnd, short nHitTest, int mouseMsg);
+@@ -581,6 +586,18 @@
+     wxSize      m_pendingSize;
+ #endif // wxUSE_DEFERRED_SIZING
+ 
++    // dll handle & proc address for check IME status
++    HMODULE imm32dll;
++    typedef HIMC (WINAPI *TImmGetContext)(HWND);
++    typedef BOOL (WINAPI *TImmGetOpenStatus)(HIMC);
++    typedef LONG (WINAPI *TImmGetCompositionString)(HIMC, DWORD, LPVOID, DWORD);
++    typedef BOOL (WINAPI *TImmReleaseContext)(HWND, HIMC);
++    TImmGetContext           p_ImmGetContext;
++    TImmGetOpenStatus        p_ImmGetOpenStatus;
++    TImmGetCompositionString p_ImmGetCompositionString;
++    TImmReleaseContext       p_ImmReleaseContext;
++    bool imm32_loaded;
++
+ private:
+ #ifdef __POCKETPC__
+     bool        m_contextMenuEnabled;
+Index: src/msw/window.cpp
+===================================================================
+--- src/msw/window.cpp	(revision 62504)
++++ src/msw/window.cpp	(working copy)
+@@ -522,6 +522,24 @@
+     m_pendingSize = wxDefaultSize;
+ #endif // wxUSE_DEFERRED_SIZING
+ 
++    imm32_loaded = false;
++    imm32dll = LoadLibrary(wxT("imm32.dll"));
++    if (imm32dll)
++    {
++        p_ImmGetContext = (TImmGetContext)GetProcAddress(imm32dll, "ImmGetContext");
++        p_ImmGetOpenStatus = (TImmGetOpenStatus)GetProcAddress(imm32dll, "ImmGetOpenStatus");
++#ifdef UNICODE
++        p_ImmGetCompositionString = (TImmGetCompositionString)GetProcAddress(imm32dll, "ImmGetCompositionStringW");
++#else
++        p_ImmGetCompositionString = (TImmGetCompositionString)GetProcAddress(imm32dll, "ImmGetCompositionStringA");
++#endif
++        p_ImmReleaseContext = (TImmReleaseContext)GetProcAddress(imm32dll, "ImmReleaseContext");
++        if (p_ImmGetContext && p_ImmGetOpenStatus && p_ImmGetCompositionString && p_ImmReleaseContext)
++        {
++            imm32_loaded = true;
++        }
++    }
++
+ #ifdef __POCKETPC__
+     m_contextMenuEnabled = false;
+ #endif
+@@ -573,6 +591,11 @@
+         wxRemoveHandleAssociation(this);
+     }
+ 
++    if (imm32dll)
++    {
++        FreeLibrary(imm32dll);
++    }
++
+ }
+ 
+ /* static */
+@@ -5701,6 +5724,27 @@
+     return HandleWindowEvent(evt);
+ }
+ 
++bool wxWindowMSW::IsImmConverting()
++{
++    bool immOpen = FALSE;
++    if (!imm32_loaded)
++    {
++        return immOpen;
++    }
++    HWND hWnd = (HWND)GetHWND();
++    HIMC hIMC = (*p_ImmGetContext)(hWnd);
++    if ( hIMC )
++    {
++        if ( (*p_ImmGetOpenStatus)(hIMC) )
++        {
++            int size = (*p_ImmGetCompositionString)(hIMC, GCS_COMPREADSTR, NULL, 0);
++            immOpen = (size > 0);
++        }
++        (*p_ImmReleaseContext)(hWnd, hIMC);
++    }
++    return immOpen;
++}
++
+ // ---------------------------------------------------------------------------
+ // joystick
+ // ---------------------------------------------------------------------------
+@@ -6343,6 +6387,16 @@
+ int APIENTRY
+ wxKeyboardHook(int nCode, WORD wParam, DWORD lParam)
+ {
++    // Avoid keybord hook when IME is converting
++    wxWindow *win = wxGetActiveWindow();
++    if ( win )
++    {
++        if ( win->IsImmConverting() )
++        {
++            return (int)CallNextHookEx(wxTheKeyboardHook, nCode, wParam, lParam);
++        }
++    }
++
+     DWORD hiWord = HIWORD(lParam);
+     if ( nCode != HC_NOREMOVE && ((hiWord & KF_UP) == 0) )
+     {

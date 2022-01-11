@@ -1,0 +1,182 @@
+Index: wxWidgets-2.8/src/common/db.cpp
+===================================================================
+--- wxWidgets-2.8/src/common/db.cpp	(revision 47742)
++++ wxWidgets-2.8/src/common/db.cpp	(working copy)
+@@ -292,8 +292,10 @@
+             || (i_sqlDataType == SQL_WVARCHAR)
+     #endif
+ #endif
+-            || (i_sqlDataType == SQL_LONGVARCHAR))
++			)
+             i_dbDataType = DB_DATA_TYPE_VARCHAR;
++        if(i_sqlDataType == SQL_LONGVARCHAR)
++		    i_dbDataType = DB_DATA_TYPE_MEMO;
+         if ((i_sqlDataType == SQL_C_DATE) || (i_sqlDataType == SQL_C_TIMESTAMP))
+             i_dbDataType = DB_DATA_TYPE_DATE;
+         if (i_sqlDataType == SQL_C_BIT)
+@@ -313,6 +315,7 @@
+ 
+     switch(i_dbDataType)     // TBD: Still a lot of proper formatting to do
+     {
++	    case DB_DATA_TYPE_MEMO:
+         case DB_DATA_TYPE_VARCHAR:
+             s_Field = wxT("%s");
+             break;
+@@ -663,6 +666,14 @@
+     //       datasource/driver is the one that will be used.
+     SWORD PossibleSqlMemoTypes[] = {
+         SQL_LONGVARCHAR,
++#if wxUSE_UNICODE && defined(SQL_WVARCHAR)
++        SQL_WVARCHAR,
++#endif
++        SQL_VARCHAR,
++#if wxUSE_UNICODE && defined(SQL_WVARCHAR)
++        SQL_WCHAR,
++#endif
++        SQL_CHAR
+     };
+ 
+ 
+@@ -2681,6 +2692,19 @@
+ #endif
+                             colInf[colNo].dbDataType = DB_DATA_TYPE_VARCHAR;
+                         }
++						else if (!wxStricmp(typeInfMemo.TypeName,colInf[colNo].typeName))
++                        {
++#ifdef _IODBC_
++                            // IODBC does not return a correct columnLength, so we set
++                            // columnLength = bufferSize if no column length was returned
++                            // IODBC returns the columnLength in bufferSize. (bug)
++                            if (colInf[colNo].columnLength < 1)
++                            {
++                               colInf[colNo].columnLength = colInf[colNo].bufferSize;
++                            }
++#endif
++                            colInf[colNo].dbDataType = DB_DATA_TYPE_MEMO;
++                        }
+                         else if (!wxStricmp(typeInfInteger.TypeName, colInf[colNo].typeName))
+                             colInf[colNo].dbDataType = DB_DATA_TYPE_INTEGER;
+                         else if (!wxStricmp(typeInfFloat.TypeName, colInf[colNo].typeName))
+@@ -2854,6 +2878,20 @@
+ 
+                         colInf[colNo].dbDataType = DB_DATA_TYPE_VARCHAR;
+                     }
++					else if (!wxStricmp(typeInfMemo.TypeName, colInf[colNo].typeName))
++                    {
++#ifdef _IODBC_
++                        // IODBC does not return a correct columnLength, so we set
++                        // columnLength = bufferSize if no column length was returned
++                        // IODBC returns the columnLength in bufferSize. (bug)
++                        if (colInf[colNo].columnLength < 1)
++                        {
++                           colInf[colNo].columnLength = colInf[colNo].bufferSize;
++                        }
++#endif
++
++                        colInf[colNo].dbDataType = DB_DATA_TYPE_MEMO;
++                    }
+                     else if (!wxStricmp(typeInfInteger.TypeName, colInf[colNo].typeName))
+                         colInf[colNo].dbDataType = DB_DATA_TYPE_INTEGER;
+                     else if (!wxStricmp(typeInfFloat.TypeName, colInf[colNo].typeName))
+@@ -4023,6 +4061,9 @@
+         case DB_DATA_TYPE_VARCHAR :
+             dataTypeName = typeInfVarchar.TypeName;
+             break;
++		case DB_DATA_TYPE_MEMO :
++            dataTypeName = typeInfMemo.TypeName;
++            break;
+         case DB_DATA_TYPE_INTEGER :
+             dataTypeName = typeInfInteger.TypeName;
+             break;
+@@ -4074,9 +4115,9 @@
+               columnName.c_str(), dataTypeName.c_str());
+     }
+ 
+-    // For varchars only, append the size of the column
+-    if (dataType == DB_DATA_TYPE_VARCHAR &&
+-        (Dbms() != dbmsMY_SQL || dataTypeName != _T("text")))
++    // For varchars(and MEMO on certain DMBS's) only, append the size of the column
++    if ((dataType == DB_DATA_TYPE_VARCHAR || (dataType == DB_DATA_TYPE_MEMO && typeInfMemo.TypeName == typeInfVarchar.TypeName))
++		&&(Dbms() != dbmsMY_SQL || dataTypeName != _T("text")))
+     {
+         wxString s;
+         s.Printf(wxT("(%lu)"), columnLength);
+Index: wxWidgets-2.8/src/common/dbtable.cpp
+===================================================================
+--- wxWidgets-2.8/src/common/dbtable.cpp	(revision 47742)
++++ wxWidgets-2.8/src/common/dbtable.cpp	(working copy)
+@@ -1424,7 +1517,7 @@
+                 cout << pDb->GetTypeInfVarchar().TypeName << wxT("(") << (int)(colDefs[i].SzDataObj / sizeof(wxChar)) << wxT(")");
+                 break;
+             case DB_DATA_TYPE_MEMO:
+-                cout << pDb->GetTypeInfMemo().TypeName;
++                cout << pDb->GetTypeInfMemo().TypeName << wxT("(") << (int)(colDefs[i].SzDataObj / sizeof(wxChar)) << wxT(")");
+                 break;
+             case DB_DATA_TYPE_INTEGER:
+                 cout << pDb->GetTypeInfInteger().TypeName;
+@@ -1483,8 +1576,8 @@
+                 sqlStmt += pDb->GetTypeInfBlob().TypeName;
+                 break;
+         }
+-        // For varchars, append the size of the string
+-        if (colDefs[i].DbDataType == DB_DATA_TYPE_VARCHAR &&
++        // For varchars(and MEMOS on certains DBMS's) only, append the size of the string
++        if ((colDefs[i].DbDataType == DB_DATA_TYPE_VARCHAR || (colDefs[i].DbDataType == DB_DATA_TYPE_MEMO && pDb->GetTypeInfMemo().TypeName == pDb->GetTypeInfVarchar().TypeName)) &&
+             (pDb->Dbms() != dbmsMY_SQL || pDb->GetTypeInfVarchar().TypeName != _T("text")))// ||
+ //            colDefs[i].DbDataType == DB_DATA_TYPE_BLOB)
+         {
+@@ -2373,12 +2562,8 @@
+             // Process the fields
+             switch (pColInfs[index].dbDataType)
+             {
+-                case DB_DATA_TYPE_VARCHAR:
+-                   pColDataPtrs[index].PtrDataObj = new wxChar[pColInfs[index].bufferSize+(1*sizeof(wxChar))];
+-                   pColDataPtrs[index].SzDataObj  = pColInfs[index].bufferSize+(1*sizeof(wxChar));
+-                   pColDataPtrs[index].SqlCtype   = SQL_C_WXCHAR;
+-                   break;
+                 case DB_DATA_TYPE_MEMO:
++			    case DB_DATA_TYPE_VARCHAR:
+                    pColDataPtrs[index].PtrDataObj = new wxChar[pColInfs[index].bufferSize+(1*sizeof(wxChar))];
+                    pColDataPtrs[index].SzDataObj  = pColInfs[index].bufferSize+(1*sizeof(wxChar));
+                    pColDataPtrs[index].SqlCtype   = SQL_C_WXCHAR;
+@@ -2751,6 +2936,7 @@
+ #endif
+             case SQL_CHAR:
+             case SQL_VARCHAR:
++			case SQL_LONGVARCHAR:
+                 val = (wxChar *)(colDefs[colNumber].PtrDataObj);
+                 break;
+             case SQL_C_LONG:
+@@ -2823,6 +3009,7 @@
+ #endif
+             case SQL_CHAR:
+             case SQL_VARCHAR:
++			case SQL_LONGVARCHAR:
+                 csstrncpyt((wxChar *)(colDefs[colNumber].PtrDataObj),
+                            val.GetString().c_str(),
+                            colDefs[colNumber].SzDataObj-1);  //TODO: glt ??? * sizeof(wxChar) ???
+Index: wxWidgets-2.8/include/wx/db.h
+===================================================================
+--- wxWidgets-2.8/include/wx/db.h	(revision 47742)
++++ wxWidgets-2.8/include/wx/db.h	(working copy)
+@@ -542,7 +542,7 @@
+     // Number of Ctable objects connected to this db object.  FOR INTERNAL USE ONLY!!!
+     unsigned int nTables;
+ 
+-    // Information about logical data types VARCHAR, INTEGER, FLOAT and DATE.
++    // Information about logical data types VARCHAR, INTEGER, FLOAT, DATE, BLOB and MEMO.
+      //
+     // This information is obtained from the ODBC driver by use of the
+     // SQLGetTypeInfo() function.  The key piece of information is the
+@@ -629,7 +629,7 @@
+     wxChar sqlState[20];
+ 
+ #if wxODBC_BACKWARD_COMPATABILITY
+-    // Information about logical data types VARCHAR, INTEGER, FLOAT and DATE.
++    // Information about logical data types VARCHAR, INTEGER, FLOAT, DATE, BLOB and MEMO.
+      //
+     // This information is obtained from the ODBC driver by use of the
+     // SQLGetTypeInfo() function.  The key piece of information is the
+Index: wxWidgets-2.8/include/wx/dbtable.h
+
+ 	  	 

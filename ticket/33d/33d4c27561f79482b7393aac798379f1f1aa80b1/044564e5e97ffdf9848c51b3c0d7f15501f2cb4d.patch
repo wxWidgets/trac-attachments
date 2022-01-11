@@ -1,0 +1,258 @@
+Index: src/msw/ole/automtn.cpp
+===================================================================
+--- src/msw/ole/automtn.cpp	(revision 65585)
++++ src/msw/ole/automtn.cpp	(working copy)
+@@ -489,9 +489,22 @@
+         return false;
+ }
+ 
++static HRESULT wxCLSIDFromProgID(const wxString& progId, CLSID& clsId)
++{
++    wxBasicString unicodeName(progId);
++
++    HRESULT hr = CLSIDFromProgID((BSTR) unicodeName, &clsId);
++    if (FAILED(hr))
++    {
++        ShowException(progId, hr, NULL, 0);
++        wxLogError(wxT("Cannot obtain CLSID from %s ProgID"), progId);
++    }
++    return hr;
++}
++
+ // Get a dispatch pointer from the current object associated
+ // with a class id
+-bool wxAutomationObject::GetInstance(const wxString& classId) const
++bool wxAutomationObject::GetInstance(const wxString& progId, int flags) const
+ {
+     if (m_dispatchPtr)
+         return false;
+@@ -500,29 +513,28 @@
+     CLSID clsId;
+     IUnknown * pUnk = NULL;
+ 
+-    wxBasicString unicodeName(classId);
+-
+-    hr = CLSIDFromProgID((BSTR) unicodeName, &clsId);
++    hr = wxCLSIDFromProgID(progId, clsId);
+     if (FAILED(hr))
+-    {
+-        ShowException(classId, hr, NULL, 0);
+-        wxLogWarning(wxT("Cannot obtain CLSID from ProgID"));
+         return false;
+-    }
+ 
+     hr = GetActiveObject(clsId, NULL, &pUnk);
+     if (FAILED(hr))
+     {
+-        ShowException(classId, hr, NULL, 0);
+-        wxLogWarning(wxT("Cannot find an active object"));
+-        return false;
++        if (flags & Automation_CreateIfNeeded)
++            return CreateInstance(progId);
++        else
++        {
++            ShowException(progId, hr, NULL, 0);
++            wxLogDebug(wxT("Cannot find an %s active object"), progId);
++            return false;
++        }
+     }
+ 
+     hr = pUnk->QueryInterface(IID_IDispatch, (LPVOID*) &m_dispatchPtr);
+     if (FAILED(hr))
+     {
+-        ShowException(classId, hr, NULL, 0);
+-        wxLogWarning(wxT("Cannot find IDispatch interface"));
++        ShowException(progId, hr, NULL, 0);
++        wxLogError(wxT("Cannot find IDispatch interface for %s object"), progId);
+         return false;
+     }
+ 
+@@ -531,7 +543,7 @@
+ 
+ // Get a dispatch pointer from a new object associated
+ // with the given class id
+-bool wxAutomationObject::CreateInstance(const wxString& classId) const
++bool wxAutomationObject::CreateInstance(const wxString& progId) const
+ {
+     if (m_dispatchPtr)
+         return false;
+@@ -539,15 +551,9 @@
+     HRESULT hr;
+     CLSID clsId;
+ 
+-    wxBasicString unicodeName(classId);
+-
+-    hr = CLSIDFromProgID((BSTR) unicodeName, &clsId);
++    hr = wxCLSIDFromProgID(progId, clsId);
+     if (FAILED(hr))
+-    {
+-        ShowException(classId, hr, NULL, 0);
+-        wxLogWarning(wxT("Cannot obtain CLSID from ProgID"));
+         return false;
+-    }
+ 
+     // get the server IDispatch interface
+     //
+@@ -558,8 +564,8 @@
+                                 (void**)&m_dispatchPtr);
+     if (FAILED(hr))
+     {
+-        ShowException(classId, hr, NULL, 0);
+-        wxLogWarning(wxT("Could not start an instance of this class."));
++        ShowException(progId, hr, NULL, 0);
++        wxLogError(wxT("Could not start an instance of %s class"), progId);
+         return false;
+     }
+ 
+Index: include/wx/msw/ole/automtn.h
+===================================================================
+--- include/wx/msw/ole/automtn.h	(revision 65585)
++++ include/wx/msw/ole/automtn.h	(working copy)
+@@ -26,6 +26,11 @@
+ #undef GetObject
+ #endif
+ 
++enum wxAutomationFlags
++{
++    Automation_CreateIfNeeded = 1 // create object if it doesn't exist
++};
++
+ /*
+  * wxAutomationObject
+  * Wraps up an IDispatch pointer and invocation; does variant conversion.
+@@ -44,10 +49,11 @@
+ 
+     // Get a dispatch pointer from the current object associated
+     // with a class id, such as "Excel.Application"
+-    bool GetInstance(const wxString& classId) const;
++    bool GetInstance(const wxString& progId,
++        int flags = Automation_CreateIfNeeded) const;
+ 
+     // Get a dispatch pointer from a new instance of the the class
+-    bool CreateInstance(const wxString& classId) const;
++    bool CreateInstance(const wxString& progId) const;
+ 
+     // Low-level invocation function. Pass either an array of variants,
+     // or an array of pointers to variants.
+Index: interface/wx/msw/ole/automtn.h
+===================================================================
+--- interface/wx/msw/ole/automtn.h	(revision 65585)
++++ interface/wx/msw/ole/automtn.h	(working copy)
+@@ -7,6 +7,15 @@
+ /////////////////////////////////////////////////////////////////////////////
+ 
+ /**
++    Automation object creation flags
++*/
++enum wxAutomationFlags
++{
++    Automation_CreateIfNeeded = 1 /**< create object if it doesn't exist */
++};
++
++
++/**
+     @class wxAutomationObject
+ 
+     The @b wxAutomationObject class represents an OLE automation object containing
+@@ -75,11 +84,11 @@
+     //@}
+ 
+     /**
+-        Creates a new object based on the class id, returning @true if the object was
++        Creates a new object based on the ProgID, returning @true if the object was
+         successfully created,
+         or @false if not.
+     */
+-    bool CreateInstance(const wxString& classId) const;
++    bool CreateInstance(const wxString& progId) const;
+ 
+     /**
+         Checks if the object is in a valid state.
+@@ -97,16 +106,18 @@
+     IDispatch* GetDispatchPtr() const;
+ 
+     /**
+-        Retrieves the current object associated with a class id, and attaches the
+-        IDispatch pointer
+-        to this object. Returns @true if a pointer was successfully retrieved, @false
++        Retrieves the current object associated with a ProgID, and attaches the
++        IDispatch pointer to this object.
++        If attach was failed and @a flags parameter has Automation_CreateIfNeeded
++        a new object will be created.
++        Returns @true if a pointer was successfully retrieved, @false
+         otherwise.
+         Note that this cannot cope with two instances of a given OLE object being
+         active simultaneously,
+         such as two copies of Excel running. Which object is referenced cannot
+         currently be specified.
+     */
+-    bool GetInstance(const wxString& classId) const;
++    bool GetInstance(const wxString& progId, int flags = Automation_CreateIfNeeded) const;
+ 
+     /**
+         Retrieves a property from this object, assumed to be a dispatch pointer, and
+Index: samples/oleauto/oleauto.cpp
+===================================================================
+--- samples/oleauto/oleauto.cpp	(revision 65585)
++++ samples/oleauto/oleauto.cpp	(working copy)
+@@ -196,28 +196,26 @@
+  */
+ void MyFrame::OnTest(wxCommandEvent& WXUNUSED(event))
+ {
+-    wxMessageBox(wxT("Please ensure Excel is running, then press OK.\nThe active cell should then say 'wxWidgets automation test!' in bold."));
++    wxMessageBox(wxT("Excel will be started if it is not running after you have pressed OK button.")
++        wxT("\nThe active cell should then say 'wxWidgets automation test!' in bold."),
++        wxT("Excel start"));
+ 
+-    wxAutomationObject excelObject, rangeObject;
+-    if (!excelObject.GetInstance(wxT("Excel.Application")))
++    wxAutomationObject excelObject;
++    if ( !excelObject.GetInstance(wxT("Excel.Application")) )
+     {
+-        // Start Excel if it is not running
+-        if (!excelObject.CreateInstance(wxT("Excel.Application")))
+-        {
+-            wxMessageBox(wxT("Could not create Excel object."));
+-            return;
+-        }
++        wxLogError(wxT("Could not create Excel object."));
++        return;
+     }
+ 
+     // Ensure that Excel is visible
+     if (!excelObject.PutProperty(wxT("Visible"), true))
+     {
+-        wxMessageBox(wxT("Could not make Excel object visible"));
++        wxLogError(wxT("Could not make Excel object visible"));
+     }
+     const wxVariant workbooksCountVariant = excelObject.GetProperty(wxT("Workbooks.Count"));
+     if (workbooksCountVariant.IsNull())
+     {
+-        wxMessageBox(wxT("Could not get workbooks count"));
++        wxLogError(wxT("Could not get workbooks count"));
+         return;
+     }
+     const long workbooksCount = workbooksCountVariant;
+@@ -226,19 +224,19 @@
+         const wxVariant workbook = excelObject.CallMethod(wxT("Workbooks.Add"));
+         if (workbook.IsNull())
+         {
+-            wxMessageBox(wxT("Could not create new Workbook"));
++            wxLogError(wxT("Could not create new Workbook"));
+             return;
+         }
+     }
+ 
+     if (!excelObject.PutProperty(wxT("ActiveCell.Value"), wxT("wxWidgets automation test!")))
+     {
+-        wxMessageBox(wxT("Could not set active cell value."));
++        wxLogError(wxT("Could not set active cell value."));
+         return;
+     }
+     if (!excelObject.PutProperty(wxT("ActiveCell.Font.Bold"), wxVariant(true)) )
+     {
+-        wxMessageBox(wxT("Could not put Bold property to active cell."));
++        wxLogError(wxT("Could not put Bold property to active cell."));
+         return;
+     }
+ }

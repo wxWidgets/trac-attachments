@@ -1,0 +1,182 @@
+Index: docs/latex/wx/module.tex
+===================================================================
+--- docs/latex/wx/module.tex	(revision 48841)
++++ docs/latex/wx/module.tex	(working copy)
+@@ -38,13 +38,30 @@
+   class MyModule: public wxModule
+   {
+   public:
+-      wxDDEModule() { AddDependency(CLASSINFO(wxDDEModule)); }
++      MyModule() { AddDependency(CLASSINFO(wxDDEModule)); }
+       virtual bool OnInit() { ... code using DDE ... }
+       virtual void OnExit() { ... }
+ 
+   private:
+-      DECLARE_DYNAMIC_CLASS(wxDDEModule)
++      DECLARE_DYNAMIC_CLASS(MyModule)
+   };
++  
++  IMPLEMENT_DYNAMIC_CLASS(MyModule, wxModule)
++  
++  // Another module which uses DDE in its OnInit()
++  // but uses a named dependency
++  class MyModule2: public wxModule
++  {
++  public:
++      MyModule2() { AddDependency(wxT("wxDDEModule")); }
++      virtual bool OnInit() { ... code using DDE ... }
++      virtual void OnExit() { ... }
++
++  private:
++      DECLARE_DYNAMIC_CLASS(MyModule2)
++  };
++  
++  IMPLEMENT_DYNAMIC_CLASS(MyModule2, wxModule)
+ \end{verbatim}
+ 
+ \wxheading{Derived from}
+@@ -80,18 +97,27 @@
+ 
+ \func{void}{AddDependency}{\param{wxClassInfo * }{dep}}
+ 
++\func{void}{AddDependency}{\param{const wxChar * }{classname}}
++
+ Call this function from the constructor of the derived class. \arg{dep} must be
+ the \helpref{CLASSINFO}{classinfo} of a wxModule-derived class and the
+ corresponding module will be loaded \emph{before} and unloaded \emph{after}
+ this module.
+ 
++The second version of this function allows a dependency to be added by
++name without access to the classinfo.  This is useful when a module is
++declared entirely in a source file and there is no header for the declaration
++of the module needed by \helpref{CLASSINFO}{classinfo}.
++
+ Note that circular dependencies are detected and result in a fatal error.
+ 
+ \wxheading{Parameters}
+ 
+ \docparam{dep}{The class information object for the dependent module.}
+ 
++\docparam{classname}{The class name of the dependent module.}
+ 
++
+ \membersection{wxModule::OnExit}\label{wxmoduleonexit}
+ 
+ \func{virtual void}{OnExit}{\void}
+Index: include/wx/module.h
+===================================================================
+--- include/wx/module.h	(revision 48841)
++++ include/wx/module.h	(working copy)
+@@ -24,7 +24,12 @@
+ WX_DEFINE_USER_EXPORTED_ARRAY_PTR(wxClassInfo *, wxArrayClassInfo,
+                                     class WXDLLIMPEXP_BASE);
+ 
++// and an array of character pointers, used for storing
++// named module dependencies
++WX_DEFINE_USER_EXPORTED_ARRAY_PTR(const wxChar *, wxArrayNamedDependencies,
++                                    class WXDLLIMPEXP_BASE);
+ 
++
+ // declaring a class derived from wxModule will automatically create an
+ // instance of this class on program startup, call its OnInit() method and call
+ // OnExit() on program termination (but only if OnInit() succeeded)
+@@ -72,6 +77,16 @@
+ 
+         m_dependencies.Add(dep);
+     }
++    
++    // Add a named dependency.  A module of this name must exist
++    // and will be initialzed prior to the dependent module.
++    void AddDependency(const wxChar* className)
++    {
++        wxCHECK_RET( className, _T("NULL module dependency") );
++      
++        m_namedDependencies.Add(className);
++    }
++    
+ 
+ private:
+     // initialize module and Append it to initializedModules list recursively
+@@ -83,10 +98,16 @@
+     // modules if we're called during initialization because not all modules
+     // could be initialized) and also empty m_modules itself
+     static void DoCleanUpModules(const wxModuleList& modules);
++    
++    // Resolve all named an optional dependendies and add them to the
++    // dependencies list
++    bool ResolveNamedDependencies();
+ 
+ 
+     // module dependencies: contains
+     wxArrayClassInfo m_dependencies;
++    
++    wxArrayNamedDependencies m_namedDependencies;
+ 
+     // used internally while initiliazing/cleaning up modules
+     enum
+@@ -100,4 +121,6 @@
+     DECLARE_CLASS(wxModule)
+ };
+ 
++
++
+ #endif // _WX_MODULE_H_
+Index: src/common/module.cpp
+===================================================================
+--- src/common/module.cpp	(revision 48841)
++++ src/common/module.cpp	(working copy)
+@@ -81,6 +81,10 @@
+ 
+     const wxArrayClassInfo& dependencies = module->m_dependencies;
+ 
++    // Resolve named depencies
++    if(module->ResolveNamedDependencies() == false)
++      return false;
++    
+     // satisfy module dependencies by loading them before the current module
+     for ( unsigned int i = 0; i < dependencies.size(); ++i )
+     {
+@@ -173,6 +177,8 @@
+     return true;
+ }
+ 
++
++
+ // Clean up all currently initialized modules
+ void wxModule::DoCleanUpModules(const wxModuleList& modules)
+ {
+@@ -197,3 +203,32 @@
+     // clear all modules, even the non-initialized ones
+     WX_CLEAR_LIST(wxModuleList, m_modules);
+ }
++
++// Resolve any named dependencies to the addresses
++// and add to the dependencies list
++bool wxModule::ResolveNamedDependencies()
++{
++    // first resolve required dependencies
++    for(unsigned int i = 0; i < m_namedDependencies.size(); ++i)
++    {
++        wxClassInfo* info = wxClassInfo::FindClass(m_namedDependencies[i]);
++        
++        if(info)
++        {
++            // Just add it even if it is not derived from wxModule
++            // DoInitializeModules will make sure a module with the
++            // same classinfo exists and fail if it does not.
++            m_dependencies.Add(info);
++        }
++        else
++        {
++            // required dependency not found
++            return false;
++        }
++    }
++    
++    // done
++    return true;
++}
++
++
+
+ 	  	 

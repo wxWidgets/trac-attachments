@@ -1,0 +1,133 @@
+commit dd2a1e4f04fed73f7cc09f7cef5a1758ffdf1cce
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Mon Jan 4 12:13:25 2010 +0100
+
+    Make calling wxLog::IsAllowedTraceMask() safe during static init time.
+    
+    Although using wxLog during statics initialization is not recommended, it may
+    still happen, possibly indirectly so make it work correctly by using an
+    accessor function for the array of trace masks which ensures that this array
+    is always correctly initialized before being used.
+    
+    Closes #11592.
+
+diff --git a/include/wx/log.h b/include/wx/log.h
+index 3048b3d..c632435 100644
+--- a/include/wx/log.h
++++ b/include/wx/log.h
+@@ -453,7 +453,7 @@ public:
+ 
+     // get string trace masks: note that this is MT-unsafe if other threads can
+     // call AddTraceMask() concurrently
+-    static const wxArrayString& GetTraceMasks() { return ms_aTraceMasks; }
++    static const wxArrayString& GetTraceMasks();
+ 
+     // sets the time stamp string format: this is used as strftime() format
+     // string for the log targets which add time stamps to the messages; set
+@@ -644,9 +644,6 @@ private:
+ #if WXWIN_COMPATIBILITY_2_8
+     static wxTraceMask ms_ulTraceMask;   // controls wxLogTrace behaviour
+ #endif // WXWIN_COMPATIBILITY_2_8
+-
+-    // currently enabled trace masks
+-    static wxArrayString ms_aTraceMasks;
+ };
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/src/common/log.cpp b/src/common/log.cpp
+index 1e8d596..88e715f 100644
+--- a/src/common/log.cpp
++++ b/src/common/log.cpp
+@@ -106,7 +106,7 @@ wxLogRecords gs_bufferedLogRecords;
+ // than main, i.e. it protects all accesses to gs_bufferedLogRecords above
+ WX_DEFINE_LOG_CS(BackgroundLog);
+ 
+-// this one is used for protecting ms_aTraceMasks from concurrent access
++// this one is used for protecting TraceMasks() from concurrent access
+ WX_DEFINE_LOG_CS(TraceMask);
+ 
+ // and this one is used for GetComponentLevels()
+@@ -598,36 +598,67 @@ wxLogLevel wxLog::GetComponentLevel(wxString component)
+ // wxLog trace masks
+ // ----------------------------------------------------------------------------
+ 
++namespace
++{
++
++// because IsAllowedTraceMask() may be called during static initialization
++// (this is not recommended but it may still happen, see #11592) we can't use a
++// simple static variable which might be not initialized itself just yet to
++// store the trace masks, but need this accessor function which will ensure
++// that the variable is always correctly initialized before being accessed
++//
++// notice that this doesn't make accessing it MT-safe, of course, you need to
++// serialize accesses to it using GetTraceMaskCS() for this
++wxArrayString& TraceMasks()
++{
++    static wxArrayString s_traceMasks;
++
++    return s_traceMasks;
++}
++
++} // anonymous namespace
++
++/* static */ const wxArrayString& wxLog::GetTraceMasks()
++{
++    // because of this function signature (it returns a reference, not the
++    // object), it is inherently MT-unsafe so there is no need to acquire the
++    // lock here anyhow
++
++    return TraceMasks();
++}
++
+ void wxLog::AddTraceMask(const wxString& str)
+ {
+     wxCRIT_SECT_LOCKER(lock, GetTraceMaskCS());
+ 
+-    ms_aTraceMasks.push_back(str);
++    TraceMasks().push_back(str);
+ }
+ 
+ void wxLog::RemoveTraceMask(const wxString& str)
+ {
+     wxCRIT_SECT_LOCKER(lock, GetTraceMaskCS());
+ 
+-    int index = ms_aTraceMasks.Index(str);
++    int index = TraceMasks().Index(str);
+     if ( index != wxNOT_FOUND )
+-        ms_aTraceMasks.RemoveAt((size_t)index);
++        TraceMasks().RemoveAt((size_t)index);
+ }
+ 
+ void wxLog::ClearTraceMasks()
+ {
+     wxCRIT_SECT_LOCKER(lock, GetTraceMaskCS());
+ 
+-    ms_aTraceMasks.Clear();
++    TraceMasks().Clear();
+ }
+ 
+ /*static*/ bool wxLog::IsAllowedTraceMask(const wxString& mask)
+ {
+     wxCRIT_SECT_LOCKER(lock, GetTraceMaskCS());
+ 
+-    for ( wxArrayString::iterator it = ms_aTraceMasks.begin(),
+-                                  en = ms_aTraceMasks.end();
+-         it != en; ++it )
++    const wxArrayString& masks = GetTraceMasks();
++    for ( wxArrayString::const_iterator it = masks.begin(),
++                                        en = masks.end();
++          it != en;
++          ++it )
+     {
+         if ( *it == mask)
+             return true;
+@@ -918,8 +949,6 @@ wxString        wxLog::ms_timestamp(wxS("%X"));  // time only, no date
+ wxTraceMask     wxLog::ms_ulTraceMask  = (wxTraceMask)0;
+ #endif // wxDEBUG_LEVEL
+ 
+-wxArrayString   wxLog::ms_aTraceMasks;
+-
+ // ----------------------------------------------------------------------------
+ // stdout error logging helper
+ // ----------------------------------------------------------------------------

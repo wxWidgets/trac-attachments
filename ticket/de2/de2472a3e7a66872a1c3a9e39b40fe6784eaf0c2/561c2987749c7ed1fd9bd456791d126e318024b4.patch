@@ -1,0 +1,175 @@
+diff -rU2 wxWidgets.orig/include/wx/msw/radiobox.h wxWidgets/include/wx/msw/radiobox.h
+--- wxWidgets.orig/include/wx/msw/radiobox.h	2005-03-04 02:25:22.000000000 +1100
++++ wxWidgets/include/wx/msw/radiobox.h	2005-03-21 23:48:35.000000000 +1100
+@@ -145,4 +145,5 @@
+     virtual wxSize DoGetBestSize() const;
+ 
++    virtual WXHRGN MSWCalculateClippingRegion();
+ 
+     // the buttons we contain
+diff -rU2 wxWidgets.orig/include/wx/msw/statbox.h wxWidgets/include/wx/msw/statbox.h
+--- wxWidgets.orig/include/wx/msw/statbox.h	2005-03-12 02:35:53.000000000 +1100
++++ wxWidgets/include/wx/msw/statbox.h	2005-03-21 23:48:36.162977576 +1100
+@@ -49,4 +49,6 @@
+     virtual WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam);
+ 
++    virtual WXHRGN MSWCalculateClippingRegion();
++    virtual WXHBRUSH MSWControlColor(WXHDC pDC);
+ 
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxStaticBox)
+diff -rU2 wxWidgets.orig/src/msw/radiobox.cpp wxWidgets/src/msw/radiobox.cpp
+--- wxWidgets.orig/src/msw/radiobox.cpp	2005-03-04 02:26:23.000000000 +1100
++++ wxWidgets/src/msw/radiobox.cpp	2005-03-21 23:51:03.800533256 +1100
+@@ -167,6 +167,4 @@
+ 
+     // and now create the buttons
+-    HWND hwndParent = GetHwndOf(parent);
+-
+     m_radioButtons = new wxSubwindows(n);
+     m_radioWidth = new int[n];
+@@ -187,5 +185,5 @@
+                                       styleBtn,
+                                       0, 0, 0, 0,   // will be set in SetSize()
+-                                      hwndParent,
++                                      GetHwnd(),
+                                       (HMENU)newId,
+                                       wxGetInstance(),
+@@ -210,5 +208,5 @@
+                          wxEmptyString,
+                          WS_GROUP | BS_AUTORADIOBUTTON | WS_CHILD,
+-                         0, 0, 0, 0, hwndParent,
++                         0, 0, 0, 0, GetHwnd(),
+                          (HMENU)NewControlId(), wxGetInstance(), NULL);
+ 
+@@ -516,6 +514,6 @@
+         yy = currentY;
+ 
+-    int y_offset = yy;
+-    int x_offset = xx;
++    int y_offset = 0;
++    int x_offset = 0;
+ 
+     int cx1, cy1;
+@@ -820,4 +818,25 @@
+ }
+ 
++WXHRGN wxRadioBox::MSWCalculateClippingRegion()
++{
++    RECT rc;
++    ::GetWindowRect(GetHwnd(), &rc);
++    HRGN hrgn = ::CreateRectRgn(rc.left, rc.top, rc.right + 1, rc.bottom + 1);
++
++    size_t count = GetCount();
++    for ( size_t i = 0; i < count; ++i )
++    {
++        ::GetWindowRect((*m_radioButtons)[i], &rc);
++        HRGN hrgnchild = ::CreateRectRgnIndirect(&rc);
++        ::CombineRgn(hrgn, hrgn, hrgnchild, RGN_DIFF);
++        ::DeleteObject(hrgnchild);
++    }
++
++    ::GetWindowRect(GetHwnd(), &rc);
++    ::OffsetRgn(hrgn, -rc.left, -rc.top);
++
++    return hrgn;
++}
++
+ #endif // wxUSE_RADIOBOX
+ 
+diff -rU2 wxWidgets.orig/src/msw/statbox.cpp wxWidgets/src/msw/statbox.cpp
+--- wxWidgets.orig/src/msw/statbox.cpp	2005-03-12 02:36:41.000000000 +1100
++++ wxWidgets/src/msw/statbox.cpp	2005-03-21 23:56:31.821666464 +1100
+@@ -39,13 +39,8 @@
+ #include "wx/notebook.h"
+ #include "wx/sysopt.h"
++#include "wx/image.h"
+ 
+ #include "wx/msw/private.h"
+ 
+-// under CE this style is not defined but we don't need to make static boxes
+-// transparent there neither
+-#ifndef WS_EX_TRANSPARENT
+-    #define WS_EX_TRANSPARENT 0
+-#endif
+-
+ // ----------------------------------------------------------------------------
+ // wxWin macros
+@@ -133,6 +128,10 @@
+     long styleWin = wxStaticBoxBase::MSWGetStyle(style, exstyle);
+ 
++    // no need for it anymore, must be removed for wxRadioBox child
++    // buttons to be able to repaint themselves
++    styleWin &= ~WS_CLIPCHILDREN;
++
+     if ( exstyle )
+-        *exstyle = WS_EX_TRANSPARENT;
++        *exstyle = 0;
+ 
+     return styleWin | BS_GROUPBOX;
+@@ -195,4 +194,64 @@
+ }
+ 
++WXHRGN wxStaticBox::MSWCalculateClippingRegion()
++{
++    RECT rc;
++    ::GetWindowRect(GetHwnd(), &rc);
++    HRGN hrgn = ::CreateRectRgn(rc.left, rc.top, rc.right + 1, rc.bottom + 1);
++
++    wxWindowList::compatibility_iterator node = GetParent()->GetChildren().GetFirst();
++    while ( node )
++    {
++        wxWindow *child = node->GetData();
++
++        // can't just test for (this != child) here since if a wxStaticBox
++        // overlaps another wxStaticBox then neither are drawn. The overlapping
++        // region will flicker but we shouldn't have overlapping windows anyway.
++        if ( !child->IsKindOf(CLASSINFO(wxStaticBox)) )
++        {
++            ::GetWindowRect(GetHwndOf(child), &rc);
++            if ( RectInRegion(hrgn, &rc) )
++            {
++                // need to remove WS_CLIPSIBLINGS from all sibling windows
++                // that are within this staticbox if set
++                LONG style = ::GetWindowLong(GetHwndOf(child), GWL_STYLE);
++                if ( style & WS_CLIPSIBLINGS )
++                {
++                    style &= ~WS_CLIPSIBLINGS;
++                    ::SetWindowLong(GetHwndOf(child), GWL_STYLE, style);
++                }
++
++                HRGN hrgnchild = ::CreateRectRgnIndirect(&rc);
++                ::CombineRgn(hrgn, hrgn, hrgnchild, RGN_DIFF);
++                ::DeleteObject(hrgnchild);
++            }
++        }
++
++        node = node->GetNext();
++    }
++    ::GetWindowRect(GetHwnd(), &rc);
++    ::OffsetRgn(hrgn, -rc.left, -rc.top);
++
++    return hrgn;
++}
++
++WXHBRUSH wxStaticBox::MSWControlColor(WXHDC pDC)
++{
++    WXHBRUSH hbr;
++    HRGN rgn = (HRGN)MSWCalculateClippingRegion();
++    RECT rc;
++
++    hbr = DoMSWControlColor(pDC, wxNullColour);
++    if ( !hbr )
++        hbr = (WXHBRUSH)::CreateSolidBrush(wxColourToRGB(GetBackgroundColour()));
++
++    ::GetClientRect(GetHwnd(), &rc);
++    ::SelectClipRgn((HDC)pDC, rgn);
++    ::FillRect((HDC)pDC, &rc, (HBRUSH)hbr);
++    ::DeleteObject(rgn);
++
++    return hbr;
++}
++
+ #endif // wxUSE_STATBOX
+ 
+
+ 	  	 

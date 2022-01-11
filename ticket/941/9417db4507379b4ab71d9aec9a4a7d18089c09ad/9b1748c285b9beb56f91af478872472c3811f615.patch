@@ -1,0 +1,221 @@
+Index: include/wx/db.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/db.h,v
+retrieving revision 1.73
+diff -b -u -2 -r1.73 db.h
+--- include/wx/db.h	2003/09/19 10:59:10	1.73
++++ include/wx/db.h	2003/11/02 08:39:57
+@@ -609,4 +609,5 @@
+ 
+     // Data Source Name, User ID, Password and whether open should fail on data type not supported
++    bool         OpenWithDriver( const wxString& connection_string, bool failOnDataTypeUnsupported=TRUE );
+     bool         Open(const wxString &Dsn, const wxString &Uid, const wxString &AuthStr, bool failOnDataTypeUnsupported=TRUE);
+     bool         Open(wxDbConnectInf *dbConnectInf);
+Index: src/common/db.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/db.cpp,v
+retrieving revision 1.85
+diff -b -u -2 -r1.85 db.cpp
+--- src/common/db.cpp	2003/09/19 10:59:14	1.85
++++ src/common/db.cpp	2003/11/02 08:40:22
+@@ -575,4 +575,198 @@
+ }  // wxDb::convertUserID()
+ 
++/********** wxDb::OpenWithDriver **********/
++bool wxDb::OpenWithDriver( const wxString& connection_string, bool failOnDataTypeUnsupported )
++{
++    wxASSERT(connection_string.Length());
++    dsn        = "";
++    uid        = "";
++    authStr    = "";
++
++    RETCODE retcode;
++
++    if (!FwdOnlyCursors())
++    {
++        // Specify that the ODBC cursor library be used, if needed.  This must be
++        // specified before the connection is made.
++        retcode = SQLSetConnectOption(hdbc, SQL_ODBC_CURSORS, SQL_CUR_USE_IF_NEEDED);
++
++#ifdef DBDEBUG_CONSOLE
++        if (retcode == SQL_SUCCESS)
++            cout << wxT("SQLSetConnectOption(CURSOR_LIB) successful") << endl;
++        else
++            cout << wxT("SQLSetConnectOption(CURSOR_LIB) failed") << endl;
++#endif
++    }
++
++    // Connect to the data source
++    UCHAR out_string[ 257 ];
++    short out_string_len;
++
++    retcode = SQLDriverConnect( hdbc, NULL, (UCHAR FAR *)connection_string.c_str(), connection_string.Length(), (UCHAR FAR *)out_string, 256, &out_string_len, SQL_DRIVER_COMPLETE );
++    if ((retcode != SQL_SUCCESS) &&
++        (retcode != SQL_SUCCESS_WITH_INFO))
++        return(DispAllErrors(henv, hdbc));
++
++/*
++    If using Intersolv branded ODBC drivers, this is the place where you would substitute
++    your branded driver license information
++
++    SQLSetConnectOption(hdbc, 1041, (UDWORD) wxEmptyString);
++    SQLSetConnectOption(hdbc, 1042, (UDWORD) wxEmptyString);
++*/
++
++    // Mark database as open
++    dbIsOpen = TRUE;
++
++    // Allocate a statement handle for the database connection
++    if (SQLAllocStmt(hdbc, &hstmt) != SQL_SUCCESS)
++        return(DispAllErrors(henv, hdbc));
++
++    // Set Connection Options
++    if (!setConnectionOptions())
++        return(FALSE);
++
++    // Query the data source for inf. about itself
++    if (!getDbInfo())
++        return(FALSE);
++
++    // Query the data source regarding data type information
++
++    //
++    // The way it was determined which SQL data types to use was by calling SQLGetInfo
++    // for all of the possible SQL data types to see which ones were supported.  If
++    // a type is not supported, the SQLFetch() that's called from getDataTypeInfo()
++    // fails with SQL_NO_DATA_FOUND.  This is ugly because I'm sure the three SQL data
++    // types I've selected below will not alway's be what we want.  These are just
++    // what happened to work against an Oracle 7/Intersolv combination.  The following is
++    // a complete list of the results I got back against the Oracle 7 database:
++    //
++    // SQL_BIGINT             SQL_NO_DATA_FOUND
++    // SQL_BINARY             SQL_NO_DATA_FOUND
++    // SQL_BIT                SQL_NO_DATA_FOUND
++    // SQL_CHAR               type name = 'CHAR', Precision = 255
++    // SQL_DATE               SQL_NO_DATA_FOUND
++    // SQL_DECIMAL            type name = 'NUMBER', Precision = 38
++    // SQL_DOUBLE             type name = 'NUMBER', Precision = 15
++    // SQL_FLOAT              SQL_NO_DATA_FOUND
++    // SQL_INTEGER            SQL_NO_DATA_FOUND
++    // SQL_LONGVARBINARY      type name = 'LONG RAW', Precision = 2 billion
++    // SQL_LONGVARCHAR        type name = 'LONG', Precision = 2 billion
++    // SQL_NUMERIC            SQL_NO_DATA_FOUND
++    // SQL_REAL               SQL_NO_DATA_FOUND
++    // SQL_SMALLINT           SQL_NO_DATA_FOUND
++    // SQL_TIME               SQL_NO_DATA_FOUND
++    // SQL_TIMESTAMP          type name = 'DATE', Precision = 19
++    // SQL_VARBINARY          type name = 'RAW', Precision = 255
++    // SQL_VARCHAR            type name = 'VARCHAR2', Precision = 2000
++    // =====================================================================
++    // Results from a Microsoft Access 7.0 db, using a driver from Microsoft
++    //
++    // SQL_VARCHAR            type name = 'TEXT', Precision = 255
++    // SQL_TIMESTAMP          type name = 'DATETIME'
++    // SQL_DECIMAL            SQL_NO_DATA_FOUND
++    // SQL_NUMERIC            type name = 'CURRENCY', Precision = 19
++    // SQL_FLOAT              SQL_NO_DATA_FOUND
++    // SQL_REAL               type name = 'SINGLE', Precision = 7
++    // SQL_DOUBLE             type name = 'DOUBLE', Precision = 15
++    // SQL_INTEGER            type name = 'LONG', Precision = 10
++
++    // VARCHAR = Variable length character string
++    if (!getDataTypeInfo(SQL_VARCHAR, typeInfVarchar))
++        if (!getDataTypeInfo(SQL_CHAR, typeInfVarchar))
++            return(FALSE);
++        else
++            typeInfVarchar.FsqlType = SQL_CHAR;
++    else
++        typeInfVarchar.FsqlType = SQL_VARCHAR;
++
++    // Float
++    if (!getDataTypeInfo(SQL_DOUBLE,typeInfFloat))
++        if (!getDataTypeInfo(SQL_REAL,typeInfFloat))
++            if (!getDataTypeInfo(SQL_FLOAT,typeInfFloat))
++                if (!getDataTypeInfo(SQL_DECIMAL,typeInfFloat))
++                    if (!getDataTypeInfo(SQL_NUMERIC,typeInfFloat))
++                    {
++                        if (failOnDataTypeUnsupported)
++                            return(FALSE);
++                    }
++                    else
++                        typeInfFloat.FsqlType = SQL_NUMERIC;
++                else
++                    typeInfFloat.FsqlType = SQL_DECIMAL;
++            else
++                typeInfFloat.FsqlType = SQL_FLOAT;
++        else
++            typeInfFloat.FsqlType = SQL_REAL;
++    else
++        typeInfFloat.FsqlType = SQL_DOUBLE;
++
++    // Integer
++    if (!getDataTypeInfo(SQL_INTEGER, typeInfInteger))
++    {
++        // If SQL_INTEGER is not supported, use the floating point
++        // data type to store integers as well as floats
++        if (!getDataTypeInfo(typeInfFloat.FsqlType, typeInfInteger))
++        {
++            if (failOnDataTypeUnsupported)
++                return(FALSE);
++        }
++        else
++            typeInfInteger.FsqlType = typeInfFloat.FsqlType;
++    }
++    else
++        typeInfInteger.FsqlType = SQL_INTEGER;
++
++    // Date/Time
++    if (!getDataTypeInfo(SQL_TIMESTAMP,typeInfDate))
++    {
++        if (!getDataTypeInfo(SQL_DATE,typeInfDate))
++        {
++#ifdef SQL_DATETIME
++            if (getDataTypeInfo(SQL_DATETIME,typeInfDate))
++            {
++                typeInfDate.FsqlType = SQL_TIME;
++            }
++            else
++#endif // SQL_DATETIME defined
++            {
++                if (failOnDataTypeUnsupported)
++                    return(FALSE);
++            }
++        }
++        else
++            typeInfDate.FsqlType = SQL_DATE;
++    }
++    else
++        typeInfDate.FsqlType = SQL_TIMESTAMP;
++
++
++    if (!getDataTypeInfo(SQL_LONGVARBINARY, typeInfBlob))
++    {
++        if (!getDataTypeInfo(SQL_VARBINARY,typeInfBlob))
++        {
++            if (failOnDataTypeUnsupported)
++                return(FALSE);
++        }
++        else
++            typeInfBlob.FsqlType = SQL_VARBINARY;
++    }
++    else
++        typeInfBlob.FsqlType = SQL_LONGVARBINARY;
++
++//typeInfBlob.TypeName = "BLOB";
++
++#ifdef DBDEBUG_CONSOLE
++    cout << wxT("VARCHAR DATA TYPE: ") << typeInfVarchar.TypeName << endl;
++    cout << wxT("INTEGER DATA TYPE: ") << typeInfInteger.TypeName << endl;
++    cout << wxT("FLOAT   DATA TYPE: ") << typeInfFloat.TypeName << endl;
++    cout << wxT("DATE    DATA TYPE: ") << typeInfDate.TypeName << endl;
++    cout << wxT("BLOB    DATA TYPE: ") << typeInfBlob.TypeName << endl;
++    cout << endl;
++#endif
++
++    // Completed Successfully
++    return(TRUE);
++}
+ 
+ /********** wxDb::Open() **********/
+
+ 	  	 

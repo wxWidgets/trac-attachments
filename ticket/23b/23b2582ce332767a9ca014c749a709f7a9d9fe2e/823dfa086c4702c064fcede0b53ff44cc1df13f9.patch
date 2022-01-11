@@ -1,0 +1,409 @@
+Index: samples/sound/sinewave.c
+===================================================================
+--- samples/sound/sinewave.c	(revision 0)
++++ samples/sound/sinewave.c	(revision 0)
+@@ -0,0 +1,138 @@
++// sinewave.c
++// by Troels K, based on code by philip_lynx-ga
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <math.h> // sin()
++#include "sinewave.h"
++
++#ifdef _MSC_VER
++#define lround(a) (long)((a) + 0.5)
++#endif
++
++#define PI 3.14159265358979
++
++#define LOWORD(l)           ((uint16_t)(l))
++#define HIWORD(l)           ((uint16_t)(((uint32_t)(l) >> 16) & 0xFFFF))
++#define LOBYTE(w)           ((uint8_t)(w))
++#define HIBYTE(w)           ((uint8_t)(((uint16_t)(w) >> 8) & 0xFF))
++
++#define sample_t uint16_t
++
++static size_t write_short(void* buf, uint16_t value)
++{
++    size_t pos = 0;
++    uint8_t* p = (uint8_t*)buf;
++    p[pos++] = LOBYTE(value);
++    p[pos++] = HIBYTE(value);
++    return pos;
++}
++
++static size_t write_long(void* buf, uint32_t value)
++{
++    size_t pos = 0;
++    uint8_t* p = (uint8_t*)buf;
++    pos += write_short(p + pos, LOWORD(value));
++    pos += write_short(p + pos, HIWORD(value));
++    return pos;
++}
++
++static size_t write_channel(uint8_t* start, const sine_options* options)
++{
++   size_t i;
++   size_t len = 0;
++   double value;
++   const uint8_t channels = (uint8_t)(options->stereo ? 2 : 1);
++
++   const double amplitude = 0.5 * (0xFFFF - 0);
++   size_t loop = (options->duration * options->samplerate) / 1000;
++
++   for (i = 0; i < loop; i++)
++   {
++      value = amplitude * sin((2.0 * PI * (double)i * (double)options->frequency) / options->samplerate);
++      len += write_short(start, (sample_t)lround(value));
++      start += channels*sizeof(sample_t);
++   }
++   return len;
++}
++
++size_t sine_create(const sine_options* options, void** pp_buf)
++{
++   const size_t riff_len  =  8;
++   const size_t fmt_header_len = 8;
++   const size_t fmt_data_len  = 16;
++   const size_t data_len  =  8;
++   const size_t wave_len  =  4;
++   const size_t len_len   =  sizeof(uint32_t);
++   const uint8_t channels = (uint8_t)(options->stereo ? 2 : 1);
++
++   uint8_t* buf = (uint8_t*)malloc(
++      ((options->duration * options->samplerate) / 1000)
++      * channels * sizeof(sample_t) 
++      + riff_len 
++      + fmt_data_len 
++      + data_len 
++      + wave_len 
++      + fmt_header_len);
++
++   const uint16_t BytesPerSample = (uint16_t) (channels*(options->BitsPerSample/8)); /* bytes per sample (all channels) */
++   const uint32_t BytesPerSecond = options->samplerate*channels*(options->BitsPerSample/8); /* bytes per second */
++   size_t pos = 0;
++   size_t len = 0;
++
++   buf[pos++] = 'R';
++   buf[pos++] = 'I';
++   buf[pos++] = 'F';
++   buf[pos++] = 'F';
++   pos += len_len; /* total length will be put here later */
++   buf[pos++] = 'W';
++   buf[pos++] = 'A';
++   buf[pos++] = 'V';
++   buf[pos++] = 'E';
++
++   /* format chunk, 8 bytes header and 16 bytes payload */
++   buf[pos++] = 'f';
++   buf[pos++] = 'm';
++   buf[pos++] = 't';
++   buf[pos++] = ' ';
++   pos += write_long (buf + pos, fmt_data_len); /* format chunk length */
++   pos += write_short(buf + pos, 1); /* chunk type */
++   pos += write_short(buf + pos, channels);
++   pos += write_long (buf + pos, options->samplerate); /* samples per second */
++   pos += write_long (buf + pos, BytesPerSecond);
++   pos += write_short(buf + pos, BytesPerSample);
++   pos += write_short(buf + pos, (uint16_t)options->BitsPerSample);
++
++   /* data chunk, 8 bytes header and xx bytes payload */
++   buf[pos++] = 'd';
++   buf[pos++] = 'a';
++   buf[pos++] = 't';
++   buf[pos++] = 'a';
++
++   len += write_channel(buf + pos + len_len, options); /* left channel sine */
++   if (options->stereo)
++   {
++      len += write_channel(buf + pos + len_len + sizeof(sample_t), options); /* right channel sine */
++   }
++
++   pos += write_long(buf + pos, len);
++
++   len += riff_len + fmt_data_len + data_len + wave_len;   
++   pos = len_len;
++   write_long(buf + pos, len);
++   *pp_buf = buf;
++   return len + fmt_header_len;
++}
++
++BOOL sine_create_file(const sine_options* options, FILE* stream)
++{
++   void* buf = NULL;
++   size_t len = sine_create(options, &buf);
++   BOOL ok = (len != 0);
++   if (ok)
++   {
++      ok = (len == fwrite(buf, 1, len, stream));
++   }
++   free(buf);
++   return ok;
++}
+Index: samples/sound/sinewave.h
+===================================================================
+--- samples/sound/sinewave.h	(revision 0)
++++ samples/sound/sinewave.h	(revision 0)
+@@ -0,0 +1,36 @@
++// sinewave.h
++// by Troels K, based on code by philip_lynx-ga
++
++#ifdef _MSC_VER
++typedef unsigned __int32 uint32_t;
++typedef unsigned __int16 uint16_t;
++typedef unsigned __int8  uint8_t;
++#else
++#include <stdint.h>
++#endif
++
++#ifndef TRUE
++typedef signed  int BOOL;
++#define TRUE  1
++#define FALSE 0
++#endif
++
++#ifndef EXTERN_C
++   #ifdef __cplusplus
++      #define EXTERN_C    extern "C"
++   #else
++      #define EXTERN_C    extern
++   #endif
++#endif
++
++typedef struct _sine_options
++{
++   int frequency;
++   int duration; /* ms */
++   int samplerate; /* 44100 */
++   BOOL stereo;
++   int BitsPerSample; /* 16 */
++} sine_options;
++
++EXTERN_C size_t sine_create     (const sine_options*, void** buf);
++EXTERN_C BOOL   sine_create_file(const sine_options*, FILE*);
+Index: samples/sound/sound.cpp
+===================================================================
+--- samples/sound/sound.cpp	(revision 69003)
++++ samples/sound/sound.cpp	(working copy)
+@@ -30,6 +30,7 @@
+ #include "wx/sound.h"
+ #include "wx/numdlg.h"
+ #include "wx/textdlg.h"
++#include "sinewave.h"
+ 
+ // ----------------------------------------------------------------------------
+ // resources
+@@ -236,6 +237,7 @@
+ #ifdef __WXMSW__
+     if ( m_useMemory )
+     {
++        /*
+         // this is the dump of cuckoo.wav
+         static const unsigned char data[] =
+         {
+@@ -965,6 +967,21 @@
+         };
+ 
+         return snd.Create(sizeof(data), data);
++        */
++        sine_options options;
++        void* buf;
++            
++        options.frequency = 1000; // Hz
++        options.duration = 2000; // ms
++        options.samplerate = 44100;
++        options.stereo = FALSE;
++        options.BitsPerSample = 16;
++
++        size_t len = sine_create(&options, &buf);
++
++        bool ok = snd.Create((int)len, (const wxByte*)buf);
++        free(buf);
++        return ok;
+     }
+ 
+     if ( !m_soundRes.empty() )
+Index: samples/sound/sound_vc9.vcproj
+===================================================================
+--- samples/sound/sound_vc9.vcproj	(revision 69003)
++++ samples/sound/sound_vc9.vcproj	(working copy)
+@@ -1,16 +1,11 @@
+ <?xml version="1.0" encoding="Windows-1252"?>
+-<!--
+-
+-  This project was generated by
+-  Bakefile 0.2.9 (http://www.bakefile.org)
+-  Do not modify, all changes will be overwritten!
+-
+--->
+ <VisualStudioProject
+ 	ProjectType="Visual C++"
+-	Version="9.00"
++	Version="9,00"
+ 	Name="sound"
+ 	ProjectGUID="{9A9B41CC-834F-53A2-B030-A2B1541AF152}"
++	RootNamespace="sound"
++	TargetFrameworkVersion="0"
+ 	>
+ 	<Platforms>
+ 		<Platform
+@@ -18,7 +13,6 @@
+ 		/>
+ 	</Platforms>
+ 	<ToolFiles>
+-		
+ 	</ToolFiles>
+ 	<Configurations>
+ 		<Configuration
+@@ -101,8 +95,8 @@
+ 			/>
+ 			<Tool
+ 				Name="VCBscMakeTool"
+-				OutputFile="vc_mswud\sound_vc9.bsc"
+ 				SuppressStartupBanner="true"
++				OutputFile="vc_mswud\sound_vc9.bsc"
+ 			/>
+ 			<Tool
+ 				Name="VCFxCopTool"
+@@ -179,9 +173,9 @@
+ 				GenerateDebugInformation="true"
+ 				ProgramDatabaseFile="vc_mswu\sound.pdb"
+ 				SubSystem="2"
+-				TargetMachine="1"
+ 				OptimizeReferences="2"
+ 				EnableCOMDATFolding="2"
++				TargetMachine="1"
+ 			/>
+ 			<Tool
+ 				Name="VCALinkTool"
+@@ -194,8 +188,8 @@
+ 			/>
+ 			<Tool
+ 				Name="VCBscMakeTool"
+-				OutputFile="vc_mswu\sound_vc9.bsc"
+ 				SuppressStartupBanner="true"
++				OutputFile="vc_mswu\sound_vc9.bsc"
+ 			/>
+ 			<Tool
+ 				Name="VCFxCopTool"
+@@ -287,8 +281,8 @@
+ 			/>
+ 			<Tool
+ 				Name="VCBscMakeTool"
+-				OutputFile="vc_mswunivud\sound_vc9.bsc"
+ 				SuppressStartupBanner="true"
++				OutputFile="vc_mswunivud\sound_vc9.bsc"
+ 			/>
+ 			<Tool
+ 				Name="VCFxCopTool"
+@@ -365,9 +359,9 @@
+ 				GenerateDebugInformation="true"
+ 				ProgramDatabaseFile="vc_mswunivu\sound.pdb"
+ 				SubSystem="2"
+-				TargetMachine="1"
+ 				OptimizeReferences="2"
+ 				EnableCOMDATFolding="2"
++				TargetMachine="1"
+ 			/>
+ 			<Tool
+ 				Name="VCALinkTool"
+@@ -380,8 +374,8 @@
+ 			/>
+ 			<Tool
+ 				Name="VCBscMakeTool"
+-				OutputFile="vc_mswunivu\sound_vc9.bsc"
+ 				SuppressStartupBanner="true"
++				OutputFile="vc_mswunivu\sound_vc9.bsc"
+ 			/>
+ 			<Tool
+ 				Name="VCFxCopTool"
+@@ -473,8 +467,8 @@
+ 			/>
+ 			<Tool
+ 				Name="VCBscMakeTool"
+-				OutputFile="vc_mswuddll\sound_vc9.bsc"
+ 				SuppressStartupBanner="true"
++				OutputFile="vc_mswuddll\sound_vc9.bsc"
+ 			/>
+ 			<Tool
+ 				Name="VCFxCopTool"
+@@ -551,9 +545,9 @@
+ 				GenerateDebugInformation="true"
+ 				ProgramDatabaseFile="vc_mswudll\sound.pdb"
+ 				SubSystem="2"
+-				TargetMachine="1"
+ 				OptimizeReferences="2"
+ 				EnableCOMDATFolding="2"
++				TargetMachine="1"
+ 			/>
+ 			<Tool
+ 				Name="VCALinkTool"
+@@ -566,8 +560,8 @@
+ 			/>
+ 			<Tool
+ 				Name="VCBscMakeTool"
+-				OutputFile="vc_mswudll\sound_vc9.bsc"
+ 				SuppressStartupBanner="true"
++				OutputFile="vc_mswudll\sound_vc9.bsc"
+ 			/>
+ 			<Tool
+ 				Name="VCFxCopTool"
+@@ -659,8 +653,8 @@
+ 			/>
+ 			<Tool
+ 				Name="VCBscMakeTool"
+-				OutputFile="vc_mswunivuddll\sound_vc9.bsc"
+ 				SuppressStartupBanner="true"
++				OutputFile="vc_mswunivuddll\sound_vc9.bsc"
+ 			/>
+ 			<Tool
+ 				Name="VCFxCopTool"
+@@ -737,9 +731,9 @@
+ 				GenerateDebugInformation="true"
+ 				ProgramDatabaseFile="vc_mswunivudll\sound.pdb"
+ 				SubSystem="2"
+-				TargetMachine="1"
+ 				OptimizeReferences="2"
+ 				EnableCOMDATFolding="2"
++				TargetMachine="1"
+ 			/>
+ 			<Tool
+ 				Name="VCALinkTool"
+@@ -752,8 +746,8 @@
+ 			/>
+ 			<Tool
+ 				Name="VCBscMakeTool"
+-				OutputFile="vc_mswunivudll\sound_vc9.bsc"
+ 				SuppressStartupBanner="true"
++				OutputFile="vc_mswunivudll\sound_vc9.bsc"
+ 			/>
+ 			<Tool
+ 				Name="VCFxCopTool"
+@@ -767,7 +761,6 @@
+ 		</Configuration>
+ 	</Configurations>
+ 	<References>
+-		
+ 	</References>
+ 	<Files>
+ 		<Filter
+@@ -776,6 +769,10 @@
+ 			UniqueIdentifier="{4FC737F1-C7A5-4376-A066-2A32D752A2FF}"
+ 			>
+ 			<File
++				RelativePath=".\sinewave.c"
++				>
++			</File>
++			<File
+ 				RelativePath=".\sound.cpp"
+ 				>
+ 			</File>
+@@ -792,7 +789,5 @@
+ 		</Filter>
+ 	</Files>
+ 	<Globals>
+-		
+ 	</Globals>
+ </VisualStudioProject>
+-

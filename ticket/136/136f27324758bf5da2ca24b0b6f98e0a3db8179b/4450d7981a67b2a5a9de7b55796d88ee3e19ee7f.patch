@@ -1,0 +1,214 @@
+Index: src/univ/textctrl.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/univ/textctrl.cpp,v
+retrieving revision 1.53
+diff -u -r1.53 textctrl.cpp
+--- src/univ/textctrl.cpp	2007/04/13 23:36:42	1.53
++++ src/univ/textctrl.cpp	2007/05/09 21:00:53
+@@ -1965,7 +1965,7 @@
+                 {
+                     // finding the last line is easy if each line has exactly
+                     // one row
+-                    yEnd = yStart + rectText.height / GetLineHeight() - 1;
++                    yEnd = yStart + rectText.height / GetLineHeight();
+                 }
+ 
+                 if ( yEnd < y )
+@@ -2405,7 +2405,7 @@
+         // only scroll this rect when the window is scrolled: note that we have
+         // to scroll not only the text but the line wrap marks too if we show
+         // them
+-        wxRect rectText = GetRealTextArea();
++        wxRect rectText = m_rectText;
+         if ( extraSpace && *extraSpace )
+         {
+             rectText.width += *extraSpace;
+@@ -3604,16 +3604,27 @@
+         if ( scrollRangeYOld )
+             y *= scrollRangeY / scrollRangeYOld;
+ #endif // 0
++        // Check if each scrollbar is needed.
++        // If not, hide it by resetting a SetScrollbars parameter
++        if ( !showScrollbarY )
++            lineHeight = 0;
++        int cWidth = charWidth; // Can't reset charWidth itself, it's needed below
++        if ( !showScrollbarX )
++            cWidth = 0;
+ 
+-        SetScrollbars(charWidth, lineHeight,
++        SetScrollbars(cWidth, lineHeight,
+                       scrollRangeX, scrollRangeY,
+                       x, y,
+                       true /* no refresh */);
+ 
+         if ( scrollRangeXOld )
+         {
+-            x *= scrollRangeX - m_rectText.width / charWidth;
+-            x /= scrollRangeXOld - m_rectText.width / charWidth;
++            int w = m_rectText.width / charWidth;
++            if ( scrollRangeXOld - w ) // Check to avoid dividing by 0
++            {
++                x *= scrollRangeX - w;
++                x /= scrollRangeXOld - w;
++            }
+             Scroll(x, y);
+         }
+ 
+@@ -3969,6 +3980,18 @@
+     }
+ #endif // WXDEBUG_TEXT
+ 
++ 
++    // prepare for drawing
++    wxCoord hLine = GetLineHeight();
++
++    // these vars will be used for hit testing of the current row
++    wxCoord y = rectUpdate.y;
++    const wxCoord x1 = rectUpdate.x;
++    const wxCoord x2 = rectUpdate.x + rectUpdate.width;
++
++    wxRect rectText;
++    rectText.height = hLine;
++
+     // calculate the range lineStart..lineEnd of lines to redraw
+     wxTextCoord lineStart, lineEnd;
+     if ( IsSingleLine() )
+@@ -3985,29 +4008,13 @@
+         (void)HitTest(pt, NULL, &lineEnd);
+     }
+ 
+-    // prepare for drawing
+-    wxCoord hLine = GetLineHeight();
+-
+-    // these vars will be used for hit testing of the current row
+-    wxCoord y = rectUpdate.y;
+-    const wxCoord x1 = rectUpdate.x;
+-    const wxCoord x2 = rectUpdate.x + rectUpdate.width;
+-
+-    wxRect rectText;
+-    rectText.height = hLine;
+-    wxCoord yClient = y - GetClientAreaOrigin().y;
+-
+-    // we want to always start at the top of the line, otherwise if we redraw a
+-    // rect whose top is in the middle of a line, we'd draw this line shifted
+-    yClient -= (yClient - m_rectText.y) % hLine;
+-
+     if ( IsSingleLine() )
+     {
+-        rectText.y = yClient;
++        rectText.y = y;
+     }
+     else // multiline, adjust for scrolling
+     {
+-        CalcUnscrolledPosition(0, yClient, NULL, &rectText.y);
++        CalcUnscrolledPosition(0, y, NULL, &rectText.y);
+     }
+ 
+     wxRenderer *renderer = GetRenderer();
+@@ -4169,12 +4176,33 @@
+     dc.SetFont(GetFont());
+     dc.SetTextForeground(GetForegroundColour());
+ 
++    // Adjust the update region 'y' if necessary to begin at the top of a line,
++    // needed by DrawTextLine() 
++    wxRegion rgnUpdate = GetUpdateRegion();
++    wxRect rectUpdate = rgnUpdate.GetBox();
++    wxCoord y = rectUpdate.y;
++    wxCoord yClient = y - GetClientAreaOrigin().y;
++    wxCoord hLine = GetLineHeight();
++    wxCoord yOffset = (yClient - m_rectText.y) % hLine;
++    yClient -= yOffset; rectUpdate.SetY(yClient);
++
++    // Increase rgnUpdate's height to compensate, plus extra to make resizing work
++    if (yOffset)
++            rectUpdate.SetHeight(rectUpdate.GetHeight() + (hLine - yOffset) + hLine);
++#ifdef __WXX11__
++    // This works around an wxX11 region bug:
++    // If width is 1, wxRegion::IsEmpty returns true
++    if ( rectUpdate.width == 1 && rectUpdate.x > 1 )
++    {
++        --rectUpdate.x; ++rectUpdate.width;
++    }
++#endif // ifdef __WXX11__
++    rgnUpdate = wxRegion(rectUpdate); // Reinsert the new dimensions into rgnUpdate
++
+     // get the intersection of the update region with the text area: note that
+     // the update region is in window coords and text area is in the client
+     // ones, so it must be shifted before computing intersection
+-    wxRegion rgnUpdate = GetUpdateRegion();
+-
+-    wxRect rectTextArea = GetRealTextArea();
++    wxRect rectTextArea = m_rectText;
+     wxPoint pt = GetClientAreaOrigin();
+     wxRect rectTextAreaAdjusted = rectTextArea;
+     rectTextAreaAdjusted.x += pt.x;
+@@ -4190,7 +4218,8 @@
+     // FIXME: is this really a bug in wxMSW?
+     rectTextArea.width--;
+ #endif // __WXMSW__
+-    dc.SetClippingRegion(rectTextArea);
++    dc.DestroyClippingRegion();
++    dc.SetClippingRegion(rgnUpdate);
+ 
+     // adjust for scrolling
+     DoPrepareDC(dc);
+Index: src/x11/window.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/x11/window.cpp,v
+retrieving revision 1.123
+diff -u -r1.123 window.cpp
+--- src/x11/window.cpp	2007/04/15 00:28:05	1.123
++++ src/x11/window.cpp	2007/05/09 21:00:55
+@@ -676,8 +676,8 @@
+ 
+         if (dx < 0) s_x += -dx;
+         if (dy < 0) s_y += -dy;
+-        if (dx > 0) d_x = dx + offset.x;
+-        if (dy > 0) d_y = dy + offset.y;
++        if (dx > 0) d_x += dx + offset.x;
++        if (dy > 0) d_y += dy + offset.y;
+ 
+         XCopyArea( xdisplay, xwindow, xwindow, xgc, s_x, s_y, w, h, d_x, d_y );
+ 
+Index: src/x11/dcclient.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/x11/dcclient.cpp,v
+retrieving revision 1.58
+diff -u -r1.58 dcclient.cpp
+--- src/x11/dcclient.cpp	2007/05/05 21:34:26	1.58
++++ src/x11/dcclient.cpp	2007/05/09 21:00:57
+@@ -2203,16 +2203,12 @@
+ 
+     if (!m_window) return;
+ 
+-    if (!m_currentClippingRegion.IsNull())
++    if (!m_currentClippingRegion.IsNull() 
++            && !m_currentClippingRegion.IsEmpty())
+         m_currentClippingRegion.Intersect( region );
+     else
+         m_currentClippingRegion.Union( region );
+ 
+-#if USE_PAINT_REGION
+-    if (!m_paintClippingRegion.IsNull())
+-        m_currentClippingRegion.Intersect( m_paintClippingRegion );
+-#endif
+-
+     wxCoord xx, yy, ww, hh;
+     m_currentClippingRegion.GetBox( xx, yy, ww, hh );
+     wxDC::DoSetClippingRegion( xx, yy, ww, hh );
+@@ -2230,11 +2226,8 @@
+     wxDC::DestroyClippingRegion();
+ 
+     m_currentClippingRegion.Clear();
+-
+-#if USE_PAINT_REGION
+-    if (!m_paintClippingRegion.IsEmpty())
+-        m_currentClippingRegion.Union( m_paintClippingRegion );
+-#endif
++    if ( m_currentClippingRegion.IsOk())
++        m_currentClippingRegion = wxRegion(0,0,-1,-1);
+ 
+     if (!m_window) return;
+ 
+
+ 	  	 

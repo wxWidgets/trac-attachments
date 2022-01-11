@@ -1,0 +1,297 @@
+commit 0eafd422f074fb4521646ef74f35bbdef238f941
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Fri Mar 28 18:14:54 2014 +0100
+
+    Make main thread wake up code more efficient and less error-prone in wxMSW.
+    
+    Use a kernel event object to signal the thread wake up instead of sending
+    WM_NULL to one of its windows. This is simpler as we don't need to look for
+    any windows and doesn't suffer from the problem of overflowing the Windows
+    message queue if we do it too many times as signalling an already signalled
+    event simply doesn't do anything.
+    
+    Closes #9053.
+
+diff --git a/include/wx/msw/evtloop.h b/include/wx/msw/evtloop.h
+index 4ccb2a6..be8f597 100644
+--- a/include/wx/msw/evtloop.h
++++ b/include/wx/msw/evtloop.h
+@@ -53,7 +53,6 @@ class WXDLLIMPEXP_CORE wxGUIEventLoop : public wxMSWEventLoopBase
+     // override/implement base class virtuals
+     virtual bool Dispatch();
+     virtual int DispatchTimeout(unsigned long timeout);
+-    virtual void WakeUp();
+ 
+ protected:
+     virtual void OnNextIteration();
+diff --git a/include/wx/msw/evtloopconsole.h b/include/wx/msw/evtloopconsole.h
+index 01d7780..a4eb6d5 100644
+--- a/include/wx/msw/evtloopconsole.h
++++ b/include/wx/msw/evtloopconsole.h
+@@ -15,9 +15,20 @@ class WXDLLIMPEXP_BASE wxMSWEventLoopBase : public wxEventLoopManual
+ {
+ public:
+     wxMSWEventLoopBase();
++    virtual ~wxMSWEventLoopBase();
+ 
+     // implement base class pure virtuals
+     virtual bool Pending() const;
++    virtual void WakeUp();
++
++#if wxUSE_THREADS
++    // MSW-specific method to wait for the termination of the specified (by its
++    // native handle) thread or any input message arriving (in GUI case).
++    //
++    // Return value is WAIT_OBJECT_0 if the thread terminated, WAIT_OBJECT_0+1
++    // if a message arrived with anything else indicating an error.
++    WXDWORD MSWWaitForThread(WXHANDLE hThread);
++#endif // wxUSE_THREADS
+ 
+ protected:
+     // get the next message from queue and return true or return false if we
+@@ -25,8 +36,13 @@ class WXDLLIMPEXP_BASE wxMSWEventLoopBase : public wxEventLoopManual
+     bool GetNextMessage(WXMSG *msg);
+ 
+     // same as above but with a timeout and return value can be -1 meaning that
+-    // time out expired in addition to
++    // time out expired in addition to true/false
+     int GetNextMessageTimeout(WXMSG *msg, unsigned long timeout);
++
++private:
++    // An auto-reset Win32 event which is signalled when we need to wake up the
++    // main thread waiting in GetNextMessage[Timeout]().
++    WXHANDLE m_heventWake;
+ };
+ 
+ #if wxUSE_CONSOLE_EVENTLOOP
+@@ -39,7 +55,6 @@ class WXDLLIMPEXP_BASE wxConsoleEventLoop : public wxMSWEventLoopBase
+     // override/implement base class virtuals
+     virtual bool Dispatch();
+     virtual int DispatchTimeout(unsigned long timeout);
+-    virtual void WakeUp();
+ 
+     // Windows-specific function to process a single message
+     virtual void ProcessMessage(WXMSG *msg);
+diff --git a/src/msw/app.cpp b/src/msw/app.cpp
+index c8df191..715518f 100644
+--- a/src/msw/app.cpp
++++ b/src/msw/app.cpp
+@@ -240,23 +240,16 @@ DWORD wxGUIAppTraits::WaitForThread(WXHANDLE hThread, int flags)
+     // have a running event loop as we would never remove them from the message
+     // queue then and so we would enter an infinite loop as
+     // MsgWaitForMultipleObjects() keeps returning WAIT_OBJECT_0 + 1.
+-    if ( flags == wxTHREAD_WAIT_BLOCK ||
+-            !wxIsMainThread() ||
+-                !wxEventLoop::GetActive() )
++    if ( flags == wxTHREAD_WAIT_YIELD && wxIsMainThread() )
+     {
+-        // Simple blocking wait.
+-        return DoSimpleWaitForThread(hThread);
++        wxMSWEventLoopBase* const
++            evtLoop = static_cast<wxMSWEventLoopBase *>(wxEventLoop::GetActive());
++        if ( evtLoop )
++            return evtLoop->MSWWaitForThread(hThread);
+     }
+ 
+-    return ::MsgWaitForMultipleObjects
+-             (
+-               1,                   // number of objects to wait for
+-               (HANDLE *)&hThread,  // the objects
+-               false,               // wait for any objects, not all
+-               INFINITE,            // no timeout
+-               QS_ALLINPUT |        // return as soon as there are any events
+-               QS_ALLPOSTMESSAGE
+-             );
++    // Simple blocking wait.
++    return DoSimpleWaitForThread(hThread);
+ }
+ #endif // wxUSE_THREADS
+ 
+@@ -798,42 +791,16 @@ void wxApp::OnIdle(wxIdleEvent& WXUNUSED(event))
+ 
+ void wxApp::WakeUpIdle()
+ {
+-    // Send the top window a dummy message so idle handler processing will
+-    // start up again.  Doing it this way ensures that the idle handler
+-    // wakes up in the right thread (see also wxWakeUpMainThread() which does
+-    // the same for the main app thread only)
+-    wxWindow * const topWindow = wxTheApp->GetTopWindow();
+-    if ( topWindow )
++    wxEventLoopBase * const evtLoop = wxEventLoop::GetActive();
++    if ( !evtLoop )
+     {
+-        HWND hwndTop = GetHwndOf(topWindow);
+-
+-        // Do not post WM_NULL if there's already a pending WM_NULL to avoid
+-        // overflowing the message queue.
+-        //
+-        // Notice that due to a limitation of PeekMessage() API (which handles
+-        // 0,0 range specially), we have to check the range from 0-1 instead.
+-        // This still makes it possible to overflow the queue with WM_NULLs by
+-        // interspersing the calles to WakeUpIdle() with windows creation but
+-        // it should be rather hard to do it accidentally.
+-        MSG msg;
+-        if ( !::PeekMessage(&msg, hwndTop, 0, 1, PM_NOREMOVE) ||
+-              ::PeekMessage(&msg, hwndTop, 1, 1, PM_NOREMOVE) )
+-        {
+-            // If this fails too, there is really not much we can do, but then
+-            // neither do we need to, as it normally indicates that the window
+-            // queue is full to the brim with the messages and so the main loop
+-            // is running and doesn't need to be woken up.
+-            //
+-            // Notice that we especially should not try use wxLogLastError()
+-            // here as this would lead to another call to wxWakeUpIdle() from
+-            // inside wxLog and stack overflow due to the resulting recursion.
+-            ::PostMessage(hwndTop, WM_NULL, 0, 0);
+-        }
++        // We can't wake up the event loop if there is none and there is just
++        // no need to do anything in this case, any pending events will be
++        // handled when the event loop starts.
++        return;
+     }
+-#if wxUSE_THREADS
+-    else
+-        wxWakeUpMainThread();
+-#endif // wxUSE_THREADS
++
++    evtLoop->WakeUp();
+ }
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/src/msw/evtloop.cpp b/src/msw/evtloop.cpp
+index 8ac1b57..a9271c7 100644
+--- a/src/msw/evtloop.cpp
++++ b/src/msw/evtloop.cpp
+@@ -250,11 +250,6 @@ void wxGUIEventLoop::OnNextIteration()
+ #endif // wxUSE_THREADS
+ }
+ 
+-void wxGUIEventLoop::WakeUp()
+-{
+-    ::PostMessage(NULL, WM_NULL, 0, 0);
+-}
+-
+ 
+ // ----------------------------------------------------------------------------
+ // Yield to incoming messages
+diff --git a/src/msw/evtloopconsole.cpp b/src/msw/evtloopconsole.cpp
+index 2be3f9c..5c56fbb 100644
+--- a/src/msw/evtloopconsole.cpp
++++ b/src/msw/evtloopconsole.cpp
+@@ -42,6 +42,17 @@ wxMSWEventLoopBase::wxMSWEventLoopBase()
+ {
+     m_shouldExit = false;
+     m_exitcode = 0;
++
++    // Create initially not signalled auto-reset event object.
++    m_heventWake = ::CreateEvent(NULL, FALSE, FALSE, NULL);
++    if ( !m_heventWake )
++        wxLogLastError(wxS("CreateEvent(wake)"));
++}
++
++wxMSWEventLoopBase::~wxMSWEventLoopBase()
++{
++    if ( m_heventWake && !::CloseHandle(m_heventWake) )
++        wxLogLastError(wxS("CloseHandle(wake)"));
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -54,26 +65,36 @@ bool wxMSWEventLoopBase::Pending() const
+     return ::PeekMessage(&msg, 0, 0, 0, PM_NOREMOVE) != 0;
+ }
+ 
+-bool wxMSWEventLoopBase::GetNextMessage(WXMSG* msg)
++void wxMSWEventLoopBase::WakeUp()
+ {
+-    const BOOL rc = ::GetMessage(msg, NULL, 0, 0);
++    if ( !::SetEvent(m_heventWake) )
++        wxLogLastError(wxS("SetEvent(wake)"));
++}
+ 
+-    if ( rc == 0 )
+-    {
+-        // got WM_QUIT
+-        return false;
+-    }
++#if wxUSE_THREADS
+ 
+-    if ( rc == -1 )
+-    {
+-        // should never happen, but let's test for it nevertheless
+-        wxLogLastError(wxT("GetMessage"));
++WXDWORD wxMSWEventLoopBase::MSWWaitForThread(WXHANDLE hThread)
++{
++    // The order is important here, the code using this function assumes that
++    // WAIT_OBJECT_0 indicates the thread termination and anything else -- the
++    // availability of an input event. So the thread handle must come first.
++    HANDLE handles[2] = { hThread, m_heventWake };
++    return ::MsgWaitForMultipleObjects
++             (
++               WXSIZEOF(handles),   // number of objects to wait for
++               handles,             // the objects
++               false,               // wait for any objects, not all
++               INFINITE,            // no timeout
++               QS_ALLINPUT |        // return as soon as there are any events
++               QS_ALLPOSTMESSAGE
++             );
++}
+ 
+-        // still break from the loop
+-        return false;
+-    }
++#endif // wxUSE_THREADS
+ 
+-    return true;
++bool wxMSWEventLoopBase::GetNextMessage(WXMSG* msg)
++{
++    return GetNextMessageTimeout(msg, INFINITE) == TRUE;
+ }
+ 
+ int wxMSWEventLoopBase::GetNextMessageTimeout(WXMSG *msg, unsigned long timeout)
+@@ -86,14 +107,12 @@ int wxMSWEventLoopBase::GetNextMessageTimeout(WXMSG *msg, unsigned long timeout)
+     //     it is not available in very old Windows versions
+     if ( !::PeekMessage(msg, 0, 0, 0, PM_REMOVE) )
+     {
+-        // we use this function just in order to not block longer than the
+-        // given timeout, so we don't pass any handles to it at all
+         DWORD rc = ::MsgWaitForMultipleObjects
+                      (
+-                        0, NULL,
++                        1, &m_heventWake,
+                         FALSE,
+                         timeout,
+-                        QS_ALLINPUT
++                        QS_ALLINPUT | QS_ALLPOSTMESSAGE
+                      );
+ 
+         switch ( rc )
+@@ -107,6 +126,15 @@ int wxMSWEventLoopBase::GetNextMessageTimeout(WXMSG *msg, unsigned long timeout)
+                 return -1;
+ 
+             case WAIT_OBJECT_0:
++                // We were woken up by a background thread, which means there
++                // is no actual input message available, but we should still
++                // return to the event loop, so pretend there was WM_NULL in
++                // the queue.
++                wxZeroMemory(*msg);
++                break;
++
++            case WAIT_OBJECT_0 + 1:
++                // Some message is supposed to be available.
+                 if ( !::PeekMessage(msg, 0, 0, 0, PM_REMOVE) )
+                 {
+                     // somehow it may happen that MsgWaitForMultipleObjects()
+@@ -127,13 +155,6 @@ int wxMSWEventLoopBase::GetNextMessageTimeout(WXMSG *msg, unsigned long timeout)
+ 
+ #if wxUSE_CONSOLE_EVENTLOOP
+ 
+-void wxConsoleEventLoop::WakeUp()
+-{
+-#if wxUSE_THREADS
+-    wxWakeUpMainThread();
+-#endif
+-}
+-
+ void wxConsoleEventLoop::ProcessMessage(WXMSG *msg)
+ {
+     ::DispatchMessage(msg);

@@ -1,0 +1,196 @@
+diff -uNr wxWidgets/include/wx/convauto.h CopyofwxWidgets/include/wx/convauto.h
+--- wxWidgets/include/wx/convauto.h	2009-03-05 22:20:46.000000000 +0100
++++ CopyofwxWidgets/include/wx/convauto.h	2009-12-20 19:57:50.531250000 +0100
+@@ -80,7 +80,8 @@
+         BOM_UTF32LE,
+         BOM_UTF16BE,
+         BOM_UTF16LE,
+-        BOM_UTF8
++        BOM_UTF8,
++        BOM_Unknown,
+     };
+ 
+     // return the BOM type of this buffer
+diff -uNr wxWidgets/src/common/convauto.cpp CopyofwxWidgets/src/common/convauto.cpp
+--- wxWidgets/src/common/convauto.cpp	2009-10-08 16:06:00.000000000 +0200
++++ CopyofwxWidgets/src/common/convauto.cpp	2009-12-30 01:14:55.203125000 +0100
+@@ -3,7 +3,7 @@
+ // Purpose:     implementation of wxConvAuto
+ // Author:      Vadim Zeitlin
+ // Created:     2006-04-04
+-// RCS-ID:      $Id: convauto.cpp 61508 2009-07-23 20:30:22Z VZ $
++// RCS-ID:      $Id: convauto.cpp 56644 2008-11-02 02:39:52Z VZ $
+ // Copyright:   (c) 2006 Vadim Zeitlin <vadim@wxwindows.org>
+ // Licence:     wxWindows licence
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -26,6 +26,7 @@
+ #if wxUSE_WCHAR_T
+ 
+ #ifndef WX_PRECOMP
++    #include "wx/wx.h"
+ #endif //WX_PRECOMP
+ 
+ #include "wx/convauto.h"
+@@ -52,57 +53,60 @@
+ /* static */
+ wxConvAuto::BOMType wxConvAuto::DetectBOM(const char *src, size_t srcLen)
+ {
+-    if ( srcLen < 2 )
+-    {
+-        // minimal BOM is 2 bytes so bail out immediately and simplify the code
+-        // below which wouldn't need to check for length for UTF-16 cases
+-        return BOM_None;
+-    }
+-
+     // examine the buffer for BOM presence
+-    //
++    // don't actually read anything until BOM is confirmed
+     // see http://www.unicode.org/faq/utf_bom.html#BOM
+-    switch ( *src++ )
+-    {
+-        case '\0':
+-            // could only be big endian UTF-32 (00 00 FE FF)
+-            if ( srcLen >= 4 &&
+-                    src[0] == '\0' &&
+-                        src[1] == '\xfe' &&
+-                            src[2] == '\xff' )
+-            {
+-                return BOM_UTF32BE;
+-            }
+-            break;
+ 
+-        case '\xfe':
+-            // could only be big endian UTF-16 (FE FF)
+-            if ( *src++ == '\xff' )
+-            {
+-                return BOM_UTF16BE;
++    switch ( srcLen )
++    {
++        case 0:
++            return BOM_Unknown;
++        case 1:
++            if (src[0] == '\x00' || src[0] == '\xFF' ||
++                src[0] == '\xFE' || src[0] == '\xEF')
++                return BOM_Unknown; // could still be anything
++            return BOM_None;
++        case 2:
++            if ((src[0] == '\x00' && src[1] == '\x00') ||
++                (src[0] == '\xFF' && src[1] == '\xFE') ||
++                (src[0] == '\xEF' && src[1] == '\xBB') ||
++                (src[0] == '\xFE' && src[1] == '\xFF'))
++                    // could still be UTF-8, 16LE or 32, but even if we know
++                    // it's UTF-16BE we don't have anything to convert yet
++                return BOM_Unknown;
++            return BOM_None;
++        case 3:
++            if((src[0] == '\x00' && src[1] == '\x00' && src[2] == '\xFE') ||
++               (src[0] == '\xFF' && src[1] == '\xFE') ||
++               (src[0] == '\xFE' && src[1] == '\xFF') ||
++               (src[0] == '\xEF' && src[1] == '\xBB' && src[2] == '\xBF'))
++                    // wait for a character to convert
++                return BOM_Unknown;
++            return BOM_None;
++        default:
++            if (src[0] == '\x00' && src[1] == '\x00' &&
++                src[2] == '\xFE' && src[3] == '\xFF')
++            {  // wait for something to convert
++                if (srcLen >= 8)
++                    return BOM_UTF32BE;
++                else
++                    return BOM_Unknown;
+             }
+-            break;
+-
+-        case '\xff':
+-            // could be either little endian UTF-16 or UTF-32, both start
+-            // with FF FE
+-            if ( *src++ == '\xfe' )
+-            {
+-                return srcLen >= 4 && src[0] == '\0' && src[1] == '\0'
+-                            ? BOM_UTF32LE
+-                            : BOM_UTF16LE;
++            if (src[0] == '\xFF' && src[1] == '\xFE' &&
++                src[2] == '\x00' && src[3] == '\x00')
++            {  // wait for something to convert
++                if (srcLen >= 8)
++                    return BOM_UTF32LE;
++                else
++                    return BOM_Unknown;
+             }
+-            break;
+-
+-        case '\xef':
+-            // is this UTF-8 BOM (EF BB BF)?
+-            if ( srcLen >= 3 && src[0] == '\xbb' && src[1] == '\xbf' )
+-            {
++            if (src[0] == '\xEF' && src[1] == '\xBB' && src[2] == '\xBF')
+                 return BOM_UTF8;
+-            }
+-            break;
++            if (src[0] == '\xFE' && src[1] == '\xFF')
++                return BOM_UTF16BE;
++            if (src[0] == '\xFF' && src[1] == '\xFE')
++                return BOM_UTF16LE;
+     }
+-
+     return BOM_None;
+ }
+ 
+@@ -112,6 +116,9 @@
+ 
+     switch ( bomType )
+     {
++        case BOM_Unknown: // postpone initialisation until we know for sure
++            break;
++
+         case BOM_UTF32BE:
+             m_conv = new wxMBConvUTF32BE;
+             m_ownsConv = true;
+@@ -170,6 +177,7 @@
+             // fall through: still need to create something
+ 
+         case BOM_None:
++        case BOM_Unknown:
+             ofs = 0;
+     }
+ 
+@@ -195,18 +203,18 @@
+     // dst as typically we're first called with NULL dst to calculate the
+     // needed buffer size
+     wxConvAuto *self = const_cast<wxConvAuto *>(this);
++
++
+     if ( !m_conv )
+     {
+         self->InitFromInput(&src, &srcLen);
+-        if ( dst )
+-            self->m_consumedBOM = true;
++        if (m_bomType == BOM_Unknown)
++            // fail; whoever's calling ToWChar will have to provide more
++            // data so we can see whether or not there's a proper BOM
++            return wxCONV_FAILED;
+     }
+-
+-    if ( !m_consumedBOM && dst )
+-    {
+-        self->m_consumedBOM = true;
++    else if ( !m_consumedBOM && dst )
+         SkipBOM(&src, &srcLen);
+-    }
+ 
+     // try to convert using the auto-detected encoding
+     size_t rc = m_conv->ToWChar(dst, dstLen, src, srcLen);
+@@ -228,6 +236,8 @@
+         }
+     }
+ 
++    if (rc != wxCONV_FAILED && dst && !m_consumedBOM)
++        self->m_consumedBOM = true;
+     return rc;
+ }
+ 
+@@ -245,4 +255,3 @@
+ }
+ 
+ #endif // wxUSE_WCHAR_T
+-

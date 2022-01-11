@@ -1,0 +1,271 @@
+Index: src/gtk/clipbrd.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/gtk/clipbrd.cpp,v
+retrieving revision 1.53
+diff -u -r1.53 clipbrd.cpp
+--- src/gtk/clipbrd.cpp	2003/08/09 12:46:08	1.53
++++ src/gtk/clipbrd.cpp	2003/10/26 15:40:15
+@@ -171,11 +171,14 @@
+ 
+     /* make sure we got the data in the correct form (selection type).
+        if so, copy data to target object */
++#if 0
++    // prevents things to work, we already checked above!
+     if (selection_data->type != GDK_SELECTION_TYPE_STRING)
+     {
+         clipboard->m_waiting = FALSE;
+         return;
+     }
++#endif
+ 
+     data_object->SetData( format, (size_t) selection_data->length, (const char*) selection_data->data );
+ 
+@@ -497,6 +500,15 @@
+                            (guint32) GDK_CURRENT_TIME );
+ 
+     while (m_waiting) gtk_main_iteration();
++
++#if defined(__WXGTK20__) && wxUSE_UNICODE
++    if (!m_formatSupported && format == wxDataFormat(wxDF_UNICODETEXT))
++    {
++        // Another try with plain STRING format
++	extern GdkAtom g_altTextAtom;
++	return IsSupported(g_altTextAtom);
++    }
++#endif
+ 
+     if (!m_formatSupported) return FALSE;
+ 
+Index: src/gtk/dataobj.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/gtk/dataobj.cpp,v
+retrieving revision 1.40
+diff -u -r1.40 dataobj.cpp
+--- src/gtk/dataobj.cpp	2003/09/09 18:04:57	1.40
++++ src/gtk/dataobj.cpp	2003/10/26 15:40:16
+@@ -28,6 +28,7 @@
+ //-------------------------------------------------------------------------
+ 
+ GdkAtom  g_textAtom        = 0;
++GdkAtom  g_altTextAtom     = 0;
+ GdkAtom  g_pngAtom         = 0;
+ GdkAtom  g_fileAtom        = 0;
+ 
+@@ -77,12 +78,9 @@
+ {
+     PrepareFormats();
+     
+-    if (type == wxDF_UNICODETEXT)
+-       type = wxDF_TEXT;
+-
+     m_type = type;
+     
+-    if (m_type == wxDF_TEXT)
++    if (m_type == wxDF_TEXT || m_type == wxDF_UNICODETEXT)
+         m_format = g_textAtom;
+     else
+     if (m_type == wxDF_BITMAP)
+@@ -143,7 +141,10 @@
+     //     here (with whom?)
+     if (!g_textAtom)
+ #if wxUSE_UNICODE
++    {
+         g_textAtom = gdk_atom_intern( "UTF8_STRING", FALSE );
++        g_altTextAtom = gdk_atom_intern( "STRING", FALSE );
++    }
+ #else
+         g_textAtom = gdk_atom_intern( "STRING" /* "text/plain" */, FALSE );
+ #endif
+@@ -191,6 +192,21 @@
+         return n < nFormatCount;
+     }
+ }
++
++
++// ----------------------------------------------------------------------------
++// wxTextDataObject
++// ----------------------------------------------------------------------------
++
++#if defined(__WXGTK20__) && wxUSE_UNICODE
++
++void wxTextDataObject::GetAllFormats(wxDataFormat *formats, wxDataObjectBase::Direction dir) const
++{
++    *formats++ = GetPreferredFormat();
++    *formats = g_altTextAtom;
++}
++
++#endif
+ 
+ // ----------------------------------------------------------------------------
+ // wxFileDataObject
+Index: src/msw/ole/dataobj.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/ole/dataobj.cpp,v
+retrieving revision 1.75
+diff -u -r1.75 dataobj.cpp
+--- src/msw/ole/dataobj.cpp	2003/09/12 16:10:00	1.75
++++ src/msw/ole/dataobj.cpp	2003/10/26 15:40:16
+@@ -755,6 +755,23 @@
+ 
+ #endif // Debug
+ 
++
++
++// ----------------------------------------------------------------------------
++// wxTextDataObject supports CF_UNICODETEXT, CF_TEXT, CF_OEMTEXT
++// ----------------------------------------------------------------------------
++
++
++void wxTextDataObject::GetAllFormats(wxDataFormat *formats,
++                               wxDataObjectBase::Direction WXUNUSED(dir)) const
++{
++    *formats++ = wxDataFormat(wxDF_UNICODETEXT);
++    *formats++ = wxDataFormat(wxDF_TEXT);
++    *formats   = wxDataFormat(wxDF_OEMTEXT);
++}
++
++
++
+ // ----------------------------------------------------------------------------
+ // wxBitmapDataObject supports CF_DIB format
+ // ----------------------------------------------------------------------------
+Index: include/wx/dataobj.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/dataobj.h,v
+retrieving revision 1.51
+diff -u -r1.51 dataobj.h
+--- include/wx/dataobj.h	2003/08/09 12:37:10	1.51
++++ include/wx/dataobj.h	2003/10/26 15:40:16
+@@ -335,20 +335,32 @@
+ 
+     // implement base class pure virtuals
+     // ----------------------------------
+-    virtual size_t GetDataSize() const;
+-    virtual bool GetDataHere(void *buf) const;
+-    virtual bool SetData(size_t len, const void *buf);
++    virtual size_t GetDataSize() const { return GetDataSize(GetPreferredFormat()); }
++    virtual bool GetDataHere(void *buf) const { return GetDataHere(GetPreferredFormat(), buf); }
++    virtual bool SetData(size_t len, const void *buf) { return SetData(GetPreferredFormat(), len, buf); }
+ 
++#if wxUSE_UNICODE
++#if defined(__WXGTK20__) 
++    virtual size_t GetFormatCount(Direction WXUNUSED(dir) = Get) const { return 2; }
++    virtual void GetAllFormats(wxDataFormat *formats,
++                               wxDataObjectBase::Direction WXUNUSED(dir) = Get) const;
++#endif
++
++#if defined(__WXMSW__) 
++    virtual size_t GetFormatCount(Direction WXUNUSED(dir) = Get) const { return 3; };
++    virtual void GetAllFormats(wxDataFormat *formats,
++                               wxDataObjectBase::Direction WXUNUSED(dir) = Get) const;
++#endif
++
++#endif
++
+ private:
+     wxString m_text;
+ 
+     // virtual function hiding supression
+-    size_t GetDataSize(const wxDataFormat& format) const
+-        { return(wxDataObjectSimple::GetDataSize(format)); }
+-    bool GetDataHere(const wxDataFormat& format, void *pBuf) const
+-        { return(wxDataObjectSimple::GetDataHere(format, pBuf)); }
+-    bool SetData(const wxDataFormat& format, size_t nLen, const void* pBuf)
+-        { return(wxDataObjectSimple::SetData(format, nLen, pBuf)); }
++    size_t GetDataSize(const wxDataFormat& format) const;
++    bool GetDataHere(const wxDataFormat& format, void *pBuf) const;
++    bool SetData(const wxDataFormat& format, size_t nLen, const void* pBuf);
+ 
+     DECLARE_NO_COPY_CLASS(wxTextDataObject)
+ };
+Index: src/common/dobjcmn.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/common/dobjcmn.cpp,v
+retrieving revision 1.25
+diff -u -r1.25 dobjcmn.cpp
+--- src/common/dobjcmn.cpp	2003/08/09 12:45:45	1.25
++++ src/common/dobjcmn.cpp	2003/10/26 15:40:16
+@@ -237,41 +237,63 @@
+ // wxTextDataObject
+ // ----------------------------------------------------------------------------
+ 
+-size_t wxTextDataObject::GetDataSize() const
++size_t wxTextDataObject::GetDataSize(const wxDataFormat& format) const
+ {
+-#if defined(__WXGTK20__) && wxUSE_UNICODE
+-    // Use UTF8 not UCS4
+-    wxCharBuffer buffer = wxConvUTF8.cWX2MB( GetText().c_str() );
+-    return strlen( (const char*) buffer ) + 1;
++    if (format == wxDF_UNICODETEXT)
++    {
++#if defined(__WXGTK20__)
++        // Use UTF8 not UCS4
++        wxCharBuffer buffer = wxConvUTF8.cWX2MB( GetText().c_str() );
++        return strlen( (const char*) buffer ) + 1;
+ #else
+-    return GetTextLength() * sizeof(wxChar);
++        return GetTextLength() * sizeof(wxChar);
+ #endif
++    }
++    else
++    {
++        wxCharBuffer buffer = wxConvLibc.cWX2MB( GetText().c_str() );
++        return strlen( (const char*) buffer ) + 1;
++    }
+ }
+ 
+-bool wxTextDataObject::GetDataHere(void *buf) const
++
++bool wxTextDataObject::GetDataHere(const wxDataFormat& format, void *buf) const
+ {
+-#if defined(__WXGTK20__) && wxUSE_UNICODE
+-    // Use UTF8 not UCS4
+-    wxCharBuffer buffer = wxConvUTF8.cWX2MB( GetText().c_str() );
+-    strcpy( (char*) buf, (const char*) buffer );
++    if (format == wxDF_UNICODETEXT)
++    {
++#if defined(__WXGTK20__)
++        // Use UTF8 not UCS4
++        wxCharBuffer buffer = wxConvUTF8.cWX2MB( GetText().c_str() );
++        strcpy( (char*) buf, (const char*) buffer );
+ #else
+-    wxStrcpy((wxChar *)buf, GetText().c_str());
++        wxStrcpy((wxChar *)buf, GetText().c_str());
+ #endif
+-
++    }
++    else
++    {
++        wxCharBuffer buffer = wxConvLibc.cWX2MB( GetText().c_str() );
++        strcpy( (char*) buf, (const char*) buffer );
++    }
+     return TRUE;
+ }
++
+ 
+-bool wxTextDataObject::SetData(size_t WXUNUSED(len), const void *buf)
++bool wxTextDataObject::SetData(const wxDataFormat& format,
++                         size_t WXUNUSED(len), const void *buf)
+ {
+-#if defined(__WXGTK20__) && wxUSE_UNICODE
+-    // Use UTF8 not UCS4
+-    SetText( wxConvUTF8.cMB2WX( (const char*) buf ) );
++    if (format == wxDF_UNICODETEXT)
++#ifdef __WXGTK20__
++        SetText( wxConvUTF8.cMB2WX( (const char*) buf ) );
+ #else
+-    SetText(wxString((const wxChar *)buf));
++        SetText(wxString((const wxChar *)buf));
+ #endif
++    else
++        SetText( wxConvLibc.cMB2WX( (const char*) buf ) );
+ 
+     return TRUE;
+ }
++
++
+ 
+ // ----------------------------------------------------------------------------
+ // wxFileDataObjectBase
+
+ 	  	 

@@ -1,0 +1,192 @@
+diff --git a/include/wx/fswatcher.h b/include/wx/fswatcher.h
+index 1d9e2eb..2646817 100644
+--- a/include/wx/fswatcher.h
++++ b/include/wx/fswatcher.h
+@@ -196,12 +196,12 @@ class wxFSWatchInfo
+ {
+ public:
+     wxFSWatchInfo() :
+-        m_events(-1), m_type(wxFSWPath_None)
++        m_events(-1), m_type(wxFSWPath_None), m_refcount(-1)
+     {
+     }
+ 
+     wxFSWatchInfo(const wxString& path, int events, wxFSWPathType type, const wxString& filespec = "") :
+-        m_path(path), m_filespec(filespec), m_events(events), m_type(type)
++        m_path(path), m_filespec(filespec), m_events(events), m_type(type), m_refcount(1)
+     {
+     }
+ 
+@@ -225,11 +225,23 @@ public:
+         return m_type;
+     }
+ 
++    int IncRefcount()
++    {
++        return ++m_refcount;
++    }
++
++    int DecRefcount()
++    {
++        wxCHECK_MSG(m_refcount > 0, 0, "Trying to decrement a zero count");
++        return --m_refcount;
++    }
++
+ protected:
+     wxString m_path;
+     wxString m_filespec;      // For tree watches, holds any filespec to apply
+     int m_events;
+     wxFSWPathType m_type;
++    int m_refcount;
+ };
+ 
+ WX_DECLARE_STRING_HASH_MAP(wxFSWatchInfo, wxFSWatchInfoMap);
+diff --git a/include/wx/private/fswatcher.h b/include/wx/private/fswatcher.h
+index e106e6c..91f7bcd 100644
+--- a/include/wx/private/fswatcher.h
++++ b/include/wx/private/fswatcher.h
+@@ -49,8 +49,13 @@ public:
+ 
+     virtual bool Add(const wxFSWatchInfo& winfo)
+     {
+-        wxCHECK_MSG( m_watches.find(winfo.GetPath()) == m_watches.end(), false,
+-                     "Path '%s' is already watched");
++        if (m_watches.find(winfo.GetPath()) != m_watches.end())
++        {
++          wxLogTrace(wxTRACE_FSWATCHER,
++                     "Path '%s' is already watched", winfo.GetPath());
++          // This can happen if a dir is watched, then a parent tree added
++          return true;
++        }
+ 
+         // construct watch entry
+         wxSharedPtr<wxFSWatchEntry> watch(new wxFSWatchEntry(winfo));
+@@ -66,8 +71,13 @@ public:
+     virtual bool Remove(const wxFSWatchInfo& winfo)
+     {
+         wxFSWatchEntries::iterator it = m_watches.find(winfo.GetPath());
+-        wxCHECK_MSG( it != m_watches.end(), false, "Path '%s' is not watched");
+-
++        if (it == m_watches.end())
++        {
++          wxLogTrace(wxTRACE_FSWATCHER,
++                     "Path '%s' is not watched", winfo.GetPath());
++          // This can happen if a dir is watched, then a parent tree added
++          return true;
++        }
+         wxSharedPtr<wxFSWatchEntry> watch = it->second;
+         m_watches.erase(it);
+         return DoRemove(watch);
+diff --git a/src/common/fswatchercmn.cpp b/src/common/fswatchercmn.cpp
+index c509186..73c15b4 100644
+--- a/src/common/fswatchercmn.cpp
++++ b/src/common/fswatchercmn.cpp
+@@ -108,17 +108,28 @@ wxFileSystemWatcherBase::AddAny(const wxFileName& path,
+     if (canonical.IsEmpty())
+         return false;
+ 
+-    wxCHECK_MSG(m_watches.find(canonical) == m_watches.end(), false,
+-                wxString::Format("Path '%s' is already watched", canonical));
+-
+     // adding a path in a platform specific way
+     wxFSWatchInfo watch(canonical, events, type, filespec);
+     if ( !m_service->Add(watch) )
+         return false;
+ 
+-    // on success, add path to our 'watch-list'
+-    wxFSWatchInfoMap::value_type val(canonical, watch);
+-    return m_watches.insert(val).second;
++    // on success, either add path to our 'watch-list'
++    // or, if already watched, inc the refcount. This may happen if
++    // a dir is Add()ed, then later AddTree() is called on a parent dir
++    wxFSWatchInfoMap::iterator it = m_watches.find(canonical);
++    if (it == m_watches.end())
++    {
++        wxFSWatchInfoMap::value_type val(canonical, watch);
++        m_watches.insert(val).second;
++    }
++    else
++    {
++        wxFSWatchInfo& watch = it->second;
++        int count = watch.IncRefcount();
++        wxLogTrace(wxTRACE_FSWATCHER,
++                   "'%s' is now watched %d times", canonical, count);
++    }
++    return true;
+ }
+ 
+ bool wxFileSystemWatcherBase::Remove(const wxFileName& path)
+@@ -132,12 +143,17 @@ bool wxFileSystemWatcherBase::Remove(const wxFileName& path)
+     wxCHECK_MSG(it != m_watches.end(), false,
+                 wxString::Format("Path '%s' is not watched", canonical));
+ 
+-    // remove from watch-list
+-    wxFSWatchInfo watch = it->second;
+-    m_watches.erase(it);
++    // Decrement the watch's refcount and remove from watch-list if 0
++    bool ret = true;
++    wxFSWatchInfo& watch = it->second;
++    if (watch.DecRefcount() == 0)
++    {
++        // remove in a platform specific way
++        ret = m_service->Remove(watch);
+ 
+-    // remove in a platform specific way
+-    return m_service->Remove(watch);
++        m_watches.erase(it);
++    }
++    return ret;
+ }
+ 
+ bool wxFileSystemWatcherBase::AddTree(const wxFileName& path, int events,
+diff --git a/tests/fswatcher/fswatchertest.cpp b/tests/fswatcher/fswatchertest.cpp
+index 7e226a1..fea0f1f 100644
+--- a/tests/fswatcher/fswatchertest.cpp
++++ b/tests/fswatcher/fswatchertest.cpp
+@@ -653,6 +653,9 @@ void FileSystemWatcherTestCase::TestTrees()
+         void GrowTree(wxFileName dir)
+         {
+             CPPUNIT_ASSERT(dir.Mkdir());
++            // Now add a subdir with an easy name to remember in WatchTree()
++            dir.AppendDir("child");
++            CPPUNIT_ASSERT(dir.Mkdir());
+ 
+             // Create a branch of 5 numbered subdirs, each containing 3
+             // numbered files
+@@ -711,7 +714,7 @@ void FileSystemWatcherTestCase::TestTrees()
+             // When there's no file mask, wxMSW sets a single watch
+             // on the trunk which is implemented recursively.
+             // wxGTK always sets an additional watch for each file/subdir
+-            treeitems += (subdirs*files) + subdirs;
++            treeitems += (subdirs*files) + subdirs + 1; // +1 for 'child'
+ #endif // __WINDOWS__
+ 
+             // Store the initial count; there may already be some watches
+@@ -726,6 +729,27 @@ void FileSystemWatcherTestCase::TestTrees()
+ 
+             m_watcher->RemoveTree(dir);
+             CPPUNIT_ASSERT_EQUAL(initial, m_watcher->GetWatchedPathsCount());
++
++            // Now test the refcount mechanism by watching items more than once
++            wxFileName child(dir);
++            child.AppendDir("child");
++            m_watcher->AddTree(child);
++            // Check some watches were added; we don't care about the number
++            CPPUNIT_ASSERT(initial < m_watcher->GetWatchedPathsCount());
++            // Now watch the whole tree and check that the count is the same 
++            // as it was the first time, despite also adding 'child' separately
++            // Except that in wxMSW this isn't true: each watch will be a
++            // single, recursive dir; so fudge the count
++            size_t fudge = 0;
++#ifdef __WINDOWS__
++            fudge = 1;
++#endif // __WINDOWS__
++            m_watcher->AddTree(dir);
++            CPPUNIT_ASSERT_EQUAL(plustree + fudge, m_watcher->GetWatchedPathsCount());
++            m_watcher->RemoveTree(child);
++            CPPUNIT_ASSERT(initial < m_watcher->GetWatchedPathsCount());
++            m_watcher->RemoveTree(dir);
++            CPPUNIT_ASSERT_EQUAL(initial, m_watcher->GetWatchedPathsCount());
+         }
+ 
+         void WatchTreeWithFilespec(const wxFileName& dir)

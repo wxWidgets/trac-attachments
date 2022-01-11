@@ -1,0 +1,199 @@
+diff --git a/include/wx/gtk/textctrl.h b/include/wx/gtk/textctrl.h
+index 921538b..b31d857 100644
+--- a/include/wx/gtk/textctrl.h
++++ b/include/wx/gtk/textctrl.h
+@@ -57,7 +57,7 @@ public:
+     virtual void GetSelection(long* from, long* to) const wxOVERRIDE;
+ 
+     virtual void Remove(long from, long to) wxOVERRIDE;
+-
++    virtual void SetMaxLength(unsigned long length) wxOVERRIDE;
+     virtual void MarkDirty() wxOVERRIDE;
+     virtual void DiscardEdits() wxOVERRIDE;
+ 
+diff --git a/include/wx/gtk/textentry.h b/include/wx/gtk/textentry.h
+index f78dc7b..8791522 100644
+--- a/include/wx/gtk/textentry.h
++++ b/include/wx/gtk/textentry.h
+@@ -58,7 +58,7 @@ public:
+     void SendMaxLenEvent();
+     bool GTKEntryOnInsertText(const char* text);
+     bool GTKIsUpperCase() const { return m_isUpperCase; }
+-
++    int GetMaxLength() const { return m_maxlen; }
+ protected:
+     // This method must be called from the derived class Create() to connect
+     // the handlers for the clipboard (cut/copy/paste) events.
+@@ -79,6 +79,7 @@ protected:
+ 
+     // Override the base class method to use GtkEntry IM context.
+     virtual int GTKIMFilterKeypress(GdkEventKey* event) const;
++    int m_maxlen;
+ 
+ private:
+     // implement this to return the associated GtkEntry or another widget
+diff --git a/interface/wx/textentry.h b/interface/wx/textentry.h
+index 20bb7e2..cc5ebe4 100644
+--- a/interface/wx/textentry.h
++++ b/interface/wx/textentry.h
+@@ -417,7 +417,6 @@ public:
+         event is sent to notify the program about it (giving it the possibility
+         to show an explanatory message, for example) and the extra input is discarded.
+ 
+-        Note that in wxGTK this function may only be used with single line text controls.
+     */
+     virtual void SetMaxLength(unsigned long len);
+ 
+diff --git a/samples/text/text.cpp b/samples/text/text.cpp
+index fa48fd7..b40d7ea 100644
+--- a/samples/text/text.cpp
++++ b/samples/text/text.cpp
+@@ -144,6 +144,7 @@ public:
+     MyTextCtrl    *m_tab;
+     MyTextCtrl    *m_readonly;
+     MyTextCtrl    *m_limited;
++    MyTextCtrl    *m_limitedMultiline;
+ 
+     MyTextCtrl    *m_multitext;
+     MyTextCtrl    *m_horizontal;
+@@ -1109,6 +1110,11 @@ MyPanel::MyPanel( wxFrame *frame, int x, int y, int w, int h )
+     m_limited->SetMaxLength(8);
+     wxSize size2 = m_limited->GetSizeFromTextSize(m_limited->GetTextExtent("WWWWWWWW"));
+     m_limited->SetSizeHints(size2, size2);
++    
++    m_limitedMultiline = new MyTextCtrl( this, wxID_ANY, "", 
++					 wxPoint( 10, 110 ), wxDefaultSize, wxTE_MULTILINE );
++    m_limitedMultiline->SetHint( "Max 20 characters" );
++    m_limitedMultiline->SetMaxLength( 20 );
+ 
+     wxTextCtrl* upperOnly = new MyTextCtrl(this, wxID_ANY, "Only upper case",
+                                            wxDefaultPosition, wxDefaultSize);
+@@ -1215,6 +1221,7 @@ MyPanel::MyPanel( wxFrame *frame, int x, int y, int w, int h )
+     column1->Add( m_password, 0, wxALL | wxEXPAND, 10 );
+     column1->Add( m_readonly, 0, wxALL, 10 );
+     column1->Add( m_limited, 0, wxALL, 10 );
++    column1->Add( m_limitedMultiline, 0, wxALL, 10 );
+     column1->Add( upperOnly, 0, wxALL, 10 );
+     column1->Add( m_horizontal, 1, wxALL | wxEXPAND, 10 );
+ 
+diff --git a/src/gtk/textctrl.cpp b/src/gtk/textctrl.cpp
+index 997316d..14e9a26 100644
+--- a/src/gtk/textctrl.cpp
++++ b/src/gtk/textctrl.cpp
+@@ -55,6 +55,40 @@ static void wxGtkOnRemoveTag(GtkTextBuffer *buffer,
+ }
+ }
+ 
++extern "C"
++{
++static void maxlen_handler(GtkTextBuffer *buffer, GtkTextIter *location, gchar *text, gint len, wxTextCtrl *win)
++{
++    gint count = gtk_text_buffer_get_char_count( buffer );
++    unsigned long maxlen = win->GetMaxLength();
++    if ( count > maxlen )
++    {
++        GtkTextIter offset, end;
++        gint startPos = gtk_text_iter_get_offset( location );
++        gtk_text_buffer_get_iter_at_offset( buffer, &offset, startPos - 1 );
++        gtk_text_buffer_get_iter_at_offset( buffer, &end, (startPos - 1) + len );
++	// This function is connected using g_signal_connect_after() call, therefore
++	// direct buffer modification is required.
++	// Using g_sigmal_connect() doesn't work as the text is still being entered
++	// probably bnecause the signal is documented as "Run Last". For exactly same
++	// reason ("Run Last") it won't work in GTKOnInsertText() as its called from
++	// the handler that does not connected after.
++        gtk_text_buffer_delete( buffer, &offset, &end );
++	// Without following line GTK3 produces following warning
++	// Gtk-WARNING **: Invalid text buffer iterator: either the iterator is uninitialized,
++	// or the characters/pixbufs/widgets in the buffer have been modified since the iterator was created.
++	// GTK+2 is more forgiving in this case
++#if GTK_CHECK_VERSION( 3, 0, 0 )
++        gtk_text_iter_assign( location, &offset );
++#endif
++        wxCommandEvent event( wxEVT_TEXT_MAXLEN, win->GetId() );
++        event.SetEventObject( win );
++        event.SetString( win->GetValue() );
++        win->HandleWindowEvent( event );
++    }
++}
++}
++
+ // remove all tags starting with the given prefix from the start..end range
+ static void
+ wxGtkTextRemoveTagsWithPrefix(GtkTextBuffer *text_buffer,
+@@ -561,6 +595,13 @@ extern "C" {
+ static void
+ gtk_text_changed_callback( GtkWidget *WXUNUSED(widget), wxTextCtrl *win )
+ {
++    if ( win->GetWindowStyleFlag() & wxTE_MULTILINE )
++    {
++        int maxlen = win->GetMaxLength();
++	int textlen = win->GetValue().length();
++	if( maxlen > 0 && textlen > maxlen )
++	    return;
++    }
+     if ( win->IgnoreTextUpdate() )
+         return;
+ 
+@@ -630,7 +671,7 @@ void wxTextCtrl::Init()
+ {
+     m_dontMarkDirty =
+     m_modified = false;
+-
++    m_maxlen = INT_MAX;
+     m_countUpdatesToIgnore = 0;
+ 
+     SetUpdateFont(false);
+@@ -845,9 +886,19 @@ bool wxTextCtrl::Create( wxWindow *parent,
+ 
+ GtkEditable *wxTextCtrl::GetEditable() const
+ {
+-    wxCHECK_MSG( IsSingleLine(), NULL, "shouldn't be called for multiline" );
++    if( IsSingleLine() )
++        return GTK_EDITABLE(m_text);
++    else
++        return NULL;
++}
+ 
+-    return GTK_EDITABLE(m_text);
++void wxTextCtrl::SetMaxLength(unsigned long length)
++{
++    if ( HasFlag( wxTE_MULTILINE ) )
++    {
++        m_maxlen = length;
++        g_signal_connect_after( m_buffer, "insert-text", G_CALLBACK(maxlen_handler), gpointer( this ) );
++    }
+ }
+ 
+ GtkEntry *wxTextCtrl::GetEntry() const
+diff --git a/src/gtk/textentry.cpp b/src/gtk/textentry.cpp
+index f031844..f9e141a 100644
+--- a/src/gtk/textentry.cpp
++++ b/src/gtk/textentry.cpp
+@@ -427,10 +427,9 @@ void wxTextEntry::SetEditable(bool editable)
+ void wxTextEntry::SetMaxLength(unsigned long len)
+ {
+     GtkEntry* const entry = (GtkEntry*)GetEditable();
+-    if (!GTK_IS_ENTRY(entry))
+-        return;
+-
+-    gtk_entry_set_max_length(entry, len);
++    m_maxlen = len;
++    if ( entry )
++        gtk_entry_set_max_length(entry, len);
+ }
+ 
+ void wxTextEntry::SendMaxLenEvent()
+diff --git a/tests/controls/textctrltest.cpp b/tests/controls/textctrltest.cpp
+index 761b38d..6bc4fc0 100644
+--- a/tests/controls/textctrltest.cpp
++++ b/tests/controls/textctrltest.cpp
+@@ -528,7 +528,7 @@ void TextCtrlTestCase::LongText()
+ {
+     // This test is only possible under MSW as in the other ports
+     // SetMaxLength() can't be used with multi line text controls.
+-#ifdef __WXMSW__
++#if defined __WXMSW__ || defined __WXGTK__
+     delete m_text;
+     CreateText(wxTE_MULTILINE|wxTE_DONTWRAP);
+ 

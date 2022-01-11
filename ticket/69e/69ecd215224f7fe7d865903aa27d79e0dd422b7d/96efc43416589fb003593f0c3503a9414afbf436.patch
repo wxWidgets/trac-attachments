@@ -1,0 +1,555 @@
+Index: include/wx/mac/wave.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/mac/wave.h,v
+retrieving revision 1.11
+diff -b -u -2 -r1.11 wave.h
+--- include/wx/mac/wave.h	2003/02/28 23:44:45	1.11
++++ include/wx/mac/wave.h	2003/07/25 10:47:18
+@@ -3,9 +3,9 @@
+ // Purpose:     wxWave class (loads and plays short Windows .wav files).
+ //              Optional on non-Windows platforms.
+-// Author:      Stefan Csomor
+-// Modified by:
+-// Created:     1998-01-01
+-// RCS-ID:      $Id: wave.h,v 1.11 2003/02/28 23:44:45 JS Exp $
+-// Copyright:   (c) Stefan Csomor
++// Author:      AUTHOR
++// Modified by: Ryan Norton (Direct Memory & File Support)
++// Created:     ??/??/98
++// RCS-ID:      $Id: wave.h,v 1.8.2.1 2002/12/17 21:23:54 RD Exp $
++// Copyright:   (c) AUTHOR
+ // Licence:     wxWindows licence
+ /////////////////////////////////////////////////////////////////////////////
+@@ -26,4 +26,5 @@
+ public:
+   wxWave();
++  //fileName - name of rosource inside .r file
+   wxWave(const wxString& fileName, bool isResource = FALSE);
+   wxWave(int size, const wxByte* data);
+@@ -32,5 +33,5 @@
+ public:
+   bool  Create(const wxString& fileName, bool isResource = FALSE);
+-  bool  IsOk() const { return !m_sndname.IsEmpty(); }
++  bool  IsOk() const { return m_pSndChannel != NULL; }
+   bool  Play(bool async = TRUE, bool looped = FALSE) const;
+ 
+@@ -40,10 +41,15 @@
+ 
+ private:
+-  void* m_sndChan;
++  //does m_hSnd needs to be disposed?
++  bool m_bIsAllocated;
+ 
+-  wxString m_sndname;
++  //sound resource handle
+   void* m_hSnd;
+-  int   m_waveLength;
+-  bool  m_isResource;
++  
++  //SndChannelPtr
++  void* m_pSndChannel;
++  
++  //Timer for Async & Looping
++  void* m_pTimer;
+ };
+ 
+Index: src/mac/wave.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/mac/wave.cpp,v
+retrieving revision 1.14
+diff -b -u -2 -r1.14 wave.cpp
+--- src/mac/wave.cpp	2003/03/27 20:29:57	1.14
++++ src/mac/wave.cpp	2003/07/25 10:47:30
+@@ -2,9 +2,9 @@
+ // Name:        wave.cpp
+ // Purpose:     wxWave class implementation: optional
+-// Author:      Stefan Csomor
+-// Modified by:
+-// Created:     1998-01-01
+-// RCS-ID:      $Id: wave.cpp,v 1.14 2003/03/27 20:29:57 SC Exp $
+-// Copyright:   (c) Stefan Csomor
++// Author:      AUTHOR
++// Modified by: Ryan Norton (Direct Memory & File Support)
++// Created:     ??/??/98
++// RCS-ID:      $Id: wave.cpp,v 1.10.2.1 2002/12/17 21:23:58 RD Exp $
++// Copyright:   (c) AUTHOR
+ // Licence:       wxWindows licence
+ /////////////////////////////////////////////////////////////////////////////
+@@ -16,5 +16,9 @@
+ #include "wx/object.h"
+ #include "wx/string.h"
+-#include "wx/wave.h"
++#include "wx/wave.h"
++#include "wx/wfstream.h"
++#include "wx/datstrm.h"
++#include "wx/mstream.h"
++#include "wx/timer.h"
+ 
+ #if wxUSE_WAVE
+@@ -27,217 +31,318 @@
+ #endif
+ 
+-wxWave::wxWave()
+-  : m_sndChan(0), m_hSnd(NULL), m_waveLength(0), m_isResource(true)
++//
++//	Converts the data (pData0) to the opposite endian (big->little & little->big)
++//	Required since we could get a 24-bit sample...
++//
++void wxEndianChange(void* pDataO, size_t nSize, size_t nBytes)
+ {
+-}
++    switch (nBytes)
++    {
++        case 1:
++            break;
++        case 2:
++        {
++            wxUint16* pData = (wxUint16*) pDataO;
+ 
+-wxWave::wxWave(const wxString& sFileName, bool isResource)
+-  : m_sndChan(0), m_hSnd(NULL), m_waveLength(0), m_isResource(true)
+-{
+-    Create(sFileName, isResource);
+-}
++            for (size_t i = 0; i < nSize / 2.0; i++)
++                pData[i] = wxUINT16_SWAP_ALWAYS(pData[i]);
++            break;
++        }
++        case 4:
++        {
++            wxUint32* pData = (wxUint32*) pDataO;
+ 
++            for (size_t i = 0; i < nSize / 4.0; i++)
++                pData[i] = wxUINT32_SWAP_ALWAYS(pData[i]);
++            break;
++        }
++        default:
++        {
++            wxUint8 temp;
++            wxUint8* pData = (wxUint8*) pDataO;
+ 
+-wxWave::~wxWave()
+-{
+-    FreeData();
++            for (size_t nLow = 0, nHigh = nSize - 1; nLow < nSize; ++nLow, --nHigh)
++            {
++                temp = pData[nLow];
++                pData[nLow] = pData[nHigh];
++                pData[nHigh] = temp;
++            }
++        }
++    }
+ }
+ 
+-wxWave::wxWave(int size, const wxByte* data)
+-  : m_sndChan(0), m_hSnd(NULL), m_waveLength(0), m_isResource(false)
++void* wxGetSndListHandle(wxInputStream* origstream)
+ {
+-    //TODO convert data
+-}
++    wxDataInputStream stream(*origstream);
+ 
+-bool wxWave::Create(const wxString& fileName, bool isResource)
+-{
+-    bool ret = false;
+-    m_sndname = fileName;
+-    m_isResource = isResource;
++    wxUint32 dwBuffer;
+ 
+-    if (m_isResource)
+-        ret = true;
+-    else
+-    { /*
+-        if (sndChan)
+-        {                                                                    // we're playing
+-            FSClose(SndRefNum);
+-            SndRefNum = 0;
+-            SndDisposeChannel(sndChan, TRUE);
+-            free(sndChan);
+-            sndChan = 0;
+-            KillTimer(0,timerID);
+-        }
++    origstream->SeekI(8);
++    origstream->Read(&dwBuffer, 4);
+ 
+-        if (!lpSnd)
+-            return true;
++    //test for "WAVE"
++    if (memcmp(&dwBuffer, "WAVE", 4) != 0)
++        return NULL;
+ 
+-        if (_access(lpSnd,0))                            // no file, no service
+-            return false;
++    wxUint16 wChannels, wBPS;
++    wxUint32 dwSampleRate, dwDataSize, dwDataPos; 
+ 
+-        // Allocate SndChannel
+-        sndChan = (SndChannelPtr) malloc (sizeof(SndChannel));
++    bool bData = false, bFormat = false;
+ 
+-        if (!sndChan)
+-            return false;
+-
+-        sndChan->qLength = 128;
++    while (!(bFormat && bData))
++    {	    
++        origstream->Read(&dwBuffer, 4);
+ 
+-        if (noErr != SndNewChannel (&sndChan, sampledSynth, initMono | initNoInterp, 0))
++        if (memcmp(
++                   &dwBuffer
++                   , "data", 4) == 0)
+         {
+-            free(sndChan);
+-            sndChan = 0;
+-            return false;
++            stream >> dwDataSize;
++	    dwDataPos = origstream->TellI();
++	    origstream->SeekI(dwDataSize, wxFromCurrent);
++            bData = true;
++            continue;
+         }
+ 
+-        if (!(SndRefNum = MacOpenSndFile ((char *)lpSnd)))
++        if (memcmp(
++                   &dwBuffer
++                   , "fmt ", 4) == 0)
+         {
+-            SndDisposeChannel(sndChan, TRUE);
+-            free(sndChan);
+-            sndChan = 0;
++            stream >> dwBuffer;
+ 
+-            return false;
++            origstream->SeekI(2, wxFromCurrent); //Assume it's not compressed
++
++	    stream >> wChannels >> dwSampleRate;
++
++	    origstream->SeekI(6, wxFromCurrent);
++
++	    stream >> wBPS;
++
++	    origstream->SeekI(dwBuffer - 16, wxFromCurrent);
++	    bFormat = true;
++	    continue;
++        }
++
++        stream >> dwBuffer;
++
++        origstream->SeekI(dwBuffer, wxFromCurrent);
++
++	if (origstream->Eof())
++	    break;
+         }
+ 
+-        bool async = false;
++    origstream->SeekI(dwDataPos, wxFromStart);
+ 
+-        if (fdwSound & SND_ASYNC)
+-            async = true;
++    void* pSamples  = new wxByte[dwDataSize];
+ 
+-        if (SndStartFilePlay(sndChan, SndRefNum, 0, 81920, 0, 0, 0, async) != noErr)
++    origstream->Read(pSamples, dwDataSize);
++
++//convert endian...	
++#if wxBYTE_ORDER == wxBIG_ENDIAN
++    wxEndianChange(pSamples, dwDataSize, wBPS / 8);
++#endif
++
++    wxInt16 sHeaderLen, sHeaderLen2;
++    
++    void* pRet = (void*) NewHandle(sizeof(SndListResource) + dwDataSize);
++    MoveHHi((Handle)pRet);
++
++    //finally, we get to setup the sound header
++    if (SetupSndHeader((SndListHandle)pRet, wChannels, dwSampleRate << 16, //silly mac stuff
++		    wBPS, 
++		    kSoundNotCompressed, //kLittleEndianFormat,
++		     kMiddleC, 0, &sHeaderLen) != 0)
++	    return NULL;
++		         
++    if (SetupSndHeader((SndListHandle)pRet, wChannels, dwSampleRate << 16, //silly mac stuff
++		    wBPS, 
++		    kSoundNotCompressed, //kLittleEndianFormat,
++		     kMiddleC, dwDataSize, &sHeaderLen2) != 0)
++	    return NULL;
++
++    HLock((Handle)pRet);
++  
++    //copy samples into resource handle  
++    BlockMove(pSamples, 
++    &(((wxByte*)(*((Handle)pRet)))[sHeaderLen]), dwDataSize);
++     
++    //clean up
++    delete [] (wxByte*) pSamples;
++    delete origstream;    
++
++    return pRet;    
++}
++
++class wxSMTimer : public wxTimer
++{
++public:
++    wxSMTimer(void* hSnd, void* pSndChannel)
++	:  m_bLoop(false), m_hSnd(hSnd), m_pSndChannel(pSndChannel)
+         {
+-            FSClose (SndRefNum);
+-            SndRefNum = 0;
+-            SndDisposeChannel (sndChan, TRUE);
+-            free (sndChan);
+-            sndChan = 0;
+-            return false;
+         }
+ 
+-        if (async)
+-        {  // haven't finish yet
+-            timerID = SetTimer(0, 0, 250, TimerCallBack);
++    ~wxSMTimer()
++    {
++	Shutdown();
+         }
+-        else
++    
++    void Loop ()
+         {
+-            FSClose (SndRefNum);
+-            SndRefNum = 0;
+-            SndDisposeChannel (sndChan, TRUE);
+-            free (sndChan);
+-            sndChan = 0;
+-        }*/
++	m_bLoop = true;
+     }
+ 
+-    return ret;
+-}
++    void Notify()
++    {
++	SCStatus stat;
++	if (SndChannelStatus((SndChannelPtr)m_pSndChannel, sizeof(SCStatus), &stat) != 0)
++	    Shutdown();
++	
++	//if the sound isn't playing anymore, see if it's looped,
++	//and if so play it again, otherwise close things up
++	if (stat.scChannelBusy == FALSE)
++	{
++	    if (m_bLoop)
++	    {
++		if(SndPlay((SndChannelPtr)m_pSndChannel, (SndListHandle) m_hSnd, true) != noErr)
++		    Shutdown();
++	    }
++	    else
++		Shutdown();
++	}
++    }
+ 
++    void Shutdown()
++    {
++	Stop();
++    }
+ 
+-//don't know what to do with looped, wth
+-bool wxWave::Play(bool async, bool looped) const
++protected:
++    bool m_bLoop;
++    void* m_hSnd;
++    void* m_pSndChannel;
++};
++
++//
++//	Allocates a sound channel with either one (mono)
++//	or two(stereo) channels depending on data
++//	from the sound resource
++//
++void* wxAllocateSndChannel(void* m_hSnd)
+ {
+-    bool ret = false;
+-
+-    if (m_isResource)
+-    {
+-    	Str255 snd ;
+-    	wxMacStringToPascal( m_sndname , snd ) ;
+-      	SndListHandle hSnd;
++    SndChannelPtr m_pSndChannel = NULL;
+ 
+-      	hSnd = (SndListHandle) GetNamedResource('snd ', snd);
++    wxUint16 wOptions = initMono;
++    unsigned long numFrames, dataOffset;
++    SoundComponentData data;
++    ParseSndHeader((SndListHandle)m_hSnd, &data, &numFrames, &dataOffset);
++
++    if (data.numChannels != 1)
++	wOptions = initStereo;
++
++    SndNewChannel(&m_pSndChannel, sampledSynth,
++			    initNoInterp + 
++			    initStereo, NULL);
++    return (void*) m_pSndChannel;
++}
+ 
+-      	if ((hSnd != NULL) && (SndPlay((SndChannelPtr)m_sndChan, (SndListHandle) hSnd, async) == noErr))
+-        	ret = true;
+-    }
++wxWave::wxWave()
++  : m_bIsAllocated(false), m_hSnd(NULL), m_pSndChannel(NULL), m_pTimer(NULL)
++{
++}
+ 
+-    return ret;
++wxWave::wxWave(const wxString& sFileName, bool isResource)
++  : m_bIsAllocated(false), m_hSnd(NULL), m_pSndChannel(NULL), m_pTimer(NULL)
++{
++    Create(sFileName, isResource);
+ }
+ 
+ 
+-bool wxWave::FreeData()
++wxWave::~wxWave()
+ {
+-    bool ret = false;
++    FreeData();
++}
+ 
+-    if (m_isResource)
++wxWave::wxWave(int size, const wxByte* data)
++{
++    m_bIsAllocated = true;
++    m_hSnd = wxGetSndListHandle(new wxMemoryInputStream(data, size));
++    m_pSndChannel = wxAllocateSndChannel(m_hSnd);
++    m_pTimer = new wxSMTimer(m_hSnd, m_pSndChannel);
++}
++
++bool wxWave::Create(const wxString& fileName, bool isResource)
++{
++    if (isResource)
+     {
+-        m_sndname.Empty();
+-        ret = true;
++	  Str255 lpSnd ;
++	  wxMacStringToPascal( fileName , lpSnd ) ;
++
++	  m_hSnd = GetNamedResource('snd ',(const unsigned char *) lpSnd);
+     }
+     else
+     {
+-        //TODO,
++	    m_hSnd = wxGetSndListHandle(new wxFileInputStream(fileName));
++	    m_bIsAllocated = true;
+     }
+ 
+-    return ret;
+-}
++    if (m_hSnd == NULL)
++	return false;
+ 
++    m_pSndChannel = wxAllocateSndChannel(m_hSnd);
+ 
+-//code below is from an old implementation used for telinfo with MSVC crossplatform support
+-//technology proceeds, so it would be the wisest to drop this code, but it's left here just
+-//for the sake of a reference. BTW: Wave files can now be played with QT, starting from V3
++    m_pTimer = new wxSMTimer(m_hSnd, m_pSndChannel);
+ 
+-/*static short MacOpenSndFile (char * path)
+-{
+-    VolumeParam vp;
+-    FSSpec fspec;
+-    Str255 name;
+-    char *c;
++    return m_pSndChannel != NULL && m_pTimer != NULL;
++}
+ 
+-    // first, get the volume reference number for the file.  Start by
+-    // making a Pstring with just the volume name
+-    strcpy ((char *) name, path);
+-    if (c = strchr ((char *) name, ':'))
+-    {
+-        c++;
+-        *c = '\0';
+-    }
+ 
+-    c2pstr ((char *) name);
+-    vp.ioCompletion = 0;
+-    vp.ioVolIndex    = -1;
+-    vp.ioNamePtr    = name;
+-    vp.ioVRefNum    = 0;
++bool wxWave::Play(bool async, bool looped) const
++{
++    //if the sound is already playing, return
++    if (m_hSnd == NULL || ((wxTimer*)m_pTimer)->IsRunning())
++	return false;
+ 
+-    if (PBGetVInfo((ParamBlockRec *)&vp, 0) != noErr)
+-        return 0;
++    if(SndPlay((SndChannelPtr)m_pSndChannel, (SndListHandle) m_hSnd, async) != noErr)
++	return false;
+ 
+-    // next, buld an FSSpec for the file
+-    strcpy ((char *) name, path);
+-    c2pstr ((char *) name);
+-    if (FSMakeFSSpec (vp.ioVRefNum, 0, name, &fspec) != noErr)
+-        return 0;
++    if (async)
++    {
++	if (looped)
++	    ((wxSMTimer*)m_pTimer)->Loop();
+ 
+-    short frefnum;
+-    // now open the file, and return it's reference number
+-    if (FSpOpenDF(&fspec, fsRdPerm, &frefnum) != noErr)
+-        return 0;
++	((wxTimer*)m_pTimer)->Start(100, wxTIMER_CONTINUOUS); //100 = 1/10 of a second
++    }
+ 
+-    return frefnum;
++    return true;
+ }
+ 
+ 
+-void TimerCallBack(HWND hwnd,UINT uMsg,UINT idEvent,DWORD dwTime)
++bool wxWave::FreeData()
+ {
+-    if(!sndChan)
++    //stop timer if in async mode
++    if (m_pTimer != NULL)		
+     {
+-        KillTimer(0,timerID);
+-        return;
++	delete (wxSMTimer*) m_pTimer;
++	m_pTimer = NULL;
+     }
+ 
+-    SCStatus    scstat;
++    if (m_pSndChannel != NULL)
++    {
++	SndDisposeChannel((SndChannelPtr)m_pSndChannel, TRUE);
++	m_pSndChannel = NULL;
++    }
+ 
+-    if (noErr == SndChannelStatus (sndChan, sizeof (SCStatus), &scstat)) {
+-        if (scstat.scChannelPaused || scstat.scChannelBusy)
+-            return;                            // not done yet
++    //free snd data if not a resource
++    if (m_hSnd != NULL && m_bIsAllocated == true)
++    {
++	HUnlock((Handle)m_hSnd);
++	DisposeHandle((Handle)m_hSnd);
++	m_bIsAllocated = false;
+     }
+ 
+-    // either error or done.
+-    FSClose (SndRefNum);
+-    SndRefNum = 0;
+-    SndDisposeChannel (sndChan, TRUE);
+-    free (sndChan);
+-    sndChan = 0;
+-    KillTimer(0,timerID);
+-}*/
++    m_hSnd = NULL;
+ 
++    return true;
++}
+ 
+ #endif
+
+ 	  	 

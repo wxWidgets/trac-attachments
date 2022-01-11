@@ -1,0 +1,799 @@
+--- wxWidgets.orig/docs/latex/wx/variant.tex	Fri Sep 29 17:26:54 2006
++++ wxWidgets/docs/latex/wx/variant.tex	Fri Sep 29 20:46:51 2006
+@@ -24,4 +24,6 @@
+ or OLE automation classes, where named parameters are required.
+ 
++Note that as of wxWidgets 2.7.1, wxVariant is reference counted.
++
+ \wxheading{Derived from}
+ 
+@@ -115,4 +117,7 @@
+ Destructor.
+ 
++Note that destructor is protected, so wxVariantData cannot usually
++be deleted. Instead, \helpref{DecRef}{wxvariantdatadecref} should be called.
++
+ 
+ \membersection{wxVariant::Append}\label{wxvariantappend}
+@@ -180,5 +185,8 @@
+ \constfunc{wxVariantData*}{GetData}{\void}
+ 
+-Returns a pointer to the internal variant data.
++Returns a pointer to the internal variant data. To take ownership
++of this data, you must call its \helpref{IncRef}{wxvariantdataincref}
++method. When you stop using it, \helpref{DecRef}{wxvariantdatadecref}
++must be likewise called.
+ 
+ \membersection{wxVariant::GetDateTime}\label{wxvariantgetdatetime}
+@@ -429,4 +437,13 @@
+ and override the pure virtual functions.
+ 
++wxVariantData is reference counted, but you don't normally have to care about this, as
++wxVariant manages the count automatically. However, incase your application needs to take
++ownership of wxVariantData, be aware that the object is created with reference count of 1,
++and passing it to wxVariant will not increase this. In other words, \helpref{IncRef}{wxvariantdataincref}
++needs to be called only if you both take ownership of wxVariantData and pass it to a wxVariant.
++Also note that the destructor is protected, so you can never explicitly delete a wxVariantData
++instance. Instead, \helpref{DecRef}{wxvariantdatadecref} will delete the object automatically
++when the reference count reaches zero.
++
+ \wxheading{Derived from}
+ 
+@@ -449,9 +466,13 @@
+ Default constructor.
+ 
+-\membersection{wxVariantData::Copy}\label{wxvariantdatacopy}
++\membersection{wxVariantData::DecRef}\label{wxvariantdatadecref}
++
++\func{void}{DecRef}{\void}
+ 
+-\func{void}{Copy}{\param{wxVariantData\&}{ data}}
++Decreases reference count. If the count reaches zero, the object is
++automatically deleted.
+ 
+-Copy the data from `this' object to {\it data}.
++Note that destructor of wxVariantData is protected, so delete
++cannot be used as normal. Instead, DecRef should be called.
+ 
+ \membersection{wxVariantData::Eq}\label{wxvariantdataeq}
+@@ -473,4 +494,10 @@
+ If the data is a wxObject returns a pointer to the objects wxClassInfo structure, if
+ the data isn't a wxObject the method returns NULL.
++
++\membersection{wxVariantData::IncRef}\label{wxvariantdataincref}
++
++\func{void}{IncRef}{\void}
++
++Increases reference count. Note that initially wxVariantData has reference count of 1.
+ 
+ \membersection{wxVariantData::Read}\label{wxvariantdataread}
+--- wxWidgets.orig/include/wx/variant.h	Fri Sep 29 17:26:59 2006
++++ wxWidgets/include/wx/variant.h	Fri Sep 29 19:58:13 2006
+@@ -37,4 +37,17 @@
+  * Derive from this to provide custom data handling.
+  *
++ * NB: To prevent addition of extra vtbl pointer to wxVariantData,
++ *     we don't multiple-inherit from wxObjectRefData. Instead,
++ *     we simply replicate the wxObject ref-counting scheme.
++ *
++ * NB: When you construct a wxVariantData, it will have refcount
++ *     of one. Refcount will not be further increased when
++ *     it is passed to wxVariant. This simulates old common
++ *     scenario where wxVariant took ownership of wxVariantData
++ *     passed to it.
++ *     If you create wxVariantData for other reasons than passing
++ *     it to wxVariant, technically you are not required to call
++ *     DecRef() before deleting it.
++ *
+  * TODO: in order to replace wxPropertyValue, we would need
+  * to consider adding constructors that take pointers to C++ variables,
+@@ -48,13 +61,17 @@
+ class WXDLLIMPEXP_BASE wxVariantData: public wxObject
+ {
+-DECLARE_ABSTRACT_CLASS(wxVariantData)
++    DECLARE_ABSTRACT_CLASS(wxVariantData)
++    friend class wxVariant;
+ public:
+ 
+ // Construction & destruction
+-    wxVariantData() {}
++    wxVariantData()
++        : wxObject(), m_count(1)
++    { }
+ 
+ // Override these to provide common functionality
+-    // Copy to data
+-    virtual void Copy(wxVariantData& data) = 0;
++#if WXWIN_COMPATIBILITY_2_6
++    wxDEPRECATED( virtual void Copy(wxVariantData& data) );
++#endif
+     virtual bool Eq(wxVariantData& data) const = 0;
+ #if wxUSE_STD_IOSTREAM
+@@ -70,4 +87,22 @@
+     // If it based on wxObject return the ClassInfo.
+     virtual wxClassInfo* GetValueClassInfo() { return NULL; }
++
++    void IncRef() { m_count++; }
++    void DecRef()
++    {
++        if ( --m_count == 0 )
++            delete this;
++    }
++
++    int GetRefCount() const { return m_count; }
++
++protected:
++    // Protected dtor should make some incompatible code
++    // break more louder. That is, they should do data->DecRef()
++    // instead of delete data.
++    virtual ~wxVariantData() { }
++
++private:
++    int     m_count;
+ };
+ 
+@@ -75,7 +110,4 @@
+  * wxVariant can store any kind of data, but has some basic types
+  * built in.
+- * NOTE: this eventually should have a reference-counting implementation.
+- * PLEASE, if you change it to ref-counting, make sure it doesn't involve bloating
+- * this class too much.
+  */
+ 
+@@ -89,4 +121,6 @@
+     wxVariant(double val, const wxString& name = wxEmptyString);
+     wxVariant(long val, const wxString& name = wxEmptyString);
++    wxVariant(int val, const wxString& name = wxEmptyString);
++    wxVariant(short val, const wxString& name = wxEmptyString);
+ #ifdef HAVE_BOOL
+     wxVariant(bool val, const wxString& name = wxEmptyString);
+@@ -173,5 +207,5 @@
+     bool operator!= (wxObject* value) const;
+     void operator= (wxObject* value);
+-    
++
+ 
+     // Treat a list variant as an array
+@@ -204,6 +238,14 @@
+     inline bool IsNull() const { return (m_data == (wxVariantData*) NULL); }
+ 
++    // For compatibility with wxWidgets <= 2.6, this doesn't increase
++    // reference count.
+     wxVariantData* GetData() const { return m_data; }
+     void SetData(wxVariantData* data) ;
++
++    // make a 'clone' of the object
++    void Ref(const wxVariant& clone);
++
++    // destroy a reference
++    void UnRef();
+ 
+     // Returns a string representing the type of the variant,
+--- wxWidgets.orig/src/common/variant.cpp	Fri Sep 29 17:27:51 2006
++++ wxWidgets/src/common/variant.cpp	Fri Sep 29 19:57:46 2006
+@@ -53,4 +53,16 @@
+ wxVariant WXDLLIMPEXP_BASE wxNullVariant;
+ 
++
++/*
++ * wxVariantData
++ */
++
++#if WXWIN_COMPATIBILITY_2_6
++void wxVariantData::Copy(wxVariantData& WXUNUSED(data))
++{
++    wxFAIL_MSG(wxT("Using wxVariantData::Copy will compromise integrity of wxVariant reference-counting"));
++}
++#endif
++
+ /*
+  * wxVariantDataList
+@@ -68,5 +80,4 @@
+     void SetValue(const wxList& value) ;
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -122,20 +133,4 @@
+ }
+ 
+-void wxVariantDataList::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("list")), wxT("wxVariantDataList::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataList& listData = (wxVariantDataList&) data;
+-
+-    listData.Clear();
+-    wxList::compatibility_iterator node = m_value.GetFirst();
+-    while (node)
+-    {
+-        wxVariant* var = (wxVariant*) node->GetData();
+-        listData.m_value.Append(new wxVariant(*var));
+-        node = node->GetNext();
+-    }
+-}
+-
+ bool wxVariantDataList::Eq(wxVariantData& data) const
+ {
+@@ -216,5 +211,4 @@
+     void SetValue(const wxStringList& value);
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -239,13 +233,4 @@
+ }
+ 
+-void wxVariantDataStringList::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("stringlist")), wxT("wxVariantDataStringList::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataStringList& listData = (wxVariantDataStringList&) data;
+-
+-    listData.m_value = m_value ;
+-}
+-
+ bool wxVariantDataStringList::Eq(wxVariantData& data) const
+ {
+@@ -326,5 +311,4 @@
+     inline void SetValue(long value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ 
+@@ -348,13 +332,4 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxVariantDataLong, wxVariantData)
+ 
+-void wxVariantDataLong::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("long")), wxT("wxVariantDataLong::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataLong& otherData = (wxVariantDataLong&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+ bool wxVariantDataLong::Eq(wxVariantData& data) const
+ {
+@@ -427,5 +402,4 @@
+     inline void SetValue(double value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+     virtual bool Read(wxString& str);
+@@ -449,13 +423,4 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxVariantDataReal, wxVariantData)
+ 
+-void wxVariantDataReal::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("double")), wxT("wxVariantDataReal::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataReal& otherData = (wxVariantDataReal&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+ bool wxVariantDataReal::Eq(wxVariantData& data) const
+ {
+@@ -528,5 +493,4 @@
+     inline void SetValue(bool value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -550,13 +514,4 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxVariantDataBool, wxVariantData)
+ 
+-void wxVariantDataBool::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("bool")), wxT("wxVariantDataBool::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataBool& otherData = (wxVariantDataBool&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+ bool wxVariantDataBool::Eq(wxVariantData& data) const
+ {
+@@ -632,5 +587,4 @@
+     inline void SetValue(char value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -652,13 +606,4 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxVariantDataChar, wxVariantData)
+ 
+-void wxVariantDataChar::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("char")), wxT("wxVariantDataChar::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataChar& otherData = (wxVariantDataChar&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+ bool wxVariantDataChar::Eq(wxVariantData& data) const
+ {
+@@ -733,5 +678,4 @@
+     inline void SetValue(const wxString& value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -753,13 +697,4 @@
+ };
+ 
+-void wxVariantDataString::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("string")), wxT("wxVariantDataString::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataString& otherData = (wxVariantDataString&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+ bool wxVariantDataString::Eq(wxVariantData& data) const
+ {
+@@ -825,5 +760,4 @@
+     inline void SetValue(void* value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -846,13 +780,4 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxVariantDataVoidPtr, wxVariantData)
+ 
+-void wxVariantDataVoidPtr::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("void*")), wxT("wxVariantDataVoidPtr::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataVoidPtr& otherData = (wxVariantDataVoidPtr&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+ bool wxVariantDataVoidPtr::Eq(wxVariantData& data) const
+ {
+@@ -908,5 +833,4 @@
+     inline void SetValue(wxObject* value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -930,15 +854,4 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxVariantDataWxObjectPtr, wxVariantData)
+ 
+-void wxVariantDataWxObjectPtr::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG(  wxIsKindOf((&data), wxVariantDataWxObjectPtr) ,\
+-                   wxT("wxVariantDataWxObjectPtr::Copy: Can't copy to this type of data") \
+-                 );
+-
+-    wxVariantDataWxObjectPtr& otherData = (wxVariantDataWxObjectPtr&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+ bool wxVariantDataWxObjectPtr::Eq(wxVariantData& data) const
+ {
+@@ -1025,5 +938,4 @@
+     inline void SetValue(const wxDateTime& value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -1045,14 +957,4 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxVariantDataDateTime, wxVariantData)
+ 
+-void wxVariantDataDateTime::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( (data.GetType() == wxT("datetime")), wxT("wxVariantDataDateTime::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataDateTime& otherData = (wxVariantDataDateTime&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+-
+ bool wxVariantDataDateTime::Eq(wxVariantData& data) const
+ {
+@@ -1112,5 +1014,4 @@
+     void SetValue(const wxArrayString& value) { m_value = value; }
+ 
+-    virtual void Copy(wxVariantData& data);
+     virtual bool Eq(wxVariantData& data) const;
+ #if wxUSE_STD_IOSTREAM
+@@ -1133,14 +1034,4 @@
+ IMPLEMENT_DYNAMIC_CLASS(wxVariantDataArrayString, wxVariantData)
+ 
+-void wxVariantDataArrayString::Copy(wxVariantData& data)
+-{
+-    wxASSERT_MSG( data.GetType() == GetType(), wxT("wxVariantDataArrayString::Copy: Can't copy to this type of data") );
+-
+-    wxVariantDataArrayString& otherData = (wxVariantDataArrayString&) data;
+-
+-    otherData.m_value = m_value;
+-}
+-
+-
+ bool wxVariantDataArrayString::Eq(wxVariantData& data) const
+ {
+@@ -1223,4 +1114,16 @@
+ }
+ 
++wxVariant::wxVariant(int val, const wxString& name)
++{
++    m_data = new wxVariantDataLong((long)val);
++    m_name = name;
++}
++
++wxVariant::wxVariant(short val, const wxString& name)
++{
++    m_data = new wxVariantDataLong((long)val);
++    m_name = name;
++}
++
+ #ifdef HAVE_BOOL
+ wxVariant::wxVariant(bool val, const wxString& name)
+@@ -1314,11 +1217,9 @@
+     : wxObject()
+ {
++    m_data = (wxVariantData*) NULL;
++
+     if (!variant.IsNull())
+-    {
+-        m_data = (wxVariantData*) variant.GetData()->GetClassInfo()->CreateObject();
+-        variant.m_data->Copy(*m_data);
+-    }
+-    else
+-        m_data = (wxVariantData*) NULL;
++        Ref(variant);
++
+     m_name = variant.m_name;
+ }
+@@ -1332,5 +1233,5 @@
+ wxVariant::~wxVariant()
+ {
+-    delete m_data;
++    UnRef();
+ }
+ 
+@@ -1339,6 +1240,5 @@
+ void wxVariant::MakeNull()
+ {
+-    delete m_data;
+-    m_data = NULL;
++    UnRef();
+ }
+ 
+@@ -1347,19 +1247,5 @@
+ void wxVariant::operator= (const wxVariant& variant)
+ {
+-    if (variant.IsNull())
+-    {
+-        MakeNull();
+-        return;
+-    }
+-
+-    if (IsNull() || (GetType() != variant.GetType()))
+-    {
+-        if (m_data)
+-            delete m_data;
+-        m_data = (wxVariantData*) variant.GetData()->GetClassInfo()->CreateObject();
+-    }
+-
+-    variant.GetData()->Copy(* GetData());
+-
++    Ref(variant);
+     m_name = variant.m_name;
+ }
+@@ -1369,5 +1255,5 @@
+ void wxVariant::operator= (wxVariantData* variantData)
+ {
+-    MakeNull();
++    UnRef();
+     m_data = variantData;
+ }
+@@ -1404,5 +1290,6 @@
+ void wxVariant::operator= (double value)
+ {
+-    if (GetType() == wxT("double"))
++    if (GetType() == wxT("double") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataReal*)GetData())->SetValue(value);
+@@ -1410,6 +1297,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataReal(value);
+     }
+@@ -1432,5 +1318,6 @@
+ void wxVariant::operator= (long value)
+ {
+-    if (GetType() == wxT("long"))
++    if (GetType() == wxT("long") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataLong*)GetData())->SetValue(value);
+@@ -1438,6 +1325,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataLong(value);
+     }
+@@ -1460,5 +1346,6 @@
+ void wxVariant::operator= (char value)
+ {
+-    if (GetType() == wxT("char"))
++    if (GetType() == wxT("char") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataChar*)GetData())->SetValue(value);
+@@ -1466,6 +1353,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataChar(value);
+     }
+@@ -1489,5 +1375,6 @@
+ void wxVariant::operator= (bool value)
+ {
+-    if (GetType() == wxT("bool"))
++    if (GetType() == wxT("bool") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataBool*)GetData())->SetValue(value);
+@@ -1495,6 +1382,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataBool(value);
+     }
+@@ -1518,5 +1404,6 @@
+ void wxVariant::operator= (const wxString& value)
+ {
+-    if (GetType() == wxT("string"))
++    if (GetType() == wxT("string") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataString*)GetData())->SetValue(value);
+@@ -1524,6 +1411,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataString(value);
+     }
+@@ -1532,5 +1418,6 @@
+ void wxVariant::operator= (const wxChar* value)
+ {
+-    if (GetType() == wxT("string"))
++    if (GetType() == wxT("string") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataString*)GetData())->SetValue(wxString(value));
+@@ -1538,6 +1425,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataString(wxString(value));
+     }
+@@ -1551,5 +1437,5 @@
+ 
+     wxVariantDataStringList other(value);
+-    return (m_data->Eq(other));
++    return (GetData()->Eq(other));
+ }
+ 
+@@ -1559,10 +1445,11 @@
+ 
+     wxVariantDataStringList other(value);
+-    return !(m_data->Eq(other));
++    return !(GetData()->Eq(other));
+ }
+ 
+ void wxVariant::operator= (const wxStringList& value)
+ {
+-    if (GetType() == wxT("stringlist"))
++    if (GetType() == wxT("stringlist") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataStringList*)GetData())->SetValue(value);
+@@ -1570,6 +1457,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataStringList(value);
+     }
+@@ -1583,5 +1469,5 @@
+ 
+     wxVariantDataList other(value);
+-    return (m_data->Eq(other));
++    return (GetData()->Eq(other));
+ }
+ 
+@@ -1593,5 +1479,6 @@
+ void wxVariant::operator= (const wxList& value)
+ {
+-    if (GetType() == wxT("list"))
++    if (GetType() == wxT("list") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataList*)GetData())->SetValue(value);
+@@ -1599,6 +1486,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataList(value);
+     }
+@@ -1617,5 +1503,6 @@
+ void wxVariant::operator= (void* value)
+ {
+-    if (GetType() == wxT("void*"))
++    if (GetType() == wxT("void*") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataVoidPtr*)GetData())->SetValue(value);
+@@ -1623,6 +1510,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataVoidPtr(value);
+     }
+@@ -1641,6 +1527,5 @@
+ void wxVariant::operator= (wxObject* value)
+ {
+-    if (m_data)
+-        delete m_data;
++    UnRef();
+     m_data = new wxVariantDataWxObjectPtr(value);
+ }
+@@ -1663,5 +1548,6 @@
+ void wxVariant::operator= (const wxDateTime& value)
+ {
+-    if (GetType() == wxT("datetime"))
++    if (GetType() == wxT("datetime") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataDateTime*)GetData())->SetValue(value);
+@@ -1669,6 +1555,5 @@
+     else
+     {
+-        if (m_data)
+-            delete m_data;
++        UnRef();
+         m_data = new wxVariantDataDateTime(value);
+     }
+@@ -1679,6 +1564,5 @@
+ void wxVariant::operator= (const DATE_STRUCT* value)
+ {
+-    if (m_data)
+-        delete m_data;
++    UnRef();
+     m_data = new wxVariantDataDateTime(value);
+ }
+@@ -1687,6 +1571,5 @@
+ void wxVariant::operator= (const TIME_STRUCT* value)
+ {
+-    if (m_data)
+-        delete m_data;
++    UnRef();
+     m_data = new wxVariantDataDateTime(value);
+ }
+@@ -1695,6 +1578,5 @@
+ void wxVariant::operator= (const TIMESTAMP_STRUCT* value)
+ {
+-    if (m_data)
+-        delete m_data;
++    UnRef();
+     m_data = new wxVariantDataDateTime(value);
+ }
+@@ -1716,5 +1598,6 @@
+ void wxVariant::operator=(const wxArrayString& value)
+ {
+-    if (GetType() == wxT("arrstring"))
++    if (GetType() == wxT("arrstring") &&
++        m_data->GetRefCount() == 1)
+     {
+         ((wxVariantDataArrayString *)GetData())->SetValue(value);
+@@ -1722,5 +1605,5 @@
+     else
+     {
+-        delete m_data;
++        UnRef();
+         m_data = new wxVariantDataArrayString(value);
+     }
+@@ -1817,9 +1700,39 @@
+ void wxVariant::SetData(wxVariantData* data)
+ {
+-    if (m_data) delete m_data;
++    UnRef();
+     m_data = data;
+ }
+ 
+ 
++void wxVariant::Ref(const wxVariant& clone)
++{
++    // nothing to be done
++    if (m_data == clone.m_data)
++        return;
++
++    // delete reference to old data
++    UnRef();
++
++    // reference new data
++    if ( clone.m_data )
++    {
++        m_data = clone.m_data;
++        m_data->m_count++;
++    }
++}
++
++
++void wxVariant::UnRef()
++{
++    if ( m_data )
++    {
++        wxASSERT_MSG( m_data->m_count > 0, _T("invalid ref data count") );
++
++        m_data->DecRef();
++        m_data = NULL;
++    }
++}
++
++
+ // Returns a string representing the type of the variant,
+ // e.g. "string", "bool", "list", "double", "long"
+@@ -1829,5 +1742,5 @@
+         return wxString(wxT("null"));
+     else
+-        return m_data->GetType();
++        return GetData()->GetType();
+ }
+ 
+@@ -1840,5 +1753,5 @@
+ bool wxVariant::IsValueKindOf(const wxClassInfo* type) const
+ {
+-    wxClassInfo* info=m_data->GetValueClassInfo();
++    wxClassInfo* info=GetData()->GetValueClassInfo();
+     return info ? info->IsKindOf(type) : false ;
+ }
+@@ -1914,5 +1827,5 @@
+ wxObject* wxVariant::GetWxObjectPtr() const
+ {
+-    wxASSERT(wxIsKindOf(m_data, wxVariantDataWxObjectPtr));
++    wxASSERT(wxIsKindOf(GetData(), wxVariantDataWxObjectPtr));
+     return (wxObject*) ((wxVariantDataWxObjectPtr*) m_data)->GetValue();
+ }
+@@ -2010,8 +1923,6 @@
+     {
+         if (!GetType().IsSameAs(wxT("list")))
+-        {
+-            delete m_data;
+-            m_data = NULL;
+-        }
++            UnRef();
++
+         m_data = new wxVariantDataList;
+     }
+
+ 	  	 

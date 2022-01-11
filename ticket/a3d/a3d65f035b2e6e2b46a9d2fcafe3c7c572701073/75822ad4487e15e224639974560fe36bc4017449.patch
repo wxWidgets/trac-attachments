@@ -1,0 +1,299 @@
+Index: docs/latex/wx/filename.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/filename.tex,v
+retrieving revision 1.46
+diff -bu2 -r1.46 docs/latex/wx/filename.tex
+--- docs/latex/wx/filename.tex
++++ docs/latex/wx/filename.tex
+@@ -816,10 +816,10 @@
+ \begin{twocollist}
+ \twocolitem{{\bf wxPATH\_NORM\_ENV\_VARS}}{replace env vars with their values}
+-\twocolitem{{\bf wxPATH\_NORM\_DOTS}}{squeeze all .. and . and prepend cwd}
+-\twocolitem{{\bf wxPATH\_NORM\_TILDE}}{Unix only: replace ~ and ~user}
++\twocolitem{{\bf wxPATH\_NORM\_DOTS}}{squeeze all .. and . when possible; if there are too many .. and thus they cannot be all removed, \false will be returned}
+ \twocolitem{{\bf wxPATH\_NORM\_CASE}}{if filesystem is case insensitive, transform to lower case}
+-\twocolitem{{\bf wxPATH\_NORM\_ABSOLUTE}}{make the path absolute}
++\twocolitem{{\bf wxPATH\_NORM\_ABSOLUTE}}{make the path absolute prepending \arg{cwd}}
+ \twocolitem{{\bf wxPATH\_NORM\_LONG}}{make the path the long form}
+ \twocolitem{{\bf wxPATH\_NORM\_SHORTCUT}}{resolve if it is a shortcut (Windows only)}
++\twocolitem{{\bf wxPATH\_NORM\_TILDE}}{replace ~ and ~user (Unix only)}
+ \twocolitem{{\bf wxPATH\_NORM\_ALL}}{all of previous flags except \texttt{wxPATH\_NORM\_CASE}}
+ \end{twocollist}
+@@ -827,7 +827,12 @@
+ 
+ \docparam{cwd}{If not empty, this directory will be used instead of current
+-working directory in normalization.}
++working directory in normalization (see wxPATH\_NORM\_ABSOLUTE).}
+ 
+-\docparam{format}{The file name format, native by default.}
++\docparam{format}{The file name format to use when processing the paths, native by default.}
++
++
++\wxheading{Return value}
++
++\true if normalization was successfully or \false otherwise.
+ 
+ 
+Index: include/wx/dynarray.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/dynarray.h,v
+retrieving revision 1.86
+diff -bu2 -r1.86 include/wx/dynarray.h
+--- include/wx/dynarray.h
++++ include/wx/dynarray.h
+@@ -968,4 +968,16 @@
+ // -----------------------------------------------------------------------------
+ 
++// prepend all element of one array to another one; e.g. if first array contains
++// elements X,Y,Z and the second contains A,B,C (in those orders), then the
++// first array will be result as A,B,C,X,Y,Z
++#define WX_PREPEND_ARRAY(array, other)                                        \
++    {                                                                         \
++        size_t wxAAcnt = (other).size();                                      \
++        for ( size_t wxAAn = 0; wxAAn < wxAAcnt; wxAAn++ )                    \
++        {                                                                     \
++            (array).Insert((other)[wxAAn], wxAAn);                            \
++        }                                                                     \
++    }
++
+ // append all element of one array to another one
+ #define WX_APPEND_ARRAY(array, other)                                         \
+Index: src/common/config.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/config.cpp,v
+retrieving revision 1.86
+diff -bu2 -r1.86 src/common/config.cpp
+--- src/common/config.cpp
++++ src/common/config.cpp
+@@ -370,5 +370,10 @@
+           const wxChar *pszValue = NULL;
+ #else
+-          const wxChar *pszValue = wxGetenv(strVarName);
++          // NB: use wxGetEnv instead of wxGetenv as otherwise variables
++          //     set through wxSetEnv may not be read correctly!
++          const wxChar *pszValue = NULL;
++          wxString tmp;
++          if (wxGetEnv(strVarName, &tmp))
++              pszValue = tmp;
+ #endif
+           if ( pszValue != NULL ) {
+Index: src/common/filename.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/filename.cpp,v
+retrieving revision 1.175
+diff -bu2 -r1.175 src/common/filename.cpp
+--- src/common/filename.cpp
++++ src/common/filename.cpp
+@@ -1132,5 +1132,5 @@
+     format = GetFormat(format);
+ 
+-    // make the path absolute
++    // set up the directory to use for making the path absolute later
+     if ( (flags & wxPATH_NORM_ABSOLUTE) && !IsAbsolute(format) )
+     {
+@@ -1143,18 +1143,4 @@
+             curDir.AssignDir(cwd);
+         }
+-
+-        // the path may be not absolute because it doesn't have the volume name
+-        // but in this case we shouldn't modify the directory components of it
+-        // but just set the current volume
+-        if ( !HasVolume() && curDir.HasVolume() )
+-        {
+-            SetVolume(curDir.GetVolume());
+-
+-            if ( !m_relative )
+-            {
+-                // yes, it was the case - we don't need curDir then
+-                curDir.Clear();
+-            }
+-        }
+     }
+ 
+@@ -1167,6 +1153,16 @@
+             if ( !dir.empty() && dir[0u] == _T('~') )
+             {
++                // to make the path absolute use the home directory
+                 curDir.AssignDir(wxGetUserHome(dir.c_str() + 1));
+ 
++                // if we are expanding the tilde, then this path
++                // *should* be already relative (since we checked for
++                // the tilde only in the first char of the first dir);
++                // if m_relative==false, it's because it was initialized
++                // from a string which started with /~; in that case
++                // we reach this point but then need m_relative=true
++                // for relative->absolute expansion later
++                m_relative = true;
++
+                 dirs.RemoveAt(0u);
+             }
+@@ -1177,12 +1173,32 @@
+     if ( curDir.IsOk() )
+     {
+-        wxArrayString dirsNew = curDir.GetDirs();
+-        size_t count = dirs.GetCount();
+-        for ( size_t n = 0; n < count; n++ )
++        // this path may be relative because it doesn't have the volume name
++        // and still have m_relative=true; in this case we shouldn't modify
++        // our directory components but just set the current volume
++        if ( !HasVolume() && curDir.HasVolume() )
++        {
++            SetVolume(curDir.GetVolume());
++
++            if ( !m_relative )
+         {
+-            dirsNew.Add(dirs[n]);
++                // yes, it was the case - we don't need curDir then
++                curDir.Clear();
++            }
+         }
+ 
+-        dirs = dirsNew;
++        // finally, prepend curDir to the dirs array
++        wxArrayString dirsNew = curDir.GetDirs();
++        WX_PREPEND_ARRAY(dirs, dirsNew);
++
++        // if we used e.g. tilde expansion previously and wxGetUserHome didn't
++        // return for some reason an absolute path, then curDir maybe not be absolute!
++        if ( curDir.IsAbsolute(format) )
++        {
++            // we have prepended an absolute path and thus we are now an absolute
++            // file name too
++            m_relative = false;
++        }
++        // else if (flags & wxPATH_NORM_ABSOLUTE):
++        //   should we warn the user that we didn't manage to make the path absolute?
+     }
+ 
+@@ -1250,9 +1266,4 @@
+     }
+ 
+-    // we do have the path now
+-    //
+-    // NB: need to do this before (maybe) calling Assign() below
+-    m_relative = false;
+-
+ #if defined(__WIN32__)
+     if ( (flags & wxPATH_NORM_LONG) && (format == wxPATH_DOS) )
+Index: tests/filename/filenametest.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/tests/filename/filenametest.cpp,v
+retrieving revision 1.10
+diff -bu2 -r1.10 tests/filename/filenametest.cpp
+--- tests/filename/filenametest.cpp
++++ tests/filename/filenametest.cpp
+@@ -56,7 +56,12 @@
+     { _T("c:\\foo.bar"), _T("c"), _T("\\"), _T("foo"), _T("bar"), true, wxPATH_DOS },
+     { _T("c:\\Windows\\command.com"), _T("c"), _T("\\Windows"), _T("command"), _T("com"), true, wxPATH_DOS },
++
++    // NB: when using the wxFileName::GetLongPath() function on these two strings,
++    //     the program will hang various seconds. All those time is taken by the
++    //     call to the win32 API GetLongPathName()...
+     { _T("\\\\server\\foo.bar"), _T("server"), _T("\\"), _T("foo"), _T("bar"), true, wxPATH_DOS },
+     { _T("\\\\server\\dir\\foo.bar"), _T("server"), _T("\\dir"), _T("foo"), _T("bar"), true, wxPATH_DOS },
+ 
++
+     // wxFileName support for Mac file names is broken currently
+ #if 0
+@@ -71,4 +76,6 @@
+ 
+     // VMS file names
++    // NB: on Windows they have the same effect of the \\server\\ strings
++    //     (see the note above)
+     { _T("device:[dir1.dir2.dir3]file.txt"), _T("device"), _T("dir1.dir2.dir3"), _T("file"), _T("txt"), true, wxPATH_VMS },
+     { _T("file.txt"), _T(""), _T(""), _T("file"), _T("txt"), false, wxPATH_VMS },
+@@ -91,4 +98,5 @@
+         CPPUNIT_TEST( TestSetPath );
+         CPPUNIT_TEST( TestStrip );
++        CPPUNIT_TEST( TestNormalize );
+ #ifdef __WINDOWS__
+         CPPUNIT_TEST( TestShortLongPath );
+@@ -101,4 +109,5 @@
+     void TestSetPath();
+     void TestStrip();
++    void TestNormalize();
+ #ifdef __WINDOWS__
+     void TestShortLongPath();
+@@ -150,5 +159,4 @@
+     fn2.Normalize();
+     CPPUNIT_ASSERT(fn1.GetPath() == fn2.GetPath());
+-
+ }
+ 
+@@ -184,4 +192,74 @@
+ }
+ 
++void FileNameTestCase::TestNormalize()
++{
++    // prepare some data to be used later
++    wxString sep = wxFileName::GetPathSeparator();
++    wxString cwd = wxGetCwd();
++    wxString home = wxGetUserHome();
++
++    cwd.Replace(sep, wxT("/"));
++    if (cwd.Last() != wxT('/'))
++        cwd += wxT('/');
++    home.Replace(sep, wxT("/"));
++    if (home.Last() != wxT('/'))
++        home += wxT('/');
++
++    // since we will always be testing paths using the wxPATH_UNIX
++    // format, we need to remove the volume, if present
++    if (home.Contains(wxT(':')))
++        home = home.AfterFirst(wxT(':'));
++    if (cwd.Contains(wxT(':')))
++        cwd = cwd.AfterFirst(wxT(':'));
++
++    static struct FileNameTest
++    {
++        wxString original;
++        int flags;
++        wxString expected;
++    } tests[] =
++    {
++        // test wxPATH_NORM_ENV_VARS
++#ifdef __WXMSW__
++        { wxT("%ABCDEF%/g/h/i"), wxPATH_NORM_ENV_VARS, wxT("abcdef/g/h/i") },
++#else
++        { wxT("$(ABCDEF)/g/h/i"), wxPATH_NORM_ENV_VARS, wxT("abcdef/g/h/i") },
++#endif
++
++        // test wxPATH_NORM_DOTS
++        { wxT("a/.././b/c/../../"), wxPATH_NORM_DOTS, wxT("") },
++
++        // test wxPATH_NORM_TILDE
++        // NB: do the tilde expansion also under Windows to test if it works there too
++        { wxT("/a/b/~"), wxPATH_NORM_TILDE, wxT("/a/b/~") },
++        { wxT("/~/a/b"), wxPATH_NORM_TILDE, home + wxT("a/b") },
++        { wxT("~/a/b"), wxPATH_NORM_TILDE, home + wxT("a/b") },
++
++        // test wxPATH_NORM_ABSOLUTE
++        { wxT("a/b/"), wxPATH_NORM_ABSOLUTE, cwd + wxT("a/b/") },
++        { wxT("a/b/c.ext"), wxPATH_NORM_ABSOLUTE, cwd + wxT("a/b/c.ext") },
++        { wxT("/a"), wxPATH_NORM_ABSOLUTE, wxT("/a") },
++
++        // test giving no flags at all to Normalize()
++        { wxT("a/b/"), 0, wxT("a/b/") },
++        { wxT("a/b/c.ext"), 0, wxT("a/b/c.ext") },
++        { wxT("/a"), 0, wxT("/a") }
++    };
++
++    // set the env var ABCDEF
++    wxSetEnv(_T("ABCDEF"), _T("abcdef"));
++
++    for (size_t i=0; i < WXSIZEOF(tests); i++)
++    {
++        wxFileName fn(tests[i].original, wxPATH_UNIX);
++
++        // be sure this normalization does not fail
++        CPPUNIT_ASSERT( fn.Normalize(tests[i].flags, cwd, wxPATH_UNIX) );
++
++        // compare result with expected string
++        CPPUNIT_ASSERT_EQUAL( tests[i].expected, fn.GetFullPath(wxPATH_UNIX) );
++    }
++}
++
+ wxString wxTestStripExtension(wxString szFile)
+ {
+
+ 	  	 

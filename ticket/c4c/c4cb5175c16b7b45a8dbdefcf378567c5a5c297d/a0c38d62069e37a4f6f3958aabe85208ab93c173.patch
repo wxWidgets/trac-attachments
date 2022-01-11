@@ -1,0 +1,684 @@
+Index: include/wx/glcanvas.h
+===================================================================
+--- include/wx/glcanvas.h	(revision 53748)
++++ include/wx/glcanvas.h	(working copy)
+@@ -47,7 +47,9 @@
+     WX_GL_MIN_ACCUM_RED,   // use red accum buffer with most bits (> MIN_ACCUM_RED bits)
+     WX_GL_MIN_ACCUM_GREEN, // use green buffer with most bits (> MIN_ACCUM_GREEN bits)
+     WX_GL_MIN_ACCUM_BLUE,  // use blue buffer with most bits (> MIN_ACCUM_BLUE bits)
+-    WX_GL_MIN_ACCUM_ALPHA  // use alpha buffer with most bits (> MIN_ACCUM_ALPHA bits)
++    WX_GL_MIN_ACCUM_ALPHA, // use alpha buffer with most bits (> MIN_ACCUM_ALPHA bits)
++    WX_GL_SAMPLE_BUFFERS,  // 1 for multisampling support (antialiasing)
++    WX_GL_SAMPLES          // 4 for 2x2 antialising supersampling on most graphics cards
+ };
+ 
+ #define wxGLCanvasName _T("GLCanvas")
+Index: include/wx/msw/glcanvas.h
+===================================================================
+--- include/wx/msw/glcanvas.h	(revision 53748)
++++ include/wx/msw/glcanvas.h	(working copy)
+@@ -56,15 +56,24 @@
+                const wxString& name = wxGLCanvasName,
+                const wxPalette& palette = wxNullPalette);
+ 
+-    bool Create(wxWindow *parent,
+-                wxWindowID id = wxID_ANY,
+-                const wxPoint& pos = wxDefaultPosition,
+-                const wxSize& size = wxDefaultSize,
+-                long style = 0,
+-                const wxString& name = wxGLCanvasName,
+-                const int *attribList = NULL,
+-                const wxPalette& palette = wxNullPalette);
++	bool CreatePFD(wxWindow *parent,
++				wxWindowID id = wxID_ANY,
++				const wxPoint& pos = wxDefaultPosition,
++				const wxSize& size = wxDefaultSize,
++				long style = 0,
++				const wxString& name = wxGLCanvasName,
++				const int *attribList = NULL,
++				const wxPalette& palette = wxNullPalette);
+ 
++	bool CreateMS(wxWindow *parent,
++				wxWindowID id = wxID_ANY,
++				const wxPoint& pos = wxDefaultPosition,
++				const wxSize& size = wxDefaultSize,
++				long style = 0,
++				const wxString& name = wxGLCanvasName,
++				const int *attribList = NULL,
++				const wxPalette& palette = wxNullPalette);
++
+     virtual ~wxGLCanvas();
+ 
+     // implement wxGLCanvasBase methods
+@@ -141,10 +150,13 @@
+     // HDC for this window, we keep it all the time
+     HDC m_hDC;
+ 
++    static int pixelFormatMultiSample;
++
++    void wxGLCanvas::DestroyWindowPFD(wxWindow *parent);
++
+ private:
+     DECLARE_EVENT_TABLE()
+     DECLARE_CLASS(wxGLCanvas)
+ };
+ 
+ #endif // _WX_GLCANVAS_H_
+-
+Index: interface/glcanvas.h
+===================================================================
+--- interface/glcanvas.h	(revision 53748)
++++ interface/glcanvas.h	(working copy)
+@@ -126,8 +126,14 @@
+     WX_GL_MIN_ACCUM_BLUE,
+ 
+     /// Specifies minimal number of alpha accumulator bits.
+-    WX_GL_MIN_ACCUM_ALPHA
++    WX_GL_MIN_ACCUM_ALPHA,
+ 
++    /// 1 for multisampling support (antialiasing)
++    WX_GL_SAMPLE_BUFFERS,
++
++    /// 4 for 2x2 antialising supersampling on most graphics cards
++    WX_GL_SAMPLES
++
+ };
+ 
+ /**
+Index: src/mac/carbon/glcanvas.cpp
+===================================================================
+--- src/mac/carbon/glcanvas.cpp	(revision 53748)
++++ src/mac/carbon/glcanvas.cpp	(working copy)
+@@ -165,6 +165,42 @@
+ 
+ #endif // WXWIN_COMPATIBILITY_2_8
+ 
++static int IsExtensionSupported(const wxString& extension_)
++{
++    // we need a valid context to query for extensions.
++    const GLint defaultAttribs[] = {AGL_RGBA, AGL_DOUBLEBUFFER, AGL_NONE};
++    AGLPixelFormat fmt = aglChoosePixelFormat(NULL, 0, defaultAttribs);
++    AGLContext ctx = aglCreateContext(fmt, NULL);
++    if (ctx == NULL) return false; // otherwise glGetString will crash
++    wxString extensionList_ = wxString::FromAscii((const char *)glGetString(GL_EXTENSIONS));
++    aglDestroyPixelFormat(fmt);
++    aglDestroyContext(ctx);
++
++    const char *extensionList = extensionList_.ToAscii();
++    const char *extension = extension_.ToAscii();
++    size_t extensionLen = strlen(extension);
++
++    // Begin examination at start of string, increment by 1 on false match
++    for (const char* p = extensionList; ; p++)
++    {
++        // Advance up to the next possible match
++        p = strstr(p, extension);
++        if (p == NULL)
++        {
++            return 0; // No match
++        }
++        // Make sure that match is at the start of the string or that
++        // the previous char is a space, or else we could accidentally
++        // match "glFunkyglExtension" with "glExtension"
++        // Also, make sure that the following character is space or NULL
++        // or else "glExtensionTwo" might match "glExtension"
++        if ((p==extensionList || p[-1]==' ') && (p[extensionLen]=='\0' || p[extensionLen]==' '))
++        {
++            return 1; // Match
++        }
++    }
++}
++
+ static AGLPixelFormat ChoosePixelFormat(const int *attribList)
+ {
+     GLint data[512];
+@@ -189,6 +225,7 @@
+     else
+     {
+         unsigned p = 0;
++        int multiSampleAvailable = -1;
+         data[p++] = AGL_MINIMUM_POLICY; // make _SIZE tags behave more like GLX
+ 
+         for ( unsigned arg = 0; attribList[arg] !=0 && p < WXSIZEOF(data); )
+@@ -271,6 +308,32 @@
+                     data[p++] = AGL_ACCUM_ALPHA_SIZE;
+                     data[p++] = attribList[arg++];
+                     break;
++
++                case WX_GL_SAMPLE_BUFFERS:
++                    data[p++] = AGL_SAMPLE_BUFFERS_ARB;
++                    data[p++] = attribList[arg];
++                    if (attribList[arg] == GL_TRUE)
++                    {
++                        if (multiSampleAvailable == -1)
++                            multiSampleAvailable = IsExtensionSupported(wxT("GL_ARB_multisample"));
++                        if (multiSampleAvailable == 1)
++                            data[p++] = AGL_NO_RECOVERY; // if hardware resources run out, do NOT switch to software
++                        else
++                            data[p-1] = GL_FALSE;
++                    }
++                    arg++;
++                    break;
++
++                case WX_GL_SAMPLES:
++                    if (multiSampleAvailable == -1)
++                        multiSampleAvailable = IsExtensionSupported(wxT("GL_ARB_multisample"));
++                    if (multiSampleAvailable == 1)
++                    {
++                        data[p++] = AGL_SAMPLES_ARB; 
++                        data[p++] = attribList[arg];
++                    }
++                    arg++;
++                    break;
+             }
+         }
+ 
+Index: src/msw/glcanvas.cpp
+===================================================================
+--- src/msw/glcanvas.cpp	(revision 53748)
++++ src/msw/glcanvas.cpp	(working copy)
+@@ -46,6 +46,8 @@
+     #define WXUNUSED_WITHOUT_GL_EXT_vertex_array(name) WXUNUSED(name)
+ #endif
+ 
++int wxGLCanvas::pixelFormatMultiSample = -1;
++
+ // ----------------------------------------------------------------------------
+ // libraries
+ // ----------------------------------------------------------------------------
+@@ -221,6 +223,8 @@
+     EVT_QUERY_NEW_PALETTE(wxGLCanvas::OnQueryNewPalette)
+ END_EVENT_TABLE()
+ 
++static bool InitMultiSample(HDC hdc, const int *attribList, int& pixelFormatMultiSample);
++
+ // ----------------------------------------------------------------------------
+ // wxGLCanvas construction
+ // ----------------------------------------------------------------------------
+@@ -244,7 +248,7 @@
+ {
+     Init();
+ 
+-    (void)Create(parent, id, pos, size, style, name, attribList, palette);
++    (void)CreateMS(parent, id, pos, size, style, name, attribList, palette);
+ }
+ 
+ wxGLCanvas::~wxGLCanvas()
+@@ -254,7 +258,7 @@
+ 
+ // Replaces wxWindow::Create functionality, since we need to use a different
+ // window class
+-bool wxGLCanvas::Create(wxWindow *parent,
++bool wxGLCanvas::CreatePFD(wxWindow *parent,
+                         wxWindowID id,
+                         const wxPoint& pos,
+                         const wxSize& size,
+@@ -322,12 +326,276 @@
+     return true;
+ }
+ 
++
++void wxGLCanvas::DestroyWindowPFD(wxWindow *parent)
++{
++    parent->RemoveChild(this);
++    ::ReleaseDC((HWND) GetHWND(), m_hDC);
++    m_hDC = 0;
++    HWND hwnd = GetHwnd();
++    UnsubclassWin(); // will do SetHWND(0);
++    ::DestroyWindow(hwnd);
++}
++
+ // ----------------------------------------------------------------------------
++// multi sample stuff
++// ----------------------------------------------------------------------------
++
++typedef const char * (WINAPI * PFNWGLGETEXTENSIONSSTRINGARBPROC) (HDC hdc);
++typedef const char * (WINAPI * PFNWGLGETEXTENSIONSSTRINGEXTPROC) (void);
++
++static bool IsWglExtensionSupported(const char *extension)
++{
++    char *extensionList = NULL;
++    PFNWGLGETEXTENSIONSSTRINGARBPROC wglGetExtensionsStringARB =
++        (PFNWGLGETEXTENSIONSSTRINGARBPROC) wglGetProcAddress("wglGetExtensionsStringARB");
++    if (wglGetExtensionsStringARB != NULL)
++    {
++        extensionList = (char*) wglGetExtensionsStringARB(wglGetCurrentDC());
++    }
++    else
++    {
++        PFNWGLGETEXTENSIONSSTRINGEXTPROC wglGetExtensionsStringEXT =
++            (PFNWGLGETEXTENSIONSSTRINGEXTPROC) wglGetProcAddress("wglGetExtensionsStringEXT");
++        if (wglGetExtensionsStringEXT != NULL)
++        {
++            extensionList = (char*) wglGetExtensionsStringEXT();
++        }
++        else
++        {
++            return false;
++        }
++    }
++
++    size_t extensionLen = strlen(extension);
++    // Begin examination at start of string, increment by 1 on false match
++    for (const char* p = extensionList; ; p++)
++    {
++        // Advance up to the next possible match
++        p = strstr(p, extension);
++        if (p == NULL)
++        {
++            return false; // No match
++        }
++        // Make sure that match is at the start of the string or that
++        // the previous char is a space, or else we could accidentally
++        // match "wglFunkywglExtension" with "wglExtension"
++        // Also, make sure that the following character is space or NULL
++        // or else "wglExtensionTwo" might match "wglExtension"
++        if ((p==extensionList || p[-1]==' ') && (p[extensionLen]=='\0' || p[extensionLen]==' '))
++        {
++            return true; // Match
++        }
++    }
++}
++
++typedef BOOL (WINAPI * PFNWGLCHOOSEPIXELFORMATARBPROC) (HDC hdc, const int *piAttribIList, const FLOAT *pfAttribFList, UINT nMaxFormats, int *piFormats, UINT *nNumFormats);
++
++#ifndef WGL_ARB_pixel_format
++#define WGL_NUMBER_PIXEL_FORMATS_ARB      0x2000
++#define WGL_DRAW_TO_WINDOW_ARB            0x2001
++#define WGL_DRAW_TO_BITMAP_ARB            0x2002
++#define WGL_ACCELERATION_ARB              0x2003
++#define WGL_NEED_PALETTE_ARB              0x2004
++#define WGL_NEED_SYSTEM_PALETTE_ARB       0x2005
++#define WGL_SWAP_LAYER_BUFFERS_ARB        0x2006
++#define WGL_SWAP_METHOD_ARB               0x2007
++#define WGL_NUMBER_OVERLAYS_ARB           0x2008
++#define WGL_NUMBER_UNDERLAYS_ARB          0x2009
++#define WGL_TRANSPARENT_ARB               0x200A
++#define WGL_TRANSPARENT_RED_VALUE_ARB     0x2037
++#define WGL_TRANSPARENT_GREEN_VALUE_ARB   0x2038
++#define WGL_TRANSPARENT_BLUE_VALUE_ARB    0x2039
++#define WGL_TRANSPARENT_ALPHA_VALUE_ARB   0x203A
++#define WGL_TRANSPARENT_INDEX_VALUE_ARB   0x203B
++#define WGL_SHARE_DEPTH_ARB               0x200C
++#define WGL_SHARE_STENCIL_ARB             0x200D
++#define WGL_SHARE_ACCUM_ARB               0x200E
++#define WGL_SUPPORT_GDI_ARB               0x200F
++#define WGL_SUPPORT_OPENGL_ARB            0x2010
++#define WGL_DOUBLE_BUFFER_ARB             0x2011
++#define WGL_STEREO_ARB                    0x2012
++#define WGL_PIXEL_TYPE_ARB                0x2013
++#define WGL_COLOR_BITS_ARB                0x2014
++#define WGL_RED_BITS_ARB                  0x2015
++#define WGL_RED_SHIFT_ARB                 0x2016
++#define WGL_GREEN_BITS_ARB                0x2017
++#define WGL_GREEN_SHIFT_ARB               0x2018
++#define WGL_BLUE_BITS_ARB                 0x2019
++#define WGL_BLUE_SHIFT_ARB                0x201A
++#define WGL_ALPHA_BITS_ARB                0x201B
++#define WGL_ALPHA_SHIFT_ARB               0x201C
++#define WGL_ACCUM_BITS_ARB                0x201D
++#define WGL_ACCUM_RED_BITS_ARB            0x201E
++#define WGL_ACCUM_GREEN_BITS_ARB          0x201F
++#define WGL_ACCUM_BLUE_BITS_ARB           0x2020
++#define WGL_ACCUM_ALPHA_BITS_ARB          0x2021
++#define WGL_DEPTH_BITS_ARB                0x2022
++#define WGL_STENCIL_BITS_ARB              0x2023
++#define WGL_AUX_BUFFERS_ARB               0x2024
++#define WGL_NO_ACCELERATION_ARB           0x2025
++#define WGL_GENERIC_ACCELERATION_ARB      0x2026
++#define WGL_FULL_ACCELERATION_ARB         0x2027
++#define WGL_SWAP_EXCHANGE_ARB             0x2028
++#define WGL_SWAP_COPY_ARB                 0x2029
++#define WGL_SWAP_UNDEFINED_ARB            0x202A
++#define WGL_TYPE_RGBA_ARB                 0x202B
++#define WGL_TYPE_COLORINDEX_ARB           0x202C
++#endif
++
++#ifndef WGL_ARB_multisample
++#define WGL_SAMPLE_BUFFERS_ARB            0x2041
++#define WGL_SAMPLES_ARB                   0x2042
++#endif
++
++static bool InitMultiSample(HDC hdc, const int *attribList, int& PFMS)
++{
++    // According to http://www.delphi3d.net/hardware/extsupport.php?extension=WGL_ARB_multisample
++    // and http://www.delphi3d.net/hardware/extsupport.php?extension=WGL_EXT_multisample
++    // there is no need to support WGL_EXT_multisample
++    if (IsWglExtensionSupported("WGL_ARB_multisample"))
++    {
++        const char *name="wglChoosePixelFormatARB";
++        PFNWGLCHOOSEPIXELFORMATARBPROC wglChoosePixelFormatARB =
++            (PFNWGLCHOOSEPIXELFORMATARBPROC)wglGetProcAddress(name);
++        if (wglChoosePixelFormatARB == NULL)
++        {
++            return false; // should not occur
++        }
++        int i=0,j=0;
++        int iAttributes[128];
++        iAttributes[j++]=WGL_DRAW_TO_WINDOW_ARB; iAttributes[j++]=GL_TRUE;
++        iAttributes[j++]=WGL_SUPPORT_OPENGL_ARB; iAttributes[j++]=GL_TRUE;
++        iAttributes[j++]=WGL_ACCELERATION_ARB; iAttributes[j++]=WGL_FULL_ACCELERATION_ARB;
++
++        if (attribList == NULL)
++        {
++            iAttributes[j++]=WGL_COLOR_BITS_ARB; iAttributes[j++]=24;
++            iAttributes[j++]=WGL_ALPHA_BITS_ARB; iAttributes[j++]=8;
++            iAttributes[j++]=WGL_DEPTH_BITS_ARB; iAttributes[j++]=16;
++            iAttributes[j++]=WGL_STENCIL_BITS_ARB; iAttributes[j++]=0;
++            iAttributes[j++]=WGL_DOUBLE_BUFFER_ARB; iAttributes[j++]=GL_TRUE;
++            iAttributes[j++]=WGL_SAMPLE_BUFFERS_ARB; iAttributes[j++]=GL_TRUE;
++            iAttributes[j++]=WGL_SAMPLES_ARB; iAttributes[j++]=4;
++        }
++        else
++        {
++            while(attribList[i]!=0)
++            {
++                switch(attribList[i++])
++                {
++                    case WX_GL_RGBA:
++                        iAttributes[j++]=WGL_COLOR_BITS_ARB;
++                        iAttributes[j++]=24;
++                        iAttributes[j++]=WGL_ALPHA_BITS_ARB;
++                        iAttributes[j++]=8;
++                        break;
++                    case WX_GL_BUFFER_SIZE:
++                        iAttributes[j++]=WGL_COLOR_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_LEVEL:
++                        if (attribList[i]>0)
++                        {
++                            iAttributes[j++]=WGL_NUMBER_OVERLAYS_ARB;
++                            iAttributes[j++]=1;
++                        }
++                        else if (attribList[i]<0)
++                        {
++                            iAttributes[j++]=WGL_NUMBER_UNDERLAYS_ARB;
++                            iAttributes[j++]=1;
++                        }
++                        i++; // ignored
++                        break;
++                    case WX_GL_DOUBLEBUFFER:
++                        iAttributes[j++]=WGL_DOUBLE_BUFFER_ARB;
++                        iAttributes[j++]=GL_TRUE;
++                        break;
++                    case WX_GL_STEREO:
++                        iAttributes[j++]=WGL_STEREO_ARB;
++                        iAttributes[j++]=GL_TRUE;
++                        break;
++                    case WX_GL_AUX_BUFFERS:
++                        iAttributes[j++]=WGL_AUX_BUFFERS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_MIN_RED:
++                        iAttributes[j++]=WGL_RED_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_MIN_GREEN:
++                        iAttributes[j++]=WGL_GREEN_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_MIN_BLUE:
++                        iAttributes[j++]=WGL_BLUE_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_MIN_ALPHA:
++                        iAttributes[j++]=WGL_ALPHA_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                       break;
++                    case WX_GL_DEPTH_SIZE:
++                        iAttributes[j++]=WGL_DEPTH_BITS_ARB;;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_STENCIL_SIZE:
++                        iAttributes[j++]=WGL_STENCIL_BITS_ARB;;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                   case WX_GL_MIN_ACCUM_RED:
++                       iAttributes[j++]=WGL_ACCUM_RED_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_MIN_ACCUM_GREEN:
++                        iAttributes[j++]=WGL_ACCUM_GREEN_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_MIN_ACCUM_BLUE:
++                        iAttributes[j++]=WGL_ACCUM_BLUE_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_MIN_ACCUM_ALPHA:
++                        iAttributes[j++]=WGL_ACCUM_ALPHA_BITS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_SAMPLE_BUFFERS:
++                        iAttributes[j++]=WGL_SAMPLE_BUFFERS_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    case WX_GL_SAMPLES:
++                        iAttributes[j++]=WGL_SAMPLES_ARB;
++                        iAttributes[j++]=attribList[i++];
++                        break;
++                    default:
++                        break;
++                }
++            }
++        }
++        iAttributes[j++]=0;
++        iAttributes[j++]=0;
++        float fAttributes[] = {0,0};
++        UINT numFormats=0;
++        int valid = wglChoosePixelFormatARB(hdc,iAttributes,fAttributes,1,&PFMS,&numFormats);
++        if (valid == 0)
++        {
++            wxLogLastError(_T("wglChoosePixelFormatARB"));
++            return false;
++        }
++        if (numFormats >= 1)
++        {
++            return true;
++        }
++    }
++    return false;
++}
++
++// ----------------------------------------------------------------------------
+ // pixel format stuff
+ // ----------------------------------------------------------------------------
+ 
+ static void
+-AdjustPFDForAttributes(PIXELFORMATDESCRIPTOR& pfd, const int *attribList)
++AdjustPFDForAttributes(PIXELFORMATDESCRIPTOR& pfd, const int *attribList, int& PFMS)
+ {
+     if ( !attribList )
+         return;
+@@ -411,6 +679,17 @@
+             case WX_GL_MIN_ACCUM_ALPHA:
+                 pfd.cAccumBits += (pfd.cAccumAlphaBits = attribList[arg++]);
+                 break;
++
++			case WX_GL_SAMPLE_BUFFERS:
++                // There is no support for multisample when using PIXELFORMATDESCRIPTOR
++				if ((attribList[arg++] == GL_TRUE) && (PFMS < 0))
++					PFMS = -2;  // Remember that multi sample is requested,
++						        // will call InitMultiSample() later
++				break;
++
++			case WX_GL_SAMPLES:
++				arg++; // Ignore the number of samples here, will be used in InitMultiSample()
++				break;
+         }
+     }
+ }
+@@ -448,7 +727,16 @@
+     else
+         *ppfd = pfd;
+ 
+-    AdjustPFDForAttributes(*ppfd, attribList);
++	AdjustPFDForAttributes(*ppfd, attribList, pixelFormatMultiSample);
++    if (pixelFormatMultiSample >= 0)
++    {
++        if ( !::SetPixelFormat(hdc, pixelFormatMultiSample, &pfd) )
++        {
++            wxLogLastError(_T("SetPixelFormat"));
++			return 0;
++        }
++        return pixelFormatMultiSample;
++    }
+ 
+     return ::ChoosePixelFormat(hdc, ppfd);
+ }
+@@ -618,7 +906,7 @@
+ {
+     Init();
+ 
+-    if ( Create(parent, id, pos, size, style, name, attribList, palette) )
++    if ( CreatePFD(parent, id, pos, size, style, name, attribList, palette) )
+         m_glContext = new wxGLContext(this);
+ }
+ 
+@@ -634,7 +922,7 @@
+ {
+     Init();
+ 
+-    if ( Create(parent, id, pos, size, style, name, attribList, palette) )
++    if ( CreatePFD(parent, id, pos, size, style, name, attribList, palette) )
+         m_glContext = new wxGLContext(this, shared);
+ }
+ 
+@@ -650,7 +938,7 @@
+ {
+     Init();
+ 
+-    if ( Create(parent, id, pos, size, style, name, attribList, palette) )
++    if ( CreatePFD(parent, id, pos, size, style, name, attribList, palette) )
+         m_glContext = new wxGLContext(this, shared ? shared->m_glContext : NULL);
+ }
+ 
+@@ -672,4 +960,43 @@
+     return true;
+ }
+ 
++bool wxGLCanvas::CreateMS(	wxWindow *parent,
++							wxWindowID id,
++							const wxPoint& pos,
++							const wxSize& size,
++							long style,
++							const wxString& name,
++							const int *attribList,
++							const wxPalette& palette)
++{
++    pixelFormatMultiSample = -1;
++    CreatePFD(parent, id, pos, size, style, name, attribList, palette);
++
++    // Anti Aliasing support (WGL_ARB_multisample) :
++    // We can't request the pixel format (to query the multisampling) until we've created a window.
++    // But we can't create a FSAA screen unless we know the pixel format will support it.
++    // So, we create the window, query the pixelFormat, then destroy and remake the window
++    // if multisampling is supported.
++    if (pixelFormatMultiSample == -2) // if multi sample is requested
++    {
++        wxGLContext *temp_glContext = new wxGLContext(this);
++        if (temp_glContext != NULL)
++            temp_glContext->SetCurrent(*this);
++        // Now, we have a valid handle to query for multisample support.
++        // If we find it's supported, we destroy and recreate this window, but with the new pixel format. 
++        if (InitMultiSample((HDC)GetHDC(), attribList, pixelFormatMultiSample))
++        {
++            delete temp_glContext;
++            // destroy Window
++            DestroyWindowPFD(parent);
++            // recreate the window with multisample pixel format
++            CreatePFD(parent, id, pos, size, style, name, attribList, palette);
++        }
++        else
++        {
++            delete temp_glContext;
++        }
++    }
++	return true;
++}
+ #endif // wxUSE_GLCANVAS
+Index: src/unix/glx11.cpp
+===================================================================
+--- src/unix/glx11.cpp	(revision 53748)
++++ src/unix/glx11.cpp	(working copy)
+@@ -122,6 +122,35 @@
+ // working with GL attributes
+ // ----------------------------------------------------------------------------
+ 
++static int IsExtensionSupported(const wxString& extension_)
++{
++    wxString extensionList_ = wxString::FromAscii((const char *)
++        glXQueryExtensionsString(GDK_DISPLAY(), DefaultScreen(GDK_DISPLAY())));
++    const char *extensionList = extensionList_.ToAscii();
++    const char *extension = extension_.ToAscii();
++    size_t extensionLen = strlen(extension);
++
++    // Begin examination at start of string, increment by 1 on false match
++    for (const char* p = extensionList; ; p++)
++    {
++        // Advance up to the next possible match
++        p = strstr(p, extension);
++        if (p == NULL)
++        {
++            return 0; // No match
++        }
++        // Make sure that match is at the start of the string or that
++        // the previous char is a space, or else we could accidentally
++        // match "glFunkyglExtension" with "glExtension"
++        // Also, make sure that the following character is space or NULL
++        // or else "glExtensionTwo" might match "glExtension"
++        if ((p==extensionList || p[-1]==' ') && (p[extensionLen]=='\0' || p[extensionLen]==' '))
++        {
++            return 1; // Match
++        }
++    }
++}
++
+ bool
+ wxGLCanvasX11::ConvertWXAttrsToGL(const int *wxattrs, int *glattrs, size_t n)
+ {
+@@ -170,6 +199,7 @@
+     }
+     else // have non-default attributes
+     {
++        int multiSampleAvailable = -1;
+         size_t p = 0;
+         for ( int arg = 0; wxattrs[arg] != 0; )
+         {
+@@ -257,6 +287,35 @@
+                     glattrs[p++] = GLX_ACCUM_ALPHA_SIZE;
+                     break;
+ 
++                case WX_GL_SAMPLE_BUFFERS:
++                    glattrs[p++] = GLX_SAMPLE_BUFFERS_ARB;
++                    if (multiSampleAvailable == -1)
++                        multiSampleAvailable = IsExtensionSupported(wxT("GLX_ARB_multisample"));
++                    if (multiSampleAvailable != 0)
++                    {
++                        glattrs[p++] = wxattrs[arg++];
++                    }
++                    else
++                    {
++                        glattrs[p++] = GL_FALSE;
++                    }
++                    continue;
++
++                case WX_GL_SAMPLES:
++                    glattrs[p++] = GLX_SAMPLES_ARB;
++                    glattrs[p++] = wxattrs[arg++];
++                    if (multiSampleAvailable == -1)
++                        multiSampleAvailable = IsExtensionSupported(wxT("GLX_ARB_multisample"));
++                    if (multiSampleAvailable != 0)
++                    {
++                        glattrs[p++] = wxattrs[arg++];
++                    }
++                    else
++                    {
++                        glattrs[p++] = 0;
++                    }
++                    continue;
++
+                 default:
+                     wxLogDebug(_T("Unsupported OpenGL attribute %d"),
+                                wxattrs[arg - 1]);

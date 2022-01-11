@@ -1,0 +1,298 @@
+Index: include/wx/msw/bitmap.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/msw/bitmap.h,v
+retrieving revision 1.25
+diff -b -u -2 -r1.25 bitmap.h
+--- include/wx/msw/bitmap.h	2001/09/30 22:06:38	1.25
++++ include/wx/msw/bitmap.h	2002/12/07 00:06:27
+@@ -64,4 +64,8 @@
+     // optional mask for transparent drawing
+     wxMask       *m_bitmapMask;
++
++#if wxUSE_DIB_FOR_BITMAP
++    WXHANDLE     m_hFileMap;	// file mapping handle for large DIB's
++#endif
+ };
+ 
+@@ -178,4 +182,9 @@
+     WXHBITMAP GetHBITMAP() const { return (WXHBITMAP)GetHandle(); }
+ 
++#if wxUSE_DIB_FOR_BITMAP
++    void SetHFileMap(WXHANDLE hFileMap) { GetBitmapData()->m_hFileMap = hFileMap; }
++    WXHANDLE GetHFileMap() const { return GetBitmapData()->m_hFileMap; }
++#endif // wxUSE_DIB_FOR_BITMAP
++
+     void SetSelectedInto(wxDC *dc) { if (GetBitmapData()) GetBitmapData()->m_selectedInto = dc; }
+     wxDC *GetSelectedInto() const { return (GetBitmapData() ? GetBitmapData()->m_selectedInto : (wxDC*) NULL); }
+@@ -209,4 +218,9 @@
+     bool CreateFromImage(const wxImage& image, int depth);
+ #endif // wxUSE_IMAGE
++
++#if wxUSE_DIB_FOR_BITMAP
++    void *CreateDIB(int width, int height, int depth);
++    void CopyDIBLine(void* src, void* dest, int count) const;
++#endif
+ 
+ private:
+Index: include/wx/msw/setup0.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/msw/setup0.h,v
+retrieving revision 1.124
+diff -b -u -2 -r1.124 setup0.h
+--- include/wx/msw/setup0.h	2002/12/04 13:59:08	1.124
++++ include/wx/msw/setup0.h	2002/12/07 00:06:28
+@@ -635,4 +635,8 @@
+ #define wxUSE_DC_CACHEING 1
+ 
++// Set this to 1 to enable the use of DIB's for wxBitmap to support
++// bitmaps > 16MB on Win95/98/Me.  Set to 0 to use DDB's only.
++#define wxUSE_DIB_FOR_BITMAP 0
++
+ // ----------------------------------------------------------------------------
+ // common dialogs
+Index: src/msw/bitmap.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/bitmap.cpp,v
+retrieving revision 1.78
+diff -b -u -2 -r1.78 bitmap.cpp
+--- src/msw/bitmap.cpp	2002/08/26 21:12:25	1.78
++++ src/msw/bitmap.cpp	2002/12/07 00:06:29
+@@ -1,3 +1,3 @@
+-/////////////////////////////////////////////////////////////////////////////
++////////////////////////////////////////////////////////////////////////////
+ // Name:        bitmap.cpp
+ // Purpose:     wxBitmap
+@@ -82,4 +82,7 @@
+     m_bitmapMask = NULL;
+     m_hBitmap = (WXHBITMAP) NULL;
++#if wxUSE_DIB_FOR_BITMAP
++    m_hFileMap = 0;
++#endif
+ }
+ 
+@@ -100,4 +103,12 @@
+     }
+ 
++#if wxUSE_DIB_FOR_BITMAP
++    if(m_hFileMap)
++    {
++      ::CloseHandle((void*)m_hFileMap);
++      m_hFileMap = 0;
++    }
++#endif
++
+     delete m_bitmapMask;
+     m_bitmapMask = NULL;
+@@ -346,4 +357,10 @@
+     GetBitmapData()->m_depth = d;
+ 
++#if wxUSE_DIB_FOR_BITMAP
++    if(w && h && d >= 16)
++      CreateDIB(w, h, d);
++    else
++    {
++#endif
+     HBITMAP hbmp;
+ #ifndef __WXMICROWIN__
+@@ -370,4 +387,7 @@
+ 
+     SetHBITMAP((WXHBITMAP)hbmp);
++#if wxUSE_DIB_FOR_BITMAP
++    }
++#endif // wxUSE_DIB_FOR_BITMAP
+ 
+ #if WXWIN_COMPATIBILITY_2
+@@ -377,4 +397,55 @@
+ }
+ 
++#if wxUSE_DIB_FOR_BITMAP
++void *wxBitmap::CreateDIB(int width, int height, int depth)
++{
++    void *dibBits = 0;
++    int infosize = sizeof(BITMAPINFOHEADER);
++    int bytesPerPixel = depth / 8;
++    BITMAPINFO* info = (BITMAPINFO*)malloc(infosize);
++    if(info)
++    {
++        memset(info, 0, infosize);
++        info->bmiHeader.biSize = infosize;
++        info->bmiHeader.biWidth = width;
++        info->bmiHeader.biHeight = height;
++        info->bmiHeader.biPlanes = 1;
++        info->bmiHeader.biBitCount = depth;
++        info->bmiHeader.biCompression = BI_RGB;
++        info->bmiHeader.biSizeImage = (((width * bytesPerPixel) + sizeof(DWORD) - 1) / sizeof(DWORD) * sizeof(DWORD)) * height;
++        info->bmiHeader.biXPelsPerMeter = 0;
++        info->bmiHeader.biYPelsPerMeter = 0;
++        info->bmiHeader.biClrUsed = 0;
++        info->bmiHeader.biClrImportant = 0;
++        GetBitmapData()->m_hFileMap = (WXHANDLE)::CreateFileMapping(INVALID_HANDLE_VALUE, 0,
++                                                      PAGE_READWRITE | SEC_COMMIT,
++                                                      0,
++                                                      info->bmiHeader.biSizeImage,
++                                                      0);
++        GetBitmapData()->m_handle = (WXHANDLE)::CreateDIBSection(0, info, DIB_RGB_COLORS,
++                                                       &dibBits,
++                                                       (HANDLE)GetBitmapData()->m_hFileMap,
++                                                       0);
++      SetWidth(width);
++      SetHeight(height);
++      SetDepth(depth);
++    }
++
++    return dibBits;
++}
++
++void wxBitmap::CopyDIBLine(void* src, void* dest, int count) const
++{
++    while(count--)
++    {
++        *((unsigned char*)dest)++ = *((unsigned char*)src + 2);
++        *((unsigned char*)dest)++ = *((unsigned char*)src + 1);
++        *((unsigned char*)dest)++ = *(unsigned char*)src;
++        (unsigned char*)src += 3;
++    }
++}
++
++#endif
++
+ // ----------------------------------------------------------------------------
+ // wxImage to/from conversions
+@@ -509,4 +580,18 @@
+     m_refData = new wxBitmapRefData();
+ 
++#if wxUSE_DIB_FOR_BITMAP
++    int h = image.GetHeight();
++    int w = image.GetWidth();
++    unsigned char *dibBits = (unsigned char*)CreateDIB(w, h, 24);
++    int srcBytesPerLine = w * 3;
++    int dstBytesPerLine = (srcBytesPerLine + sizeof(DWORD) - 1) / sizeof(DWORD) * sizeof(DWORD);
++    unsigned char *src = image.GetData() + ((h - 1) * srcBytesPerLine);
++    for(int i = 0; i < h; i++, src -= srcBytesPerLine, dibBits += dstBytesPerLine)
++      CopyDIBLine(src, dibBits, w);
++
++    if(image.HasMask())
++        SetMask(new wxMask(*this, wxColour(image.GetMaskRed(), image.GetMaskGreen(), image.GetMaskBlue())));
++
++#else // wxUSE_DIB_FOR_BITMAP
+     // sizeLimit is the MS upper limit for the DIB size
+ #ifdef  WIN32
+@@ -727,4 +812,5 @@
+     free(lpDIBh);
+     free(lpBits);
++#endif // wxUSE_DIB_FOR_BITMAP
+ 
+ #if WXWIN_COMPATIBILITY_2
+Index: src/msw/dcprint.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/dcprint.cpp,v
+retrieving revision 1.32
+diff -b -u -2 -r1.32 dcprint.cpp
+--- src/msw/dcprint.cpp	2002/12/04 14:09:10	1.32
++++ src/msw/dcprint.cpp	2002/12/07 00:06:29
+@@ -432,4 +432,23 @@
+     if ( ::GetDeviceCaps(GetHdc(), RASTERCAPS) & RC_STRETCHDIB )
+     {
++#if wxUSE_DIB_FOR_BITMAP
++        if(bmp.GetHFileMap())	// we already have a dib
++        {
++            DIBSECTION dib;
++            if(::GetObject((HGDIOBJ)bmp.GetHBITMAP(), sizeof(dib), &dib) == sizeof(dib))
++            {
++                 if ( ::StretchDIBits(GetHdc(), x, y,
++                                 width, height,
++                                 0 , 0, width, height,
++                                 dib.dsBm.bmBits, (LPBITMAPINFO)&dib.dsBmih,
++                                 DIB_RGB_COLORS, SRCCOPY) == GDI_ERROR )
++                    wxLogLastError(wxT("StretchDIBits"));
++            }
++            else
++                wxLogLastError(wxT("GetObject"));
++        }
++        else
++        {
++#endif // wxUSE_DIB_FOR_BITMAP
+         BITMAPINFO *info = (BITMAPINFO *) malloc( sizeof( BITMAPINFOHEADER ) + 256 * sizeof(RGBQUAD ) );
+         memset( info, 0, sizeof( BITMAPINFOHEADER ) );
+@@ -471,5 +490,8 @@
+         free(bits);
+         free(info);
++#if wxUSE_DIB_FOR_BITMAP
+     }
++#endif // wxUSE_DIB_FOR_BITMAP
++    }
+     else // no support for StretchDIBits()
+     {
+@@ -529,7 +551,30 @@
+             int width = bmp.GetWidth(),
+                 height = bmp.GetHeight();
++#if wxUSE_DIB_FOR_BITMAP
++            if(bmp.GetHFileMap())	// we already have a dib
++            {
++                DIBSECTION dib;
++                if(::GetObject((HGDIOBJ)bmp.GetHBITMAP(), sizeof(dib), &dib) == sizeof(dib))
++                {
++                     if ( ::StretchDIBits(GetHdc(), xdest, ydest,
++                                     width, height,
++                                     xsrc, ysrc, width, height,
++                                     dib.dsBm.bmBits, (LPBITMAPINFO)&dib.dsBmih,
++                                     DIB_RGB_COLORS, SRCCOPY) == GDI_ERROR )
++                        wxLogLastError(wxT("StretchDIBits"));
++                }
++                else
++                    wxLogLastError(wxT("GetObject"));
++            }
++            else
++            {
++#endif // wxUSE_DIB_FOR_BITMAP
+ 
+             BITMAPINFO *info = (BITMAPINFO *) malloc( sizeof( BITMAPINFOHEADER ) + 256 * sizeof(RGBQUAD ) );
+-            int iBitsSize = ((width + 3 ) & ~3 ) * height;
++#if wxUSE_DRAWBITMAP_24BITS
++            int iBitsSize = (((width * 3) + 3 ) & ~3 ) * height;
++#else
++            int iBitsSize = ((width + 3 ) & ~3 ) * height ;
++#endif
+ 
+             void* bits = malloc( iBitsSize );
+@@ -541,5 +586,9 @@
+             info->bmiHeader.biHeight = height;
+             info->bmiHeader.biPlanes = 1;
++#if wxUSE_DRAWBITMAP_24BITS
++            info->bmiHeader.biBitCount = 24;
++#else
+             info->bmiHeader.biBitCount = 8;
++#endif
+             info->bmiHeader.biCompression = BI_RGB;
+ 
+@@ -570,4 +619,7 @@
+             free(bits);
+             free(info);
++#if wxUSE_DIB_FOR_BITMAP
++            }
++#endif // wxUSE_DIB_FOR_BITMAP
+         }
+         else // no support for StretchDIBits
+Index: src/msw/dc.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/dc.cpp,v
+retrieving revision 1.130
+diff -b -u -2 -r1.130 dc.cpp
+--- src/msw/dc.cpp	2002/08/30 20:34:25	1.130
++++ src/msw/dc.cpp	2002/12/07 00:06:30
+@@ -1902,4 +1902,13 @@
+     else // no mask, just BitBlt() it
+     {
++        if ( ::GetDeviceCaps(GetHdc(), RASTERCAPS) & RC_STRETCHBLT )
++        {
++	    int oldbltmode = ::SetStretchBltMode(GetHdc(), COLORONCOLOR);
++	    success = ::StretchBlt(GetHdc(), xdest, ydest, width, height,
++                                   GetHdcOf(*source), xsrc, ysrc, width, height,
++                                   dwRop) != 0;
++    	    ::SetStretchBltMode(GetHdc(), oldbltmode);
++        }
++        else
+         success = ::BitBlt(GetHdc(), xdest, ydest,
+                            (int)width, (int)height,
+
+ 	  	 

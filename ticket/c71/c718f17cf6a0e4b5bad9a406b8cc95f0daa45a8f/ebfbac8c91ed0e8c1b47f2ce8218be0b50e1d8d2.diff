@@ -1,0 +1,735 @@
+Index: include/wx/thread.h
+===================================================================
+RCS file: /home/wxcvs/wxWindows/include/wx/thread.h,v
+retrieving revision 1.47
+diff -u -r1.47 thread.h
+--- include/wx/thread.h	30 Jan 2002 19:11:53 -0000	1.47
++++ include/wx/thread.h	17 Feb 2002 10:25:48 -0000
+@@ -80,6 +80,7 @@
+ 
+ // you should consider wxMutexLocker whenever possible instead of directly
+ // working with wxMutex class - it is safer
++class wxMConditionInternal;
+ class WXDLLEXPORT wxMutexInternal;
+ class WXDLLEXPORT wxMutex
+ {
+@@ -105,6 +106,8 @@
+ 
+     int m_locked;
+     wxMutexInternal *m_internal;
++
++    friend class wxMConditionInternal;
+ };
+ 
+ // a helper class which locks the mutex in the ctor and unlocks it in the dtor:
+@@ -242,6 +245,93 @@
+ 
+ private:
+     wxConditionInternal *m_internal;
++};
++
++
++class wxMConditionInternal;
++class WXDLLEXPORT wxMCondition
++{
++public :
++    // constructor and destructor
++
++    // Each wxMCondition object is associated with
++    // with a wxMutex object
++    // The mutex object MUST be locked
++    // before calling  Wait()
++    wxMCondition( wxMutex *mutex );
++    ~wxMCondition();
++
++    // NOTE : the associated mutex MUST be locked beforehand by the calling thread
++    // 
++    // it atomically releases the lock on the associated mutex
++    // and starts waiting to be woken up by a Signal()/Broadcast()
++    // once its signaled, then it will wait until it can reacquire
++    // the lock on the associated mutex object, before returning.
++    void Wait();
++
++    // NOTE : the associated mutex MUST be locked beforehand by the calling thread
++    //
++    // this method atomically release the lock on the associated mutex
++    // and starts waiting till its woken up by Signal()/Broadcast() or 
++    // the specified time elapses. Then the thread will wait until it reacquires
++    // the lock on the associated mutex before returning
++    // 
++    // the time params given specify a interval that needs to be waited ( relative time )
++    bool Wait( unsigned long timeout_millis );
++
++    // NOTE : the associated mutex may or may not be locked by the calling thread
++    //
++    // this method unblocks one thread if any are blocking on the condition.
++    // if no thread is blocking in Wait(), then the signal is NOT remembered
++    // The thread which was blocking on Wait(), will then reacquire the lock
++    // on the associated mutex object before returning
++    void Signal();
++
++    // NOTE : the associated mutex may or may not be locked by the calling thread
++    //
++    // this method unblocks all threads if any are blocking on the condition.
++    // if no thread is blocking in Wait(), then the signal is NOT remembered
++    // The threads which were blocking on Wait(), will then reacquire the lock
++    // on the associated mutex object before returning.
++    void Broadcast();
++
++private :
++    wxMConditionInternal *m_internal;
++
++    friend class wxMConditionInternal;
++};
++
++class wxSemaphoreInternal;
++class WXDLLEXPORT wxSemaphore
++{
++public :
++
++    // specifying a maxcount of 0 actually makes
++    // wxSemaphore behave as if there is no upper limit
++    wxSemaphore( int initialcount = 0, int maxcount = 0 );
++    ~wxSemaphore();
++
++    // wait indefinitely, until the semaphore count goes beyond 0
++    // and then decrement it and return
++    void Wait();
++
++    // same as Wait(), but does not block, 
++    // returns true if successful
++    // returns false if the count is zero
++    bool TryWait();
++
++    // same as Wait(), but as a timeout limit
++    // returns true if successfull
++    // returns false if timedout
++    bool Wait( unsigned long timeout_millis );
++
++    // increments the semaphore count
++    // and signals one of the waiting threads
++    void Post();
++
++private :
++    wxSemaphoreInternal *m_internal;
++
+ };
+ 
+ // ----------------------------------------------------------------------------
+Index: src/msw/thread.cpp
+===================================================================
+RCS file: /home/wxcvs/wxWindows/src/msw/thread.cpp,v
+retrieving revision 1.47
+diff -u -r1.47 thread.cpp
+--- src/msw/thread.cpp	16 Jan 2002 06:28:10 -0000	1.47
++++ src/msw/thread.cpp	17 Feb 2002 10:25:49 -0000
+@@ -342,6 +342,303 @@
+     m_internal->Broadcast();
+ }
+ 
++// ==========================================================================
++// wxSemaphore
++// ==========================================================================
++
++// --------------------------------------------------------------------------
++// wxSemaphoreInternal
++// --------------------------------------------------------------------------
++
++class wxSemaphoreInternal
++{
++public :
++    wxSemaphoreInternal( int initialcount = 0, int maxcount = 0 );
++    ~wxSemaphoreInternal();
++
++    void Wait();
++    bool TryWait();
++
++    bool Wait( unsigned long timeout_millis );
++    
++    void Post();
++
++private :
++    HANDLE m_semaphore;
++};
++
++wxSemaphoreInternal::wxSemaphoreInternal( int initialcount, int maxcount )
++{
++    if ( maxcount == 0 ) {
++        maxcount = 32767; // TODO : this should some kind of #define ( MAX_INT ? )
++    }
++    m_semaphore = CreateSemaphore( NULL, initialcount, maxcount, NULL );
++    if ( m_semaphore == NULL ) {
++        wxFAIL_MSG( _T("CreateSemaphore() failed") );
++    }
++}
++
++wxSemaphoreInternal::~wxSemaphoreInternal()
++{
++    CloseHandle( m_semaphore );
++}
++
++void wxSemaphoreInternal::Wait()
++{
++    DWORD result = WaitForSingleObject( m_semaphore, INFINITE );
++    if ( result != WAIT_OBJECT_0 ) {
++        wxFAIL_MSG( _T("Semaphore Wait() error") );
++    }
++}
++
++bool wxSemaphoreInternal::TryWait()
++{
++    DWORD result = WaitForSingleObject( m_semaphore, 0 );
++    if ( result == WAIT_TIMEOUT ) {
++        return false;
++    }
++    else if ( result == WAIT_OBJECT_0 ) {
++        return true;
++    }
++    wxFAIL_MSG( _T("Error in Semaphore TryWait()") );
++}
++
++bool wxSemaphoreInternal::Wait( unsigned long timeout_millis )
++{
++    bool success = true;;
++    DWORD result = WaitForSingleObject( m_semaphore, timeout_millis );
++    if ( (result != WAIT_OBJECT_0) && (result != WAIT_TIMEOUT) ) {
++        wxFAIL_MSG( _T("Unable to wait for semaphore") );
++    }
++    if ( result == WAIT_TIMEOUT ) {
++        return false;
++    }
++
++    return true;
++}
++
++void wxSemaphoreInternal::Post()
++{
++    BOOL result = ReleaseSemaphore( m_semaphore, 1, NULL );
++    if ( !result ) {
++        wxFAIL_MSG( _T("Error in Semaphore Post()") );
++    }
++}
++
++// --------------------------------------------------------------------------
++// wxSemaphore
++// --------------------------------------------------------------------------
++
++wxSemaphore::wxSemaphore( int initialcount, int maxcount )
++{
++    m_internal = new wxSemaphoreInternal( initialcount, maxcount );
++}
++
++wxSemaphore::~wxSemaphore()
++{
++    delete m_internal;
++}
++
++void wxSemaphore::Wait()
++{
++    m_internal->Wait();
++}
++
++bool wxSemaphore::TryWait()
++{
++    return m_internal->TryWait();
++}
++
++bool wxSemaphore::Wait( unsigned long timeout_millis )
++{
++    return m_internal->Wait( timeout_millis );
++}
++
++void wxSemaphore::Post()
++{
++    m_internal->Post();
++}
++
++
++// ==========================================================================
++// wxMCondition
++// ==========================================================================
++
++// --------------------------------------------------------------------------
++// wxMConditionInternal
++// --------------------------------------------------------------------------
++
++class wxMConditionInternal
++{
++public :
++
++    wxMConditionInternal( wxMutex *mutex );
++    ~wxMConditionInternal();
++
++    void Wait();
++
++    bool Wait( unsigned long timeout_millis );
++
++    void Signal();
++    
++    void Broadcast();
++
++private :
++    int m_nwaiters;
++    wxMutex m_nwaiters_mutex;
++
++    wxMutex *m_mutex;
++
++    wxSemaphore m_semaphore;
++};
++
++wxMConditionInternal::wxMConditionInternal( wxMutex *mutex )
++{
++    this->m_mutex = mutex;
++
++    m_nwaiters = 0;
++}
++
++wxMConditionInternal::~wxMConditionInternal()
++{
++}
++
++void wxMConditionInternal::Wait()
++{
++    // increment the number of waiters
++    m_nwaiters_mutex.Lock();
++    m_nwaiters++;
++    m_nwaiters_mutex.Unlock();
++
++    m_mutex->Unlock();
++
++    // a potential race condition can occur here
++    // 
++    // after a thread increments nwaiters, and unlocks the mutex
++    // and before the semaphore.Wait() is called, 
++    // if another thread can cause a signal to be generated
++    //
++    // this race condition is handled by using a semaphore
++    // and incrementing the semaphore only if 'nwaiters'
++    // is greater that zero
++    // since the semaphore, can 'remember' signals
++    // the race condition will not occur
++
++    // wait ( if necessary ) and decrement semaphore
++    m_semaphore.Wait();
++
++    m_mutex->Lock();
++}
++
++bool wxMConditionInternal::Wait( unsigned long timeout_millis )
++{
++    m_nwaiters_mutex.Lock();
++    m_nwaiters++;
++    m_nwaiters_mutex.Unlock();
++
++    m_mutex->Unlock();
++
++    // a race condition can occur at this point in the code
++    // 
++    // please see the comments in wait(), for details
++
++    bool success = true;
++
++    bool result = m_semaphore.Wait( timeout_millis );
++
++    if ( !result ) {
++        // another potential race condition exists here
++        // it is caused when a 'waiting' thread timesout,
++        // and returns from WaitForSingleObject, but
++        // has not yet decremented 'nwaiters'.
++        //
++        // at this point if another thread calls signal()
++        // then the semaphore will be incremented, but
++        // the waiting thread will miss it.
++        //
++        // to handle this particular case, the waiting
++        // thread calls WaitForSingleObject again with
++        // a timeout of 0, after locking 'nwaiters_mutex'.
++        // this call does not block because
++        // of the zero timeout, but will allow the waiting thread
++        // to catch the missed signals.
++
++        m_nwaiters_mutex.Lock();
++        result = m_semaphore.Wait( 0 );
++
++        if ( !result ) {
++            m_nwaiters--;
++            success = false;
++        }
++
++        m_nwaiters_mutex.Unlock();
++    }
++
++    m_mutex->Lock();
++
++    return success;
++}
++
++void wxMConditionInternal::Signal()
++{
++    m_nwaiters_mutex.Lock();
++
++    if ( m_nwaiters > 0 ) {
++        // increment the semaphore by 1
++        m_semaphore.Post();
++
++        m_nwaiters--;
++    }
++
++    m_nwaiters_mutex.Unlock();
++}
++
++void wxMConditionInternal::Broadcast()
++{
++    m_nwaiters_mutex.Lock();
++
++    while ( m_nwaiters > 0 ) {
++        m_semaphore.Post();
++        m_nwaiters --;
++    }
++
++    m_nwaiters_mutex.Unlock();
++}
++
++// ----------------------------------------------------------------------------
++// wxMCondition implementation
++// ----------------------------------------------------------------------------
++
++wxMCondition::wxMCondition( wxMutex *mutex )
++{
++    m_internal = new wxMConditionInternal( mutex );
++}
++
++wxMCondition::~wxMCondition()
++{
++    delete m_internal;
++}
++
++void wxMCondition::Wait()
++{
++    m_internal->Wait();
++}
++
++bool wxMCondition::Wait( unsigned long timeout_millis ) 
++{
++    return m_internal->Wait(timeout_millis);
++}
++
++void wxMCondition::Signal()
++{
++    m_internal->Signal();
++}
++
++void wxMCondition::Broadcast()
++{
++    m_internal->Broadcast();
++}
++
+ // ----------------------------------------------------------------------------
+ // wxCriticalSection implementation
+ // ----------------------------------------------------------------------------
+Index: src/unix/threadpsx.cpp
+===================================================================
+RCS file: /home/wxcvs/wxWindows/src/unix/threadpsx.cpp,v
+retrieving revision 1.52
+diff -u -r1.52 threadpsx.cpp
+--- src/unix/threadpsx.cpp	7 Feb 2002 14:41:48 -0000	1.52
++++ src/unix/threadpsx.cpp	17 Feb 2002 10:25:50 -0000
+@@ -34,6 +34,7 @@
+ #include "wx/log.h"
+ #include "wx/intl.h"
+ #include "wx/dynarray.h"
++#include "wx/timer.h"
+ 
+ #include <stdio.h>
+ #include <unistd.h>
+@@ -174,6 +175,8 @@
+ 
+ private:
+     pthread_mutex_t m_mutex;
++
++    friend class wxMConditionInternal;
+ };
+ 
+ wxMutexInternal::wxMutexInternal()
+@@ -542,9 +545,277 @@
+     m_internal->Signal(TRUE /* all */);
+ }
+ 
+-// ============================================================================
++// ===========================================================================
++// wxMCondition implementation
++// ===========================================================================
++
++// ---------------------------------------------------------------------------
++// wxMConditionInternal
++// ---------------------------------------------------------------------------
++
++class wxMConditionInternal
++{
++public :
++    wxMConditionInternal( wxMutex *mutex );
++    ~wxMConditionInternal();
++
++    void Wait();
++
++    bool Wait( const timespec *ts );
++
++    void Signal();
++
++    void Broadcast();
++
++private :
++
++    wxMutex *m_mutex;
++    pthread_cond_t m_cond;
++};
++
++wxMConditionInternal::wxMConditionInternal( wxMutex *mutex )
++{
++    this->m_mutex = mutex;
++    int result = pthread_cond_init( &m_cond, NULL );
++    if ( result != 0 ) {
++        wxFAIL_MSG( _T("pthread_cond_init() failed") );
++    }
++}
++
++wxMConditionInternal::~wxMConditionInternal()
++{
++    int result = pthread_cond_destroy( &m_cond );
++    if ( result != 0 ) {
++        wxFAIL_MSG( _T("pthread_cond_destroy() failed") );
++    }
++}
++
++void wxMConditionInternal::Wait()
++{
++    int result = pthread_cond_wait( &m_cond, &(m_mutex->m_internal->m_mutex) );
++    if ( result != 0 ) {
++        wxFAIL_MSG( _T("pthread_cond_wait() failed") );
++    }
++}
++
++bool wxMConditionInternal::Wait( const timespec *ts )
++{
++    int result = pthread_cond_timedwait( &m_cond, &(m_mutex->m_internal->m_mutex), ts );
++    if ( result == ETIMEDOUT ) {
++        return false;
++    }
++    if ( result != 0 ) {
++        wxFAIL_MSG( _T("pthread_cond_timedwait() failed") );
++    }
++    return true;
++}
++
++void wxMConditionInternal::Signal()
++{
++    int result = pthread_cond_signal( &m_cond );
++    if ( result != 0 ) {
++        wxFAIL_MSG( _T("pthread_cond_signal() failed") );
++    }
++}
++
++void wxMConditionInternal::Broadcast()
++{
++    int result = pthread_cond_broadcast( &m_cond );
++    if ( result != 0 ) {
++        wxFAIL_MSG( _T("pthread_cond_broadcast() failed") );
++    }
++}
++
++
++// ---------------------------------------------------------------------------
++// wxMCondition
++// ---------------------------------------------------------------------------
++
++wxMCondition::wxMCondition( wxMutex *mutex )
++{
++    m_internal = new wxMConditionInternal( mutex );
++}
++
++wxMCondition::~wxMCondition()
++{
++    delete m_internal;
++}
++
++void wxMCondition::Wait()
++{
++    m_internal->Wait();
++}
++
++bool wxMCondition::Wait( unsigned long timeout_millis ) 
++{
++
++    wxLongLong curtime = wxGetLocalTimeMillis();
++    curtime += timeout_millis;
++    wxLongLong temp = curtime / 1000;
++    int sec = temp.GetLo();
++    temp = temp * 1000;
++    temp = curtime - temp;
++    int millis = temp.GetLo();
++
++    timespec tspec;
++
++    tspec.tv_sec = sec;
++    tspec.tv_nsec = millis * 1000L * 1000L;
++
++    return m_internal->Wait(&tspec);
++}
++
++void wxMCondition::Signal()
++{
++    m_internal->Signal();
++}
++
++void wxMCondition::Broadcast()
++{
++    m_internal->Broadcast();
++}
++
++// ===========================================================================
++// wxSemaphore implementation
++// ===========================================================================
++
++// ---------------------------------------------------------------------------
++// wxSemaphoreInternal
++// ---------------------------------------------------------------------------
++
++class wxSemaphoreInternal
++{
++public :
++    wxSemaphoreInternal( int initialcount, int maxcount );
++    ~wxSemaphoreInternal();
++
++    void Wait();
++    bool TryWait();
++
++    bool Wait( unsigned long timeout_millis );
++    
++    void Post();
++
++private :
++    wxMutex *m_mutex;
++    wxMCondition *m_cond;
++    int maxcount;
++    int count;
++};
++
++wxSemaphoreInternal::wxSemaphoreInternal( int initialcount, int maxcount )
++{
++
++    if ( (initialcount < 0) || ((maxcount > 0) && (initialcount > maxcount)) ) {
++        wxFAIL_MSG( _T("Semaphore invalid initial count") );
++    }
++
++    this->maxcount = maxcount;
++    count = initialcount;
++    m_mutex = new wxMutex();
++    m_cond = new wxMCondition( m_mutex );
++}
++
++wxSemaphoreInternal::~wxSemaphoreInternal()
++{
++    delete m_cond;
++    delete m_mutex;
++}
++
++void wxSemaphoreInternal::Wait()
++{
++    wxMutexLocker locker(*m_mutex);
++
++    while ( count <= 0 ) {
++        m_cond->Wait();
++    }
++
++    count--;
++}
++
++bool wxSemaphoreInternal::TryWait()
++{
++    wxMutexLocker locker(*m_mutex);
++
++    if ( count <= 0 ) {
++        return false;
++    }
++
++    count--;
++
++    return true;
++}
++
++bool wxSemaphoreInternal::Wait( unsigned long timeout_millis )
++{
++    wxMutexLocker locker( *m_mutex );
++
++    if ( count <= 0 ) {
++        bool result = m_cond->Wait( timeout_millis );
++        if ( !result ) {
++            return false;
++        }
++        else if ( count <= 0 ) {
++            return false;
++        }
++    }
++
++    count--;
++
++    return true;
++}
++
++void wxSemaphoreInternal::Post()
++{
++    wxMutexLocker locker(*m_mutex);
++
++    if ( (maxcount > 0) && (count == maxcount) ) {
++        wxFAIL_MSG( _T("Semaphore Post() overflow") );
++    }
++
++    count++;
++
++    m_cond->Signal();
++}
++
++
++// --------------------------------------------------------------------------
++// wxSemaphore
++// --------------------------------------------------------------------------
++
++wxSemaphore::wxSemaphore( int initialcount, int maxcount )
++{
++    m_internal = new wxSemaphoreInternal( initialcount, maxcount );
++}
++
++wxSemaphore::~wxSemaphore()
++{
++    delete m_internal;
++}
++
++void wxSemaphore::Wait()
++{
++    m_internal->Wait();
++}
++
++bool wxSemaphore::TryWait()
++{
++    return m_internal->TryWait();
++}
++
++bool wxSemaphore::Wait( unsigned long timeout_millis )
++{
++    return m_internal->Wait( timeout_millis );
++}
++
++void wxSemaphore::Post()
++{
++    m_internal->Post();
++}
++
++// ===========================================================================
+ // wxThread implementation
+-// ============================================================================
++// ===========================================================================
+ 
+ // the thread callback functions must have the C linkage
+ extern "C"
+
+ 	  	 

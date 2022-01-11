@@ -1,0 +1,166 @@
+diff --git a/docs/changes.txt b/docs/changes.txt
+index bc8d33f..a162ea2 100644
+--- a/docs/changes.txt
++++ b/docs/changes.txt
+@@ -79,6 +79,8 @@ All:
+ - Handle strings with embedded NULs in wxDataStream (Nitch).
+ - Don't crash in wxTextFile::GetLastLine() if the file is empty (crohr).
+ - Add wxString::cbegin() and cend() method (Lauri Nurmi).
++- Fix compilation error when using Bind() with event handlers non-publicly
++  deriving from wxTrackable. (Raul Tambre, mmarsan, vadz)
+ 
+ All (GUI):
+ 
+diff --git a/docs/doxygen/overviews/eventhandling.h b/docs/doxygen/overviews/eventhandling.h
+index 9d0e026..f223627 100644
+--- a/docs/doxygen/overviews/eventhandling.h
++++ b/docs/doxygen/overviews/eventhandling.h
+@@ -242,7 +242,7 @@ Now let us describe the semantic differences:
+ 
+     <li>
+         As a slight extension of the above, the handlers can also be unbound at
+-        any time with Unbind<>() (and maybe rebound later). Of course,
++        any time with Unbind<>() (and may be rebound later). Of course,
+         it's also possible to emulate this behaviour with the classic
+         static (i.e., bound via event tables) handlers by using an internal
+         flag indicating whether the handler is currently enabled and returning
+@@ -349,6 +349,34 @@ MyFrame::MyFrame()
+ }
+ @endcode
+ 
++You can also bind functions that are members of any class provided that the
++class publicly derives from wxTrackable from somewhere down the line and that
++you have a pointer to that class object.
++For example:
++
++@code
++class MyFrame : public wxFrame
++{
++private:
++    void OnExit(wxCloseEvent& event);
++}
++
++void MyFrame::OnExit(wxCloseEvent& event)
++{
++    // ...
++}
++
++MyFrame::MyFrame()
++{
++    Bind(wxEVT_CLOSE_WINDOW, &MyFrame::OnExit, this);
++}
++@endcode
++
++You can also bind functions for classes that don't publicly derive from wxTrackable
++somewhere down the line, provided that your compiler supports C++11.
++Do note that in such cases then your event handler will @b not take part of the normal
++wxWidgets event chain (for example event propagation will not work).
++
+ And finally you can bind to an arbitrary functor and use it as an event
+ handler:
+ 
+@@ -411,7 +439,7 @@ MyFrame::MyFrame()
+ @endcode
+ 
+ 
+-With the aid of @c bind<>() you can even use methods or functions which
++With the aid of @c Bind<>() you can even use methods or functions which
+ don't quite have the correct signature:
+ 
+ @code
+diff --git a/include/wx/event.h b/include/wx/event.h
+index 89d4659..f445d3b 100644
+--- a/include/wx/event.h
++++ b/include/wx/event.h
+@@ -332,7 +332,7 @@ class wxEventFunctorMethod
+               <
+                 Class,
+                 EventArg,
+-                wxConvertibleTo<Class, wxEvtHandler>::value != 0
++                wxIsPubliclyDerived<wxEvtHandler, Class>::value != 0
+               >
+ {
+ private:
+diff --git a/include/wx/meta/convertible.h b/include/wx/meta/convertible.h
+index 4599937..c5477c9 100644
+--- a/include/wx/meta/convertible.h
++++ b/include/wx/meta/convertible.h
+@@ -10,9 +10,7 @@
+ #ifndef _WX_META_CONVERTIBLE_H_
+ #define _WX_META_CONVERTIBLE_H_
+ 
+-//
+ // Introduce an extra class to make this header compilable with g++3.2
+-//
+ template <class D, class B>
+ struct wxConvertibleTo_SizeHelper
+ {
+@@ -34,5 +32,28 @@ struct wxConvertibleTo
+     };
+ };
+ 
++// Checks if D is publicly derived from B.
++// value is set to true if it is.
++// On C++11 compilers in case D doesn't publicly derive from B value will be
++// set to false.
++// On pre-C++11 compilers in case D doesn't publicly derive from B this will
++// fail to compile.
++template <class B, class D>
++struct wxIsPubliclyDerived
++{
++    enum
++    {
++#if __cplusplus >= 201103 || (defined(_MSC_VER) && _MSC_VER >= 1600)
++        // If C++11 is available we use this, as on most compilers it's a
++        // built-in and will be evaluated at compile-time.
++        value = std::is_base_of<B, D>::value && std::is_convertible<D*, B*>::value
++#else
++        // On very old compilers we fall back to wxConvertibleTo, which fails
++        // at compile-time if D doesn't publicly derive from B.
++        value = wxConvertibleTo<D, B>::value
++#endif
++    };
++};
++
+ #endif // _WX_META_CONVERTIBLE_H_
+ 
+diff --git a/include/wx/weakref.h b/include/wx/weakref.h
+index 4794c85..5f6ad10 100644
+--- a/include/wx/weakref.h
++++ b/include/wx/weakref.h
+@@ -19,7 +19,7 @@
+ template <class T>
+ struct wxIsStaticTrackable
+ {
+-    enum { value = wxConvertibleTo<T, wxTrackable>::value };
++    enum { value = wxIsPubliclyDerived<wxTrackable, T>::value };
+ };
+ 
+ 
+diff --git a/tests/events/evthandler.cpp b/tests/events/evthandler.cpp
+index 4fb44cc..fa67fc5 100644
+--- a/tests/events/evthandler.cpp
++++ b/tests/events/evthandler.cpp
+@@ -509,3 +509,21 @@ void EvtHandlerTestCase::UnbindFromHandler()
+ 
+     handler.ProcessEvent(e);
+ }
++
++// This is a compilation-time-only test: just check that a class inheriting
++// from wxEvtHandler non-publicly can use Bind() with its method, this used to
++// result in compilation errors.
++// Note that this test will work only on C++11 compilers, so we test this only
++// for such compilers.
++#if __cplusplus >= 201103
++class HandlerNonPublic : protected wxEvtHandler
++{
++public:
++    HandlerNonPublic()
++    {
++        Bind(wxEVT_IDLE, &HandlerNonPublic::OnIdle, this);
++    }
++
++    void OnIdle(wxIdleEvent&) { }
++};
++#endif
+\ No newline at end of file

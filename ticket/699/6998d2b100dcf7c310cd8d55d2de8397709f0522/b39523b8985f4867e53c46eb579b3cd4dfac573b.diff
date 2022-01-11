@@ -1,0 +1,245 @@
+diff -uNr orig/include/wx/unix/pipe.h mine/include/wx/unix/pipe.h
+--- orig/include/wx/unix/pipe.h	2010-11-02 04:57:30.000000000 -0700
++++ mine/include/wx/unix/pipe.h	2010-11-09 14:13:57.000000000 -0800
+@@ -118,6 +118,18 @@
+     virtual bool CanRead() const;
+ };
+ 
++// ----------------------------------------------------------------------------
++// wxPipeOutputStream: stream for writing to a pipe
++// ----------------------------------------------------------------------------
++
++class wxPipeOutputStream : public wxFileOutputStream
++{
++public:
++    wxPipeOutputStream(int fd) : wxFileOutputStream(fd) { }
++
++    size_t OnSysWrite(const void *buffer, size_t size);
++};
++
+ #endif // wxUSE_STREAMS && wxUSE_FILE
+ 
+ #endif // _WX_UNIX_PIPE_H_
+diff -uNr orig/src/unix/utilsunx.cpp mine/src/unix/utilsunx.cpp
+--- orig/src/unix/utilsunx.cpp	2010-11-02 04:57:30.000000000 -0700
++++ mine/src/unix/utilsunx.cpp	2010-11-13 19:03:38.000000000 -0800
+@@ -59,15 +59,15 @@
+ #   include <sys/select.h>
+ #endif
+ 
+-#define HAS_PIPE_INPUT_STREAM (wxUSE_STREAMS && wxUSE_FILE)
++#define HAS_PIPE_STREAMS (wxUSE_STREAMS && wxUSE_FILE)
+ 
+-#if HAS_PIPE_INPUT_STREAM
++#if HAS_PIPE_STREAMS
+ 
+ // define this to let wxexec.cpp know that we know what we're doing
+ #define _WX_USED_BY_WXEXECUTE_
+ #include "../common/execcmn.cpp"
+ 
+-#endif // HAS_PIPE_INPUT_STREAM
++#endif // HAS_PIPE_STREAMS
+ 
+ #if defined(__MWERKS__) && defined(__MACH__)
+     #ifndef WXWIN_OS_DESCRIPTION
+@@ -297,7 +297,7 @@
+ // wxStream classes to support IO redirection in wxExecute
+ // ----------------------------------------------------------------------------
+ 
+-#if HAS_PIPE_INPUT_STREAM
++#if HAS_PIPE_STREAMS
+ 
+ bool wxPipeInputStream::CanRead() const
+ {
+@@ -337,7 +337,46 @@
+     }
+ }
+ 
+-#endif // HAS_PIPE_INPUT_STREAM
++size_t wxPipeOutputStream::OnSysWrite(const void *buffer, size_t size)
++{
++    size_t ret;
++    // We need to suppress error logging here, because on writing
++    // to a pipe which is full, wxFile::Write reports a system error.
++    // However, this is not an extraordinary situation, and it should
++    // not be repored to the user. (Yet the program can recognize it
++    // by getting LastRead() == 0.)
++    // Other errors will be reported below.
++    {
++        wxLogNull logNo;
++        ret = m_file->Write(buffer, size);
++    }
++
++    switch ( m_file->GetLastError() ) {
++       // pipe is full
++#ifdef EAGAIN
++       case EAGAIN:
++#endif
++#if defined(EWOULDBLOCK) && (EWOULDBLOCK != EAGAIN)
++       case EWOULDBLOCK:
++#endif
++           // do not treat it as an error
++           m_file->ClearError();
++           // fall through
++
++       // no error
++       case 0:
++           break;
++
++       // some real error
++       default:
++           wxLogSysError(_("Can't write to child process's stdin"));
++           m_lasterror = wxSTREAM_WRITE_ERROR;
++    }
++
++    return ret;
++}
++
++#endif // HAS_PIPE_STREAMS
+ 
+ // ----------------------------------------------------------------------------
+ // wxShell
+@@ -545,11 +584,6 @@
+     }
+     else if ( pid == 0 )  // we're in child
+     {
+-        // NB: we used to close all the unused descriptors of the child here
+-        //     but this broke some programs which relied on e.g. FD 1 being
+-        //     always opened so don't do it any more, after all there doesn't
+-        //     seem to be any real problem with keeping them opened
+-
+ #if !defined(__VMS) && !defined(__EMX__)
+         if ( flags & wxEXEC_MAKE_GROUP_LEADER )
+         {
+@@ -559,12 +593,6 @@
+         }
+ #endif // !__VMS
+ 
+-        // reading side can be safely closed but we should keep the write one
+-        // opened, it will be only closed when the process terminates resulting
+-        // in a read notification to the parent
+-        execData.pipeEndProcDetect.Detach(wxPipe::Write);
+-        execData.pipeEndProcDetect.Close();
+-
+         // redirect stdin, stdout and stderr
+         if ( pipeIn.IsOk() )
+         {
+@@ -578,8 +606,25 @@
+             pipeIn.Close();
+             pipeOut.Close();
+             pipeErr.Close();
++
+         }
+ 
++        // Close all unnecessary file descriptors to avoid any input/output
++       	// which might block the child process.
++        // Writing side of the end process detection pipe should remain open,
++        // it will be only closed when the process terminates resulting in
++        // a read notification to the parent
++        int fdEndProc = execData.pipeEndProcDetect.Detach(wxPipe::Write);
++        execData.pipeEndProcDetect.Close();
++        for ( int fd = 0; fd < (int)FD_SETSIZE; ++fd )
++            if ( !(fd == STDIN_FILENO  ||
++                   fd == STDOUT_FILENO ||
++                   fd == STDERR_FILENO ||
++                   fd == fdEndProc) )
++            {       
++                close(fd);
++            }    
++
+         // Process additional options if we have any
+         if ( env )
+         {
+@@ -643,7 +688,7 @@
+ 
+         // prepare for IO redirection
+ 
+-#if HAS_PIPE_INPUT_STREAM
++#if HAS_PIPE_STREAMS
+         // the input buffer bufOut is connected to stdout, this is why it is
+         // called bufOut and not bufIn
+         wxStreamTempInputBuffer bufOut,
+@@ -662,10 +707,11 @@
+                 // it might not be the best idea.
+                 wxLogSysError(_("Failed to set up non-blocking pipe, "
+                                 "the program might hang."));
++                wxLog::FlushActive();
+             }
+ 
+             wxOutputStream *inStream =
+-                new wxFileOutputStream(pipeIn.Detach(wxPipe::Write));
++                new wxPipeOutputStream(pipeIn.Detach(wxPipe::Write));
+ 
+             const int fdOut = pipeOut.Detach(wxPipe::Read);
+             wxPipeInputStream *outStream = new wxPipeInputStream(fdOut);
+@@ -684,7 +730,7 @@
+             execData.fdOut = fdOut;
+             execData.fdErr = fdErr;
+         }
+-#endif // HAS_PIPE_INPUT_STREAM
++#endif // HAS_PIPE_STREAMS
+ 
+         if ( pipeIn.IsOk() )
+         {
+@@ -1296,7 +1342,7 @@
+ 
+ bool wxAppTraits::CheckForRedirectedIO(wxExecuteData& execData)
+ {
+-#if HAS_PIPE_INPUT_STREAM
++#if HAS_PIPE_STREAMS
+     bool hasIO = false;
+ 
+     if ( execData.bufOut && execData.bufOut->Update() )
+@@ -1306,9 +1352,9 @@
+         hasIO = true;
+ 
+     return hasIO;
+-#else // !HAS_PIPE_INPUT_STREAM
++#else // !HAS_PIPE_STREAMS
+     return false;
+-#endif // HAS_PIPE_INPUT_STREAM/!HAS_PIPE_INPUT_STREAM
++#endif // HAS_PIPE_STREAMS/!HAS_PIPE_STREAMS
+ }
+ 
+ // helper classes/functions used by WaitForChild()
+@@ -1358,7 +1404,7 @@
+     wxDECLARE_NO_COPY_CLASS(wxEndHandler);
+ };
+ 
+-#if HAS_PIPE_INPUT_STREAM
++#if HAS_PIPE_STREAMS
+ 
+ // class for monitoring our ends of child stdout/err, should be constructed
+ // with the FD and stream from wxExecuteData and will do nothing if they're
+@@ -1387,7 +1433,7 @@
+     wxDECLARE_NO_COPY_CLASS(wxRedirectedIOHandler);
+ };
+ 
+-#endif // HAS_PIPE_INPUT_STREAM
++#endif // HAS_PIPE_STREAMS
+ 
+ // helper function which calls waitpid() and analyzes the result
+ int DoWaitForChild(int pid, int flags = 0)
+@@ -1468,7 +1514,7 @@
+     }
+     //else: synchronous execution case
+ 
+-#if HAS_PIPE_INPUT_STREAM && wxUSE_SOCKETS
++#if HAS_PIPE_STREAMS && wxUSE_SOCKETS
+     wxProcess * const process = execData.process;
+     if ( process && process->IsRedirected() )
+     {
+@@ -1492,7 +1538,7 @@
+         }
+     }
+     //else: no IO redirection, just block waiting for the child to exit
+-#endif // HAS_PIPE_INPUT_STREAM
++#endif // HAS_PIPE_STREAMS
+ 
+     return DoWaitForChild(execData.pid);
+ }
+@@ -1519,4 +1565,3 @@
+         data->pid = 0;
+     }
+ }
+-

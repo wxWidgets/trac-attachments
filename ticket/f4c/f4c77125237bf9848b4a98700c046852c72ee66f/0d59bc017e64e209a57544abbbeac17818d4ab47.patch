@@ -1,0 +1,333 @@
+Index: include/wx/msw/radiobox.h
+===================================================================
+--- include/wx/msw/radiobox.h	(revision 65298)
++++ include/wx/msw/radiobox.h	(working copy)
+@@ -123,6 +123,8 @@
+     void SetLabelFont(const wxFont& WXUNUSED(font)) {}
+     void SetButtonFont(const wxFont& font) { SetFont(font); }
+ 
++    static wxRadioBox *GetRadioBoxFromHWND(WXHWND hwnd);
++
+     // implementation only from now on
+     // -------------------------------
+ 
+Index: src/msw/radiobox.cpp
+===================================================================
+--- src/msw/radiobox.cpp	(revision 65298)
++++ src/msw/radiobox.cpp	(working copy)
+@@ -113,10 +113,26 @@
+ // the pointer to standard radio button wnd proc
+ static WXFARPROC s_wndprocRadioBtn = (WXFARPROC)NULL;
+ 
++// hash containing all our wxRadioBoxes, it uses HWND keys and wxRadioBox* values
++WX_DECLARE_HASH_MAP(HWND, wxRadioBox *,
++                    wxPointerHash, wxPointerEqual,
++                    RadioBoxHandles);
++
++RadioBoxHandles gs_radioBoxHandles;
++
+ // ===========================================================================
+ // implementation
+ // ===========================================================================
+ 
++/* static */
++wxRadioBox* wxRadioBox::GetRadioBoxFromHWND(WXHWND hwnd)
++{
++    RadioBoxHandles::iterator it=gs_radioBoxHandles.find(hwnd);
++    if( it != gs_radioBoxHandles.end() ) return it->second;
++
++    return NULL;
++}
++
+ // ---------------------------------------------------------------------------
+ // wxRadioBox creation
+ // ---------------------------------------------------------------------------
+@@ -258,6 +274,16 @@
+         DestroyWindow((HWND)m_dummyHwnd);
+     delete[] m_radioWidth;
+     delete[] m_radioHeight;
++
++    // remove all entries we put into the hashtable
++    RadioBoxHandles::iterator it;
++    for( it = gs_radioBoxHandles.begin(); it != gs_radioBoxHandles.end(); )
++    {
++        RadioBoxHandles::iterator current=it;
++        it++;
++
++        if( current->second == this) gs_radioBoxHandles.erase(current);
++    }
+ }
+ 
+ // NB: if this code is changed, wxGetWindowForHWND() which relies on having the
+@@ -270,7 +296,8 @@
+         s_wndprocRadioBtn = (WXFARPROC)wxGetWindowProc(hwndBtn);
+ 
+     wxSetWindowProc(hwndBtn, wxRadioBtnWndProc);
+-    wxSetWindowUserData(hwndBtn, this);
++
++    gs_radioBoxHandles[hwndBtn]=this;
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -745,139 +772,133 @@
+                                            WPARAM wParam,
+                                            LPARAM lParam)
+ {
+-    switch ( message )
+-    {
+-        case WM_GETDLGCODE:
+-            // we must tell IsDialogMessage()/our kbd processing code that we
+-            // want to process arrows ourselves because neither of them is
+-            // smart enough to handle arrows properly for us
+-            {
+-                long lDlgCode = ::CallWindowProc(CASTWNDPROC s_wndprocRadioBtn, hwnd,
+-                                                 message, wParam, lParam);
+ 
+-                return lDlgCode | DLGC_WANTARROWS;
+-            }
++    wxRadioBox *radiobox = wxRadioBox::GetRadioBoxFromHWND(hwnd);
+ 
+-        case WM_KEYDOWN:
+-            {
+-                wxRadioBox *radiobox = (wxRadioBox *)wxGetWindowUserData(hwnd);
++    // not our radiobox, then this message is not intended for us
++    if( radiobox != NULL )
++    {
++        switch ( message )
++        {
++            case WM_GETDLGCODE:
++                // we must tell IsDialogMessage()/our kbd processing code that we
++                // want to process arrows ourselves because neither of them is
++                // smart enough to handle arrows properly for us
++                {
++                    long lDlgCode = ::CallWindowProc(CASTWNDPROC s_wndprocRadioBtn, hwnd,
++                                                    message, wParam, lParam);
+ 
+-                wxCHECK_MSG( radiobox, 0, wxT("radio button without radio box?") );
++                    return lDlgCode | DLGC_WANTARROWS;
++                }
+ 
+-                bool processed = true;
+-
+-                wxDirection dir;
+-                switch ( wParam )
++            case WM_KEYDOWN:
+                 {
+-                    case VK_UP:
+-                        dir = wxUP;
+-                        break;
++                    bool processed = true;
+ 
+-                    case VK_LEFT:
+-                        dir = wxLEFT;
+-                        break;
++                    wxDirection dir;
++                    switch ( wParam )
++                    {
++                        case VK_UP:
++                            dir = wxUP;
++                            break;
+ 
+-                    case VK_DOWN:
+-                        dir = wxDOWN;
+-                        break;
++                        case VK_LEFT:
++                            dir = wxLEFT;
++                            break;
+ 
+-                    case VK_RIGHT:
+-                        dir = wxRIGHT;
+-                        break;
++                        case VK_DOWN:
++                            dir = wxDOWN;
++                            break;
+ 
+-                    default:
+-                        processed = false;
++                        case VK_RIGHT:
++                            dir = wxRIGHT;
++                            break;
+ 
+-                        // just to suppress the compiler warning
+-                        dir = wxALL;
+-                }
++                        default:
++                            processed = false;
+ 
+-                if ( processed )
+-                {
+-                    int selOld = radiobox->GetSelection();
+-                    int selNew = radiobox->GetNextItem
+-                                 (
+-                                  selOld,
+-                                  dir,
+-                                  radiobox->GetWindowStyle()
+-                                 );
++                            // just to suppress the compiler warning
++                            dir = wxALL;
++                    }
+ 
+-                    if ( selNew != selOld )
++                    if ( processed )
+                     {
+-                        radiobox->SetSelection(selNew);
+-                        radiobox->SetFocus();
++                        int selOld = radiobox->GetSelection();
++                        int selNew = radiobox->GetNextItem
++                                    (
++                                    selOld,
++                                    dir,
++                                    radiobox->GetWindowStyle()
++                                    );
+ 
+-                        // emulate the button click
+-                        radiobox->SendNotificationEvent();
++                        if ( selNew != selOld )
++                        {
++                            radiobox->SetSelection(selNew);
++                            radiobox->SetFocus();
+ 
+-                        return 0;
++                            // emulate the button click
++                            radiobox->SendNotificationEvent();
++
++                            return 0;
++                        }
+                     }
+                 }
+-            }
+-            break;
++                break;
+ 
+-        case WM_SETFOCUS:
+-        case WM_KILLFOCUS:
+-            {
+-                wxRadioBox *radiobox = (wxRadioBox *)wxGetWindowUserData(hwnd);
++            case WM_SETFOCUS:
++            case WM_KILLFOCUS:
++                {
++                    // if we don't do this, no focus events are generated for the
++                    // radiobox and, besides, we need to notify the parent about
++                    // the focus change, otherwise the focus handling logic in
++                    // wxControlContainer doesn't work
++                    if ( message == WM_SETFOCUS )
++                        radiobox->HandleSetFocus((WXHWND)wParam);
++                    else
++                        radiobox->HandleKillFocus((WXHWND)wParam);
++                }
++                break;
+ 
+-                wxCHECK_MSG( radiobox, 0, wxT("radio button without radio box?") );
+-
+-                // if we don't do this, no focus events are generated for the
+-                // radiobox and, besides, we need to notify the parent about
+-                // the focus change, otherwise the focus handling logic in
+-                // wxControlContainer doesn't work
+-                if ( message == WM_SETFOCUS )
+-                    radiobox->HandleSetFocus((WXHWND)wParam);
+-                else
+-                    radiobox->HandleKillFocus((WXHWND)wParam);
+-            }
+-            break;
+-
+ #ifndef __WXWINCE__
+-        case WM_HELP:
+-            {
+-                wxRadioBox *radiobox = (wxRadioBox *)wxGetWindowUserData(hwnd);
++            case WM_HELP:
++                {
++                    bool processed = false;
+ 
+-                wxCHECK_MSG( radiobox, 0, wxT("radio button without radio box?") );
++                    wxEvtHandler * const handler = radiobox->GetEventHandler();
+ 
+-                bool processed = false;
+-
+-                wxEvtHandler * const handler = radiobox->GetEventHandler();
+-
+-                HELPINFO* info = (HELPINFO*) lParam;
+-                if ( info->iContextType == HELPINFO_WINDOW )
+-                {
+-                    for ( wxWindow* subjectOfHelp = radiobox;
+-                          subjectOfHelp;
+-                          subjectOfHelp = subjectOfHelp->GetParent() )
++                    HELPINFO* info = (HELPINFO*) lParam;
++                    if ( info->iContextType == HELPINFO_WINDOW )
+                     {
+-                        wxHelpEvent helpEvent(wxEVT_HELP,
+-                                              subjectOfHelp->GetId(),
+-                                              wxPoint(info->MousePos.x,
+-                                                      info->MousePos.y));
+-                        helpEvent.SetEventObject(radiobox);
+-                        if ( handler->ProcessEvent(helpEvent) )
++                        for ( wxWindow* subjectOfHelp = radiobox;
++                            subjectOfHelp;
++                            subjectOfHelp = subjectOfHelp->GetParent() )
+                         {
+-                            processed = true;
+-                            break;
++                            wxHelpEvent helpEvent(wxEVT_HELP,
++                                                subjectOfHelp->GetId(),
++                                                wxPoint(info->MousePos.x,
++                                                        info->MousePos.y));
++                            helpEvent.SetEventObject(radiobox);
++                            if ( handler->ProcessEvent(helpEvent) )
++                            {
++                                processed = true;
++                                break;
++                            }
+                         }
+                     }
++                    else if (info->iContextType == HELPINFO_MENUITEM)
++                    {
++                        wxHelpEvent helpEvent(wxEVT_HELP, info->iCtrlId);
++                        helpEvent.SetEventObject(radiobox);
++                        processed = handler->ProcessEvent(helpEvent);
++                    }
++
++                    if ( processed )
++                        return 0;
+                 }
+-                else if (info->iContextType == HELPINFO_MENUITEM)
+-                {
+-                    wxHelpEvent helpEvent(wxEVT_HELP, info->iCtrlId);
+-                    helpEvent.SetEventObject(radiobox);
+-                    processed = handler->ProcessEvent(helpEvent);
+-                }
+-
+-                if ( processed )
+-                    return 0;
+-            }
+-            break;
++                break;
+ #endif // !__WXWINCE__
++        }
+     }
+-
+     return ::CallWindowProc(CASTWNDPROC s_wndprocRadioBtn, hwnd, message, wParam, lParam);
+ }
+ 
+Index: src/msw/window.cpp
+===================================================================
+--- src/msw/window.cpp	(revision 65298)
++++ src/msw/window.cpp	(working copy)
+@@ -93,6 +93,10 @@
+     #include "wx/spinctrl.h"
+ #endif // wxUSE_SPINCTRL
+ 
++#if wxUSE_RADIOBOX
++    #include "wx/radiobox.h"
++#endif // wxUSE_RADIOBOX
++
+ #include "wx/notebook.h"
+ #include "wx/listctrl.h"
+ #include "wx/dynlib.h"
+@@ -6381,7 +6385,7 @@
+             // do it as well, win would be already non NULL
+             if ( ::SendMessage(hwnd, WM_GETDLGCODE, 0, 0) & DLGC_RADIOBUTTON )
+             {
+-                win = (wxWindow *)wxGetWindowUserData(hwnd);
++                win = wxRadioBox::GetRadioBoxFromHWND(hwnd);
+             }
+             //else: it's a wxRadioButton, not a radiobutton from wxRadioBox
+ #endif // wxUSE_RADIOBOX

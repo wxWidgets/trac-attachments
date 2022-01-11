@@ -1,0 +1,460 @@
+--- D:/Prog/wxWidgets/svn/src/generic/datavgen.cpp	Thu Aug 12 18:01:31 2010
++++ C:/Documents and Settings/_Cool-/Local Settings/Temp/datavgen-Head.3.cpp	Thu Aug 12 18:08:01 2010
+@@ -75,6 +75,13 @@
+ static const int EXPANDER_OFFSET = 1;
+ #endif
+ 
++// Below is the compare stuff.
++// For the generic implementation, both the leaf nodes and the nodes are sorted for
++// fast search when needed
++static wxDataViewModel* g_model;
++static int g_column = -2;
++static bool g_asending = true;
++
+ //-----------------------------------------------------------------------------
+ // wxDataViewColumn
+ //-----------------------------------------------------------------------------
+@@ -249,49 +256,18 @@
+ //-----------------------------------------------------------------------------
+ 
+ class wxDataViewTreeNode;
+-class wxDataViewTreeLeaf;
+ WX_DEFINE_ARRAY( wxDataViewTreeNode *, wxDataViewTreeNodes );
+-WX_DEFINE_ARRAY( wxDataViewTreeLeaf* , wxDataViewTreeLeaves);
++WX_DEFINE_ARRAY( void* , wxDataViewTreeLeaves);
+ 
+ int LINKAGEMODE wxGenericTreeModelNodeCmp( wxDataViewTreeNode ** node1,
+                                            wxDataViewTreeNode ** node2);
+-int LINKAGEMODE wxGenericTreeModelLeaveCmp( wxDataViewTreeLeaf ** leaf1,
+-                                            wxDataViewTreeLeaf ** leaf2);
+-
+-class wxDataViewTreeLeaf
+-{
+-public:
+-    wxDataViewTreeLeaf( const wxDataViewMainWindow* mainWindow )
+-    {
+-		m_mainWindow = mainWindow;
+-    }
+-
+-    ~wxDataViewTreeLeaf()
+-    {
+-    }
+-
+-    wxDataViewItem & GetItem() { return m_item; }
+-    const wxDataViewItem & GetItem() const { return m_item; }
+-    void SetItem( const wxDataViewItem & item ) { m_item = item; }
+-
+-    void Resort();
+-
+-	inline const wxDataViewMainWindow* GetMainWindow() const { return m_mainWindow; }
+-
+-	inline bool operator==(const wxDataViewTreeLeaf& leaf) const { return (m_item.GetID()==leaf.m_item.GetID()); }
+-	inline bool operator!=(const wxDataViewTreeLeaf& leaf) const { return !(operator==(leaf)); }
+-
+-private:
+-	const wxDataViewMainWindow *m_mainWindow;
+-    wxDataViewItem       m_item;
+-};
++int LINKAGEMODE wxGenericTreeModelItemCmp( void ** id1, void ** id2);
+ 
+ class wxDataViewTreeNode
+ {
+ public:
+-    wxDataViewTreeNode( const wxDataViewMainWindow* mainWindow, wxDataViewTreeNode * parent )
++    wxDataViewTreeNode( wxDataViewTreeNode * parent = NULL )
+     {
+-		m_mainWindow = mainWindow;
+         m_parent = parent;
+         if (!parent)
+             m_open = true;
+@@ -310,8 +286,21 @@
+     wxDataViewTreeNodes &  GetNodes() { return m_nodes; }
+     wxDataViewTreeLeaves & GetChildren() { return m_leaves; }
+ 
+-    void AddNode( wxDataViewTreeNode * node );
+-    void AddLeaf( wxDataViewTreeLeaf * leaf );
++    void AddNode( wxDataViewTreeNode * node )
++    {
++        m_leaves.Add( node->GetItem().GetID() );
++        if (g_column >= -1)
++            m_leaves.Sort( &wxGenericTreeModelItemCmp );
++        m_nodes.Add( node );
++        if (g_column >= -1)
++            m_nodes.Sort( &wxGenericTreeModelNodeCmp );
++    }
++    void AddLeaf( void * leaf )
++    {
++        m_leaves.Add( leaf );
++        if (g_column >= -1)
++            m_leaves.Sort( &wxGenericTreeModelItemCmp );
++    }
+ 
+     wxDataViewItem & GetItem() { return m_item; }
+     const wxDataViewItem & GetItem() const { return m_item; }
+@@ -369,15 +358,19 @@
+             m_parent->ChangeSubTreeCount(num);
+     }
+ 
+-    void Resort();
+-
+-	inline const wxDataViewMainWindow* GetMainWindow() const { return m_mainWindow; }
+-
+-	inline bool operator==(const wxDataViewTreeNode& node) const { return (m_parent==node.m_parent && m_item.GetID()==node.m_item.GetID()); }
+-	inline bool operator!=(const wxDataViewTreeNode& node) const { return !(operator==(node)); }
++    void Resort()
++    {
++        if (g_column >= -1)
++        {
++            m_nodes.Sort( &wxGenericTreeModelNodeCmp );
++            int len = m_nodes.GetCount();
++            for (int i = 0; i < len; i ++)
++                m_nodes[i]->Resort();
++            m_leaves.Sort( &wxGenericTreeModelItemCmp );
++        }
++    }
+ 
+ private:
+-	const wxDataViewMainWindow *m_mainWindow;
+     wxDataViewTreeNode  *m_parent;
+     wxDataViewTreeNodes  m_nodes;
+     wxDataViewTreeLeaves m_leaves;
+@@ -387,6 +380,18 @@
+     int                  m_subTreeCount;
+ };
+ 
++int LINKAGEMODE wxGenericTreeModelNodeCmp( wxDataViewTreeNode ** node1,
++                                           wxDataViewTreeNode ** node2)
++{
++    return g_model->Compare( (*node1)->GetItem(), (*node2)->GetItem(), g_column, g_asending );
++}
++
++int LINKAGEMODE wxGenericTreeModelItemCmp( void ** id1, void ** id2)
++{
++    return g_model->Compare( *id1, *id2, g_column, g_asending );
++}
++
++
+ //-----------------------------------------------------------------------------
+ // wxDataViewMainWindow
+ //-----------------------------------------------------------------------------
+@@ -537,10 +542,6 @@
+     void OnLeave();
+ #endif // wxUSE_DRAG_AND_DROP
+ 
+-	inline const wxDataViewModel* GetModel() const { return g_model; }
+-	inline int GetColumn() const { return g_column; }
+-	inline bool GetAsending() const { return g_asending; }
+-
+ private:
+     wxDataViewTreeNode * GetTreeNodeByRow( unsigned int row ) const;
+     // We did not need this temporarily
+@@ -597,13 +598,6 @@
+     // This is the tree node under the cursor
+     wxDataViewTreeNode * m_underMouse;
+ 
+-	// Below is the compare stuff.
+-	// For the generic implementation, both the leaf nodes and the nodes are sorted for
+-	// fast search when needed
+-	wxDataViewModel* g_model;
+-	int g_column;
+-	bool g_asending;
+-
+ private:
+     DECLARE_DYNAMIC_CLASS(wxDataViewMainWindow)
+     DECLARE_EVENT_TABLE()
+@@ -1294,11 +1288,7 @@
+     m_selection( wxDataViewSelectionCmp )
+ 
+ {
+-	g_model = NULL;
+-	g_column = -2;
+-	g_asending = true;
+-
+-	SetOwner( parent );
++    SetOwner( parent );
+ 
+     m_lastOnSame = false;
+     m_renameTimer = new wxDataViewRenameTimer( this );
+@@ -1335,7 +1325,7 @@
+     // TODO: maybe there is something system colour to use
+     m_penExpander = wxPen(wxColour(0,0,0));
+ 
+-    m_root = new wxDataViewTreeNode( this, NULL );
++    m_root = new wxDataViewTreeNode( NULL );
+     m_root->SetHasChildren(true);
+ 
+     // Make m_count = -1 will cause the class recaculate the real displaying number of rows.
+@@ -1925,7 +1875,7 @@
+     // 2: Job not done, continue
+     enum  { OK = 0 , IGR = 1, CONT = 2 };
+     virtual int operator() ( wxDataViewTreeNode * node ) = 0;
+-    virtual int operator() ( wxDataViewTreeLeaf * n ) = 0;
++    virtual int operator() ( void * n ) = 0;
+ };
+ 
+ bool Walker( wxDataViewTreeNode * node, DoJob & func )
+@@ -1944,8 +1894,8 @@
+             ;
+     }
+ 
+-    const wxDataViewTreeNodes& nodes = node->GetNodes();
+-    const wxDataViewTreeLeaves& leaves = node->GetChildren();
++    wxDataViewTreeNodes nodes = node->GetNodes();
++    wxDataViewTreeLeaves leaves = node->GetChildren();
+ 
+     int len_nodes = nodes.GetCount();
+     int len = leaves.GetCount();
+@@ -1953,8 +1903,8 @@
+ 
+     for(; i < len; i ++ )
+     {
+-        wxDataViewTreeLeaf * n = leaves[i];
+-		if( nodes_i < len_nodes && n->GetItem().GetID() == nodes[nodes_i]->GetItem().GetID() )
++        void * n = leaves[i];
++        if( nodes_i < len_nodes && n == nodes[nodes_i]->GetItem().GetID() )
+         {
+             wxDataViewTreeNode * nd = nodes[nodes_i];
+             nodes_i++;
+@@ -2001,17 +1951,13 @@
+ 
+     if( g_model->IsContainer( item ) )
+     {
+-        wxDataViewTreeNode * newnode = new wxDataViewTreeNode( this, node );
++        wxDataViewTreeNode * newnode = new wxDataViewTreeNode( node );
+         newnode->SetItem(item);
+         newnode->SetHasChildren( true );
+         node->AddNode( newnode);
+     }
+     else
+-	{
+-        wxDataViewTreeLeaf * newleaf = new wxDataViewTreeLeaf( this );
+-        newleaf->SetItem(item);
+-        node->AddLeaf( newleaf );
+-	}
++        node->AddLeaf( item.GetID() );
+ 
+     node->ChangeSubTreeCount(1);
+ 
+@@ -2044,24 +1990,23 @@
+     }
+ 
+     wxDataViewTreeNode * node = FindNode(parent);
+-	wxDataViewTreeLeaf tnode(this);
+-	tnode.SetItem(item);
++
+     // Notice that it is possible that the item being deleted is not in the
+     // tree at all, for example we could be deleting a never shown (because
+     // collapsed) item in a tree model. So it's not an error if we don't know
+     // about this item, just return without doing anything then.
+-    if ( !node || node->GetChildren().Index(&tnode) == wxNOT_FOUND )
++    if ( !node || node->GetChildren().Index(item.GetID()) == wxNOT_FOUND )
+         return false;
+ 
+     int sub = -1;
+-    node->GetChildren().Remove( &tnode );
++    node->GetChildren().Remove( item.GetID() );
+     // Manipolate selection
+     if( m_selection.GetCount() > 1 )
+     {
+         m_selection.Empty();
+     }
+     bool isContainer = false;
+-    const wxDataViewTreeNodes& nds = node->GetNodes();
++    wxDataViewTreeNodes nds = node->GetNodes();
+     for (size_t i = 0; i < nds.GetCount(); i ++)
+     {
+         if (nds[i]->GetItem() == item)
+@@ -2073,7 +2018,7 @@
+     if( isContainer )
+     {
+         wxDataViewTreeNode * n = NULL;
+-        const wxDataViewTreeNodes& nodes = node->GetNodes();
++        wxDataViewTreeNodes nodes = node->GetNodes();
+         int len = nodes.GetCount();
+         for( int i = 0; i < len; i ++)
+         {
+@@ -2715,20 +2660,19 @@
+             if( node->GetNodes().GetCount() == 0)
+             {
+                 int index = static_cast<int>(row) - current - 1;
+-				wxDataViewTreeLeaf * n = node->GetChildren().Item( index );
+-                ret = n->GetItem();
++                ret = node->GetChildren().Item( index );
+                 return DoJob::OK;
+             }
+             return DoJob::CONT;
+         }
+     }
+ 
+-    virtual int operator() ( wxDataViewTreeLeaf * n )
++    virtual int operator() ( void * n )
+     {
+         current ++;
+         if( current == static_cast<int>(row))
+         {
+-			ret = n->GetItem();
++            ret = wxDataViewItem( n );
+             return DoJob::OK;
+         }
+         return DoJob::CONT;
+@@ -2794,9 +2738,9 @@
+             if( node->GetNodes().GetCount() == 0)
+             {
+                 int index = static_cast<int>(row) - current - 1;
+-                wxDataViewTreeLeaf * n = node->GetChildren().Item( index );
+-				ret = new wxDataViewTreeNode( parent->GetMainWindow(), parent );
+-				ret->SetItem( n->GetItem() );
++                void * n = node->GetChildren().Item( index );
++                ret = new wxDataViewTreeNode( parent );
++                ret->SetItem( wxDataViewItem( n ));
+                 ret->SetHasChildren(false);
+                 return DoJob::OK;
+             }
+@@ -2804,13 +2748,14 @@
+         }
+     }
+ 
+-    virtual int operator() ( wxDataViewTreeLeaf * n )
++    virtual int operator() ( void * n )
+     {
+         current ++;
+         if( current == static_cast<int>(row))
+         {
+-			ret = new wxDataViewTreeNode( parent->GetMainWindow(), parent );
+-			ret->SetItem( n->GetItem() );
++            ret = new wxDataViewTreeNode( parent );
++            ret->SetItem( wxDataViewItem( n ));
++            ret->SetHasChildren(false);
+             return DoJob::OK;
+         }
+ 
+@@ -3051,7 +2996,7 @@
+                 ::BuildTreeHelper(model, node->GetItem(), node);
+             }
+ 
+-            const wxDataViewTreeNodes& nodes = node->GetNodes();
++            wxDataViewTreeNodes nodes = node->GetNodes();
+             unsigned int i;
+             bool found = false;
+ 
+@@ -3211,10 +3156,10 @@
+ 
+     }
+ 
+-    virtual int operator() ( wxDataViewTreeLeaf * n )
++    virtual int operator() ( void * n )
+     {
+         ret ++;
+-		if( n->GetItem().GetID() == item.GetID() )
++        if( n == item.GetID() )
+             return DoJob::OK;
+         return DoJob::CONT;
+     }
+@@ -3279,16 +3224,14 @@
+     {
+         if( model->IsContainer( children[index] ) )
+         {
+-			wxDataViewTreeNode * n = new wxDataViewTreeNode( node->GetMainWindow(), node );
++            wxDataViewTreeNode * n = new wxDataViewTreeNode( node );
+             n->SetItem(children[index]);
+             n->SetHasChildren( true );
+             node->AddNode( n );
+         }
+         else
+         {
+-			wxDataViewTreeLeaf * n = new wxDataViewTreeLeaf( node->GetMainWindow() );
+-            n->SetItem(children[index]);
+-            node->AddLeaf( n );
++            node->AddLeaf( children[index].GetID() );
+         }
+         index ++;
+     }
+@@ -3309,7 +3252,7 @@
+         return;
+     }
+ 
+-    m_root = new wxDataViewTreeNode( this, NULL );
++    m_root = new wxDataViewTreeNode( NULL );
+     m_root->SetHasChildren(true);
+ 
+     // First we define a invalid item to fetch the top-level elements
+@@ -3328,9 +3271,6 @@
+         for (int i = 0; i < len; i++)
+             DestroyTreeHelper(nodes[i]);
+     }
+-	wxDataViewTreeLeaves& leaves = node->GetChildren();
+-	for (size_t k = 0; k<leaves.GetCount(); k++)
+-		delete leaves[k];
+     delete node;
+ }
+ 
+@@ -3924,69 +3860,6 @@
+ }
+ 
+ //-----------------------------------------------------------------------------
+-// wxDataViewTreeNode
+-//-----------------------------------------------------------------------------
+-void wxDataViewTreeNode::AddNode( wxDataViewTreeNode * node )
+-{
+-	wxDataViewTreeLeaf *leaf = new wxDataViewTreeLeaf(node->GetMainWindow());
+-	leaf->SetItem( node->GetItem() );
+-	AddLeaf( leaf );
+-    m_nodes.Add( node );
+-    if (m_mainWindow->GetColumn() >= -1)
+-        m_nodes.Sort( &wxGenericTreeModelNodeCmp );
+-}
+-void wxDataViewTreeNode::AddLeaf( wxDataViewTreeLeaf * leaf )
+-{
+-    m_leaves.Add( leaf );
+-    if (m_mainWindow->GetColumn() >= -1)
+-        m_leaves.Sort( &wxGenericTreeModelLeaveCmp );
+-}
+-void wxDataViewTreeNode::Resort()
+-{
+-    if (m_mainWindow->GetColumn() >= -1)
+-    {
+-        m_nodes.Sort( &wxGenericTreeModelNodeCmp );
+-        int len = m_nodes.GetCount();
+-        for (int i = 0; i < len; i ++)
+-            m_nodes[i]->Resort();
+-        m_leaves.Sort( &wxGenericTreeModelLeaveCmp );
+-    }
+-}
+-
+-int LINKAGEMODE wxGenericTreeModelNodeCmp( wxDataViewTreeNode ** node1,
+-                                           wxDataViewTreeNode ** node2)
+-{
+-	const wxDataViewMainWindow* mwindow = (*node1)->GetMainWindow();
+-	if (mwindow)
+-	{
+-		const wxDataViewModel* model = mwindow->GetModel();
+-		if (model)
+-		{
+-			int column = mwindow->GetColumn();
+-			bool asending = mwindow->GetAsending();
+-			return model->Compare( (*node1)->GetItem(), (*node2)->GetItem(), column, asending );
+-		}
+-	}
+-	return 1;
+-}
+-
+-int LINKAGEMODE wxGenericTreeModelLeaveCmp( wxDataViewTreeLeaf ** leaf1, wxDataViewTreeLeaf ** leaf2)
+-{
+-	const wxDataViewMainWindow* mwindow = (*leaf1)->GetMainWindow();
+-	if (mwindow)
+-	{
+-		const wxDataViewModel* model = mwindow->GetModel();
+-		if (model)
+-		{
+-			int column = mwindow->GetColumn();
+-			bool asending = mwindow->GetAsending();
+-			return model->Compare( (*leaf1)->GetItem(), (*leaf2)->GetItem(), column, asending );
+-		}
+-	}
+-	return 1;
+-}
+-
+-//-----------------------------------------------------------------------------
+ // wxDataViewCtrl
+ //-----------------------------------------------------------------------------
+ 

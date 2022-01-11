@@ -1,0 +1,415 @@
+Index: src/gtk/filedlg.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/filedlg.cpp,v
+retrieving revision 1.45
+diff -u -3 -r1.45 filedlg.cpp
+--- src/gtk/filedlg.cpp	2004/05/25 12:44:56	1.45
++++ src/gtk/filedlg.cpp	2004/10/12 21:48:22
+@@ -18,9 +18,10 @@
+ #include "wx/utils.h"
+ #include "wx/intl.h"
+ #include "wx/generic/msgdlgg.h"
++#include "wx/filename.h"
+ 
+ #include <gtk/gtk.h>
+-
++#include "wx/gtk/private.h"
+ //-----------------------------------------------------------------------------
+ // idle system
+ //-----------------------------------------------------------------------------
+@@ -28,10 +29,13 @@
+ extern void wxapp_install_idle_handler();
+ extern bool g_isIdle;
+ 
++//GtkFileChooser appeared in GTK+ 2.4.0
++#define USE_FILE_CHOOSER 	GTK_CHECK_VERSION(2,4,0)
++
+ //-----------------------------------------------------------------------------
+ // "delete_event"
+ //-----------------------------------------------------------------------------
+-
++#if !USE_FILE_CHOOSER
+ static
+ bool gtk_filedialog_delete_callback( GtkWidget *WXUNUSED(widget), GdkEvent *WXUNUSED(event), wxDialog *win )
+ {
+@@ -48,28 +52,32 @@
+ 
+     return TRUE;
+ }
+-
++#endif
+ //-----------------------------------------------------------------------------
+ // "clicked" for OK-button
+ //-----------------------------------------------------------------------------
+ 
+ static
+-void gtk_filedialog_ok_callback( GtkWidget *WXUNUSED(widget), wxFileDialog *dialog )
++void gtk_filedialog_ok_callback( GtkWidget *widget, wxFileDialog *dialog )
+ {
+     if (g_isIdle) wxapp_install_idle_handler();
+ 
+     int style = dialog->GetStyle();
+-
++#if USE_FILE_CHOOSER
++    gchar* text = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(widget));
++    wxString filename( wxGTK_CONV_BACK ( text ) );
++#else // GTK 1.2/2.0
+     GtkFileSelection *filedlg = GTK_FILE_SELECTION(dialog->m_widget);
+-    char *filename = gtk_file_selection_get_filename(filedlg);
+-
++    const char* text =gtk_file_selection_get_filename(filedlg);
++    wxString filename = wxGTK_CONV_BACK(text);
++#endif
+     if ( (style & wxSAVE) && ( style & wxOVERWRITE_PROMPT ) )
+     {
+         if (wxFileExists( filename ))
+         {
+             wxString msg;
+             msg.Printf( _("File '%s' already exists, do you really want to "
+-                         "overwrite it?"), filename);
++                         "overwrite it?"), filename.c_str());
+ 
+             if (wxMessageBox(msg, _("Confirm"), wxYES_NO) != wxYES)
+                 return;
+@@ -97,8 +105,10 @@
+         }
+     }
+ 
+-    dialog->SetPath( filename );
+ 
++    dialog->DoSetPath( filename );
++    dialog->UpdateFromDialog();
++    
+     wxCommandEvent event(wxEVT_COMMAND_BUTTON_CLICKED, wxID_OK);
+     event.SetEventObject( dialog );
+     dialog->GetEventHandler()->ProcessEvent( event );
+@@ -112,12 +122,24 @@
+ void gtk_filedialog_cancel_callback( GtkWidget *WXUNUSED(w), wxFileDialog *dialog )
+ {
+     if (g_isIdle) wxapp_install_idle_handler();
+-
++    
+     wxCommandEvent event(wxEVT_COMMAND_BUTTON_CLICKED, wxID_CANCEL);
+     event.SetEventObject( dialog );
+     dialog->GetEventHandler()->ProcessEvent( event );
+ }
+ 
++#if USE_FILE_CHOOSER
++static
++void gtk_filedialog_response_callback( GtkWidget *w, int response, wxFileDialog *dialog )
++{
++    if (g_isIdle) wxapp_install_idle_handler();
++    if( response == GTK_RESPONSE_CANCEL )
++	gtk_filedialog_cancel_callback(w,dialog);
++    else
++	gtk_filedialog_ok_callback(w,dialog);
++}
++#endif
++
+ //-----------------------------------------------------------------------------
+ // wxFileDialog
+ //-----------------------------------------------------------------------------
+@@ -135,45 +157,245 @@
+     if (!PreCreation( parent, pos, wxDefaultSize ) ||
+         !CreateBase( parent, wxID_ANY, pos, wxDefaultSize, style, wxDefaultValidator, wxT("filedialog") ))
+     {
+-        wxFAIL_MSG( wxT("wxXX creation failed") );
++        wxFAIL_MSG( wxT("wxFileDialog creation failed") );
+         return;
+     }
+-
+-    m_widget = gtk_file_selection_new( m_message.mbc_str() );
+-
+-    int x = (gdk_screen_width () - 400) / 2;
+-    int y = (gdk_screen_height () - 400) / 2;
+-    gtk_widget_set_uposition( m_widget, x, y );
+-
+-    GtkFileSelection *sel = GTK_FILE_SELECTION(m_widget);
+-    gtk_file_selection_hide_fileop_buttons( sel ); // they don't work anyway
+-
+     m_path.Append(m_dir);
+     if( ! m_path.IsEmpty() && m_path.Last()!=wxT('/') )
+         m_path.Append('/');
+     m_path.Append(m_fileName);
+ 
+-    if(m_path.Length()>1) gtk_file_selection_set_filename(sel,m_path.mbc_str());
++#ifdef __WXGTK20__
++    bool multiple = (style & wxMULTIPLE) == wxMULTIPLE;
++#endif
++
++#if USE_FILE_CHOOSER // new gtk 2.4 GtkFileChooser
++    GtkFileChooserAction gtk_action;
++    GtkWindow* gtk_parent = NULL;
++    if( parent )
++	gtk_parent = GTK_WINDOW(parent->m_widget);
++    gchar* ok_stock;
++    if( style & wxSAVE ){
++	gtk_action = GTK_FILE_CHOOSER_ACTION_SAVE;
++	ok_stock = GTK_STOCK_SAVE;
++    } else {
++	gtk_action = GTK_FILE_CHOOSER_ACTION_OPEN;
++	ok_stock = GTK_STOCK_OPEN;
++    }
++    m_widget = gtk_file_chooser_dialog_new(m_message.mbc_str(), 
++					   gtk_parent,
++					   gtk_action,
++					   GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL,
++					   ok_stock, GTK_RESPONSE_ACCEPT,
++					   NULL);
++
++    gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(m_widget), multiple);
++        
++    if(m_path.Length()>1) 
++	gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(m_widget),m_path.mbc_str());
++    gtk_signal_connect(GTK_OBJECT(m_widget),
++                             "response", 
++                             GTK_SIGNAL_FUNC(gtk_filedialog_response_callback),
++                             (gpointer*)this);
++#else // old gtk 2.0/1.2 GtkFileSelection
++    m_widget = gtk_file_selection_new( m_message.mbc_str() );
+ 
++    GtkFileSelection *sel = GTK_FILE_SELECTION(m_widget);
++    gtk_file_selection_hide_fileop_buttons( sel ); // they don't work anyway
++#ifdef __WXGTK20__
++    gtk_file_selection_set_select_multiple(sel, multiple);
++#endif
++    if(m_path.Length()>1) gtk_file_selection_set_filename(sel,m_path.mbc_str());
++    
+     gtk_signal_connect( GTK_OBJECT(sel->ok_button), "clicked",
+       GTK_SIGNAL_FUNC(gtk_filedialog_ok_callback), (gpointer*)this );
+ 
+     // strange way to internationalize
++#if !__WXGTK20__
+     gtk_label_set( GTK_LABEL( GTK_BUTTON(sel->ok_button)->child ), wxConvCurrent->cWX2MB(_("OK")) );
++#endif
+ 
+     gtk_signal_connect( GTK_OBJECT(sel->cancel_button), "clicked",
+       GTK_SIGNAL_FUNC(gtk_filedialog_cancel_callback), (gpointer*)this );
+ 
+     // strange way to internationalize
++#if !__WXGTK20__
+     gtk_label_set( GTK_LABEL( GTK_BUTTON(sel->cancel_button)->child ), wxConvCurrent->cWX2MB(_("Cancel")) );
++#endif
+ 
+     gtk_signal_connect( GTK_OBJECT(m_widget), "delete_event",
+         GTK_SIGNAL_FUNC(gtk_filedialog_delete_callback), (gpointer)this );
++#endif
++    int x = (gdk_screen_width () - 400) / 2;
++    int y = (gdk_screen_height () - 400) / 2;
++    gtk_widget_set_uposition( m_widget, x, y );
++    
++    SetWildcard(wildCard);
++    SetFilterIndex(0);
+ }
+ 
+ void wxFileDialog::SetPath(const wxString& path)
++{
++    DoSetPath(path);
++    UpdateDialog();
++}
++
++void wxFileDialog::GetFilenames(wxArrayString& files) const 
++{
++    GetPaths(files);
++    for(size_t n=0; n < files.GetCount(); n++ ) {
++	wxString name,ext;
++	wxSplitPath(files[n], NULL, &name, &ext);
++	if( !ext.IsEmpty() ) {
++	    name += wxT(".");
++	    name += ext;
++	}
++	files[n] = name;
++    }
++}
++void wxFileDialog::GetPaths(wxArrayString& paths) const 
++{
++    paths.Empty(); 
++#if USE_FILE_CHOOSER
++    if( GetWindowStyle() & wxMULTIPLE ) {
++	GSList* gpathsi = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(m_widget));
++	GSList* gpaths = gpathsi;
++	while( gpathsi ) {
++	    wxString file = wxGTK_CONV_BACK( (gchar*) gpathsi->data);
++	    paths.Add(file);
++	    g_free(gpathsi->data);
++	    gpathsi = gpathsi->next;
++	}
++	if( gpaths ) 
++	    g_slist_free(gpaths);
++    } else 
++#elif __WXGTK20__
++    if( GetWindowStyle() & wxMULTIPLE ) {
++        gchar** selections = gtk_file_selection_get_selections(GTK_FILE_SELECTION(m_widget));
++	gchar** x = selections;
++	while( *x ) {
++	    gsize bread,bwrite;
++	    GError* err;
++	    gchar* utf_fn = g_filename_to_utf8(*x,strlen(*x), &bread, &bwrite, &err);
++	    if( utf_fn ) {
++		paths.Add(wxGTK_CONV_BACK(utf_fn));
++		g_free(utf_fn);
++	    }
++	    x++;
++	}
++	g_strfreev(selections);
++    } else 
++#endif
++    {
++        paths.Add(m_fileName);
++    }
++}
++void wxFileDialog::SetMessage(const wxString& message)
++{
++    m_message = message;
++    SetTitle(message);
++}
++void wxFileDialog::SetDirectory(const wxString& dir)
++{
++    wxFileName fn(dir,m_fileName);
++    SetPath(fn.GetFullPath());
++}
++void wxFileDialog::SetFilename(const wxString& name)
++{
++    m_fileName = name;
++    wxFileName fn(m_dir,name);
++    SetPath(fn.GetFullPath());
++}
++void wxFileDialog::SetWildcard(const wxString& wildCard)
++{
++    m_wildCard = wildCard;
++#if USE_FILE_CHOOSER
++    GtkFileChooser* chooser = GTK_FILE_CHOOSER(m_widget);
++    // empty filter list !
++    GSList* ifilters = gtk_file_chooser_list_filters(chooser);
++    GSList* filters = ifilters;
++    while( ifilters ) {
++	gtk_file_chooser_remove_filter(chooser,GTK_FILE_FILTER(ifilters->data));
++	ifilters = ifilters->next;
++    }
++    g_slist_free(filters);
++    
++    wxArrayString wildDescriptions, wildFilters;
++    if ( !wxParseCommonDialogsFilter(m_wildCard, wildDescriptions, wildFilters) )
++    {
++        wxFAIL_MSG( wxT("Wrong file type description") );
++    }
++    for (size_t n=0; n<wildFilters.GetCount(); n++)
++    {
++        //m_choice->Append( wildDescriptions[n], (void*) new wxString( wildFilters[n] ) );
++	GtkFileFilter* filter = gtk_file_filter_new();
++	gtk_file_filter_set_name(filter,wildDescriptions[n].mbc_str());
++	wxString after = wildFilters[n];
++	do {
++	    wxString ext = after.BeforeFirst(';');
++	    gtk_file_filter_add_pattern(filter,ext.mbc_str());
++	    if( after.Find(';') == wxNOT_FOUND )
++	        break;
++	    after = after.AfterLast(';');
++	} while( !after.IsEmpty() );
++	gtk_file_chooser_add_filter(chooser, filter);
++    }
++#endif
++}
++
++void wxFileDialog::SetFilterIndex(int filterIndex)
++{
++    m_filterIndex = filterIndex;
++#if USE_FILE_CHOOSER
++    GtkFileChooser* chooser = GTK_FILE_CHOOSER(m_widget);
++    GSList* ifilters = gtk_file_chooser_list_filters(chooser),*filters = ifilters;
++    int i = 0;
++    while( ifilters ) {
++	if( i == filterIndex ) {
++	    gtk_file_chooser_set_filter(chooser, GTK_FILE_FILTER(ifilters->data));
++	    m_filterIndex = i;
++	    break;
++	}
++	i++;
++	ifilters = ifilters->next;
++    }
++    g_slist_free(filters);
++#endif
++}
++
++void wxFileDialog::UpdateFromDialog()
++{
++#if USE_FILE_CHOOSER
++    // update filterIndex
++    {
++	GSList* ifilters = gtk_file_chooser_list_filters(GTK_FILE_CHOOSER(m_widget));
++	GSList* filters = ifilters;
++	GtkFileFilter* current = gtk_file_chooser_get_filter(GTK_FILE_CHOOSER(m_widget));
++	int i = 0;
++	m_filterIndex = 0;
++	while( ifilters ) {
++	    if( ifilters->data == (gpointer)current ) {
++		m_filterIndex = i;
++		break;
++	    }
++	    i++;
++	    ifilters = ifilters->next;
++	}
++	g_slist_free(filters);
++    }
++#endif
++}
++void wxFileDialog::UpdateDialog()
++{
++#if USE_FILE_CHOOSER
++    gtk_file_chooser_set_filename(GTK_FILE_CHOOSER(m_widget),m_path.mbc_str());
++#else
++    gtk_file_selection_set_filename(GTK_FILE_SELECTION(m_widget),m_path.mbc_str());
++#endif
++
++}
++void wxFileDialog::DoSetPath(const wxString& path)
+ {
+-    // not only set the full path but also update filename and dir
+     m_path = path;
+     if ( !!path )
+     {
+Index: include/wx/gtk/filedlg.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/gtk/filedlg.h,v
+retrieving revision 1.19
+diff -u -3 -r1.19 filedlg.h
+--- include/wx/gtk/filedlg.h	2004/05/23 20:50:53	1.19
++++ include/wx/gtk/filedlg.h	2004/10/12 21:48:22
+@@ -32,8 +32,18 @@
+                  long style = 0,
+                  const wxPoint& pos = wxDefaultPosition);
+     
+-    virtual void SetPath(const wxString& path);
++    virtual void GetPaths(wxArrayString& paths) const;
++    virtual void GetFilenames(wxArrayString& files) const;
+     
++    virtual void SetMessage(const wxString& message);
++    virtual void SetPath(const wxString& path);
++    virtual void SetDirectory(const wxString& dir);
++    virtual void SetFilename(const wxString& name);
++    virtual void SetWildcard(const wxString& wildCard);
++    virtual void SetFilterIndex(int filterIndex);
++            void UpdateFromDialog();
++            void UpdateDialog();
++            void DoSetPath(const wxString& path);
+ private:
+     DECLARE_DYNAMIC_CLASS(wxFileDialog)
+ };
+Index: include/wx/filedlg.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/filedlg.h,v
+retrieving revision 1.32
+diff -u -3 -r1.32 filedlg.h
+--- include/wx/filedlg.h	2004/09/14 12:08:17	1.32
++++ include/wx/filedlg.h	2004/10/12 21:48:23
+@@ -159,7 +159,7 @@
+ #elif defined(__WXMOTIF__)
+ #include "wx/motif/filedlg.h"
+ #elif defined(__WXGTK__)
+-#include "wx/generic/filedlgg.h"
++#include "wx/gtk/filedlg.h"
+ #elif defined(__WXX11__)
+ #include "wx/generic/filedlgg.h"
+ #elif defined(__WXMGL__)
+
+ 	  	 

@@ -1,0 +1,164 @@
+Index: include/wx/file.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWidgets/include/wx/file.h,v
+retrieving revision 1.31
+diff -b -u -2 -r1.31 file.h
+--- include/wx/file.h	2003/12/11 10:59:05	1.31
++++ include/wx/file.h	2004/03/31 09:05:50
+@@ -64,4 +64,6 @@
+     // standard values for file descriptor
+   enum { fd_invalid = -1, fd_stdin, fd_stdout, fd_stderr };
++    // locking mode
++  enum LockMode { shared_read, exclusive_write };
+ 
+   // static functions
+@@ -128,4 +130,11 @@
+     // has an error occured?
+   bool Error() const { return m_error; }
++
++  // can we lock a file region?
++  bool CanLock();
++  // lock a file region
++  bool Lock(off_t ofs, off_t len, LockMode mode);
++  // unlock a file region
++  bool Unlock(off_t ofs, off_t len, LockMode mode);
+ 
+   // dtor closes the file if opened
+Index: src/common/file.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWidgets/src/common/file.cpp,v
+retrieving revision 1.78
+diff -b -u -2 -r1.78 file.cpp
+--- src/common/file.cpp	2003/11/23 22:29:46	1.78
++++ src/common/file.cpp	2004/03/31 09:09:50
+@@ -640,4 +640,128 @@
+ }
+ 
++// can we lock a file region?
++bool wxFile::CanLock()
++{
++    // We check for flag definitions to determine whether a function is available on a specific platform.
++    // This has the advantage of making the feature available as soon as the platform adds/has support for it.  
++    // TODO: a future version of this method should check for real compliance and could even analyze issues 
++    // such as lock support for networked file systems (NFS).
++#if defined(F_SETLKW) && ! defined(__WXWINCE__)
++    return true;
++#else 
++#ifdef LOCKFILE_EXCLUSIVE_LOCK
++    return true;
++#endif
++#endif
++    return false;
++}
++
++// lock a file region
++bool wxFile::Lock(off_t ofs, off_t len, LockMode mode)
++{
++    // default to false 
++    bool ret = false;
++
++    if (len == 0)
++    { 
++        // fcntl would lock the whole file with len == 0, however Windows LockFileEx does not support this.
++        // Locking 0 bytes is always successful and does nothing.
++        return true;
++    }
++
++    // if F_SETLKW is defined we assume POSIX fcntl(2) F_SETLKW support is present.
++#if defined(F_SETLKW) && ! defined(__WXWINCE__)
++    {
++        struct flock lck;
++        lck.l_start = ofs;
++        lck.l_len = len;
++        lck.l_type = (mode == exclusive_write ? F_WRLCK : F_RDLCK);
++        lck.l_whence = SEEK_SET;
++
++        ret = (-1 != fcntl(m_fd, F_SETLKW, &lck)); 
++    }
++#else // fcntl(2) F_SETLKW not available
++
++    // if LOCKFILE_EXCLUSIVE_LOCK is defined we assume Windows LockFileEx is present.
++#ifdef LOCKFILE_EXCLUSIVE_LOCK
++    {
++#ifdef __WXWINCE__
++        HANDLE hFILE = (HANDLE) m_fd;
++#else
++        HANDLE hFILE = (HANDLE) _get_osfhandle(m_fd);
++#endif
++        OVERLAPPED ol;
++        ol.Offset = (DWORD)ofs;
++        ol.OffsetHigh = (DWORD)(ofs>>32);
++        ol.hEvent = NULL;
++        ret = (0 != LockFileEx(
++            hFILE, 
++            LOCKFILE_FAIL_IMMEDIATELY | (mode == exclusive_write ? LOCKFILE_EXCLUSIVE_LOCK : 0), 
++            0, 
++            (DWORD)len, (DWORD)(len>>32),
++            &ol));
++    }
++#endif // LockFileEx available
++
++#endif // fcntl(2) F_SETLKW available or else.
++  
++    return ret;
++}
++
++// unlock a file region
++bool wxFile::Unlock(off_t ofs, off_t len, LockMode mode)
++{
++    // default to false 
++    bool ret = false;
++
++    if (len == 0)
++    { 
++        // fcntl would lock the whole file with len == 0, however Windows LockFileEx does not support this.
++        // Locking 0 bytes is always successful and does nothing.
++        return true;
++    }
++    
++    // if F_SETLKW is defined we assume POSIX fcntl(2) F_SETLKW support is present.
++#if defined(F_SETLKW) && ! defined(__WXWINCE__)
++    {
++        struct flock lck;
++        lck.l_start = ofs;
++        lck.l_len = len;
++        lck.l_type = F_UNLCK;
++        lck.l_whence = SEEK_SET;
++
++        ret = (-1 != fcntl(m_fd, F_SETLKW, &lck)); 
++    }
++
++#else // fcntl(2) F_SETLKW not available
++
++    // if LOCKFILE_EXCLUSIVE_LOCK is defined we assume Windows LockFileEx is present.
++#ifdef LOCKFILE_EXCLUSIVE_LOCK
++    {
++   
++#ifdef __WXWINCE__
++        HANDLE hFILE = (HANDLE) m_fd;
++#else
++        HANDLE hFILE = (HANDLE) _get_osfhandle(m_fd);
++#endif
++      OVERLAPPED ol;
++      ol.Offset = (DWORD)ofs;
++      ol.OffsetHigh = (DWORD)(ofs>>32);
++      ol.hEvent = NULL;
++      ret = (0 != UnlockFileEx(
++          hFILE, 
++          0, 
++          (DWORD)len, (DWORD)(len>>32),
++          &ol));
++    }
++#endif // LockFileEx available
++
++#endif // fcntl(2) F_SETLKW available or else.
++  
++    return ret;
++    
++}
++
++
+ // ============================================================================
+ // implementation of wxTempFile
+
+ 	  	 

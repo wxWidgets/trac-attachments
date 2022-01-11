@@ -1,0 +1,157 @@
+Index: include/wx/process.h
+===================================================================
+--- include/wx/process.h	(revision 73324)
++++ include/wx/process.h	(working copy)
+@@ -30,6 +30,14 @@
+     wxPROCESS_REDIRECT = 1
+ };
+ 
++// defines the interval of priority
++enum
++{
++    WXPROCESS_MIN_PRIORITY      = 0u,
++    WXPROCESS_DEFAULT_PRIORITY  = 50u,
++    WXPROCESS_MAX_PRIORITY      = 100u
++};
++
+ // ----------------------------------------------------------------------------
+ // A wxProcess object should be passed to wxExecute - than its OnTerminate()
+ // function will be called when the process terminates.
+@@ -104,6 +112,15 @@
+                         wxInputStream *errStream);
+ #endif // wxUSE_STREAMS
+ 
++    // priority
++        // Sets the priority to "prio": see WXPROCESS_XXX_PRIORITY constants
++        //
++        // NB: the priority can only be set before the process is created
++    void SetPriority(unsigned int prio);
++
++        // Get the current priority.
++    unsigned int GetPriority() const;
++
+     // implementation only - don't use!
+     // --------------------------------
+ 
+@@ -116,6 +133,8 @@
+     int m_id;
+     long m_pid;
+ 
++    unsigned m_priority;
++
+ #if wxUSE_STREAMS
+     // these streams are connected to stdout, stderr and stdin of the child
+     // process respectively (yes, m_inputStream corresponds to stdout -- very
+Index: interface/wx/process.h
+===================================================================
+--- interface/wx/process.h	(revision 73324)
++++ interface/wx/process.h	(working copy)
+@@ -243,6 +243,27 @@
+         The caught output stream is returned by GetInputStream() as a non-seekable stream.
+     */
+     void Redirect();
++
++    /**
++        Sets the priority of the process, between 0 and 100.
++        It can only be set before the process is created.
++
++        The following priorities are defined:
++          - @b WXTHREAD_MIN_PRIORITY: 0
++          - @b WXTHREAD_DEFAULT_PRIORITY: 50
++          - @b WXTHREAD_MAX_PRIORITY: 100
++    */
++    void SetPriority(unsigned int priority);
++
++    /**
++        Gets the priority of the process, between zero and 100.
++
++        The following priorities are defined:
++          - @b WXTHREAD_MIN_PRIORITY: 0
++          - @b WXTHREAD_DEFAULT_PRIORITY: 50
++          - @b WXTHREAD_MAX_PRIORITY: 100
++    */
++    unsigned int GetPriority() const;
+ };
+ 
+ 
+Index: src/msw/utilsexc.cpp
+===================================================================
+--- src/msw/utilsexc.cpp	(revision 73324)
++++ src/msw/utilsexc.cpp	(working copy)
+@@ -852,6 +852,26 @@
+         }
+     }
+ 
++    // translate wxWidgets priority to the Windows one
++    unsigned int prio=handler->GetPriority();
++    if (prio <= 20)
++        dwFlags |= IDLE_PRIORITY_CLASS;
++    else if (prio <= 40)
++        dwFlags |= BELOW_NORMAL_PRIORITY_CLASS;
++    else if (prio <= 60)
++        dwFlags |= NORMAL_PRIORITY_CLASS;
++    else if (prio <= 80)
++        dwFlags |= ABOVE_NORMAL_PRIORITY_CLASS;
++    else if (prio <= 99)
++        dwFlags |= HIGH_PRIORITY_CLASS;
++    else if (prio <= 100)
++        dwFlags |= REALTIME_PRIORITY_CLASS;
++    else
++    {
++        wxFAIL_MSG(wxT("invalid value of thread priority parameter"));
++        dwFlags |= THREAD_PRIORITY_NORMAL;
++    }
++
+     bool ok = ::CreateProcess
+                 (
+                     // WinCE requires appname to be non null
+Index: src/unix/utilsunx.cpp
+===================================================================
+--- src/unix/utilsunx.cpp	(revision 73324)
++++ src/unix/utilsunx.cpp	(working copy)
+@@ -132,6 +132,10 @@
+     #include <sys/sysinfo.h>   // for SAGET and MINFO structures
+ #endif
+ 
++#ifdef __LINUX__
++    #include <sys/resource.h>   // for setpriority()
++#endif
++
+ // ----------------------------------------------------------------------------
+ // conditional compilation
+ // ----------------------------------------------------------------------------
+@@ -545,6 +549,14 @@
+         }
+     }
+ 
++    // priority
++    signed int prio = process->GetPriority();
++    if(prio>100 || prio<0) {
++        wxFAIL_MSG(wxT("invalid value of thread priority parameter"));
++        prio = THREAD_PRIORITY_NORMAL;
++    }
++    prio=prio*(20+19)/100-20; // compute value in range -20..+19
++
+     // fork the process
+     //
+     // NB: do *not* use vfork() here, it completely breaks this code for some
+@@ -574,10 +586,18 @@
+         {
+             // Set process group to child process' pid.  Then killing -pid
+             // of the parent will kill the process and all of its children.
+-            setsid();
++            id=setsid();
+         }
+ #endif // !__VMS
+ 
++        errno=0;
++        setpriority(PRIO_PROCESS,getpid(),prio);
++        if(0!=errno)
++        {
++            wxLogError(_("Cannot set priority: setpriority failer with errno %d."),
++                   errno);
++        }
++
+         // redirect stdin, stdout and stderr
+         if ( pipeIn.IsOk() )
+         {

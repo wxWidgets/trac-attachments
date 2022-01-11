@@ -1,0 +1,241 @@
+Index: include/wx/generic/dataview.h
+===================================================================
+--- include/wx/generic/dataview.h	(revision 59234)
++++ include/wx/generic/dataview.h	(working copy)
+@@ -457,6 +457,8 @@
+ 
+     virtual wxBorder GetDefaultBorder() const;
+ 
++    virtual void StartEditor( const wxDataViewItem & item, unsigned int column );
++
+ protected:
+     virtual int GetSelections( wxArrayInt & sel ) const;
+     virtual void SetSelections( const wxArrayInt & sel );
+Index: samples/dataview/dataview.cpp
+===================================================================
+--- samples/dataview/dataview.cpp	(revision 59234)
++++ samples/dataview/dataview.cpp	(working copy)
+@@ -810,7 +810,7 @@
+     m_musicCtrl->EnableDragSource( wxDF_UNICODETEXT );
+     m_musicCtrl->EnableDropTarget( wxDF_UNICODETEXT );
+ 
+-    wxDataViewTextRenderer *tr = new wxDataViewTextRenderer( wxT("string"), wxDATAVIEW_CELL_INERT );
++    wxDataViewTextRenderer *tr = new wxDataViewTextRenderer( wxT("string"), wxDATAVIEW_CELL_EDITABLE/*wxDATAVIEW_CELL_INERT*/ );
+     wxDataViewColumn *column0 = new wxDataViewColumn( wxT("title"), tr, 0, 200, wxALIGN_LEFT,
+         wxDATAVIEW_COL_SORTABLE | wxDATAVIEW_COL_RESIZABLE );
+     m_musicCtrl->AppendColumn( column0 );
+@@ -859,7 +859,7 @@
+ 
+ #if 1
+     m_listCtrl->AppendTextColumn    (wxT("editable string"), 0, wxDATAVIEW_CELL_EDITABLE, 120 );
+-    m_listCtrl->AppendIconTextColumn(wxIcon(small1_xpm), 1, wxDATAVIEW_CELL_INERT )->SetTitle( wxT("icon") );
++    m_listCtrl->AppendIconTextColumn(wxIcon(small1_xpm), 1, wxDATAVIEW_CELL_EDITABLE/*wxDATAVIEW_CELL_INERT*/ )->SetTitle( wxT("icon") );
+ #else
+     m_listCtrl->AppendTextColumn    (wxT("editable string"), 0, wxDATAVIEW_CELL_EDITABLE );
+     m_listCtrl->AppendIconTextColumn(wxT("icon"),            1, wxDATAVIEW_CELL_INERT );
+Index: src/common/datavcmn.cpp
+===================================================================
+--- src/common/datavcmn.cpp	(revision 59234)
++++ src/common/datavcmn.cpp	(working copy)
+@@ -695,6 +695,11 @@
+     GetOwner()->GetOwner()->GetModel()->GetValue( value, item, col );
+ 
+     m_editorCtrl = CreateEditorCtrl( GetOwner()->GetOwner()->GetMainWindow(), labelRect, value );
++
++	// there might be no editor control for the given item
++    if(!m_editorCtrl)
++        return false;
++
+     (void) new wxKillRef( m_editorCtrl.get() );
+ 
+     wxDataViewEditorCtrlEvtHandler *handler =
+Index: src/generic/datavgen.cpp
+===================================================================
+--- src/generic/datavgen.cpp	(revision 59234)
++++ src/generic/datavgen.cpp	(working copy)
+@@ -1128,18 +1128,37 @@
+ }
+ 
+ wxControl *
+-wxDataViewIconTextRenderer::CreateEditorCtrl(wxWindow * WXUNUSED(parent),
+-                                            wxRect WXUNUSED(labelRect),
+-                                            const wxVariant& WXUNUSED(value))
++wxDataViewIconTextRenderer::CreateEditorCtrl(wxWindow * parent,
++                                             wxRect labelRect,
++                                             const wxVariant& value)
+ {
+-    return NULL;
++    wxDataViewIconText iconText;
++    iconText << value;
++
++    wxString text = iconText.GetText();
++
++    // adjust the label rect to take the width of the icon into account
++    if (iconText.GetIcon().IsOk())
++    {
++        int w = iconText.GetIcon().GetWidth() + 4;
++        labelRect.x += w;
++        labelRect.width -= w;
++    }
++
++    return new wxTextCtrl( parent, wxID_ANY, text,
++                           wxPoint(labelRect.x,labelRect.y),
++                           wxSize(labelRect.width,labelRect.height) );
+ }
+ 
+ bool
+-wxDataViewIconTextRenderer::GetValueFromEditorCtrl(wxControl* WXUNUSED(editor),
+-                                                wxVariant& WXUNUSED(value))
++wxDataViewIconTextRenderer::GetValueFromEditorCtrl(wxControl* editor,
++                                                   wxVariant& value)
+ {
+-    return false;
++    wxTextCtrl *text = (wxTextCtrl*) editor;
++
++    wxDataViewIconText iconText(text->GetValue(), m_value.GetIcon());
++    value << iconText;
++    return true;
+ }
+ 
+ //-----------------------------------------------------------------------------
+@@ -1909,42 +1928,10 @@
+         wxSafeYield();
+     }
+ 
+-    int xpos = 0;
+-    unsigned int cols = GetOwner()->GetColumnCount();
+-    unsigned int i;
+-    for (i = 0; i < cols; i++)
+-    {
+-        wxDataViewColumn *c = GetOwner()->GetColumnAt( i );
+-        if (c->IsHidden())
+-            continue;      // skip it!
++    wxDataViewItem item = GetItemByRow( m_currentRow );
+ 
+-        if (c == m_currentCol)
+-            break;
+-        xpos += c->GetWidth();
+-    }
++    wxRect labelRect = GetItemRect(item, m_currentCol);
+ 
+-    // we have to take an expander column into account and compute its indentation
+-    // to get the editor at the correct x position where the actual text is
+-    int indent = 0;
+-    if (!IsVirtualList() && GetOwner()->GetExpanderColumn() == m_currentCol)
+-    {
+-        wxDataViewTreeNode* node = GetTreeNodeByRow(m_currentRow);
+-        indent = GetOwner()->GetIndent() * node->GetIndentLevel();
+-        indent = indent + m_lineHeight;
+-
+-        if(!node->HasChildren())
+-            delete node;
+-    }
+-
+-    wxRect labelRect( xpos + indent,
+-                    GetLineStart( m_currentRow ),
+-                    m_currentCol->GetWidth() - indent,
+-                    GetLineHeight( m_currentRow ) );
+-
+-    GetOwner()->CalcScrolledPosition( labelRect.x, labelRect.y,
+-                                    &labelRect.x, &labelRect.y);
+-
+-    wxDataViewItem item = GetItemByRow( m_currentRow );
+     m_currentCol->GetRenderer()->StartEditing( item, labelRect );
+ }
+ 
+@@ -3105,21 +3092,64 @@
+ 
+ wxRect wxDataViewMainWindow::GetItemRect( const wxDataViewItem & item, const wxDataViewColumn* column )
+ {
++    int xpos = 0;
++    int width = 0;
++	
++    unsigned int cols = GetOwner()->GetColumnCount();
++    // If column is null the loop will compute the combined width of all columns.
++    // Otherwise, it will compute the x position of the column we are looking for.
++    for (unsigned int i = 0; i < cols; i++)
++    {
++        wxDataViewColumn* col = GetOwner()->GetColumnAt( i );
++
++        if (col == column)
++            break;
++
++        if (col->IsHidden())
++            continue;      // skip it!
++
++        xpos += col->GetWidth();
++        width += col->GetWidth();
++    }
++
++    if(column != 0)
++    {
++        // If we have a column, we need can get its width directly.
++        if(column->IsHidden())
++            width = 0;
++        else
++            width = column->GetWidth();
++
++    }
++    else
++    {
++        // If we have no column, we reset the x position back to zero.
++        xpos = 0;
++    }
++
++    // we have to take an expander column into account and compute its indentation
++    // to get the correct x position where the actual text is
++    int indent = 0;
+     int row = GetRowByItem(item);
+-    int y = GetLineStart( row );
+-    int h = GetLineHeight( m_lineHeight );
+-    int x = 0;
+-    wxDataViewColumn *col = NULL;
+-    for( int i = 0, cols = GetOwner()->GetColumnCount(); i < cols; i ++ )
++    if (!IsVirtualList() && (column == 0 || GetOwner()->GetExpanderColumn() == column) )
+     {
+-    col = GetOwner()->GetColumnAt( i );
+-    x += col->GetWidth();
+-    if( GetOwner()->GetColumnAt(i+1) == column )
+-        break;
++        wxDataViewTreeNode* node = GetTreeNodeByRow(row);
++        indent = GetOwner()->GetIndent() * node->GetIndentLevel();
++        indent = indent + m_lineHeight;	// use m_lineHeight as the width of the expander
++
++        if(!node->HasChildren())
++            delete node;
+     }
+-    int w = col->GetWidth();
+-    m_owner->CalcScrolledPosition( x, y, &x, &y );
+-    return wxRect(x, y, w, h);
++
++    wxRect itemRect( xpos + indent,
++                     GetLineStart( row ),
++                     width - indent,
++                     GetLineHeight( row ) );
++
++    GetOwner()->CalcScrolledPosition(  itemRect.x,  itemRect.y,
++                                      &itemRect.x, &itemRect.y );
++
++    return itemRect;
+ }
+ 
+ int wxDataViewMainWindow::RecalculateCount()
+@@ -4280,7 +4310,18 @@
+     return false;
+ }
+ 
++void wxDataViewCtrl::StartEditor( const wxDataViewItem & item, unsigned int column )
++{
++    wxDataViewColumn* col = GetColumn( column );
++    if(!col)
++        return;
+ 
++    wxRect itemRect = GetItemRect(item, col);
++    wxDataViewRenderer* renderer = col->GetRenderer();
++    renderer->StartEditing(item, itemRect);
++}
++
++
+ #endif
+     // !wxUSE_GENERICDATAVIEWCTRL
+ 

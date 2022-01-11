@@ -1,0 +1,286 @@
+Index: include/wx/dataview.h
+===================================================================
+--- include/wx/dataview.h	(revision 70463)
++++ include/wx/dataview.h	(working copy)
+@@ -27,6 +27,10 @@
+ #include "wx/dataobj.h"
+ #include "wx/withimages.h"
+ 
++#if wxUSE_DRAG_AND_DROP
++#include "wx/dnd.h"
++#endif
++
+ class WXDLLIMPEXP_FWD_CORE wxImageList;
+ 
+ #if !(defined(__WXGTK20__) || defined(__WXOSX__)) || defined(__WXUNIVERSAL__)
+@@ -767,7 +771,9 @@
+ #if wxUSE_DRAG_AND_DROP
+         , m_dataObject(NULL),
+         m_dataBuffer(NULL),
+-        m_dataSize(0)
++        m_dataSize(0),
++        m_dragFlags(0),
++        m_dropEffect(wxDragNone)
+ #endif
+         { }
+ 
+@@ -786,7 +792,9 @@
+         , m_dataObject(event.m_dataObject),
+         m_dataFormat(event.m_dataFormat),
+         m_dataBuffer(event.m_dataBuffer),
+-        m_dataSize(event.m_dataSize)
++        m_dataSize(event.m_dataSize),
++        m_dragFlags(event.m_dragFlags),
++        m_dropEffect(event.m_dropEffect)
+ #endif
+         { }
+ 
+@@ -832,6 +840,10 @@
+     size_t GetDataSize() const { return m_dataSize; }
+     void SetDataBuffer( void* buf ) { m_dataBuffer = buf;}
+     void *GetDataBuffer() const { return m_dataBuffer; }
++    void SetDragFlags( int flags ) { m_dragFlags = flags; }
++    int GetDragFlags() const { return m_dragFlags; }
++    void SetDropEffect( wxDragResult effect ) { m_dropEffect = effect; }
++    wxDragResult GetDropEffect() const { return m_dropEffect; }
+ #endif // wxUSE_DRAG_AND_DROP
+ 
+     virtual wxEvent *Clone() const { return new wxDataViewEvent(*this); }
+@@ -853,6 +865,9 @@
+     wxDataFormat        m_dataFormat;
+     void*               m_dataBuffer;
+     size_t              m_dataSize;
++
++    int                 m_dragFlags;
++    wxDragResult        m_dropEffect;
+ #endif // wxUSE_DRAG_AND_DROP
+ 
+ private:
+Index: interface/wx/dataview.h
+===================================================================
+--- interface/wx/dataview.h	(revision 70463)
++++ interface/wx/dataview.h	(working copy)
+@@ -3022,6 +3022,32 @@
+     void *GetDataBuffer() const;
+ 
+     /**
++        This can be used inside a wxEVT_COMMAND_DATAVIEW_ITEM_BEGIN_DRAG handler in order
++        to configure the drag operation. Valid values are wxDrag_CopyOnly (default),
++        wxDrag_AllowMove (allow the data to be moved) and wxDrag_DefaultMove.
++        
++        @see GetDropEffect()
++    */
++    void SetDragFlags( int flags );
++
++    /**
++        Used internally.
++    */
++    int GetDragFlags() const;
++
++    /**
++        Used internally. Sets the effect of a drop operation.
++    */
++    void SetDropEffect( wxDragResult effect );
++
++    /**
++        Returns the effect the user requested to happen to the dropped data
++        (copy, move, link). This function can be used inside wxEVT_COMMAND_DATAVIEW_ITEM_DROP_POSSIBLE and
++        wxEVT_COMMAND_DATAVIEW_ITEM_DROP handlers.
++    */
++    wxDragResult GetDropEffect() const;
++
++    /**
+         Return the first row that will be displayed.
+     */
+     int GetCacheFrom() const;
+Index: samples/dataview/dataview.cpp
+===================================================================
+--- samples/dataview/dataview.cpp	(revision 70463)
++++ samples/dataview/dataview.cpp	(working copy)
+@@ -841,6 +841,7 @@
+     wxTextDataObject *obj = new wxTextDataObject;
+     obj->SetText( node->m_title );
+     event.SetDataObject( obj );
++    event.SetDragFlags(wxDrag_AllowMove); // allows both copy and move
+ }
+ 
+ void MyFrame::OnDropPossible( wxDataViewEvent &event )
+@@ -1048,8 +1049,17 @@
+ 
+ void MyFrame::OnContextMenu( wxDataViewEvent &event )
+ {
++    wxDataViewItem item;   /* test for HitTest() */
++    wxDataViewColumn* pcolumn;
++    wxPoint pt = event.GetPosition();
++    m_ctrl[0]->HitTest(pt, item, pcolumn);
++    wxString artist = m_music_model->GetArtist(item);
++    wxString column_title;
++    if ( pcolumn )
++        column_title = pcolumn->GetTitle();
+     wxString title = m_music_model->GetTitle( event.GetItem() );
+-    wxLogMessage( "wxEVT_COMMAND_DATAVIEW_ITEM_CONTEXT_MENU, Item: %s", title );
++    wxLogMessage( "wxEVT_COMMAND_DATAVIEW_ITEM_CONTEXT_MENU, Click Point is: (%d,%d), Title: %s, Artist: %s, Column: %s",
++                 pt.x, pt.y, title, artist, column_title );
+ 
+     wxMenu menu;
+     menu.Append( 1, "menuitem 1" );
+Index: src/generic/datavgen.cpp
+===================================================================
+--- src/generic/datavgen.cpp	(revision 70463)
++++ src/generic/datavgen.cpp	(working copy)
+@@ -1472,7 +1472,9 @@
+     event.SetEventObject( m_owner );
+     event.SetItem( item );
+     event.SetModel( model );
++    event.SetPosition(x, y);    // "scrolled position" required for HitTest()
+     event.SetDataFormat( format );
++    event.SetDropEffect( def );
+     if (!m_owner->HandleWindowEvent( event ))
+     {
+         RemoveDropHint();
+@@ -1515,6 +1517,7 @@
+     event.SetEventObject( m_owner );
+     event.SetItem( item );
+     event.SetModel( model );
++    event.SetPosition(x, y);    // "scrolled position" required for HitTest()
+     event.SetDataFormat( format );
+     if (!m_owner->HandleWindowEvent( event ))
+         return false;
+@@ -1546,9 +1549,11 @@
+     event.SetEventObject( m_owner );
+     event.SetItem( item );
+     event.SetModel( model );
++    event.SetPosition(x, y);    // "scrolled position" required for HitTest()
+     event.SetDataFormat( format );
+     event.SetDataSize( obj->GetSize() );
+     event.SetDataBuffer( obj->GetData() );
++    event.SetDropEffect( def );
+     if (!m_owner->HandleWindowEvent( event ))
+         return wxDragNone;
+ 
+@@ -3181,14 +3186,18 @@
+     unsigned int colnum = 0;
+     int x, y;
+     m_owner->CalcUnscrolledPosition( point.x, point.y, &x, &y );
+-    for (unsigned x_start = 0; colnum < cols; colnum++)
++    // x < 0 is possible when point is on the left border.
++    // Using unsigned int results in the last (most right) column
++    // as x_start+w is much smaller than (unsigned int)x for small negative x.
++    // Using int instead of unsigned int for w and x_start results in the first column
++    for (int x_start = 0; colnum < cols; colnum++)
+     {
+         col = GetOwner()->GetColumnAt(colnum);
+         if (col->IsHidden())
+             continue;      // skip it!
+ 
+-        unsigned int w = col->GetWidth();
+-        if (x_start+w >= (unsigned int)x)
++        int w = col->GetWidth();
++        if (x_start+w >= /*(unsigned int)*/x)
+             break;
+ 
+         x_start += w;
+@@ -4001,6 +4010,15 @@
+             event.SetEventObject( m_owner );
+             event.SetItem( itemDragged );
+             event.SetModel( model );
++            // wxDataViewCtrl::HitTest() requires the cursor position when
++            // detecting what is to be dragged.
++            // wxDataViewCtrl::HitTest() uses wxDataViewCtrl coordinates,
++            // i.e. including the header window if any.
++            int width, height = 0;
++            if ( m_owner->m_headerArea != NULL )
++                m_owner->m_headerArea->GetSize(&width, &height);
++            wxPoint pt(m_dragStart.x, m_dragStart.y + height);	// add header size if any
++            event.SetPosition(pt.x, pt.y);   // required for HitTest()
+             if (!m_owner->HandleWindowEvent( event ))
+                 return;
+ 
+@@ -4013,7 +4031,9 @@
+ 
+             wxDataViewDropSource drag( this, drag_item_row );
+             drag.SetData( *obj );
+-            /* wxDragResult res = */ drag.DoDragDrop();
++            // if the client who handled the event did not set the drag flags
++            // wxDrag_CopyOnly will be the default.
++            /* wxDragResult res = */ drag.DoDragDrop(event.GetDragFlags()/*wxDrag_AllowMove*/);
+             delete obj;
+         }
+         return;
+@@ -4115,6 +4135,21 @@
+             SendSelectionChangedEvent(GetItemByRow( m_currentRow ) );
+         }
+     }
++    else if (event.RightUp())
++    {
++        wxVariant value;
++        model->GetValue( value, item, col->GetModelColumn() );
++        wxWindow *parent = GetParent();
++        wxDataViewEvent le(wxEVT_COMMAND_DATAVIEW_ITEM_CONTEXT_MENU, parent->GetId());
++        le.SetItem( item );
++        le.SetColumn( col->GetModelColumn() );
++        le.SetDataViewColumn( col );
++        le.SetEventObject(parent);
++        le.SetModel(GetOwner()->GetModel());
++        le.SetValue(value);
++        le.SetPosition(event.GetX(), event.GetY());   // required for HitTest()
++        parent->GetEventHandler()->ProcessEvent(le);
++    }
+     else if (event.MiddleDown())
+     {
+     }
+Index: src/gtk/dataview.cpp
+===================================================================
+--- src/gtk/dataview.cpp	(revision 70463)
++++ src/gtk/dataview.cpp	(working copy)
+@@ -3560,6 +3560,15 @@
+                                            GtkTreePath *path,
+                                            GtkSelectionData *selection_data)
+ {
++    // GTKPathToItem(path) seems to often calc the wrong item. Observed in
++    // deeper trees. Usually its the item below the darg target.
++    // Hint: It seems GTKPathToItem(path) does not return the drop target
++    // but the first child if the drop target has children.
++    // This still needs further investigation. See also HitTest().
++    // Note: this function is called by wxgtk_tree_model_drag_data_received
++    // which has been set up as a callback for GTK.
++    // Strange: when using the standard DnD method this function drag_data_received()
++    // does NOT get called even when row_drop_possible() returns true!
+     wxDataViewItem item(GetOwner()->GTKPathToItem(path));
+     if ( !item )
+         return FALSE;
+@@ -3571,6 +3580,9 @@
+     event.SetDataFormat(gtk_selection_data_get_target(selection_data));
+     event.SetDataSize(gtk_selection_data_get_length(selection_data));
+     event.SetDataBuffer(const_cast<guchar*>(gtk_selection_data_get_data(selection_data)));
++    gint x, y;
++    gtk_widget_get_pointer( m_owner->GtkGetTreeView(), &x, &y );
++    event.SetPosition( x, y );    // "scrolled position" required for HitTest()
+     if (!m_owner->HandleWindowEvent( event ))
+         return FALSE;
+ 
+@@ -3585,6 +3597,13 @@
+                                           GtkTreePath *path,
+                                           GtkSelectionData *selection_data)
+ {
++    // GTKPathToItem(path) seems to often calc the wrong item. Observed in
++    // deeper trees. Usually its the item below the darg target.
++    // Hint: It seems GTKPathToItem(path) does not return the drop target
++    // but the first child if the drop target has children.
++    // This still needs further investigation. See also HitTest().
++    // Note: this function is called by wxgtk_tree_model_drag_data_received
++    // which has been set up as a callback for GTK.
+     wxDataViewItem item(GetOwner()->GTKPathToItem(path));
+     if ( !item )
+         return FALSE;
+@@ -3594,6 +3613,10 @@
+     event.SetItem( item );
+     event.SetModel( m_wx_model );
+     event.SetDataFormat(gtk_selection_data_get_target(selection_data));
++    event.SetDataSize(gtk_selection_data_get_length(selection_data));
++    gint x, y;
++    gtk_widget_get_pointer( m_owner->GtkGetTreeView(), &x, &y );
++    event.SetPosition( x, y );    // "scrolled position" required for HitTest()
+     if (!m_owner->HandleWindowEvent( event ))
+         return FALSE;
+ 

@@ -1,0 +1,527 @@
+Index: docs/changes.txt
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/changes.txt,v
+retrieving revision 1.628
+diff -u -B -r1.628 changes.txt
+--- docs/changes.txt	2005/03/03 10:53:54	1.628
++++ docs/changes.txt	2005/03/06 14:02:42
+@@ -19,6 +19,9 @@
+ - Added style parameter to wxBufferedDC to allow buffering just the client, or
+   the whole virtual area.
+ 
++wxGTK:
++
++- Improved wxSystemSettings::GetMetric() to work better with X11. (Mart Raudsepp)
+ 
+ wxPalmOS:
+ 
+Index: docs/latex/wx/settings.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/settings.tex,v
+retrieving revision 1.14
+diff -u -B -r1.14 settings.tex
+--- docs/latex/wx/settings.tex	2005/03/02 01:03:42	1.14
++++ docs/latex/wx/settings.tex	2005/03/06 14:02:42
+@@ -97,10 +97,13 @@
+ 
+ \membersection{wxSystemSettings::GetMetric}\label{wxsystemsettingsgetmetric}
+ 
+-\func{static int}{GetMetric}{\param{wxSystemMetric}{ index}}
++\func{static int}{GetMetric}{\param{wxSystemMetric}{ index}, \param{wxWindow*}{ win = NULL}}
+ 
+-Returns the value of a system metric, or -1 if the metric is not
+-supported on the current platform.
++Returns the value of a system metric, or -1 if the metric is not supported on the current system.
++The value of {\it win} determines if the metric returned is a global value or
++a \helpref{wxWindow}{wxwindow} based value, in which case it might determine the widget, the
++display the window is on, or something similar. The window given should be as close to the
++metric as possible (e.g a wxTopLevelWindow in case of the wxSYS_CAPTION_Y metric).
+ 
+ {\it index} can be one of:
+ 
+@@ -151,6 +154,12 @@
+ where it would otherwise present the information only in audible form; zero otherwise.}
+ \twocolitem{{\bf wxSYS\_SWAP\_BUTTONS}}{Non-zero if the meanings of the left and right mouse buttons are swapped; zero otherwise.}
+ \end{twocollist}
++
++{\it win} is a pointer to the window for which the metric is requested.
++Specifying the {\it win} parameter is encouraged, because some metrics on some ports are not supported without one,
++or they might be capable of reporting better values if given one. If a window does not make sense for a metric,
++one should still be given, as for example it might determine which displays cursor width is requested with
++wxSYS_CURSOR_X.
+ 
+ \pythonnote{This static method is implemented in Python as a
+ standalone function named {\tt wxSystemSettings\_GetMetric}}
+Index: include/wx/settings.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/settings.h,v
+retrieving revision 1.29
+diff -u -B -r1.29 settings.h
+--- include/wx/settings.h	2005/01/04 19:25:43	1.29
++++ include/wx/settings.h	2005/03/06 14:02:42
+@@ -81,7 +81,7 @@
+     wxSYS_COLOUR_MAX
+ };
+ 
+-// possible values for wxSystemSettings::GetMetric() parameter
++// possible values for wxSystemSettings::GetMetric() index parameter
+ //
+ // NB: update the conversion table in msw/settings.cpp if you change the values
+ //     of the elements of this enum
+@@ -165,7 +165,7 @@
+     static wxFont GetFont(wxSystemFont index);
+ 
+     // get a system-dependent metric
+-    static int GetMetric(wxSystemMetric index);
++    static int GetMetric(wxSystemMetric index, wxWindow * win = NULL);
+ 
+     // return true if the port has certain feature
+     static bool HasFeature(wxSystemFeature index);
+Index: src/gtk/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/gtk/settings.cpp,v
+retrieving revision 1.53
+diff -u -B -r1.53 settings.cpp
+--- src/gtk/settings.cpp	2005/01/06 12:49:20	1.53
++++ src/gtk/settings.cpp	2005/03/06 14:02:43
+@@ -2,6 +2,7 @@
+ // Name:        gtk/settings.cpp
+ // Purpose:
+ // Author:      Robert Roebling
++// Modified by: Mart Raudsepp (GetMetric)
+ // Id:          $Id: settings.cpp,v 1.53 2005/01/06 12:49:20 RR Exp $
+ // Copyright:   (c) 1998 Robert Roebling
+ // Licence:     wxWindows licence
+@@ -21,9 +22,12 @@
+ #include "wx/fontutil.h"
+ 
+ #include <gdk/gdk.h>
++#include <gdk/gdkx.h>
+ #include <gdk/gdkprivate.h>
+ #include <gtk/gtk.h>
+ 
++#include <X11/Xatom.h>
++
+ #define SHIFT (8*(sizeof(short int)-sizeof(char)))
+ 
+ // ----------------------------------------------------------------------------
+@@ -363,41 +367,151 @@
+     }
+ }
+ 
+-int wxSystemSettingsNative::GetMetric( wxSystemMetric index )
++int wxSystemSettingsNative::GetMetric( wxSystemMetric index, wxWindow* win )
+ {
++#ifdef __WXGTK20__
++    guchar *data = NULL;
++    GdkWindow *window = NULL;
++    if(win && GTK_WIDGET_REALIZED(win->GetHandle()))
++        window = win->GetHandle()->window;
++#endif
++
+     switch (index)
+     {
+-        case wxSYS_SCREEN_X:   return gdk_screen_width();
+-        case wxSYS_SCREEN_Y:   return gdk_screen_height();
+-        case wxSYS_HSCROLL_Y:  return 15;
+-        case wxSYS_VSCROLL_X:  return 15;
++        case wxSYS_BORDER_X:
++        case wxSYS_BORDER_Y:
++        case wxSYS_EDGE_X:
++        case wxSYS_EDGE_Y:
++        case wxSYS_FRAMESIZE_X:
++        case wxSYS_FRAMESIZE_Y:
++            // If a window is specified/realized, and it is a toplevel window, we can query from wm.
++            // The returned border thickness is outside the client area in that case.
++            if (window)
++            {
++                wxTopLevelWindow *tlw = wxDynamicCast(win, wxTopLevelWindow);
++                if (!tlw)
++                    return -1; // not a tlw, not sure how to approach
++                else
++                {
++                    // Check if wm supports frame extents - we can't know
++                    // the border widths if it does not.
++#if GTK_CHECK_VERSION(2,2,0)
++                    if (!gtk_check_version(2,2,0))
++                    {
++                        if (!gdk_x11_screen_supports_net_wm_hint(
++                                gdk_drawable_get_screen(window),
++                                gdk_atom_intern("_NET_FRAME_EXTENTS", false) ) )
++                            return -1;
++                    }
++                    else
++#endif
++                    {
++                        if (!gdk_net_wm_supports(gdk_atom_intern("_NET_FRAME_EXTENTS", false)))
++                            return -1;
++                    }
++    
++                    // Get the frame extents from the windowmanager.
++                    // In most cases the top extent is the titlebar, so we use the bottom extent
++                    // for the heights.
++    
++                    Atom type;
++                    gint format;
++                    gulong nitems;
++                    gulong bytes_after;
++    
++                    if (XGetWindowProperty (GDK_DISPLAY_XDISPLAY(gdk_drawable_get_display(window)),
++                                            GDK_WINDOW_XWINDOW(window),
++                                            gdk_x11_get_xatom_by_name_for_display (
++                                                    gdk_drawable_get_display(window),
++                                                    "_NET_FRAME_EXTENTS" ),
++                                            0, // left, right, top, bottom, CARDINAL[4]/32
++                                            G_MAXLONG, // size of long
++                                            false, // do not delete property
++                                            XA_CARDINAL, // 32 bit
++                                            &type, &format, &nitems, &bytes_after, &data
++                                           ) == Success)
++                    {
++                        int border_return = -1;
++
++                        if ((type == XA_CARDINAL) && (format == 32) && (nitems >= 4) && (data))
++                        {
++                            long *borders;
++                            borders = (long*)data;
++                            switch(index)
++                            {
++                                case wxSYS_BORDER_X:
++                                case wxSYS_EDGE_X:
++                                case wxSYS_FRAMESIZE_X:
++                                    border_return = borders[1]; // width of right extent
++                                    break;
++                                default:
++                                    border_return = borders[3]; // height of bottom extent
++                                    break;
++                            }
++                        }
++
++                        if (data)
++                            XFree(data);
++
++                        return border_return;
++                    }
++                }
++            }
+ 
+-#if defined(__WXGTK20__) && GTK_CHECK_VERSION(2, 4, 0)
++            return -1; // no window specified
++
++        case wxSYS_CURSOR_X:
++        case wxSYS_CURSOR_Y:
++#ifdef __WXGTK24__
++            if (!gtk_check_version(2,4,0))
++            {
++                if (window)
++                    return gdk_display_get_default_cursor_size(gdk_drawable_get_display(window));
++                else
++                    return gdk_display_get_default_cursor_size(gdk_display_get_default());
++            }
++            else
++#endif
++                return 16;
++
++#ifdef __WXGTK20__
+         case wxSYS_DCLICK_X:
+         case wxSYS_DCLICK_Y:
+             gint dclick_distance;
+-            g_object_get(gtk_settings_get_default(), "gtk-double-click-distance", &dclick_distance, NULL);
+-            return dclick_distance * 2;
++#if GTK_CHECK_VERSION(2,2,0)
++            if (window && !gtk_check_version(2,2,0))
++                g_object_get(gtk_settings_get_for_screen(gdk_drawable_get_screen(window)),
++                                "gtk-double-click-distance", &dclick_distance, NULL);
++            else
+ #endif
++                g_object_get(gtk_settings_get_default(),
++                                "gtk-double-click-distance", &dclick_distance, NULL);
+ 
+-#if defined(__WXGTK20__)
++            return dclick_distance * 2;
++#endif // gtk2
++
++#ifdef __WXGTK20__
+         case wxSYS_DRAG_X:
+         case wxSYS_DRAG_Y:
+             gint drag_threshold;
+-            g_object_get(gtk_settings_get_default(), "gtk-dnd-drag-threshold", &drag_threshold, NULL);
+-            return drag_threshold * 2;
++#if GTK_CHECK_VERSION(2,2,0)
++            if (window && !gtk_check_version(2,2,0))
++            {
++                g_object_get(
++                        gtk_settings_get_for_screen(gdk_drawable_get_screen(window)),
++                        "gtk-dnd-drag-threshold",
++                        &drag_threshold, NULL);
++            }
++            else
+ #endif
++            {
++                g_object_get(gtk_settings_get_default(),
++                             "gtk-dnd-drag-threshold", &drag_threshold, NULL);
++            }
+ 
+-        // VZ: is there any way to get the cursor size with GDK?
+-        // Mart Raudsepp: Yes, there is a way to get the default cursor size for a display ever since GDK 2.4
+-#if defined(__WXGTK20__) && GTK_CHECK_VERSION(2, 4, 0)
+-        case wxSYS_CURSOR_X:
+-        case wxSYS_CURSOR_Y:
+-            return gdk_display_get_default_cursor_size(gdk_display_get_default());
+-#else
+-        case wxSYS_CURSOR_X:   return 16;
+-        case wxSYS_CURSOR_Y:   return 16;
++            return drag_threshold * 2;
+ #endif
++
+         // MBN: ditto for icons
+         case wxSYS_ICON_X:     return 32;
+         case wxSYS_ICON_Y:     return 32;
+@@ -401,7 +515,101 @@
+         // MBN: ditto for icons
+         case wxSYS_ICON_X:     return 32;
+         case wxSYS_ICON_Y:     return 32;
+-        default:               
++
++        case wxSYS_SCREEN_X:
++#if defined(__WXGTK20__) && GTK_CHECK_VERSION(2,2,0)
++            if (window && !gtk_check_version(2,2,0))
++                return gdk_screen_get_width(gdk_drawable_get_screen(window));
++            else
++#endif
++                return gdk_screen_width();
++
++        case wxSYS_SCREEN_Y:
++#if defined(__WXGTK20__) && GTK_CHECK_VERSION(2,2,0)
++            if (window && !gtk_check_version(2,2,0))
++                return gdk_screen_get_height(gdk_drawable_get_screen(window));
++            else
++#endif
++                return gdk_screen_height();
++
++        case wxSYS_HSCROLL_Y:  return 15;
++        case wxSYS_VSCROLL_X:  return 15;
++
++// a gtk1 implementation should be possible too if gtk2 efficiency/convenience functions aren't used
++#ifdef __WXGTK20__
++        case wxSYS_CAPTION_Y:
++            if (!window)
++                // No realized window specified, and no implementation for that case yet.
++                return -1;
++
++            // Check if wm supports frame extents - we can't know the caption height if it does not.
++#if GTK_CHECK_VERSION(2,2,0)
++            if (!gtk_check_version(2,2,0))
++            {
++                if (!gdk_x11_screen_supports_net_wm_hint(
++                        gdk_drawable_get_screen(window),
++                        gdk_atom_intern("_NET_FRAME_EXTENTS", false) ) )
++                    return -1;
++            }
++            else
++#endif
++            {
++                if (!gdk_net_wm_supports(gdk_atom_intern("_NET_FRAME_EXTENTS", false)))
++                    return -1;
++            }
++
++            wxASSERT_MSG( wxDynamicCast(win, wxTopLevelWindow),
++                          wxT("Asking for caption height of a non toplevel window") );
++
++            // Get the height of the top windowmanager border.
++            // This is the titlebar in most cases. The titlebar might be elsewhere, and
++            // we could check which is the thickest wm border to decide on which side the
++            // titlebar is, but this might lead to interesting behaviours in used code.
++            // Reconsider when we have a way to report to the user on which side it is.
++
++            Atom type;
++            gint format;
++            gulong nitems;
++            gulong bytes_after;
++
++            if (XGetWindowProperty (GDK_DISPLAY_XDISPLAY(gdk_drawable_get_display(window)),
++                                    GDK_WINDOW_XWINDOW(window),
++                                    gdk_x11_get_xatom_by_name_for_display (
++                                            gdk_drawable_get_display(window),
++                                            "_NET_FRAME_EXTENTS" ),
++                                    0, // left, right, top, bottom, CARDINAL[4]/32
++                                    G_MAXLONG, // size of long
++                                    false, // do not delete property
++                                    XA_CARDINAL, // 32 bit
++                                    &type, &format, &nitems, &bytes_after, &data
++                                   ) == Success)
++            {
++                int caption_height = -1;
++
++                if ((type == XA_CARDINAL) && (format == 32) && (nitems >= 3) && (data))
++                {
++                    long *borders;
++                    borders = (long*)data;
++                    caption_height = borders[2]; // top frame extent
++                }
++
++                if (data)
++                    XFree(data);
++
++                return caption_height;
++            }
++
++            // Try a default approach without a window pointer, if possible
++            // ...
++
++            return -1;
++#endif // gtk2
++
++        case wxSYS_PENWINDOWS_PRESENT:
++            // No MS Windows for Pen computing extension available in X11 based gtk+.
++            return 0;
++
++        default:
+             return -1;   // metric is unknown
+     }
+ }
+Index: src/cocoa/settings.mm
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/cocoa/settings.mm,v
+retrieving revision 1.3
+diff -u -B -r1.3 settings.mm
+--- src/cocoa/settings.mm	2005/01/12 15:39:02	1.3
++++ src/cocoa/settings.mm	2005/03/06 14:02:43
+@@ -135,7 +135,7 @@
+ // ----------------------------------------------------------------------------
+ 
+ // Get a system metric, e.g. scrollbar size
+-int wxSystemSettingsNative::GetMetric(wxSystemMetric index)
++int wxSystemSettingsNative::GetMetric(wxSystemMetric index, wxWindow *WXUNUSED(win))
+ {
+     switch ( index)
+     {
+Index: src/mac/carbon/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/carbon/settings.cpp,v
+retrieving revision 1.18
+diff -u -B -r1.18 settings.cpp
+--- src/mac/carbon/settings.cpp	2005/01/27 20:59:29	1.18
++++ src/mac/carbon/settings.cpp	2005/03/06 14:02:43
+@@ -154,7 +154,7 @@
+ // ----------------------------------------------------------------------------
+ 
+ // Get a system metric, e.g. scrollbar size
+-int wxSystemSettingsNative::GetMetric(wxSystemMetric index)
++int wxSystemSettingsNative::GetMetric(wxSystemMetric index, wxWindow* WXUNUSED(win))
+ {
+     int value;
+ 
+Index: src/mac/classic/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mac/classic/settings.cpp,v
+retrieving revision 1.4
+diff -u -B -r1.4 settings.cpp
+--- src/mac/classic/settings.cpp	2004/09/29 21:55:52	1.4
++++ src/mac/classic/settings.cpp	2005/03/06 14:02:43
+@@ -152,7 +152,7 @@
+ // ----------------------------------------------------------------------------
+ 
+ // Get a system metric, e.g. scrollbar size
+-int wxSystemSettingsNative::GetMetric(wxSystemMetric index)
++int wxSystemSettingsNative::GetMetric(wxSystemMetric index, wxWindow* WXUNUSED(win))
+ {
+     int value;
+ 
+Index: src/mgl/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/mgl/settings.cpp,v
+retrieving revision 1.18
+diff -u -B -r1.18 settings.cpp
+--- src/mgl/settings.cpp	2004/09/29 21:55:46	1.18
++++ src/mgl/settings.cpp	2005/03/06 14:02:43
+@@ -78,7 +78,7 @@
+     }
+ }
+ 
+-int wxSystemSettingsNative::GetMetric(wxSystemMetric index)
++int wxSystemSettingsNative::GetMetric(wxSystemMetric index, wxWindow* WXUNUSED(win))
+ {
+     int val;
+     
+Index: src/motif/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/motif/settings.cpp,v
+retrieving revision 1.22
+diff -u -B -r1.22 settings.cpp
+--- src/motif/settings.cpp	2005/02/06 17:38:32	1.22
++++ src/motif/settings.cpp	2005/03/06 14:02:43
+@@ -182,7 +182,7 @@
+ }
+ 
+ // Get a system metric, e.g. scrollbar size
+-int wxSystemSettingsNative::GetMetric(wxSystemMetric index)
++int wxSystemSettingsNative::GetMetric(wxSystemMetric index, wxWindow* WXUNUSED(win))
+ {
+     int return_value = 0;
+ 
+Index: src/msw/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/settings.cpp,v
+retrieving revision 1.37
+diff -u -B -r1.37 settings.cpp
+--- src/msw/settings.cpp	2005/01/04 19:40:54	1.37
++++ src/msw/settings.cpp	2005/03/06 14:02:43
+@@ -377,7 +377,7 @@
+ };
+ 
+ // Get a system metric, e.g. scrollbar size
+-int wxSystemSettingsNative::GetMetric(wxSystemMetric index)
++int wxSystemSettingsNative::GetMetric(wxSystemMetric index, wxWindow* WXUNUSED(win))
+ {
+ #ifdef __WXMICROWIN__
+     // TODO: probably use wxUniv themes functionality
+Index: src/os2/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/os2/settings.cpp,v
+retrieving revision 1.20
+diff -u -B -r1.20 settings.cpp
+--- src/os2/settings.cpp	2004/09/29 21:55:32	1.20
++++ src/os2/settings.cpp	2005/03/06 14:02:43
+@@ -251,6 +251,7 @@
+ // Get a system metric, e.g. scrollbar size
+ int wxSystemSettingsNative::GetMetric(
+   wxSystemMetric                    index
++, wxWindow*                         WXUNUSED(win)
+ )
+ {
+     switch ( index)
+Index: src/palmos/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/palmos/settings.cpp,v
+retrieving revision 1.5
+diff -u -B -r1.5 settings.cpp
+--- src/palmos/settings.cpp	2005/02/10 09:22:12	1.5
++++ src/palmos/settings.cpp	2005/03/06 14:02:47
+@@ -123,7 +123,7 @@
+ // ----------------------------------------------------------------------------
+ 
+ // Get a system metric, e.g. scrollbar size
+-int wxSystemSettingsNative::GetMetric(wxSystemMetric index)
++int wxSystemSettingsNative::GetMetric(wxSystemMetric index, wxWindow* WXUNUSED(win))
+ {
+     int metric = -1;
+     uint32_t attrP;
+Index: src/x11/settings.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/x11/settings.cpp,v
+retrieving revision 1.9
+diff -u -B -r1.9 settings.cpp
+--- src/x11/settings.cpp	2004/09/29 21:55:25	1.9
++++ src/x11/settings.cpp	2005/03/06 14:02:47
+@@ -59,7 +59,7 @@
+ }
+ 
+ // Get a system metric, e.g. scrollbar size
+-int wxSystemSettingsNative::GetMetric(wxSystemMetric index)
++int wxSystemSettingsNative::GetMetric(wxSystemMetric index, wxWindow* WXUNUSED(win))
+ {
+ 	switch ( index)
+ 	{
+
+ 	  	 

@@ -1,0 +1,221 @@
+Index: src/msw/button.cpp
+===================================================================
+--- src/msw/button.cpp	(revision 63417)
++++ src/msw/button.cpp	(working copy)
+@@ -103,6 +103,12 @@
+     #define DT_HIDEPREFIX       0x00100000
+ #endif
+ 
++// set the value for BCM_SETSHIELD (for the UAC shield) if it's not defined in
++// the header
++#ifndef BCM_SETSHIELD 
++    #define BCM_SETSHIELD       0x160c
++#endif
++
+ // ----------------------------------------------------------------------------
+ // button image data
+ // ----------------------------------------------------------------------------
+@@ -433,7 +439,8 @@
+         ::SetWindowLong(hwnd, GWL_STYLE, styleNew);
+ }
+ 
+-wxSize wxMSWButton::GetFittingSize(wxWindow *win, const wxSize& sizeLabel)
++wxSize wxMSWButton::GetFittingSize(wxWindow *win, const wxSize& sizeLabel,
++                                   bool authNeeded)
+ {
+     // FIXME: this is pure guesswork, need to retrieve the real button margins
+     wxSize sizeBtn = sizeLabel;
+@@ -441,17 +448,21 @@
+     sizeBtn.x += 3*win->GetCharWidth();
+     sizeBtn.y = 11*EDIT_HEIGHT_FROM_CHAR_HEIGHT(sizeLabel.y)/10;
+ 
++    // allow for the UAC symbol, which is always 16px wide
++    if ( authNeeded )
++        sizeBtn.x += 16;
++
+     return sizeBtn;
+ }
+ 
+-wxSize wxMSWButton::ComputeBestSize(wxControl *btn)
++wxSize wxMSWButton::ComputeBestSize(wxControl *btn, bool authNeeded)
+ {
+     wxClientDC dc(btn);
+ 
+     wxSize sizeBtn;
+     dc.GetMultiLineTextExtent(btn->GetLabelText(), &sizeBtn.x, &sizeBtn.y);
+ 
+-    sizeBtn = GetFittingSize(btn, sizeBtn);
++    sizeBtn = GetFittingSize(btn, sizeBtn, authNeeded);
+ 
+     // all buttons have at least the standard size unless the user explicitly
+     // wants them to be of smaller size and used wxBU_EXACTFIT style when
+@@ -486,6 +497,8 @@
+                       const wxValidator& validator,
+                       const wxString& name)
+ {
++    m_authNeeded = false;
++
+     wxString label(lbl);
+     if (label.empty() && wxIsStockID(id))
+     {
+@@ -583,7 +596,8 @@
+     // zero size)
+     if ( ShowsLabel() || !m_imageData )
+     {
+-        size = wxMSWButton::ComputeBestSize(const_cast<wxButton *>(this));
++        size = wxMSWButton::ComputeBestSize(const_cast<wxButton *>(this),
++                                            m_authNeeded);
+     }
+ 
+     if ( m_imageData )
+@@ -949,6 +963,25 @@
+ }
+ 
+ // ----------------------------------------------------------------------------
++// authentication needed handling
++// ----------------------------------------------------------------------------
++
++bool wxButton::DoGetAuthNeeded() const
++{
++    return m_authNeeded;
++}
++
++void wxButton::DoSetAuthNeeded(bool show)
++{
++    // show/hide UAC symbol on Windows Vista and later
++    if ( wxGetWinVersion() >= wxWinVersion_6 ) {
++        m_authNeeded = show;
++        ::SendMessage(GetHwnd(), BCM_SETSHIELD, 0, show);
++        InvalidateBestSize();
++    }
++}
++
++// ----------------------------------------------------------------------------
+ // button images
+ // ----------------------------------------------------------------------------
+ 
+Index: docs/changes.txt
+===================================================================
+--- docs/changes.txt	(revision 63417)
++++ docs/changes.txt	(working copy)
+@@ -522,6 +522,7 @@
+ - Suppressed spurious character event for decimal key in numeric keypad.
+ - Allow to not create wxPaintDC in EVT_PAINT handler.
+ - Fix sending of wxEVT_COMMAND_LIST_COL_DRAGGING events in wxListCtrl.
++- Allow putting the UAC symbol on buttons (Chris Spencer).
+ 
+ i18n:
+ 
+Index: include/wx/button.h
+===================================================================
+--- include/wx/button.h	(revision 63417)
++++ include/wx/button.h	(working copy)
+@@ -64,6 +64,12 @@
+ public:
+     wxButtonBase() { }
+ 
++    // show the authentication needed symbol on the button: this is currently
++    // only implemented on Windows Vista and newer (on which it shows the UAC
++    // shield symbol)
++    void SetAuthNeeded(bool show) { DoSetAuthNeeded(show); }
++    bool GetAuthNeeded() const { return DoGetAuthNeeded(); }
++
+     // show the image in the button in addition to the label: this method is
+     // supported on all (major) platforms
+     void SetBitmap(const wxBitmap& bitmap, wxDirection dir = wxLEFT)
+@@ -170,6 +176,9 @@
+     // choose the default border for this window
+     virtual wxBorder GetDefaultBorder() const { return wxBORDER_NONE; }
+ 
++    virtual bool DoGetAuthNeeded() const { return false; }
++    virtual void DoSetAuthNeeded(bool WXUNUSED(show)) { }
++
+     virtual wxBitmap DoGetBitmap(State WXUNUSED(which)) const
+         { return wxBitmap(); }
+     virtual void DoSetBitmap(const wxBitmap& WXUNUSED(bitmap),
+Index: include/wx/msw/button.h
+===================================================================
+--- include/wx/msw/button.h	(revision 63417)
++++ include/wx/msw/button.h	(working copy)
+@@ -80,6 +80,8 @@
+     // usually overridden base class virtuals
+     virtual wxSize DoGetBestSize() const;
+ 
++    virtual bool DoGetAuthNeeded() const;
++    virtual void DoSetAuthNeeded(bool show);
+     virtual wxBitmap DoGetBitmap(State which) const;
+     virtual void DoSetBitmap(const wxBitmap& bitmap, State which);
+     virtual wxSize DoGetBitmapMargins() const;
+@@ -88,6 +90,9 @@
+ 
+     class wxButtonImageData *m_imageData;
+ 
++    // true if the UAC symbol is shown
++    bool m_authNeeded;
++
+ private:
+     DECLARE_DYNAMIC_CLASS_NO_COPY(wxButton)
+ };
+Index: include/wx/msw/private/button.h
+===================================================================
+--- include/wx/msw/private/button.h	(revision 63417)
++++ include/wx/msw/private/button.h	(working copy)
+@@ -47,11 +47,12 @@
+ 
+ // common implementation of wxButton and wxToggleButton::DoGetBestSize()
+ // (implemented in src/msw/button.cpp)
+-wxSize ComputeBestSize(wxControl *btn);
++wxSize ComputeBestSize(wxControl *btn, bool authNeeded = false);
+ 
+ // compute the button size (as if wxBU_EXACTFIT were specified, i.e. without
+ // adjusting it to be of default size if it's smaller) for the given label size
+-wxSize GetFittingSize(wxWindow *win, const wxSize& sizeLabel);
++wxSize GetFittingSize(wxWindow *win, const wxSize& sizeLabel,
++                      bool authNeeded = false);
+ 
+ } // namespace wxMSWButton
+ 
+Index: interface/wx/button.h
+===================================================================
+--- interface/wx/button.h	(revision 63417)
++++ interface/wx/button.h	(working copy)
+@@ -147,6 +147,19 @@
+                 const wxString& name = wxButtonNameStr);
+ 
+     /**
++        Returns @true if an authentication needed symbol is displayed on the
++        button.
++
++        @remarks This method always returns @false if the platform is not
++                 Windows Vista or newer.
++
++        @see SetAuthNeeded()
++
++        @since 2.9.1
++     */
++    bool GetAuthNeeded() const;
++
++    /**
+         Return the bitmap shown by the button.
+ 
+         The returned bitmap may be invalid only if the button doesn't show any
+@@ -224,6 +237,19 @@
+     wxString GetLabel() const;
+ 
+     /**
++        Sets whether an authentication needed symbol should be displayed on the
++        button.
++
++        @remarks This method doesn't do anything if the platform is not Windows
++                 Vista or newer.
++
++        @see GetAuthNeeded()
++
++        @since 2.9.1
++     */
++    void SetAuthNeeded(bool show);
++
++    /**
+         Sets the bitmap to display in the button.
+ 
+         The bitmap is displayed together with the button label. This method

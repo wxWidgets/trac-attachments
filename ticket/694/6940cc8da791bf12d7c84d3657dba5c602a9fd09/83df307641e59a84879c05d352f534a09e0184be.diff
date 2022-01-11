@@ -1,0 +1,172 @@
+diff -ur ../wxWidgets/include/wx/gtk/private.h ./include/wx/gtk/private.h
+--- ../wxWidgets/include/wx/gtk/private.h	2006-01-22 16:30:05.000000000 -0800
++++ ./include/wx/gtk/private.h	2006-01-22 20:59:48.000000000 -0800
+@@ -117,5 +117,8 @@
+                                            gint         *height);
+ #endif
+ 
++// Shared arrow-key handler for wxRadioBox, wxRadioButton
++extern "C" gint wx_radio_keypress_callback(GtkWidget* widget, GdkEventKey* gdk_event, wxWindow *win);
++
+ #endif // _WX_GTK_PRIVATE_H_
+ 
+diff -ur ../wxWidgets/src/gtk/radiobox.cpp ./src/gtk/radiobox.cpp
+--- ../wxWidgets/src/gtk/radiobox.cpp	2006-01-22 16:30:06.000000000 -0800
++++ ./src/gtk/radiobox.cpp	2006-01-22 21:24:31.000000000 -0800
+@@ -60,55 +60,95 @@
+ }
+ 
+ //-----------------------------------------------------------------------------
+-// "key_press_event"
++// sort callbacks for ordering buttons by screen position
+ //-----------------------------------------------------------------------------
+ 
+ extern "C" {
+-static gint gtk_radiobox_keypress_callback( GtkWidget *widget, GdkEventKey *gdk_event, wxRadioBox *rb )
++// order for up/down priority
++static gint sort_compare_down(gconstpointer a, gconstpointer b)
++{
++    const GtkWidget* w1 = (GtkWidget*)a;
++    const GtkWidget* w2 = (GtkWidget*)b;
++    gint cmp = w1->allocation.x - w2->allocation.x;
++    if (cmp == 0)
++    {
++        cmp = w1->allocation.y - w2->allocation.y;
++    }
++    return cmp;
++}
++}
++
++extern "C" {
++// order for left/right priority
++static gint sort_compare_right(gconstpointer a, gconstpointer b)
++{
++    const GtkWidget* w1 = (GtkWidget*)a;
++    const GtkWidget* w2 = (GtkWidget*)b;
++    gint cmp = w1->allocation.y - w2->allocation.y;
++    if (cmp == 0)
++    {
++        cmp = w1->allocation.x - w2->allocation.x;
++    }
++    return cmp;
++}
++}
++
++//-----------------------------------------------------------------------------
++// handler for "key_press_event", shared with wxRadioButton
++//-----------------------------------------------------------------------------
++
++extern "C" {
++gint wx_radio_keypress_callback(GtkWidget* widget, GdkEventKey* gdk_event, wxWindow* win)
+ {
+     if (g_isIdle)
+         wxapp_install_idle_handler();
+ 
+-    if (!rb->m_hasVMT) return FALSE;
++    if (!win->m_hasVMT) return FALSE;
+     if (g_blockEventsOnDrag) return FALSE;
+ 
+-    if ((gdk_event->keyval != GDK_Up) &&
+-        (gdk_event->keyval != GDK_Down) &&
+-        (gdk_event->keyval != GDK_Left) &&
+-        (gdk_event->keyval != GDK_Right))
++    GSList* list = NULL;
++    switch (gdk_event->keyval)
+     {
++    case GDK_Up:
++    case GDK_Down:
++        list = gtk_radio_button_group((GtkRadioButton*)widget);
++        list = g_slist_copy(list);
++        list = g_slist_sort(list, sort_compare_down);
++        break;
++    case GDK_Left:
++    case GDK_Right:
++        list = gtk_radio_button_group((GtkRadioButton*)widget);
++        list = g_slist_copy(list);
++        list = g_slist_sort(list, sort_compare_right);
++        break;
++    default:
+         return FALSE;
+     }
+ 
+-    wxList::compatibility_iterator node = rb->m_boxes.Find( (wxObject*) widget );
+-    if (!node)
++    if (gdk_event->keyval == GDK_Up || gdk_event->keyval == GDK_Left)
+     {
+-        return FALSE;
++        list = g_slist_reverse(list);
+     }
+ 
+-    g_signal_stop_emission_by_name (widget, "key_press_event");
+-
+-    if ((gdk_event->keyval == GDK_Up) ||
+-        (gdk_event->keyval == GDK_Left))
++    GtkWidget* button = NULL;
++    GSList* node = g_slist_find(list, widget);
++    wxASSERT(node != NULL);
++    node = node->next;
++    if (node == NULL)
+     {
+-        if (node == rb->m_boxes.GetFirst())
+-            node = rb->m_boxes.GetLast();
+-        else
+-            node = node->GetPrevious();
+-    }
+-    else
+-    {
+-        if (node == rb->m_boxes.GetLast())
+-            node = rb->m_boxes.GetFirst();
+-        else
+-            node = node->GetNext();
++        node = list;
+     }
++    button = (GtkWidget*)node->data;
+ 
+-    GtkWidget *button = (GtkWidget*) node->GetData();
++    g_slist_free(list);
+ 
+-    gtk_widget_grab_focus( button );
+-
+-    return TRUE;
++    if (button != NULL)
++    {
++        g_signal_stop_emission_by_name(widget, "key_press_event");
++        gtk_widget_grab_focus(button);
++        gtk_toggle_button_set_state((GtkToggleButton*)button, TRUE);
++    }
++    return button != NULL;
+ }
+ }
+ 
+@@ -235,7 +275,7 @@
+         gtk_widget_show( GTK_WIDGET(m_radio) );
+ 
+         g_signal_connect (m_radio, "key_press_event",
+-                          G_CALLBACK (gtk_radiobox_keypress_callback), this);
++                          G_CALLBACK (wx_radio_keypress_callback), this);
+ 
+         m_boxes.Append( (wxObject*) m_radio );
+ 
+diff -ur ../wxWidgets/src/gtk/radiobut.cpp ./src/gtk/radiobut.cpp
+--- ../wxWidgets/src/gtk/radiobut.cpp	2006-01-22 16:30:06.000000000 -0800
++++ ./src/gtk/radiobut.cpp	2006-01-22 21:18:21.000000000 -0800
+@@ -10,7 +10,7 @@
+ // For compilers that support precompilation, includes "wx.h".
+ #include "wx/wxprec.h"
+ 
+-#if wxUSE_RADIOBOX
++#if wxUSE_RADIOBTN
+ 
+ #include "wx/radiobut.h"
+ 
+@@ -113,6 +113,8 @@
+ 
+     g_signal_connect (m_widget, "clicked",
+                       G_CALLBACK (gtk_radiobutton_clicked_callback), this);
++    g_signal_connect (m_widget, "key_press_event",
++                      G_CALLBACK (wx_radio_keypress_callback), this);
+ 
+     m_parent->DoAddChild( this );
+ 
+
+ 	  	 

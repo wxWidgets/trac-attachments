@@ -1,0 +1,232 @@
+Index: samples/stc/defsext.h
+===================================================================
+--- samples/stc/defsext.h	(revision 76460)
++++ samples/stc/defsext.h	(working copy)
+@@ -73,6 +73,9 @@
+     myID_CONVERTCR,
+     myID_CONVERTCRLF,
+     myID_CONVERTLF,
++    myID_MULTIPLE_SELECTIONS,
++    myID_MULTI_PASTE,
++    myID_MULTIPLE_SELECTIONS_TYPING,
+     myID_USECHARSET,
+     myID_CHARSETANSI,
+     myID_CHARSETMAC,
+Index: samples/stc/edit.cpp
+===================================================================
+--- samples/stc/edit.cpp	(revision 76460)
++++ samples/stc/edit.cpp	(working copy)
+@@ -103,11 +103,14 @@
+     EVT_MENU (myID_ANNOTATION_STYLE_STANDARD, Edit::OnAnnotationStyle)
+     EVT_MENU (myID_ANNOTATION_STYLE_BOXED,    Edit::OnAnnotationStyle)
+     // extra
+-    EVT_MENU (myID_CHANGELOWER,        Edit::OnChangeCase)
+-    EVT_MENU (myID_CHANGEUPPER,        Edit::OnChangeCase)
+-    EVT_MENU (myID_CONVERTCR,          Edit::OnConvertEOL)
+-    EVT_MENU (myID_CONVERTCRLF,        Edit::OnConvertEOL)
+-    EVT_MENU (myID_CONVERTLF,          Edit::OnConvertEOL)
++    EVT_MENU (myID_CHANGELOWER,                 Edit::OnChangeCase)
++    EVT_MENU (myID_CHANGEUPPER,                 Edit::OnChangeCase)
++    EVT_MENU (myID_CONVERTCR,                   Edit::OnConvertEOL)
++    EVT_MENU (myID_CONVERTCRLF,                 Edit::OnConvertEOL)
++    EVT_MENU (myID_CONVERTLF,                   Edit::OnConvertEOL)
++    EVT_MENU(myID_MULTIPLE_SELECTIONS,          Edit::OnMultipleSelections)
++    EVT_MENU(myID_MULTI_PASTE,                  Edit::OnMultiPaste)
++    EVT_MENU(myID_MULTIPLE_SELECTIONS_TYPING,   Edit::OnMultipleSelectionsTyping)
+     // stc
+     EVT_STC_MARGINCLICK (wxID_ANY,     Edit::OnMarginClick)
+     EVT_STC_CHARADDED (wxID_ANY,       Edit::OnCharAdded)
+@@ -439,6 +442,26 @@
+     SetEOLMode (eolMode);
+ }
+ 
++void Edit::OnMultipleSelections(wxCommandEvent& WXUNUSED(event)) {
++    bool isSet = GetMultipleSelection();
++    SetMultipleSelection(!isSet);
++}
++
++void Edit::OnMultiPaste(wxCommandEvent& WXUNUSED(event)) {
++    int pasteMode = GetMultiPaste();
++    if (wxSTC_MULTIPASTE_EACH == pasteMode) {
++        SetMultiPaste(wxSTC_MULTIPASTE_ONCE);
++    }
++    else {
++        SetMultiPaste(wxSTC_MULTIPASTE_EACH);
++    }
++}
++
++void Edit::OnMultipleSelectionsTyping(wxCommandEvent& WXUNUSED(event)) {
++    bool isSet = GetAdditionalSelectionTyping();
++    SetAdditionalSelectionTyping(!isSet);
++}
++
+ //! misc
+ void Edit::OnMarginClick (wxStyledTextEvent &event) {
+     if (event.GetMargin() == 2) {
+Index: samples/stc/edit.h
+===================================================================
+--- samples/stc/edit.h	(revision 76460)
++++ samples/stc/edit.h	(working copy)
+@@ -98,6 +98,9 @@
+     //! extra
+     void OnChangeCase (wxCommandEvent &event);
+     void OnConvertEOL (wxCommandEvent &event);
++    void OnMultipleSelections(wxCommandEvent& event);
++    void OnMultiPaste(wxCommandEvent& event);
++    void OnMultipleSelectionsTyping(wxCommandEvent& event);
+     // stc
+     void OnMarginClick (wxStyledTextEvent &event);
+     void OnCharAdded  (wxStyledTextEvent &event);
+Index: samples/stc/stctest.cpp
+===================================================================
+--- samples/stc/stctest.cpp	(revision 76460)
++++ samples/stc/stctest.cpp	(working copy)
+@@ -546,6 +546,9 @@
+     menuExtra->Append (myID_CHANGECASE, _("Change &case to .."), menuChangeCase);
+     menuExtra->AppendSeparator();
+     menuExtra->Append (myID_CONVERTEOL, _("Convert line &endings to .."), menuConvertEOL);
++    menuExtra->AppendCheckItem(myID_MULTIPLE_SELECTIONS, _("Toggle &multiple selections"));
++    menuExtra->AppendCheckItem(myID_MULTI_PASTE, _("Toggle multi-&paste"));
++    menuExtra->AppendCheckItem(myID_MULTIPLE_SELECTIONS_TYPING, _("Toggle t&yping on multiple selections"));
+ 
+     // Window menu
+     wxMenu *menuWindow = new wxMenu;
+Index: src/stc/ScintillaWX.cpp
+===================================================================
+--- src/stc/ScintillaWX.cpp	(revision 76460)
++++ src/stc/ScintillaWX.cpp	(working copy)
+@@ -61,7 +61,7 @@
+ 
+     void Notify() wxOVERRIDE {
+         m_swx->DoTick();
+-    }
++	}
+ 
+ private:
+     ScintillaWX* m_swx;
+@@ -251,6 +251,16 @@
+     sysCaretWidth = 0;
+     sysCaretHeight = 0;
+ #endif
++
++#ifdef wxHAVE_STC_RECT_FORMAT
++#ifdef __WXMSW__
++    m_ColumnClipboardFormat = wxDataFormat(wxT("MSDEVColumnSelect"));
++#endif
++#ifdef __WXGTK__
++    m_ColumnClipboardFormat = wxDataFormat(wxT("SECONDARY"));
++#endif // __WXGTK___
++#endif // wxHAVE_STC_RECT_FORMAT
++
+ }
+ 
+ 
+@@ -484,10 +494,10 @@
+     }
+ }
+ 
+-
+ void ScintillaWX::Paste() {
+     pdoc->BeginUndoAction();
+-    ClearSelection();
++    ClearSelection(multiPasteMode == SC_MULTIPASTE_EACH);
++    bool isRectangularClipboard = false;
+ 
+ #if wxUSE_DATAOBJ
+     wxTextDataObject data;
+@@ -495,7 +505,10 @@
+ 
+     wxTheClipboard->UsePrimarySelection(false);
+     if (wxTheClipboard->Open()) {
+-        gotData = wxTheClipboard->GetData(data);
++#ifdef wxHAVE_STC_RECT_FORMAT
++        isRectangularClipboard = wxTheClipboard->IsSupported(m_ColumnClipboardFormat);
++#endif
++        gotData = wxTheClipboard->GetData(data);		
+         wxTheClipboard->Close();
+     }
+     if (gotData) {
+@@ -508,10 +521,23 @@
+         data.SetText(wxEmptyString);
+         text = wxEmptyString;
+ #endif
++
+         int len = strlen(buf);
+-        int caretMain = sel.MainCaret();
+-        pdoc->InsertString(caretMain, buf, len);
+-        SetEmptySelection(caretMain + len);
++        SelectionPosition selStart = sel.IsRectangular() ?
++            sel.Rectangular().Start() :
++            sel.Range(sel.Main()).Start();
++
++        // call the appropriate scintilla paste method if the 
++        // depending on whether the text was copied FROM a rectangular selection
++        // or not.
++        if (isRectangularClipboard) 
++        {
++            PasteRectangular(selStart, buf, len);
++        }
++        else 
++        {
++            InsertPaste(selStart, buf, len);
++        }
+     }
+ #endif // wxUSE_DATAOBJ
+ 
+@@ -529,7 +555,20 @@
+     wxTheClipboard->UsePrimarySelection(false);
+     if (wxTheClipboard->Open()) {
+         wxString text = wxTextBuffer::Translate(stc2wx(st.Data(), st.Length()));
+-        wxTheClipboard->SetData(new wxTextDataObject(text));
++
++        // when copying the text to the clipboard, we add extra 
++        // meta-data that tells the Paste() method that the user
++        // copied a rectangular block of text, as opposed to 
++        // a stream of text.        
++        wxDataObjectComposite* composite = new wxDataObjectComposite();
++        composite->Add(new wxTextDataObject(text), true);
++#ifdef wxHAVE_STC_RECT_FORMAT
++        if (st.rectangular)
++        {
++            composite->Add(new wxCustomDataObject(m_ColumnClipboardFormat));
++        }
++#endif
++        wxTheClipboard->SetData(composite);
+         wxTheClipboard->Close();
+     }
+ #else
+Index: src/stc/ScintillaWX.h
+===================================================================
+--- src/stc/ScintillaWX.h	(revision 76460)
++++ src/stc/ScintillaWX.h	(working copy)
+@@ -70,6 +70,13 @@
+ #include "wx/timer.h"
+ #endif
+ 
++#ifdef __WXMSW__
++    #define wxHAVE_STC_RECT_FORMAT 1
++#endif
++
++#ifdef __WXGTK__
++    #define wxHAVE_STC_RECT_FORMAT 1
++#endif
+ //----------------------------------------------------------------------
+ 
+ 
+@@ -205,7 +212,15 @@
+     int sysCaretWidth;
+     int sysCaretHeight;
+ #endif
+-   
++
++#ifdef wxHAVE_STC_RECT_FORMAT
++    // using two clipboard formats, the standard one 
++    // for the copied text and this one as a 
++    // way to mark the copied text as being
++    // copied from a rectangular selection
++    wxDataFormat m_ColumnClipboardFormat;
++#endif
++
+     friend class wxSTCCallTip;
+ };
+ 

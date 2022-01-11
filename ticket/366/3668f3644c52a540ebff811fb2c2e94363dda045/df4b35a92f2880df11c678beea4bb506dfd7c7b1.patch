@@ -1,0 +1,266 @@
+Index: src/msw/artmsw.cpp
+===================================================================
+--- src/msw/artmsw.cpp	(revision 73572)
++++ src/msw/artmsw.cpp	(working copy)
+@@ -22,13 +22,119 @@
+ 
+ #include "wx/artprov.h"
+ #include "wx/image.h"
++#include "wx/stdpaths.h"	    // for wxStandardPaths::MSWGetShellDir
++#include "wx/dynlib.h"
++#include "wx/volume.h"
++#include "wx/msw/private.h"
++#include "wx/msw/wrapshl.h"		// for CSIDL_SYSTEM
+ #include "wx/msw/wrapwin.h"
+ 
++#ifdef SHGSI_ICON
++    #define HAS_SHGetStockIconInfo
++#endif
+ 
+ // ----------------------------------------------------------------------------
+ // wxWindowsArtProvider
+ // ----------------------------------------------------------------------------
++#ifdef HAS_SHGetStockIconInfo
+ 
++static SHSTOCKICONID MSWGetStockIconIdForArtProviderId( const wxArtID &art_id )
++{
++    // try to find an equivalent MSW stock icon id for wxArtID
++    if ( art_id == wxART_ERROR)             return SIID_ERROR;
++    else if ( art_id == wxART_QUESTION )    return SIID_HELP;
++    else if ( art_id == wxART_WARNING )     return SIID_WARNING;
++    else if ( art_id == wxART_INFORMATION ) return SIID_INFO;
++    else if ( art_id == wxART_HELP )        return SIID_HELP;
++    else if ( art_id == wxART_FOLDER )      return SIID_FOLDER;
++    else if ( art_id == wxART_FOLDER_OPEN ) return SIID_FOLDEROPEN;
++    else if ( art_id == wxART_DELETE )      return SIID_DELETE;
++    else if ( art_id == wxART_FIND )        return SIID_FIND;
++    else if ( art_id == wxART_HARDDISK )    return SIID_DRIVEFIXED;
++    else if ( art_id == wxART_FLOPPY )      return SIID_DRIVE35;
++    else if ( art_id == wxART_CDROM )       return SIID_DRIVECD;
++    else if ( art_id == wxART_REMOVABLE )   return SIID_DRIVEREMOVE;
++
++    return SIID_INVALID;
++};
++
++
++// try to load SHGetStockIconInfo dynamically, so this code runs
++// even on pre-Vista Windows versions
++static HRESULT MSW_SHGetStockIconInfo( SHSTOCKICONID siid,
++                                       UINT uFlags,
++                                       SHSTOCKICONINFO *psii )
++{
++    typedef HRESULT (WINAPI *PSHGETSTOCKICONINFO)(SHSTOCKICONID, UINT, SHSTOCKICONINFO *);
++    static PSHGETSTOCKICONINFO pSHGetStockIconInfo = (PSHGETSTOCKICONINFO)-1;
++
++    if ( pSHGetStockIconInfo == (PSHGETSTOCKICONINFO)-1 )
++    {
++        wxDynamicLibrary shell32(wxT("shell32.dll"));
++
++        pSHGetStockIconInfo = (PSHGETSTOCKICONINFO)shell32.RawGetSymbol( wxT("SHGetStockIconInfo") );
++        wxLogDebug(wxT("pSHGetStockIconInfo: %p"), pSHGetStockIconInfo);
++    }
++
++    if ( !pSHGetStockIconInfo )
++        return E_FAIL;
++    
++    return pSHGetStockIconInfo(siid, uFlags, psii);
++}
++#endif // #ifdef HAS_SHGetStockIconInfo
++
++
++static wxBitmap MSWGetBitmapForPath( const wxString &path, const wxSize &size, bool open=false, bool selected=false )
++{
++    SHFILEINFO fi;
++    memset(&fi, 0, sizeof(fi));
++
++    DWORD uFlags = SHGFI_USEFILEATTRIBUTES|SHGFI_ICON;
++    if ( size != wxDefaultSize )
++    {
++        if ( size.x <= 16 )
++            uFlags |= SHGFI_SMALLICON;
++        else if ( size.x >= 64 )
++            uFlags |= SHGFI_LARGEICON;
++    }
++
++    if ( open )     uFlags |= SHGFI_OPENICON;
++    if ( selected ) uFlags |= SHGFI_SELECTED;
++    
++    DWORD_PTR ret = SHGetFileInfo( path.c_str(), FILE_ATTRIBUTE_DIRECTORY, &fi, sizeof(SHFILEINFO), uFlags);
++
++    if ( ret!=0 )
++    {
++        wxIcon icon;
++        icon.SetHICON( (WXHICON)fi.hIcon );
++        icon.SetSize( wxGetHiconSize(fi.hIcon) );
++
++        wxBitmap bitmap( icon );
++        DestroyIcon(fi.hIcon);
++
++        if( bitmap.IsOk() ) return bitmap;
++    }
++
++    return wxNullBitmap;
++}
++
++
++static wxBitmap GetDriveBitmapForVolumeType( const wxFSVolumeKind &vol_type, const wxSize &size )
++{
++    // get all volumes and try to find one with a matching type
++    wxArrayString volumes = wxFSVolume::GetVolumes();
++    for ( size_t i=0; i<volumes.Count(); i++ )
++    {
++        wxFSVolume vol( volumes[i] );
++        if ( vol.GetKind() == vol_type )
++        {
++            return MSWGetBitmapForPath( volumes[i], size );
++        }
++    }
++
++    return wxNullBitmap;
++}
++
+ class wxWindowsArtProvider : public wxArtProvider
+ {
+ protected:
+@@ -64,25 +170,126 @@
+ 
+ wxBitmap wxWindowsArtProvider::CreateBitmap(const wxArtID& id,
+                                             const wxArtClient& client,
+-                                            const wxSize& WXUNUSED(size))
++                                            const wxSize &size)
+ {
+-    // handle message box icons specially (wxIcon ctor treat these names
+-    // as special cases via wxICOResourceHandler::LoadIcon):
+-    const char *name = NULL;
+-    if ( id == wxART_ERROR )
+-        name = "wxICON_ERROR";
+-    else if ( id == wxART_INFORMATION )
+-        name = "wxICON_INFORMATION";
+-    else if ( id == wxART_WARNING )
+-        name = "wxICON_WARNING";
+-    else if ( id == wxART_QUESTION )
+-        name = "wxICON_QUESTION";
++    wxBitmap bitmap = wxNullBitmap;
+ 
+-    if ( name )
+-        return CreateFromStdIcon(name, client);
++#ifdef HAS_SHGetStockIconInfo
++    // first try to use SHGetStockIconInfo, available only on Vista and higher
++    SHSTOCKICONID stock_icon_id = MSWGetStockIconIdForArtProviderId( id );
++    if( stock_icon_id != SIID_INVALID )
++    {
++        SHSTOCKICONINFO sii;
++        memset( &sii, 0, sizeof(SHSTOCKICONINFO) );
++        sii.cbSize = sizeof(SHSTOCKICONINFO);
+ 
++        UINT uFlags = SHGSI_ICON;
++        if ( size != wxDefaultSize )
++        {
++            if ( size.x <= 16 )
++                uFlags |= SHGSI_SMALLICON;
++            else if ( size.x >= 64 )
++                uFlags |= SHGSI_LARGEICON;
++        }
++
++        HRESULT res = MSW_SHGetStockIconInfo( stock_icon_id, uFlags, &sii);
++        if ( res == S_OK )
++        {
++            wxIcon icon;
++            icon.SetHICON( (WXHICON)sii.hIcon );
++            icon.SetSize( wxGetHiconSize(sii.hIcon) );
++
++            wxBitmap bitmap( icon );
++            DestroyIcon(sii.hIcon);
++
++            if( bitmap.IsOk() ) return bitmap;
++        }
++    }
++#endif      // #ifdef HAS_SHGetStockIconInfo
++
++
++    // now try SHGetFileInfo
++    wxFSVolumeKind vol_type = wxFS_VOL_OTHER;
++    if ( id == wxART_HARDDISK )         vol_type = wxFS_VOL_DISK;
++    else if ( id == wxART_FLOPPY )      vol_type = wxFS_VOL_FLOPPY;
++    else if ( id == wxART_CDROM )       vol_type = wxFS_VOL_CDROM;
++
++    if( vol_type != wxFS_VOL_OTHER )
++    {
++        bitmap = GetDriveBitmapForVolumeType( vol_type, size );
++    }
++
++    if( !bitmap.IsOk() ) 
++    {
++        // the directory passed doesn't have to exist
++        if( id == wxART_FOLDER )            bitmap = MSWGetBitmapForPath("C:\\wxdummydir\\", size );
++        else if( id==wxART_FOLDER_OPEN )    bitmap = MSWGetBitmapForPath("C:\\wxdummydir\\", size, true );
++    }
++
++
++    // as a last resort, try to get the icon from SHELL32.DLL
++    if( !bitmap.IsOk() )
++    {
++        wxString filename = wxStandardPaths::MSWGetShellDir( CSIDL_SYSTEM );
++        filename.Append( "\\shell32.dll" );
++
++        if ( wxFileExists(filename) )
++        {
++            int icon_index = -1;
++            // hardcoded icon index into shell32.dll
++            // the lower indices seem to be identical for all versions of shell32
++            // theoretically we could get icons for many more wxArtIDs if we used
++            // hardcoded indices for different SHELL32.DLL versions
++            if ( id == wxART_HARDDISK )         icon_index = 8;
++            else if ( id == wxART_FLOPPY )      icon_index = 6;
++            else if ( id == wxART_CDROM )       icon_index = 11;
++            else if ( id == wxART_REMOVABLE )   icon_index = 7;
++            else if ( id == wxART_FOLDER )      icon_index = 3;
++            else if ( id == wxART_FOLDER_OPEN ) icon_index = 4;
++            
++            if ( icon_index != -1 )
++            {
++                // append icon index to filename
++                filename << ";" << icon_index;
++                wxIcon icon( filename, wxBITMAP_TYPE_ICO, size.x, size.y);
++                if ( icon.IsOk() )
++                    bitmap.CopyFromIcon( icon );
++            }
++        }
++    }
++
++    if ( !bitmap.IsOk() ) return wxNullBitmap;
++
++    if ( size.x > 0 && size.y > 0 && ( bitmap.GetWidth() != size.x || bitmap.GetHeight()!= size.y ) )
++    {
++        // we need to resize the bitmap
++        wxImage tempimage = bitmap.ConvertToImage();
++        tempimage.Rescale( size.x, size.y, wxIMAGE_QUALITY_NEAREST );
++        // why is there no wxImage::ConvertToBitmap() for consistency?
++        bitmap = wxBitmap( tempimage );
++    }
++
++
++    if ( !bitmap.IsOk() ) 
++    {
++        // handle message box icons specially (wxIcon ctor treat these names
++        // as special cases via wxICOResourceHandler::LoadIcon):
++        const char *name = NULL;
++        if ( id == wxART_ERROR )
++            name = "wxICON_ERROR";
++        else if ( id == wxART_INFORMATION )
++            name = "wxICON_INFORMATION";
++        else if ( id == wxART_WARNING )
++            name = "wxICON_WARNING";
++        else if ( id == wxART_QUESTION )
++            name = "wxICON_QUESTION";
++
++        if ( name )
++            return CreateFromStdIcon(name, client);
++    }
++
+     // for anything else, fall back to generic provider:
+-    return wxNullBitmap;
++    return bitmap;
+ }
+ 
+ // ----------------------------------------------------------------------------

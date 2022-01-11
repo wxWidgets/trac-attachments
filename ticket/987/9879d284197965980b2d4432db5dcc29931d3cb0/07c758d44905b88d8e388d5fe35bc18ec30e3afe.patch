@@ -1,0 +1,208 @@
+Index: docs/latex/wx/object.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/object.tex,v
+retrieving revision 1.10
+diff -u -r1.10 object.tex
+--- docs/latex/wx/object.tex	2006/10/30 22:03:25	1.10
++++ docs/latex/wx/object.tex	2007/02/15 11:32:33
+@@ -202,6 +202,10 @@
+ the identifier \_\_WXDEBUG\_\_ is defined. It takes over memory deallocation, allowing
+ wxDebugContext operations.
+ 
++
++
++%% wxObjectRefData
++
+ \section{\class{wxObjectRefData}}\label{wxobjectrefdata}
+ 
+ This class is used to store reference-counted data. Derive classes from this to
+@@ -223,19 +227,36 @@
+ 
+ \func{}{wxObjectRefData}{\void}
+ 
+-Default constructor. Initialises the {\bf m\_count} member to 1.
++Default constructor. Initialises the internal reference count to 1.
+ 
+ \membersection{wxObjectRefData::\destruct{wxObjectRefData}}\label{wxobjectrefdatadtor}
+ 
+ \func{}{wxObjectRefData}{\void}
+ 
+-Destructor.
++Destructor. It's declared {\tt protected} so that wxObjectRefData instances will never
++be destroyed directly but only as result of a \helpref{DecRef}{wxobjectrefdatadecref} call.
+ 
+ \membersection{wxObjectRefData::GetRefCount}\label{wxobjectrefdatagetrefcount}
+ 
+ \constfunc{int}{GetRefCount}{\void}
+ 
+ Returns the reference count associated with this shared data.
+-When this goes to zero during a \helpref{wxObject::UnRef}{wxobjectunref}, an object
+-can delete this {\bf wxObjectRefData} object.
++When this goes to zero during a \helpref{DecRef}{wxobjectrefdatadecref} call, the object
++will auto-free itself.
++
++\membersection{wxObjectRefData::DecRef}\label{wxobjectrefdatadecref}
++
++\func{void}{DecRef}{\void}
++
++Decrements the reference count associated with this shared data and, if it reaches zero,
++destroys this instance of wxObjectRefData releasing its memory.
++
++Please note that after calling this function, the caller should absolutely avoid to use
++the pointer to this instance since it may not be valid anymore.
++
++\membersection{wxObjectRefData::IncRef}\label{wxobjectrefdataincref}
++
++\func{void}{IncRef}{\void}
++
++Increments the reference count associated with this shared data.
+ 
+Index: include/wx/object.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/object.h,v
+retrieving revision 1.131
+diff -u -r1.131 object.h
+--- include/wx/object.h	2006/10/30 22:03:26	1.131
++++ include/wx/object.h	2007/02/15 12:24:41
+@@ -392,15 +392,84 @@
+ 
+ public:
+     wxObjectRefData() : m_count(1) { }
+-    virtual ~wxObjectRefData() { }
+ 
+     int GetRefCount() const { return m_count; }
+ 
++    void IncRef() { m_count++; }
++    void DecRef();
++
++protected:
++    // this object should never be destroyed directly but only as a
++    // result of a DecRef() call:
++    virtual ~wxObjectRefData() { }
++
+ private:
++    // our refcount:
+     int m_count;
+ };
+ 
+ // ----------------------------------------------------------------------------
++// wxObjectDataPtr: helper class to avoid memleaks because of missing calls
++//                  to wxObjectRefData::DecRef
++// ----------------------------------------------------------------------------
++
++template <class T>
++class wxObjectDataPtr
++{
++public:
++    typedef T element_type;
++
++    wxEXPLICIT wxObjectDataPtr(T *ptr = NULL) : m_ptr(ptr) {}
++
++    // copy ctor
++    wxObjectDataPtr(const wxObjectDataPtr<T> &tocopy) 
++        : m_ptr(tocopy.m_ptr)
++    { 
++        if (m_ptr)
++            m_ptr->IncRef(); 
++    }
++
++    ~wxObjectDataPtr() 
++    { 
++        if (m_ptr) 
++            m_ptr->DecRef(); 
++    }
++
++    T *get() const { return m_ptr; }
++    T *operator->() const { return get(); }
++
++    void reset(T *ptr)
++    {
++        if (m_ptr)
++            m_ptr->DecRef();
++        m_ptr = ptr;
++    }
++
++    wxObjectDataPtr& operator=(const wxObjectDataPtr &tocopy)
++    { 
++        if (m_ptr) 
++            m_ptr->DecRef(); 
++        m_ptr = tocopy.m_ptr; 
++        if (m_ptr)
++            m_ptr->IncRef(); 
++        return *this;
++    }
++
++    wxObjectDataPtr& operator=(T *ptr)
++    { 
++        if (m_ptr) 
++            m_ptr->DecRef(); 
++        m_ptr = ptr; 
++        if (m_ptr)
++            m_ptr->IncRef(); 
++        return *this;
++    }
++
++private:
++    T *m_ptr;
++};
++
++// ----------------------------------------------------------------------------
+ // wxObject: the root class of wxWidgets object hierarchy
+ // ----------------------------------------------------------------------------
+ 
+@@ -520,7 +589,8 @@
+ #ifdef _MSC_VER
+         return (wxClassInfo*) m_classInfo;
+ #else
+-        return wx_const_cast(wxClassInfo *, m_classInfo);
++        wxDynamicClassInfo *nonconst = wx_const_cast(wxDynamicClassInfo *, m_classInfo);
++        return wx_static_cast(wxClassInfo *, nonconst);
+ #endif
+     }
+ 
+Index: src/common/object.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/object.cpp,v
+retrieving revision 1.103
+diff -u -r1.103 object.cpp
+--- src/common/object.cpp	2006/07/15 22:21:44	1.103
++++ src/common/object.cpp	2007/02/15 11:32:33
+@@ -290,6 +290,17 @@
+ 
+ 
+ // ----------------------------------------------------------------------------
++// wxObjectRefData
++// ----------------------------------------------------------------------------
++
++void wxObjectRefData::DecRef()
++{
++    if ( --m_count == 0 )
++        delete this;
++}
++
++
++// ----------------------------------------------------------------------------
+ // wxObject
+ // ----------------------------------------------------------------------------
+ 
+@@ -310,7 +321,7 @@
+     if ( clone.m_refData )
+     {
+         m_refData = clone.m_refData;
+-        ++(m_refData->m_count);
++        m_refData->IncRef();
+     }
+ }
+ 
+@@ -320,8 +331,7 @@
+     {
+         wxASSERT_MSG( m_refData->m_count > 0, _T("invalid ref data count") );
+ 
+-        if ( --m_refData->m_count == 0 )
+-            delete m_refData;
++        m_refData->DecRef();
+         m_refData = NULL;
+     }
+ }
+
+ 	  	 

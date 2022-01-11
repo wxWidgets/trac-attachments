@@ -1,0 +1,242 @@
+Index: include/wx/docview.h
+===================================================================
+--- include/wx/docview.h	(revision 72995)
++++ include/wx/docview.h	(working copy)
+@@ -60,6 +60,10 @@
+ 
+ #define wxMAX_FILE_HISTORY 9
+ 
++typedef wxVector<wxDocument*> wxDocVector;
++typedef wxVector<wxView*> wxViewVector;
++typedef wxVector<wxDocTemplate*> wxDocTemplateVector;
++
+ class WXDLLIMPEXP_CORE wxDocument : public wxEvtHandler
+ {
+ public:
+@@ -140,8 +144,11 @@
+ 
+     virtual bool AddView(wxView *view);
+     virtual bool RemoveView(wxView *view);
++
++    wxViewVector GetViewVector() const { return m_documentViews.AsSafeVector<wxView>(); }
+     wxList& GetViews() { return m_documentViews; }
+     const wxList& GetViews() const { return m_documentViews; }
++
+     wxView *GetFirstView() const;
+ 
+     virtual void UpdateAllViews(wxView *sender = NULL, wxObject *hint = NULL);
+@@ -455,6 +462,8 @@
+     virtual void ActivateView(wxView *view, bool activate = true);
+     virtual wxView *GetCurrentView() const { return m_currentView; }
+ 
++    wxDocVector GetDocumentVector() const { return m_docs.AsSafeVector<wxDocument>(); }
++    wxDocTemplateVector GetTemplateVector() const { return m_templates.AsSafeVector<wxDocTemplate>(); }
+     wxList& GetDocuments() { return m_docs; }
+     wxList& GetTemplates() { return m_templates; }
+ 
+Index: include/wx/list.h
+===================================================================
+--- include/wx/list.h	(revision 72995)
++++ include/wx/list.h	(working copy)
+@@ -32,6 +32,7 @@
+ #include "wx/defs.h"
+ #include "wx/object.h"
+ #include "wx/string.h"
++#include "wx/vector.h"
+ 
+ #if wxUSE_STD_CONTAINERS
+     #include "wx/beforestd.h"
+@@ -1215,6 +1216,34 @@
+     // compatibility methods
+     void Sort(wxSortCompareFunction compfunc) { wxListBase::Sort(compfunc); }
+ #endif // !wxUSE_STD_CONTAINERS
++
++    template<typename T_PTR> // T_PTR is a pointer
++    wxVector<T_PTR> AsVector() const
++    {
++        wxVector<T_PTR> vector;
++        size_t i = 0;
++
++        vector.resize(size());
++        for (const_iterator it = begin(); it != end(); it++)
++        {
++            vector[i++] = (T_PTR)*it; // no type check
++        }
++        return vector;
++    }
++
++    template<typename T> // T is a class name
++    wxVector<T*> AsSafeVector() const // using wxRTTI
++    {
++        wxVector<T*> vector;
++        size_t i = 0;
++
++        vector.resize(size());
++        for (const_iterator it = begin(); it != end(); it++)
++        {
++            vector[i++] = wxStaticCast(*it, T); // takes a literal class name
++        }
++        return vector;
++    }
+ };
+ 
+ #if !wxUSE_STD_CONTAINERS
+Index: include/wx/vector.h
+===================================================================
+--- include/wx/vector.h	(revision 72995)
++++ include/wx/vector.h	(working copy)
+@@ -28,7 +28,6 @@
+ 
+ #else // !wxUSE_STD_CONTAINERS
+ 
+-#include "wx/utils.h"
+ #include "wx/scopeguard.h"
+ #include "wx/meta/movable.h"
+ #include "wx/meta/if.h"
+Index: samples/docview/docview.cpp
+===================================================================
+--- samples/docview/docview.cpp	(revision 72995)
++++ samples/docview/docview.cpp	(working copy)
+@@ -290,7 +290,7 @@
+         menubar->Append(edit, wxGetStockLabel(wxID_EDIT));
+ 
+     wxMenu *help= new wxMenu;
+-    help->Append(wxID_ABOUT);
++    help->Append(wxID_ABOUT, wxGetStockLabel(wxID_ABOUT) + "\tShift+F1");
+     menubar->Append(help, wxGetStockLabel(wxID_HELP));
+ 
+     frame->SetMenuBar(menubar);
+@@ -385,16 +385,18 @@
+         default:
+             wxFAIL_MSG( "unknown mode ");
+     }
++    const wxDocVector docList = wxDocManager::GetDocumentManager()->GetDocumentVector();
+ 
+     wxLogMessage
+     (
+         "This is the wxWidgets Document/View Sample\n"
+         "running in %s mode.\n"
++        "%d open documents.\n"
+         "\n"
+         "Authors: Julian Smart, Vadim Zeitlin\n"
+         "\n"
+         "Usage: docview [--{mdi,sdi,single}]",
+-        modeName
++        modeName,
++        (int)docList.size()
+     );
+ }
+-
+Index: src/common/docview.cpp
+===================================================================
+--- src/common/docview.cpp	(revision 72995)
++++ src/common/docview.cpp	(working copy)
+@@ -76,8 +76,6 @@
+     #include "wx/wfstream.h"
+ #endif
+ 
+-typedef wxVector<wxDocTemplate *> wxDocTemplates;
+-
+ // ----------------------------------------------------------------------------
+ // wxWidgets macros
+ // ----------------------------------------------------------------------------
+@@ -1384,21 +1382,21 @@
+ {
+ 
+ // helper function: return only the visible templates
+-wxDocTemplates GetVisibleTemplates(const wxList& allTemplates)
++wxDocTemplateVector GetVisibleTemplates(const wxDocManager& docManager)
+ {
++    const wxDocTemplateVector allTemplates = docManager.GetTemplateVector();
++    wxDocTemplateVector templates;
++
+     // select only the visible templates
+-    const size_t totalNumTemplates = allTemplates.GetCount();
+-    wxDocTemplates templates;
++    const size_t totalNumTemplates = allTemplates.size();
+     if ( totalNumTemplates )
+     {
+-        templates.reserve(totalNumTemplates);
+-
+-        for ( wxList::const_iterator i = allTemplates.begin(),
+-                                   end = allTemplates.end();
++        for ( wxDocTemplateVector::const_iterator i = allTemplates.begin(),
++                                                end = allTemplates.end();
+               i != end;
+               ++i )
+         {
+-            wxDocTemplate * const temp = (wxDocTemplate *)*i;
++            wxDocTemplate * const temp = *i;
+             if ( temp->IsVisible() )
+                 templates.push_back(temp);
+         }
+@@ -1407,6 +1405,19 @@
+     return templates;
+ }
+ 
++// helper function: move pointers from vector to legacy pointer array, for bw compatibility
++void MakeTemplateArray(const wxDocTemplateVector& vector, wxScopedArray<wxDocTemplate*>* array)
++{
++    size_t i = 0;
++
++    array->reset(new wxDocTemplate*[vector.size()]);
++    for (wxDocTemplateVector::const_iterator it = vector.begin(); it != vector.end(); it++)
++    {
++        array->get()[i++] = *it;
++    }
++    wxASSERT(i == vector.size());
++}
++
+ } // anonymous namespace
+ 
+ void wxDocManager::ActivateDocument(wxDocument *doc)
+@@ -1425,7 +1436,7 @@
+     // this ought to be const but SelectDocumentType/Path() are not
+     // const-correct and can't be changed as, being virtual, this risks
+     // breaking user code overriding them
+-    wxDocTemplates templates(GetVisibleTemplates(m_templates));
++    wxDocTemplateVector templates(GetVisibleTemplates(*this));
+     const size_t numTemplates = templates.size();
+     if ( !numTemplates )
+     {
+@@ -1452,12 +1463,16 @@
+     }
+     else // not silent, ask the user
+     {
++        // move pointers to array, for compatibility
++        wxScopedArray<wxDocTemplate*> templateArray;
++        MakeTemplateArray(templates, &templateArray);
++
+         // for the new file we need just the template, for an existing one we
+         // need the template and the path, unless it's already specified
+         if ( (flags & wxDOC_NEW) || !path.empty() )
+-            temp = SelectDocumentType(&templates[0], numTemplates);
++            temp = SelectDocumentType(templateArray.get(), numTemplates);
+         else
+-            temp = SelectDocumentPath(&templates[0], numTemplates, path, flags);
++            temp = SelectDocumentPath(templateArray.get(), numTemplates, path, flags);
+     }
+ 
+     if ( !temp )
+@@ -1532,15 +1547,19 @@
+ 
+ wxView *wxDocManager::CreateView(wxDocument *doc, long flags)
+ {
+-    wxDocTemplates templates(GetVisibleTemplates(m_templates));
++    wxDocTemplateVector templates(GetVisibleTemplates(*this));
+     const size_t numTemplates = templates.size();
+ 
+     if ( numTemplates == 0 )
+         return NULL;
+ 
++    // move pointers to array, for compatibility
++    wxScopedArray<wxDocTemplate*> templateArray;
++    MakeTemplateArray(templates, &templateArray);
++
+     wxDocTemplate * const
+     temp = numTemplates == 1 ? templates[0]
+-                             : SelectViewType(&templates[0], numTemplates);
++                             : SelectViewType(templateArray.get(), numTemplates);
+ 
+     if ( !temp )
+         return NULL;

@@ -1,0 +1,141 @@
+diff --git a/src/msw/nonownedwnd.cpp b/src/msw/nonownedwnd.cpp
+index eb0e9309ef..1dbadd22f6 100644
+--- a/src/msw/nonownedwnd.cpp
++++ b/src/msw/nonownedwnd.cpp
+@@ -249,8 +249,55 @@ WXLRESULT wxNonOwnedWindow::MSWWindowProc(WXUINT message, WXWPARAM wParam, WXLPA
+     return rc;
+ }
+ 
++// Helper function for scaling a size proportionally
++// Returns a new size such that the ratio of returnSize:newSize is the
++// same as size:oldSize in each direction.
++// If oldSize does not contain a valid size in either or both directions
++// the defaultScale value is used instead for those directions.
++// If size is set to wxDefaultCoord in either or both directions it is
++// not changed for those directions.
++static wxSize ScaleSizeToKeepProportion(const wxSize& size,
++                                        const wxSize& oldSize,
++                                        const wxSize& newSize,
++                                        float defaultScale)
++{
++    int width = wxDefaultCoord;
++    if( size.x != wxDefaultCoord )
++    {
++        float scaleX = ( oldSize.x > 0 ) ? (float)size.x / oldSize.x : defaultScale;
++        // Window sizes can get rounded down with each successive DPI change,
++        // causing the Window to get continuously smaller. Using ceil prevents this.
++        width = ceil(newSize.x * scaleX);
++    }
++
++    int height = wxDefaultCoord;
++    if( size.y != wxDefaultCoord )
++    {
++        float scaleY = (oldSize.y > 0 ) ? (float)size.y / oldSize.y : defaultScale;
++        height = ceil(newSize.y * scaleY);
++    }
++    return wxSize(width, height);
++}
++
++// Helper function to adjust a wxSize by the specified x and y amounts
++// only if the coordinate is no equal to wxDefaultCoord
++static wxSize AdjustSizeIfSet(const wxSize& size, int xAdjust, int yAdjust)
++{
++    wxSize newSize(size);
++    if( newSize.x != wxDefaultCoord )
++    {
++        newSize.x += xAdjust;
++    }
++    if( size.y != wxDefaultCoord )
++    {
++        newSize.y += yAdjust;
++    }
++    return newSize;
++}
++
+ bool wxNonOwnedWindow::HandleDPIChange(const wxSize& newDPI, const wxRect& newRect)
+ {
++
+     if ( !m_perMonitorDPIaware )
+     {
+         return false;
+@@ -258,11 +305,78 @@ bool wxNonOwnedWindow::HandleDPIChange(const wxSize& newDPI, const wxRect& newRe
+ 
+     if ( newDPI != m_activeDPI )
+     {
++        // Use the best client size as the reference point for scaling our window.
++        // The Window surrounds (border and title area) don't scale linearly with
++        // the DPI so we exclude these.
++        wxSize orgBorder = GetSize() - GetClientSize();
++        wxSize orgBestClientSize = DoGetBestClientSize();
++        if( orgBestClientSize == wxDefaultSize )
++        {
++            // We use DoGetBestSize() as we don't want minSize considered
++            orgBestClientSize = DoGetBestSize() - orgBorder;
++        }
++
++        wxSize orgClientSize = GetClientSize();
++        wxSize orgMinClientSize = AdjustSizeIfSet(GetMinSize(), -orgBorder.x, -orgBorder.y);
++        wxSize orgMaxClientSize = AdjustSizeIfSet(GetMaxSize(), -orgBorder.x, -orgBorder.y);
++        float defaultScale = (float)newDPI.y / m_activeDPI.y;
++
+         MSWUpdateOnDPIChange(m_activeDPI, newDPI);
+         m_activeDPI = newDPI;
+-    }
+ 
+-    SetSize(newRect);
++        // This SetSize() is purely so we can determine the new Window
++        // surrounds (border and title area) values.
++        // We don't actually need or want the window to be redrawn.
++        Freeze();
++        SetSize(newRect);
++        Thaw();
++
++        // Determine the best client size at the new DPI.
++        wxSize newBorder = GetSize() - GetClientSize();
++        wxSize newBestClientSize = DoGetBestClientSize();
++        if( newBestClientSize == wxDefaultSize )
++        {
++            newBestClientSize = DoGetBestSize() - newBorder;
++        }
++
++        // Scale the window minimum client size, maximum client size and
++        // current client size so they are proportionally the same size
++        // compared to the new best client size as they were to the original
++        // best client size. Add the new border size to get the corresponding
++        // window sizes.
++        wxSize newMinClientSize = ScaleSizeToKeepProportion(orgMinClientSize,
++                                                            orgBestClientSize,
++                                                            newBestClientSize,
++                                                            defaultScale);
++        SetMinSize(AdjustSizeIfSet(newMinClientSize, newBorder.x, newBorder.y));
++
++        wxSize newMaxClientSize = ScaleSizeToKeepProportion(orgMaxClientSize,
++                                                            orgBestClientSize,
++                                                            newBestClientSize,
++                                                            defaultScale);
++        SetMaxSize(AdjustSizeIfSet(newMaxClientSize, newBorder.x, newBorder.y));
++
++        wxSize newClientSize = ScaleSizeToKeepProportion(orgClientSize,
++                                                         orgBestClientSize,
++                                                         newBestClientSize,
++                                                         defaultScale);
++        wxSize newWindowSize = AdjustSizeIfSet(newClientSize, newBorder.x, newBorder.y);
++
++        // We want the centre of the window to remain as close to it's current
++        // position as possible in order to minimise the possibility of the
++        // window resize moving the window back to the previous monitor causing
++        // an infinite monitor swapping loop. So we expand or contract the window
++        // around it's current central point to match our new size.
++        int adjustLeft = (newRect.GetWidth() - newWindowSize.GetWidth()) / 2;
++        int adjustTop = (newRect.GetHeight() - newWindowSize.GetHeight()) / 2;
++
++        wxRect finalRect(wxPoint(newRect.GetLeft() - adjustLeft, newRect.GetTop() - adjustTop), newWindowSize);
++        SetSize(finalRect);
++    }
++    else
++    {
++        SetSize(newRect);
++    }
+ 
+     Refresh();
+ 

@@ -1,0 +1,359 @@
+Index: include/wx/msw/dcclient.h
+===================================================================
+--- include/wx/msw/dcclient.h	(revision 72714)
++++ include/wx/msw/dcclient.h	(working copy)
+@@ -25,15 +25,13 @@
+ // array types
+ // ----------------------------------------------------------------------------
+ 
+-// this one if used by wxPaintDC only
+-struct WXDLLIMPEXP_FWD_CORE wxPaintDCInfo;
+-
+-WX_DECLARE_EXPORTED_OBJARRAY(wxPaintDCInfo, wxArrayDCInfo);
+-
+ // ----------------------------------------------------------------------------
+ // DC classes
+ // ----------------------------------------------------------------------------
+ 
++// forward declaration
++struct wxPaintDCInfo;
++
+ class WXDLLIMPEXP_CORE wxWindowDCImpl : public wxMSWDCImpl
+ {
+ public:
+@@ -84,13 +82,19 @@
+     virtual ~wxPaintDCImpl();
+ 
+     // find the entry for this DC in the cache (keyed by the window)
+-    static WXHDC FindDCInCache(wxWindow* win);
++    static WXHDC FindDCInCache( const wxWindow* win );
+ 
++    static wxPaintDCInfo *FindInCache( const wxWindow *win );
++
++    // used to finalize wxPaintDC from wxWindowMSW::MSWHandleMessage
++    static void EndPaint( wxWindow *win );
++
++    // used to finalize wxPaintDCEx from wxWindowMSW::MSWHandleMessage
++    static void RestoreDC( wxWindow *win );
++
+ protected:
+-    static wxArrayDCInfo ms_cache;
+-
+     // find the entry for this DC in the cache (keyed by the window)
+-    wxPaintDCInfo *FindInCache(size_t *index = NULL) const;
++    wxPaintDCInfo *FindInCache() const;
+ 
+     DECLARE_CLASS(wxPaintDCImpl)
+     wxDECLARE_NO_COPY_CLASS(wxPaintDCImpl);
+@@ -111,5 +115,28 @@
+     wxDECLARE_NO_COPY_CLASS(wxPaintDCEx);
+ };
+ 
++
++struct WXDLLEXPORT wxPaintDCInfo
++{
++    wxPaintDCInfo(wxWindow *win, wxPaintDCImpl *dc)
++    {
++        hwnd = win->GetHWND();
++        hdc = dc->GetHDC();
++        saveState = 0;
++    }
++
++    WXHWND    hwnd;          // window for this DC
++    WXHDC     hdc;           // the DC handle
++    int       saveState;     // only used for wxPaintDCExImpl
++    PAINTSTRUCT paintStruct;
++};
++
++// hash containing wxPaintDCInfo*, it uses wxWindow* keys and wxPaintDCInfo* values
++// This is used to make sure that for each WM_PAINT message, BeginPaint/EndPaint
++// is called at most once, even if multiple wxPaintDCs were created
++WX_DECLARE_HASH_MAP(wxWindow *, wxPaintDCInfo *,
++                    wxPointerHash, wxPointerEqual,
++                    PaintDCInfos);
++
+ #endif
+-    // _WX_DCCLIENT_H_
++// _WX_DCCLIENT_H_
+Index: src/msw/dcclient.cpp
+===================================================================
+--- src/msw/dcclient.cpp	(revision 72714)
++++ src/msw/dcclient.cpp	(working copy)
+@@ -39,24 +39,6 @@
+ // array/list types
+ // ----------------------------------------------------------------------------
+ 
+-struct WXDLLEXPORT wxPaintDCInfo
+-{
+-    wxPaintDCInfo(wxWindow *win, wxPaintDCImpl *dc)
+-    {
+-        hwnd = win->GetHWND();
+-        hdc = dc->GetHDC();
+-        count = 1;
+-    }
+-
+-    WXHWND    hwnd;       // window for this DC
+-    WXHDC     hdc;        // the DC handle
+-    size_t    count;      // usage count
+-};
+-
+-#include "wx/arrimpl.cpp"
+-
+-WX_DEFINE_OBJARRAY(wxArrayDCInfo)
+-
+ // ----------------------------------------------------------------------------
+ // macros
+ // ----------------------------------------------------------------------------
+@@ -65,7 +47,7 @@
+ // global variables
+ // ----------------------------------------------------------------------------
+ 
+-static PAINTSTRUCT g_paintStruct;
++static PaintDCInfos gs_PaintDCInfos;
+ 
+ #ifdef wxHAS_PAINT_DEBUG
+     // a global variable which we check to verify that wxPaintDC are only
+@@ -204,8 +186,6 @@
+ 
+ IMPLEMENT_ABSTRACT_CLASS(wxPaintDCImpl, wxClientDCImpl)
+ 
+-wxArrayDCInfo wxPaintDCImpl::ms_cache;
+-
+ wxPaintDCImpl::wxPaintDCImpl( wxDC *owner ) :
+    wxClientDCImpl( owner )
+ {
+@@ -230,7 +210,6 @@
+ 
+     wxDidCreatePaintDC = true;
+ 
+-
+     m_window = window;
+ 
+     // do we have a DC for this window in the cache?
+@@ -238,13 +217,18 @@
+     if ( info )
+     {
+         m_hDC = info->hdc;
+-        info->count++;
+     }
+     else // not in cache, create a new one
+     {
+-        m_hDC = (WXHDC)::BeginPaint(GetHwndOf(m_window), &g_paintStruct);
++        PAINTSTRUCT paintStruct;
++        memset(&paintStruct, 0, sizeof(PAINTSTRUCT));
++        m_hDC = (WXHDC)::BeginPaint(GetHwndOf(m_window), &paintStruct);
+         if (m_hDC)
+-            ms_cache.Add(new wxPaintDCInfo(m_window, this));
++        {
++            wxPaintDCInfo *info = new wxPaintDCInfo(m_window, this);
++            info->paintStruct = paintStruct;
++            gs_PaintDCInfos[m_window] = info;
++        }
+     }
+ 
+     // Note: at this point m_hDC can be NULL under MicroWindows, when dragging.
+@@ -264,64 +248,75 @@
+     if ( m_hDC )
+     {
+         SelectOldObjects(m_hDC);
++        m_hDC = 0;
++    }
++}
+ 
+-        size_t index;
+-        wxPaintDCInfo *info = FindInCache(&index);
+ 
+-        wxCHECK_RET( info, wxT("existing DC should have a cache entry") );
+ 
+-        if ( --info->count == 0 )
+-        {
+-            ::EndPaint(GetHwndOf(m_window), &g_paintStruct);
++wxPaintDCInfo *wxPaintDCImpl::FindInCache() const
++{
++    return wxPaintDCImpl::FindInCache( m_window );
++}
+ 
+-            ms_cache.RemoveAt(index);
++/* static */
++wxPaintDCInfo *wxPaintDCImpl::FindInCache( const wxWindow *win )
++{
++    PaintDCInfos::const_iterator it = gs_PaintDCInfos.find( win );
++    if ( it != gs_PaintDCInfos.end() )
++    {
++        wxPaintDCInfo *info = it->second;
+ 
+-            // Reduce the number of bogus reports of non-freed memory
+-            // at app exit
+-            if (ms_cache.IsEmpty())
+-                ms_cache.Clear();
+-        }
+-        //else: cached DC entry is still in use
++        wxASSERT_MSG( info->hwnd == win->GetHWND(), wxT("Inconsistent HWND entries") );
+ 
+-        // prevent the base class dtor from ReleaseDC()ing it again
+-        m_hDC = 0;
++        return info;
+     }
++
++    return NULL;
+ }
+ 
+-wxPaintDCInfo *wxPaintDCImpl::FindInCache(size_t *index) const
++
++
++// find the entry for this DC in the cache (keyed by the window)
++WXHDC wxPaintDCImpl::FindDCInCache( const wxWindow* win )
+ {
+-    wxPaintDCInfo *info = NULL;
+-    size_t nCache = ms_cache.GetCount();
+-    for ( size_t n = 0; n < nCache; n++ )
++    PaintDCInfos::const_iterator it = gs_PaintDCInfos.find( win );
++    if ( it != gs_PaintDCInfos.end() )
+     {
+-        wxPaintDCInfo *info1 = &ms_cache[n];
+-        if ( info1->hwnd == m_window->GetHWND() )
+-        {
+-            info = info1;
+-            if ( index )
+-                *index = n;
+-            break;
+-        }
++        wxPaintDCInfo *info = it->second;
++
++        wxASSERT_MSG( info->hwnd == win->GetHWND(), wxT("Inconsistent HWND entries") );
++
++        return info->hdc;
+     }
+ 
+-    return info;
++    return 0;
+ }
+ 
+-// find the entry for this DC in the cache (keyed by the window)
+-WXHDC wxPaintDCImpl::FindDCInCache(wxWindow* win)
++/* static */
++void wxPaintDCImpl::EndPaint( wxWindow *win )
+ {
+-    size_t nCache = ms_cache.GetCount();
+-    for ( size_t n = 0; n < nCache; n++ )
++    wxPaintDCInfo *info = FindInCache( win );
++    if ( info )
+     {
+-        wxPaintDCInfo *info = &ms_cache[n];
+-        if ( info->hwnd == win->GetHWND() )
+-        {
+-            return info->hdc;
+-        }
++        ::EndPaint(GetHwndOf(win), &info->paintStruct);
++        gs_PaintDCInfos.erase( win );
++        delete info;
+     }
+-    return 0;
+ }
+ 
++/* static */
++void wxPaintDCImpl::RestoreDC( wxWindow *win )
++{
++    wxPaintDCInfo *info = FindInCache( win );
++    if ( info )
++    {
++        ::RestoreDC((HDC)info->hdc, info->saveState);
++        gs_PaintDCInfos.erase( win );
++        delete info;
++    }
++}
++
+ /*
+  * wxPaintDCEx
+  */
+@@ -334,7 +329,6 @@
+     wxPaintDCExImpl( wxDC *owner, wxWindow *window, WXHDC dc );
+     ~wxPaintDCExImpl();
+ 
+-    int m_saveState;
+ };
+ 
+ 
+@@ -350,45 +344,27 @@
+ {
+         wxCHECK_RET( dc, wxT("wxPaintDCEx requires an existing device context") );
+ 
+-        m_saveState = 0;
+-
+         m_window = window;
+ 
+         wxPaintDCInfo *info = FindInCache();
+         if ( info )
+         {
+-           m_hDC = info->hdc;
+-           info->count++;
++            m_hDC = info->hdc;
+         }
+         else // not in cache, create a new one
+         {
+-                m_hDC = dc;
+-                ms_cache.Add(new wxPaintDCInfo(m_window, this));
+-                m_saveState = SaveDC((HDC) dc);
++            m_hDC = dc;
++
++            info = new wxPaintDCInfo(m_window, this);
++            info->saveState = SaveDC((HDC) dc);
++            gs_PaintDCInfos[m_window] = info;
+         }
+ }
+ 
+ wxPaintDCExImpl::~wxPaintDCExImpl()
+ {
+-        size_t index;
+-        wxPaintDCInfo *info = FindInCache(&index);
+-
+-        wxCHECK_RET( info, wxT("existing DC should have a cache entry") );
+-
+-        if ( --info->count == 0 )
+-        {
+-                RestoreDC((HDC) m_hDC, m_saveState);
+-                ms_cache.RemoveAt(index);
+-
+-                // Reduce the number of bogus reports of non-freed memory
+-                // at app exit
+-                if (ms_cache.IsEmpty())
+-                        ms_cache.Clear();
+-        }
+-        //else: cached DC entry is still in use
+-
+-        // prevent the base class dtor from ReleaseDC()ing it again
+-        m_hDC = 0;
++    // prevent the base class dtor from ReleaseDC()ing it again
++    m_hDC = 0;
+ }
+ 
+ 
+Index: src/msw/window.cpp
+===================================================================
+--- src/msw/window.cpp	(revision 72714)
++++ src/msw/window.cpp	(working copy)
+@@ -2707,6 +2707,7 @@
+     return rc;
+ }
+ 
++
+ bool
+ wxWindowMSW::MSWHandleMessage(WXLRESULT *result,
+                               WXUINT message,
+@@ -2842,10 +2843,16 @@
+                 wxPaintDCEx dc((wxWindow *)this, (WXHDC)wParam);
+ 
+                 processed = HandlePaint();
++
++                if ( processed )
++                    wxPaintDCImpl::RestoreDC( this );
+             }
+             else // no DC given
+             {
+                 processed = HandlePaint();
++
++                if ( processed )
++                    wxPaintDCImpl::EndPaint( this );
+             }
+             break;
+ 

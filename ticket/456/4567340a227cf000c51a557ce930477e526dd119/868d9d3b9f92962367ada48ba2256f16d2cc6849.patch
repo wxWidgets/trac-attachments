@@ -1,0 +1,218 @@
+--- listctrl.cpp.orig	Sat Feb 19 23:03:38 2005
++++ listctrl.cpp	Fri Mar  4 13:48:27 2005
+@@ -155,4 +155,22 @@
+ 
+ //-----------------------------------------------------------------------------
++//  wxColWidthInfo (internal)
++//-----------------------------------------------------------------------------
++
++struct wxColWidthInfo
++{
++    int     nMaxWidth;
++    bool    bNeedsUpdate;   //  only set to true when an item whose 
++                            //  width == nMaxWidth is removed
++    
++    wxColWidthInfo(void)
++        {   nMaxWidth = 0; bNeedsUpdate = false; }
++    wxColWidthInfo(int w, bool needsUpdate)
++        {   nMaxWidth = w; bNeedsUpdate = needsUpdate; }
++};
++
++WX_DEFINE_ARRAY(wxColWidthInfo *, ColWidthArray);
++
++//-----------------------------------------------------------------------------
+ //  wxListItemData (internal)
+ //-----------------------------------------------------------------------------
+@@ -295,5 +313,5 @@
+         wxRect m_rectHighlight;
+ 
+-        // extend all our rects to be centered inside theo ne of given width
++        // extend all our rects to be centered inside the one of given width
+         void ExtendWidth(wxCoord w)
+         {
+@@ -687,4 +705,5 @@
+     void InsertItem( wxListItem &item );
+     void InsertColumn( long col, wxListItem &item );
++    int GetItemWidthWithImage(wxListItem * item);
+     void SortItems( wxListCtrlCompare fn, long data );
+ 
+@@ -768,4 +787,5 @@
+     int                  m_dragCount;
+     wxPoint              m_dragStart;
++    ColWidthArray        m_aColWidths;
+ 
+     // for double click logic
+@@ -3548,32 +3568,28 @@
+             int max = AUTOSIZE_COL_MARGIN;
+ 
+-            for ( size_t i = 0; i < count; i++ )
++            //  if the cached column width isn't valid then recalculate it 
++            if (m_aColWidths.Item(col)->bNeedsUpdate)
+             {
+-                wxListLineData *line = GetLine(i);
+-                wxListItemDataList::compatibility_iterator n = line->m_items.Item( col );
+-
+-                wxCHECK_RET( n, _T("no subitem?") );
+-
+-                wxListItemData *item = n->GetData();
+-                int current = 0;
+-
+-                if (item->HasImage())
+-                {
+-                    int ix, iy;
+-                    GetImageSize( item->GetImage(), ix, iy );
+-                    current += ix + 5;
+-                }
+-
+-                if (item->HasText())
++                for (size_t i = 0; i < count; i++)
+                 {
+-                    wxCoord w;
+-                    dc.GetTextExtent( item->GetText(), &w, NULL );
+-                    current += w;
++                    wxListLineData *line = GetLine(i);
++                    wxListItemDataList::compatibility_iterator n = line->m_items.Item( col );
++                    
++                    wxCHECK_RET( n, _T("no subitem?") );
++                    
++                    wxListItemData *itemData = n->GetData();
++                    wxListItem      item;
++                    
++                    itemData->GetItem(item);
++                    int itemWidth = GetItemWidthWithImage(&item);
++                    if (itemWidth > max)
++                        max = itemWidth;
+                 }
+-
+-                if (current > max)
+-                    max = current;
++                
++                m_aColWidths.Item(col)->bNeedsUpdate = false;
++                m_aColWidths.Item(col)->nMaxWidth = max;
+             }
+ 
++            max = m_aColWidths.Item(col)->nMaxWidth;
+             width = max + AUTOSIZE_COL_MARGIN;
+         }
+@@ -3634,4 +3650,13 @@
+         wxListLineData *line = GetLine((size_t)id);
+         line->SetItem( item.m_col, item );
++        
++        if (InReportView())
++        {
++            //  update the Max Width Cache if needed
++            int width = GetItemWidthWithImage(&item);
++            
++            if (width > m_aColWidths.Item(item.m_col)->nMaxWidth)
++                m_aColWidths.Item(item.m_col)->nMaxWidth = width;
++        }
+     }
+ 
+@@ -4222,4 +4247,24 @@
+     if ( InReportView() )
+     {
++    //  mark the Column Max Width cache as dirty if the items in the line
++    //  we're deleting contain the Max Column Width
++        wxListLineData * const line = GetLine(index);
++        wxListItemDataList::compatibility_iterator n;
++        wxListItemData *itemData;
++        wxListItem      item;
++        int             itemWidth;
++        
++        for (size_t i = 0; i < m_columns.GetCount(); i++)
++        {
++            n = line->m_items.Item( i );
++            itemData = n->GetData();
++            itemData->GetItem(item);
++            
++            itemWidth = GetItemWidthWithImage(&item);
++            
++            if (itemWidth >= m_aColWidths.Item(i)->nMaxWidth)
++                m_aColWidths.Item(i)->bNeedsUpdate = true;
++        }
++
+         ResetVisibleLinesRange();
+     }
+@@ -4266,4 +4311,10 @@
+     }
+ 
++    if ( InReportView() )   //  we only cache max widths when in Report View
++    {
++        delete m_aColWidths.Item(col);
++        m_aColWidths.RemoveAt(col);
++    }
++        
+     // invalidate it as it has to be recalculated
+     m_headerWidth = 0;
+@@ -4299,4 +4350,8 @@
+     {
+         ResetVisibleLinesRange();
++        for (size_t i = 0; i < m_aColWidths.GetCount(); i++)
++        {
++            delete m_aColWidths.Item(i);
++        }
+     }
+ 
+@@ -4450,4 +4505,13 @@
+         #endif
+         ResetVisibleLinesRange();
++        
++        //  calculate the width of the item and adjust the max column width accordingly
++        wxColWidthInfo *    pWidthInfo = m_aColWidths.Item(item.GetColumn());
++        int width = 0;
++        
++        width = GetItemWidthWithImage(&item);
++        item.SetWidth(width);
++        if (width > pWidthInfo->nMaxWidth)
++            pWidthInfo->nMaxWidth = width;
+     }
+     else if ( HasFlag(wxLC_LIST) )
+@@ -4507,4 +4571,6 @@
+ 
+         wxListHeaderData *column = new wxListHeaderData( item );
++        wxColWidthInfo *    colWidthInfo = new wxColWidthInfo();
++        
+         bool insert = (col >= 0) && ((size_t)col < m_columns.GetCount());
+         if ( insert )
+@@ -4512,8 +4578,10 @@
+             wxListHeaderDataList::compatibility_iterator node = m_columns.Item( col );
+             m_columns.Insert( node, column );
++            m_aColWidths.Insert( colWidthInfo, col );
+         }
+         else
+         {
+             m_columns.Append( column );
++            m_aColWidths.Add( colWidthInfo );
+         }
+ 
+@@ -4535,4 +4603,28 @@
+         m_headerWidth = 0;
+     }
++}
++
++int wxListMainWindow::GetItemWidthWithImage(wxListItem * item)
++{
++    int width = 0;
++    wxClientDC dc(this);
++
++    dc.SetFont( GetFont() );
++
++    if (item->GetImage() != -1)
++    {
++        int ix, iy;
++        GetImageSize( item->GetImage(), ix, iy );
++        width += ix + 5;
++    }
++    
++    if (!item->GetText().empty())
++    {
++        wxCoord w;
++        dc.GetTextExtent( item->GetText(), &w, NULL );
++        width += w;
++    }
++
++    return width;
+ }
+ 
+
+ 	  	 

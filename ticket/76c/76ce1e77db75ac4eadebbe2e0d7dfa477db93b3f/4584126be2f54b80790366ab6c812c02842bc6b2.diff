@@ -1,0 +1,95 @@
+commit ea5638390028df73f2c91f94c91862d2876e5dc6
+Author: Vadim Zeitlin <vadim@wxwidgets.org>
+Date:   Mon Dec 13 17:18:59 2010 +0100
+
+    WIP: Trying to avoid eating Esc used by IME.
+
+diff --git a/src/msw/window.cpp b/src/msw/window.cpp
+index ff1861f..f4579f8 100644
+--- a/src/msw/window.cpp
++++ b/src/msw/window.cpp
+@@ -228,6 +228,13 @@ EraseBgHooks gs_eraseBgHooks;
+ 
+ #endif // wxHAS_MSW_BACKGROUND_ERASE_HOOK
+ 
++// Window for which IME composition is currently in progress.
++//
++// This is currently global as we allow using UI from the main thread only
++// anyhow but could be replaced with a thread-specific value in the future if
++// needed.
++wxWindow *gs_winUsingIME = NULL;
++
+ } // anonymous namespace
+ 
+ // ---------------------------------------------------------------------------
+@@ -3280,6 +3287,14 @@ WXLRESULT wxWindowMSW::MSWWindowProc(WXUINT message, WXWPARAM wParam, WXLPARAM l
+             }
+             break;
+ 
++        case WM_IME_STARTCOMPOSITION:
++            gs_winUsingIME = this;
++            break;
++
++        case WM_IME_ENDCOMPOSITION:
++            gs_winUsingIME = NULL;
++            break;
++
+ #if wxUSE_HOTKEY
+         case WM_HOTKEY:
+             processed = HandleHotKey((WORD)wParam, lParam);
+@@ -6604,31 +6619,37 @@ wxKeyboardHook(int nCode, WORD wParam, DWORD lParam)
+     DWORD hiWord = HIWORD(lParam);
+     if ( nCode != HC_NOREMOVE && ((hiWord & KF_UP) == 0) )
+     {
+-        wchar_t uc;
+-        int id = wxMSWKeyboard::VKToWX(wParam, lParam, &uc);
+-        if ( id != WXK_NONE
++        // Don't intercept keys which may be needed by IME if it's currently in
++        // use. This is rather drastic but better than the alternative of
++        // stealing keys that have special meaning for IME (such as Enter and
++        // Esc) from it.
++        const wxWindow * const win = wxGetActiveWindow();
++        if ( !gs_winUsingIME || win != gs_winUsingIME )
++        {
++            wchar_t uc;
++            int id = wxMSWKeyboard::VKToWX(wParam, lParam, &uc);
++            if ( id != WXK_NONE
+ #if wxUSE_UNICODE
+-                || static_cast<int>(uc) != WXK_NONE
++                    || static_cast<int>(uc) != WXK_NONE
+ #endif // wxUSE_UNICODE
+-                )
+-        {
+-            const wxWindow * const win = wxGetActiveWindow();
+-
+-            wxKeyEvent event(wxEVT_CHAR_HOOK);
+-            MSWInitAnyKeyEvent(event, wParam, lParam, win);
++                    )
++            {
++                wxKeyEvent event(wxEVT_CHAR_HOOK);
++                MSWInitAnyKeyEvent(event, wParam, lParam, win);
+ 
+-            event.m_keyCode = id;
++                event.m_keyCode = id;
+ #if wxUSE_UNICODE
+-            event.m_uniChar = uc;
++                event.m_uniChar = uc;
+ #endif // wxUSE_UNICODE
+ 
+-            wxEvtHandler * const handler = win ? win->GetEventHandler()
+-                                               : wxTheApp;
++                wxEvtHandler * const handler = win ? win->GetEventHandler()
++                                                   : wxTheApp;
+ 
+-            if ( handler && handler->ProcessEvent(event) )
+-            {
+-                // processed
+-                return 1;
++                if ( handler && handler->ProcessEvent(event) )
++                {
++                    // processed
++                    return 1;
++                }
+             }
+         }
+     }

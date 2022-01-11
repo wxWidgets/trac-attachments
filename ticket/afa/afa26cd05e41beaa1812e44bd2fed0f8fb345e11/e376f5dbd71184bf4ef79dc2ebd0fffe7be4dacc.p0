@@ -1,0 +1,93 @@
+--- include/wx/event-svn.h	2007-11-24 16:12:56.000000000 +0100
++++ include/wx/event.h	2007-11-24 17:05:51.000000000 +0100
+@@ -2366,7 +2393,10 @@
+     // add an event to be processed later
+     virtual void AddPendingEvent(const wxEvent& event);
+ 
+-    void ProcessPendingEvents();
++    // Returns true if event handler processed all events and should be 
++    // removed from wxPendingEvents (list of handlers with still pending events)
++    // Returns false otherwise.
++    bool ProcessPendingEvents();
+ 
+ #if wxUSE_THREADS
+     bool ProcessThreadEvent(const wxEvent& event);
+--- src/common/appbase-svn.cpp	2007-11-24 16:14:05.000000000 +0100
++++ src/common/appbase.cpp	2007-11-24 17:25:35.000000000 +0100
+@@ -363,16 +363,29 @@
+         while (node)
+         {
+             wxEvtHandler *handler = (wxEvtHandler *)node->GetData();
+-            wxPendingEvents->Erase(node);
++            // Delay removal from list, since we use presence in the list as an 
++            // indicator that the object is still alive (inside wxEvtHandler::ProcessPendingEvents)
++            // And there might still be unprocessed events after the call to the
++            // event handler. 
++
+ 
+             // In ProcessPendingEvents(), new handlers might be add
+             // and we can safely leave the critical section here.
+             wxLEAVE_CRIT_SECT( *wxPendingEventsLocker );
+ 
+-            handler->ProcessPendingEvents();
++            bool rv = handler->ProcessPendingEvents();
+ 
+             wxENTER_CRIT_SECT( *wxPendingEventsLocker );
+ 
++            // If handler was not destroyed, we can remove it from the list.
++            // Otherwise already removed (or still has unprocessed events).
++            if( rv==true ) 
++            {
++            	// The node might have changed (from nested call to ProcessPendingEvents).
++            	// Use DeleteObject instead of Erase.
++            	wxPendingEvents->DeleteObject(handler);
++            }
++            
+             node = wxPendingEvents->GetFirst();
+         }
+     }
+--- src/common/event-svn.cpp	2007-11-24 16:14:49.000000000 +0100
++++ src/common/event.cpp	2007-11-24 17:07:51.000000000 +0100
+@@ -1164,11 +1164,11 @@
+     wxWakeUpIdle();
+ }
+ 
+-void wxEvtHandler::ProcessPendingEvents()
++bool wxEvtHandler::ProcessPendingEvents()
+ {
+     // this method is only called by wxApp if this handler does have
+     // pending events
+-    wxCHECK_RET( m_pendingEvents,
++    wxCHECK_MSG( m_pendingEvents, true, 
+                  wxT("Please call wxApp::ProcessPendingEvents() instead") );
+ 
+     wxENTER_CRIT_SECT( Lock() );
+@@ -1196,6 +1196,14 @@
+ 
+         delete event;
+ 
++        // It could be that this event handler has been destroyed during
++        // ProcessEvent above (an event handler must be allowed to destroy
++        // itself in response to an event). If so, return without accessing 
++        // any members (Note: depends on wxAppConsoleBase::ProcessPendingEvents 
++        // not removing the node before calling us). 
++        if( !wxPendingEvents->Find(this) )
++            return false;
++            
+         wxENTER_CRIT_SECT( Lock() );
+ 
+         if ( --n == 0 )
+@@ -1203,6 +1211,11 @@
+     }
+ 
+     wxLEAVE_CRIT_SECT( Lock() );
++    
++    // Only return true if there are no unprocessed events left, since 
++    // removing us from wxPendingEvents would leave the events unprocessed
++    // indefinitely.
++    return m_pendingEvents->size()==0;
+ }
+ 
+ /*
+
+ 	  	 

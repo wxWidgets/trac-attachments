@@ -1,0 +1,276 @@
+diff --git a/include/wx/overlay.h b/include/wx/overlay.h
+index adde26d..c08e0ea 100644
+--- a/include/wx/overlay.h
++++ b/include/wx/overlay.h
+@@ -49,7 +49,8 @@ private:
+     // returns true if it has been setup
+     bool IsOk();
+ 
+-    void Init(wxDC* dc, int x , int y , int width , int height);
++    void Init(wxScrolledWindow* scrlwnd, wxDC* dc,
++              int x , int y , int width , int height);
+ 
+     void BeginDrawing(wxDC* dc);
+ 
+@@ -71,10 +72,17 @@ class WXDLLIMPEXP_CORE wxDCOverlay
+ public:
+     // connects this overlay to the corresponding drawing dc, if the overlay is
+     // not initialized yet this call will do so
++    // (coordinates are logical)
+     wxDCOverlay(wxOverlay &overlay, wxDC *dc, int x , int y , int width , int height);
++    // connects this overlay to the corresponding wxScrolledWindow, if the overlay is
++    // not initialized yet this call will do so
++    // (coordinates are logical)
++    wxDCOverlay(wxOverlay &overlay, wxScrolledWindow& scrlwnd, int x, int y, int width, int height);
+ 
+     // convenience wrapper that behaves the same using the entire area of the dc
+     wxDCOverlay(wxOverlay &overlay, wxDC *dc);
++    // convenience wrapper that behaves the same using the entire area of the wxScrolledWindow
++    wxDCOverlay(wxOverlay &overlay, wxScrolledWindow& scrlwnd);
+ 
+     // removes the connection between the overlay and the dc
+     virtual ~wxDCOverlay();
+@@ -82,8 +90,11 @@ public:
+     // clears the layer, restoring the state at the last init
+     void Clear();
+ 
++    wxDC* GetDC() { return m_dc;  }
++
+ private:
+-    void Init(wxDC *dc, int x , int y , int width , int height);
++    void Init(wxScrolledWindow *scrlwnd, wxDC *dc,
++              int x , int y , int width , int height);
+ 
+     wxOverlay& m_overlay;
+ 
+diff --git a/include/wx/private/overlay.h b/include/wx/private/overlay.h
+index 1149701..5848812 100644
+--- a/include/wx/private/overlay.h
++++ b/include/wx/private/overlay.h
+@@ -33,7 +33,7 @@ class WXDLLIMPEXP_FWD_CORE wxWindow;
+ class wxOverlayImpl
+ {
+ public:
+-    wxOverlayImpl();
++    wxOverlayImpl(wxOverlay& owner);
+     ~wxOverlayImpl();
+ 
+ 
+@@ -44,7 +44,11 @@ public:
+     // returns true if it has been setup
+     bool IsOk();
+ 
+-    void Init(wxDC* dc, int x , int y , int width , int height);
++    // returns true if setup with wxScrolledWindow
++    bool IsScrolledWindow() { return m_scrolled; }
++
++    void Init(wxScrolledWindow* scrlwnd, wxDC* dc,
++              int x , int y , int width , int height);
+ 
+     void BeginDrawing(wxDC* dc);
+ 
+@@ -53,12 +57,19 @@ public:
+     void Clear(wxDC* dc);
+ 
+ private:
++    void OnScrollWinEvent(wxScrollWinEvent& event);
++
++    wxOverlay& m_owner;
+     wxBitmap m_bmpSaved ;
+     int m_x ;
+     int m_y ;
+     int m_width ;
+     int m_height ;
+-    wxWindow* m_window ;
++    bool m_scrolled;
++    union {
++        wxWindow* m_window;
++        wxScrolledWindow* m_scrlwnd;
++    };
+ };
+ 
+ #endif // wxHAS_NATIVE_OVERLAY/!wxHAS_NATIVE_OVERLAY
+diff --git a/src/common/overlaycmn.cpp b/src/common/overlaycmn.cpp
+index 4ea0de9..16d4532 100644
+--- a/src/common/overlaycmn.cpp
++++ b/src/common/overlaycmn.cpp
+@@ -38,7 +38,7 @@
+ 
+ wxOverlay::wxOverlay()
+ {
+-    m_impl = new wxOverlayImpl();
++    m_impl = new wxOverlayImpl(*this);
+     m_inDrawing = false;
+ }
+ 
+@@ -52,9 +52,10 @@ bool wxOverlay::IsOk()
+     return m_impl->IsOk();
+ }
+ 
+-void wxOverlay::Init( wxDC* dc, int x , int y , int width , int height )
++void wxOverlay::Init( wxScrolledWindow* scrlwnd, wxDC* dc,
++                      int x , int y , int width , int height )
+ {
+-    m_impl->Init(dc, x, y, width, height);
++    m_impl->Init(scrlwnd, dc, x, y, width, height);
+ }
+ 
+ void wxOverlay::BeginDrawing( wxDC* dc)
+@@ -88,7 +89,16 @@ void wxOverlay::Reset()
+ wxDCOverlay::wxDCOverlay(wxOverlay &overlay, wxDC *dc, int x , int y , int width , int height) :
+     m_overlay(overlay)
+ {
+-    Init(dc, x, y, width, height);
++    Init(NULL, dc, x, y, width, height);
++}
++
++wxDCOverlay::wxDCOverlay(wxOverlay &overlay, wxScrolledWindow& scrlwnd, int x, int y, int width, int height) :
++    m_overlay(overlay)
++{
++    wxDC* dc = new wxClientDC(&scrlwnd);
++    scrlwnd.PrepareDC(*dc);
++
++    Init(&scrlwnd, dc, x, y, width, height);
+ }
+ 
+ wxDCOverlay::wxDCOverlay(wxOverlay &overlay, wxDC *dc) :
+@@ -96,25 +106,50 @@ wxDCOverlay::wxDCOverlay(wxOverlay &overlay, wxDC *dc) :
+ {
+     const wxRect device(wxPoint(0, 0), dc->GetSize());
+ 
+-    Init(dc,
++    Init(NULL,
++         dc,
+          dc->DeviceToLogicalX(device.GetLeft()),
+          dc->DeviceToLogicalY(device.GetTop()),
+          dc->DeviceToLogicalX(device.GetRight()),
+          dc->DeviceToLogicalY(device.GetBottom()));
+ }
+ 
++wxDCOverlay::wxDCOverlay(wxOverlay &overlay, wxScrolledWindow& scrlwnd) :
++    m_overlay(overlay)
++{
++    wxDC* dc = new wxClientDC(&scrlwnd);
++    scrlwnd.PrepareDC(*dc);
++    wxRect device(wxPoint(0, 0), dc->GetSize());
++    // avoid graphic trailings at bottom of window
++    device.SetWidth(device.GetWidth() + 1);
++    device.SetHeight(device.GetHeight() + 1);
++
++    Init(&scrlwnd,
++        dc,
++        dc->DeviceToLogicalX(device.GetLeft()),
++        dc->DeviceToLogicalY(device.GetTop()),
++        dc->DeviceToLogicalX(device.GetRight()),
++        dc->DeviceToLogicalY(device.GetBottom()));
++}
++
+ wxDCOverlay::~wxDCOverlay()
+ {
+     m_overlay.EndDrawing(m_dc);
++    if (m_overlay.GetImpl()->IsScrolledWindow())
++    {
++        delete m_dc;
++    }
+ }
+ 
+-void wxDCOverlay::Init(wxDC *dc, int x , int y , int width , int height )
++void wxDCOverlay::Init(wxScrolledWindow *scrlwnd, wxDC *dc,
++                       int x , int y , int width , int height )
+ {
+     m_dc = dc ;
+     if ( !m_overlay.IsOk() )
+     {
+-        m_overlay.Init(dc,x,y,width,height);
++        m_overlay.Init(scrlwnd, dc,x,y,width,height);
+     }
++    wxASSERT(!scrlwnd || scrlwnd == dc->GetWindow());
+     m_overlay.BeginDrawing(dc);
+ }
+ 
+@@ -129,8 +164,10 @@ void wxDCOverlay::Clear()
+ 
+ #ifndef wxHAS_NATIVE_OVERLAY
+ 
+-wxOverlayImpl::wxOverlayImpl()
++wxOverlayImpl::wxOverlayImpl(wxOverlay& owner) :
++    m_owner(owner)
+ {
++     m_scrolled = false;
+      m_window = NULL ;
+      m_x = m_y = m_width = m_height = 0 ;
+ }
+@@ -144,9 +181,26 @@ bool wxOverlayImpl::IsOk()
+     return m_bmpSaved.IsOk() ;
+ }
+ 
+-void wxOverlayImpl::Init( wxDC* dc, int x , int y , int width , int height )
++void wxOverlayImpl::Init( wxScrolledWindow* scrlwnd, wxDC* dc,
++                          int x , int y , int width , int height )
+ {
+-    m_window = dc->GetWindow();
++    m_scrolled = scrlwnd != NULL;
++    if (scrlwnd)
++    {
++        m_scrlwnd = scrlwnd;
++        m_scrlwnd->Bind(wxEVT_SCROLLWIN_TOP, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Bind(wxEVT_SCROLLWIN_BOTTOM, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Bind(wxEVT_SCROLLWIN_LINEUP, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Bind(wxEVT_SCROLLWIN_LINEDOWN, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Bind(wxEVT_SCROLLWIN_PAGEUP, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Bind(wxEVT_SCROLLWIN_PAGEDOWN, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Bind(wxEVT_SCROLLWIN_THUMBTRACK, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Bind(wxEVT_SCROLLWIN_THUMBRELEASE, &wxOverlayImpl::OnScrollWinEvent, this);
++    }
++    else
++    {
++        m_window = dc->GetWindow();
++    }
+     wxMemoryDC dcMem ;
+     m_bmpSaved.Create( width, height );
+     dcMem.SelectObject( m_bmpSaved );
+@@ -169,6 +223,17 @@ void wxOverlayImpl::Clear(wxDC* dc)
+ 
+ void wxOverlayImpl::Reset()
+ {
++    if (m_scrolled)
++    {
++        m_scrlwnd->Unbind(wxEVT_SCROLLWIN_TOP, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Unbind(wxEVT_SCROLLWIN_BOTTOM, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Unbind(wxEVT_SCROLLWIN_LINEUP, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Unbind(wxEVT_SCROLLWIN_LINEDOWN, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Unbind(wxEVT_SCROLLWIN_PAGEUP, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Unbind(wxEVT_SCROLLWIN_PAGEDOWN, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Unbind(wxEVT_SCROLLWIN_THUMBTRACK, &wxOverlayImpl::OnScrollWinEvent, this);
++        m_scrlwnd->Unbind(wxEVT_SCROLLWIN_THUMBRELEASE, &wxOverlayImpl::OnScrollWinEvent, this);
++    }
+     m_bmpSaved = wxBitmap();
+ }
+ 
+@@ -180,6 +245,26 @@ void wxOverlayImpl::EndDrawing(wxDC* WXUNUSED(dc))
+ {
+ }
+ 
++void wxOverlayImpl::OnScrollWinEvent(wxScrollWinEvent& event)
++{
++    wxASSERT(m_scrolled);
++    // perform standard action
++    m_scrlwnd->HandleOnScroll(event);
++
++    if (m_scrlwnd->IsAutoScrolling())
++    {
++        // erase rubber band and uninit m_overlay
++        {
++            wxDCOverlay overlaydc(m_owner, *m_scrlwnd);
++            overlaydc.Clear();
++        }
++        m_owner.Reset();
++
++        // before OnMouseMove re-initializes m_overlay
++        m_scrlwnd->Update();
++    }
++}
++
+ #endif // !wxHAS_NATIVE_OVERLAY
+ 
+ 

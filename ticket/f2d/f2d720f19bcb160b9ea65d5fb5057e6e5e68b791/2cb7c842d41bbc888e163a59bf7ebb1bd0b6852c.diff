@@ -1,0 +1,377 @@
+diff --git a/include/wx/filename.h b/include/wx/filename.h
+index 8da9903..2685b2d 100644
+--- a/include/wx/filename.h
++++ b/include/wx/filename.h
+@@ -108,6 +108,20 @@ enum
+     wxPATH_RMDIR_RECURSIVE  = 0x0002   // delete all recursively (dangerous!)
+ };
+ 
++// wxFileExists flags
++enum
++{
++    wxFILE_EXISTS_FILE      = 0x0001,  // check for existence of a regular file
++    wxFILE_EXISTS_DIR       = 0x0002,  // check for existence of a directory
++    wxFILE_EXISTS_SYMLINK   = 0x0004,  // check for existence of a symbolic link
++    wxFILE_EXISTS_DEVICE    = 0x0008,  // check for existence of a device
++    wxFILE_EXISTS_FIFO      = 0x0016,  // check for existence of a FIFO
++    wxFILE_EXISTS_SOCKET    = 0x0032,  // check for existence of a socket
++                                       // gap for future types
++    wxFILE_EXISTS_ANY       = 0x0FFF,  // check for existence of anything
++    wxFILE_EXISTS_NO_FOLLOW = 0x1000   // don't dereference a contained symlink
++};
++
+ #if wxUSE_LONGLONG
+ // error code of wxFileName::GetSize()
+ extern WXDLLIMPEXP_DATA_BASE(const wxULongLong) wxInvalidSize;
+@@ -224,8 +238,8 @@ public:
+ 
+         // does anything at all with this name (i.e. file, directory or some
+         // other file system object such as a device, socket, ...) exist?
+-    bool Exists() const;
+-    static bool Exists(const wxString& path);
++    bool Exists(int flags = wxFILE_EXISTS_ANY) const;
++    static bool Exists(const wxString& path, int flags = wxFILE_EXISTS_ANY);
+ 
+ 
+         // checks on most common flags for files/directories;
+diff --git a/interface/wx/filename.h b/interface/wx/filename.h
+index cc6ccc9..fa9cdb1 100644
+--- a/interface/wx/filename.h
++++ b/interface/wx/filename.h
+@@ -91,6 +91,21 @@ enum
+ };
+ 
+ /**
++    Flags for wxFileName::Exists().
++ */
++enum
++{
++    wxFILE_EXISTS_FILE      = 0x0001,  //!< Check for existence of a regular file
++    wxFILE_EXISTS_DIR       = 0x0002,  //!< Check for existence of a directory
++    wxFILE_EXISTS_SYMLINK   = 0x0004,  //!< Check for existence of a symbolic link
++    wxFILE_EXISTS_DEVICE    = 0x0008,  //!< Check for existence of a device
++    wxFILE_EXISTS_FIFO      = 0x0016,  //!< Check for existence of a FIFO
++    wxFILE_EXISTS_SOCKET    = 0x0032,  //!< Check for existence of a socket
++    wxFILE_EXISTS_ANY       = 0x0FFF,  //!< Check for existence of anything
++    wxFILE_EXISTS_NO_FOLLOW = 0x1000   //!< Don't dereference a contained symbolic link
++};
++
++/**
+     The return value of wxFileName::GetSize() in case of error.
+ */
+ wxULongLong wxInvalidSize;
+@@ -511,22 +526,28 @@ public:
+ 
+         @since 2.9.4
+      */
+-    bool Exists() const;
++    bool Exists(int flag = wxFILE_EXISTS_ANY) const;
+ 
+     /**
+         Returns @true if either a file or a directory or something else with
+         this name exists in the file system.
+ 
+-        This method is equivalent to @code FileExists() || DirExists() @endcode
+-        under most systems but under Unix it also returns true if the file
++        Don't dereference @a path if it is a symbolic link  and @a flags
++        contain wxFILE_EXISTS_NO_FOLLOW.
++
++        By default this method is equivalent to @code FileExists() || DirExists() @endcode
++        under most systems, but under Unix it also returns true if the file
+         identifies a special file system object such as a device, a socket or a
+         FIFO.
+ 
++        Alternatively you may check for the existence of one or more specific 
++        items by passing the appropriate @a flags.
++
+         @since 2.9.4
+ 
+         @see FileExists(), DirExists()
+      */
+-    static bool Exists(const wxString& path);
++    static bool Exists(const wxString& path, int flag = wxFILE_EXISTS_ANY);
+ 
+     /**
+         Returns @true if the file with this name exists.
+diff --git a/src/common/filename.cpp b/src/common/filename.cpp
+index d21a7e5..5d5e194 100644
+--- a/src/common/filename.cpp
++++ b/src/common/filename.cpp
+@@ -335,14 +335,14 @@ static bool IsUNCPath(const wxString& path, wxPathFormat format)
+ #ifndef __WIN32__
+ 
+ // Under Unix-ish systems (basically everything except Windows) we may work
+-// either with the file itself or its target in case it's a symbolic link, as
+-// determined by wxFileName::ShouldFollowLink(). StatAny() can be used to stat
+-// the appropriate file with an extra twist that it also works (by following
+-// the symlink by default) when there is no wxFileName object at all, as is the
+-// case in static methods.
++// either with the file itself or its target if it's a symbolic link and we
++// should dereference it, as determined by wxFileName::ShouldFollowLink() and
++// the absence of the wxFILE_EXISTS_NO_FOLLOW flag. StatAny() can be used to
++// stat the appropriate file with an extra twist that it also works when there
++// is no wxFileName object at all, as is the case in static methods.
+ 
+ // Private implementation, don't call directly, use one of the overloads below.
+-bool DoStatAny(wxStructStat& st, wxString path, const wxFileName* fn)
++bool DoStatAny(wxStructStat& st, wxString path, bool dereference)
+ {
+     // We need to remove any trailing slashes from the path because they could
+     // interfere with the symlink following decision: even if we use lstat(),
+@@ -362,23 +362,22 @@ bool DoStatAny(wxStructStat& st, wxString path, const wxFileName* fn)
+         path.erase(posLast);
+     }
+ 
+-    int ret = !fn || fn->ShouldFollowLink() ? wxStat(path, &st)
+-                                            : wxLstat(path, &st);
++    int ret = dereference ? wxStat(path, &st) : wxLstat(path, &st);
+     return ret == 0;
+ }
+ 
+ // Overloads to use for a case when we don't have wxFileName object and when we
+ // do have one.
+ inline
+-bool StatAny(wxStructStat& st, const wxString& path)
++bool StatAny(wxStructStat& st, const wxString& path, bool dereference)
+ {
+-    return DoStatAny(st, path, NULL);
++    return DoStatAny(st, path, dereference);
+ }
+ 
+ inline
+ bool StatAny(wxStructStat& st, const wxFileName& fn)
+ {
+-    return DoStatAny(st, fn.GetFullPath(), &fn);
++    return DoStatAny(st, fn.GetFullPath(), fn.ShouldFollowLink());
+ }
+ 
+ #endif // !__WIN32__
+@@ -644,16 +643,6 @@ wxFileName wxFileName::DirName(const wxString& dir, wxPathFormat format)
+ namespace
+ {
+ 
+-// Flags for wxFileSystemObjectExists() asking it to check for:
+-enum
+-{
+-    wxFileSystemObject_File  = 1,   // file existence
+-    wxFileSystemObject_Dir   = 2,   // directory existence
+-    wxFileSystemObject_Other = 4,   // existence of something else, e.g.
+-                                    // device, socket, FIFO under Unix
+-    wxFileSystemObject_Any   = 7    // existence of anything at all
+-};
+-
+ #if defined(__WINDOWS__) && !defined(__WXMICROWIN__)
+ 
+ void RemoveTrailingSeparatorsFromPath(wxString& strPath)
+@@ -682,16 +671,17 @@ bool
+ wxFileSystemObjectExists(const wxString& path, int flags,
+                          const wxFileName* fn = NULL)
+ {
+-    wxUnusedVar(fn);    // It's only used under Unix
+ 
+     // Should the existence of file/directory with this name be accepted, i.e.
+     // result in the true return value from this function?
+-    const bool acceptFile = (flags & wxFileSystemObject_File) != 0;
+-    const bool acceptDir  = (flags & wxFileSystemObject_Dir) != 0;
++    const bool acceptFile = (flags & wxFILE_EXISTS_FILE) != 0;
++    const bool acceptDir  = (flags & wxFILE_EXISTS_DIR)  != 0;
+ 
+     wxString strPath(path);
+ 
+ #if defined(__WINDOWS__) && !defined(__WXMICROWIN__)
++    wxUnusedVar(fn);    // It's only used under Unix
++
+     if ( acceptDir )
+     {
+         // Ensure that the path doesn't have any trailing separators when
+@@ -735,22 +725,38 @@ wxFileSystemObjectExists(const wxString& path, int flags,
+     // We consider that the path must exist if we get a sharing violation for
+     // it but we don't know what is it in this case.
+     if ( rc == ERROR_SHARING_VIOLATION )
+-        return flags & wxFileSystemObject_Other;
++        return flags & wxFILE_EXISTS_ANY;
+ 
+     // Any other error (usually ERROR_PATH_NOT_FOUND), means there is nothing
+     // there.
+     return false;
+ #else // Non-MSW, non-OS/2
++    // Should we dereference any symlink in the test?
++    bool dereference = (flags & wxFILE_EXISTS_NO_FOLLOW) == 0;
++    // if the wxFILE_EXISTS_NO_FOLLOW flag wasn't passed, check fn
++    if (dereference && fn)
++    {
++        dereference = fn->ShouldFollowLink();
++    }
++
+     wxStructStat st;
+-    if ( !DoStatAny(st, strPath, fn) )
++    if ( !StatAny(st, strPath, dereference) )
+         return false;
+ 
+     if ( S_ISREG(st.st_mode) )
+         return acceptFile;
+     if ( S_ISDIR(st.st_mode) )
+         return acceptDir;
+-
+-    return flags & wxFileSystemObject_Other;
++    if ( S_ISLNK(st.st_mode) )
++        return (flags & wxFILE_EXISTS_SYMLINK) != 0;
++    if ( S_ISBLK(st.st_mode) || S_ISCHR(st.st_mode) )
++        return (flags & wxFILE_EXISTS_DEVICE) != 0;
++    if ( S_ISFIFO(st.st_mode) )
++        return (flags & wxFILE_EXISTS_FIFO) != 0;
++    if ( S_ISSOCK(st.st_mode) )
++        return (flags & wxFILE_EXISTS_SOCKET) != 0;
++
++    return flags & wxFILE_EXISTS_ANY;
+ #endif // Platforms
+ }
+ 
+@@ -758,35 +764,43 @@ wxFileSystemObjectExists(const wxString& path, int flags,
+ 
+ bool wxFileName::FileExists() const
+ {
+-    return wxFileSystemObjectExists(GetFullPath(), wxFileSystemObject_File, this);
++    return wxFileSystemObjectExists(GetFullPath(),
++                     ShouldFollowLink() ? wxFILE_EXISTS_FILE : wxFILE_EXISTS_FILE | wxFILE_EXISTS_NO_FOLLOW);
+ }
+ 
+ /* static */
+ bool wxFileName::FileExists( const wxString &filePath )
+ {
+-    return wxFileSystemObjectExists(filePath, wxFileSystemObject_File);
++    return wxFileSystemObjectExists(filePath, wxFILE_EXISTS_FILE);
+ }
+ 
+ bool wxFileName::DirExists() const
+ {
+-    return wxFileSystemObjectExists(GetPath(), wxFileSystemObject_Dir, this);
++    return Exists(GetFullPath(),
++                     ShouldFollowLink() ? wxFILE_EXISTS_DIR : wxFILE_EXISTS_DIR | wxFILE_EXISTS_NO_FOLLOW);
+ }
+ 
+ /* static */
+ bool wxFileName::DirExists( const wxString &dirPath )
+ {
+-    return wxFileSystemObjectExists(dirPath, wxFileSystemObject_Dir);
++    return wxFileSystemObjectExists(dirPath, wxFILE_EXISTS_DIR);
+ }
+ 
+-bool wxFileName::Exists() const
++bool wxFileName::Exists(int flags /*= wxFILE_EXISTS_ANY*/) const
+ {
+-    return wxFileSystemObjectExists(GetFullPath(), wxFileSystemObject_Any, this);
++    // If no overriding NO_FOLLOW flag was passed, honour the internal setting
++    if ((flags & wxFILE_EXISTS_NO_FOLLOW) == 0 && m_dontFollowLinks)
++    {
++        flags |= wxFILE_EXISTS_NO_FOLLOW;
++    }
++        
++    return wxFileSystemObjectExists(GetFullPath(), flags, this);
+ }
+ 
+ /* static */
+-bool wxFileName::Exists(const wxString& path)
++bool wxFileName::Exists(const wxString& path, int flags /*= wxFILE_EXISTS_ANY*/)
+ {
+-    return wxFileSystemObjectExists(path, wxFileSystemObject_Any);
++    return wxFileSystemObjectExists(path, flags);
+ }
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/tests/filename/filenametest.cpp b/tests/filename/filenametest.cpp
+index 5cd5ed9..420509c 100644
+--- a/tests/filename/filenametest.cpp
++++ b/tests/filename/filenametest.cpp
+@@ -672,17 +672,35 @@ void FileNameTestCase::TestExists()
+ 
+     CPPUNIT_ASSERT( fn.FileExists() );
+     CPPUNIT_ASSERT( !wxFileName::DirExists(fn.GetFullPath()) );
++
++    CPPUNIT_ASSERT( fn.Exists(wxFILE_EXISTS_FILE) );
++    CPPUNIT_ASSERT( !fn.Exists(wxFILE_EXISTS_DIR) );
+     CPPUNIT_ASSERT( fn.Exists() );
+ 
+     wxFileName dirTemp(wxFileName::DirName(wxFileName::GetTempDir()));
+     CPPUNIT_ASSERT( !dirTemp.FileExists() );
+     CPPUNIT_ASSERT( dirTemp.DirExists() );
++
++    CPPUNIT_ASSERT( dirTemp.Exists(wxFILE_EXISTS_DIR) );
++    CPPUNIT_ASSERT( !dirTemp.Exists(wxFILE_EXISTS_FILE) );
+     CPPUNIT_ASSERT( dirTemp.Exists() );
+ 
+ #ifdef __UNIX__
+     CPPUNIT_ASSERT( !wxFileName::FileExists("/dev/null") );
+     CPPUNIT_ASSERT( !wxFileName::DirExists("/dev/null") );
+     CPPUNIT_ASSERT( wxFileName::Exists("/dev/null") );
++    CPPUNIT_ASSERT( wxFileName::Exists("/dev/null", wxFILE_EXISTS_DEVICE) );
++    // The next two seem reliably to exist, at least on Linux...
++    CPPUNIT_ASSERT( !wxFileName::Exists("/dev/core", wxFILE_EXISTS_SYMLINK) );
++    CPPUNIT_ASSERT( wxFileName::Exists("/dev/core", wxFILE_EXISTS_SYMLINK | wxFILE_EXISTS_NO_FOLLOW) );
++    CPPUNIT_ASSERT( wxFileName::Exists("/dev/log", wxFILE_EXISTS_SOCKET) );
++    // but I couldn't find a guaranteed fifo
++    wxString fifo = dirTemp.GetPath() + "/fifo";
++    if (mkfifo(fifo, 0600) == 0)
++    {
++        CPPUNIT_ASSERT( wxFileName::Exists(fifo, wxFILE_EXISTS_FIFO) );
++        wxON_BLOCK_EXIT1(wxRemoveFile, fifo);
++    }
+ #endif // __UNIX__
+ }
+ 
+@@ -838,7 +856,7 @@ void FileNameTestCase::TestSymlinks()
+             equal
+         );
+ 
+-        // Test Exists()
++        // Test (File|Dir)Exists()
+         CPPUNIT_ASSERT_EQUAL_MESSAGE
+         (
+             "Testing file existence" + msg,
+@@ -851,6 +869,46 @@ void FileNameTestCase::TestSymlinks()
+             deref,
+             linktodir.DirExists()
+         );
++
++        // Test wxFileName::Exists
++        // The wxFILE_EXISTS_NO_FOLLOW flag should override DontFollowLink()
++        CPPUNIT_ASSERT_EQUAL_MESSAGE
++        (
++            "Testing file existence" + msg,
++            false,
++            linktofile.Exists(wxFILE_EXISTS_FILE | wxFILE_EXISTS_NO_FOLLOW)
++        );
++        CPPUNIT_ASSERT_EQUAL_MESSAGE
++        (
++            "Testing directory existence" + msg,
++            false,
++            linktodir.Exists(wxFILE_EXISTS_DIR | wxFILE_EXISTS_NO_FOLLOW)
++        );
++        // and the static versions
++        CPPUNIT_ASSERT_EQUAL_MESSAGE
++        (
++            "Testing file existence" + msg,
++            false,
++            wxFileName::Exists(linktofile.GetFullPath(), wxFILE_EXISTS_FILE | wxFILE_EXISTS_NO_FOLLOW)
++        );
++        CPPUNIT_ASSERT_EQUAL_MESSAGE
++        (
++            "Testing file existence" + msg,
++            true,
++            wxFileName::Exists(linktofile.GetFullPath(), wxFILE_EXISTS_FILE)
++        );
++        CPPUNIT_ASSERT_EQUAL_MESSAGE
++        (
++            "Testing directory existence" + msg,
++            false,
++            wxFileName::Exists(linktodir.GetFullPath(), wxFILE_EXISTS_DIR | wxFILE_EXISTS_NO_FOLLOW)
++        );
++        CPPUNIT_ASSERT_EQUAL_MESSAGE
++        (
++            "Testing directory existence" + msg,
++            true,
++            wxFileName::Exists(linktodir.GetFullPath(), wxFILE_EXISTS_DIR)
++        );
+     }
+ 
+     // Finally test Exists() after removing the file.

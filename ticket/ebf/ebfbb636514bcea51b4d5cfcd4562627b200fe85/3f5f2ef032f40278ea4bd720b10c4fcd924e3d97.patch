@@ -1,0 +1,965 @@
+--- c:\CVSHome\wxWidgetsClean/docs/latex/wx/config.tex	2007-05-11 13:55:17.000000000 -0700
++++ c:\CVSHome\wxWidgets/docs/latex/wx/config.tex	2007-06-18 14:06:10.793757900 -0700
+@@ -712,6 +712,11 @@
+ Reads a bool value, returning \true if the value was found. If the value was
+ not found, {\it defaultVal} is used instead.
+ 
++\constfunc{bool}{Read}{\param{const wxString\& }{ key}, \param{wxMemoryBuffer*}{ buf}}
++
++Reads a binary block, returning \true if the value was found. If the value was
++not found, {\it buf} is not changed.
++
+ \pythonnote{In place of a single overloaded method name, wxPython
+ implements the following methods:\par
+ \indented{2cm}{\begin{twocollist}
+@@ -802,6 +807,8 @@
+ 
+ \func{bool}{Write}{\param{const wxString\& }{ key}, \param{bool}{ value}}
+ 
++\func{bool}{Write}{\param{const wxString\& }{ key}, \param{const wxMemoryBuffer\&}{ buf}}
++
+ These functions write the specified value to the config file and return \true on success.
+ 
+ \pythonnote{In place of a single overloaded method name, wxPython
+--- c:\CVSHome\wxWidgetsClean/include/wx/confbase.h	2007-06-10 10:42:02.000000000 -0700
++++ c:\CVSHome\wxWidgets/include/wx/confbase.h	2007-06-18 14:50:59.081326300 -0700
+@@ -16,7 +16,9 @@
+ 
+ #include "wx/defs.h"
+ #include "wx/string.h"
++#include "wx/buffer.h"
+ #include "wx/object.h"
++#include "wx/base64.h"
+ 
+ class WXDLLIMPEXP_BASE wxArrayString;
+ 
+@@ -177,6 +179,11 @@
+   bool Read(const wxString& key, bool* val) const;
+   bool Read(const wxString& key, bool* val, bool defVal) const;
+ 
++    // read a binary data block
++  bool Read(const wxString& key, wxMemoryBuffer* data) const
++	{ return DoReadBinary(key, data); }
++	// no default version since it does not make sense for binary data
++
+   // convenience functions returning directly the value (we don't have them for
+   // int/double/bool as there would be ambiguities with the long one then)
+   wxString Read(const wxString& key,
+@@ -202,6 +209,9 @@
+   bool Write(const wxString& key, bool value)
+     { return DoWriteBool(key, value); }
+ 
++  bool Write(const wxString& key, const wxMemoryBuffer& buf)
++    { return DoWriteBinary(key, buf); }
++
+   // we have to provide a separate version for C strings as otherwise they
+   // would be converted to bool and not to wxString as expected!
+   bool Write(const wxString& key, const char *value)
+@@ -273,12 +283,14 @@
+   virtual bool DoReadInt(const wxString& key, int *pi) const;
+   virtual bool DoReadDouble(const wxString& key, double* val) const;
+   virtual bool DoReadBool(const wxString& key, bool* val) const;
++  virtual bool DoReadBinary(const wxString& key, wxMemoryBuffer* buf) const = 0;
+ 
+   virtual bool DoWriteString(const wxString& key, const wxString& value) = 0;
+   virtual bool DoWriteLong(const wxString& key, long value) = 0;
+   virtual bool DoWriteInt(const wxString& key, int value);
+   virtual bool DoWriteDouble(const wxString& key, double value);
+   virtual bool DoWriteBool(const wxString& key, bool value);
++  virtual bool DoWriteBinary(const wxString& key, const wxMemoryBuffer& buf) = 0;
+ 
+ private:
+   // are we doing automatic environment variable expansion?
+@@ -345,6 +357,34 @@
+   #define wxConfig  wxFileConfig
+ #endif
+ 
++/*
++  If the user doesn't use some form of binary encode decode, provide an error
++    should they attempt to use a function requiring it.  Also, by using the
++	#defines, allow the user to choose an alternative method.
++*/
++#ifndef wxBINARY_TO_TEXT_ENCODING
++inline wxString nO_bInArY_tO_tExt( const wxMemoryBuffer& )
++{
++	wxASSERT_MSG( 0, wxT( "No file based Binary Config write capability without wxBINARY_TO_TEXT_ENCODING.  #define wxUSE_BASE64 in the wxWidgets Setup.h to use BASE64 functionality." ) );
++	wxString empt;
++	return empt;
++}
++#define wxCONFIG_BINARY_TO_TEXT_ENCODING( buf ) nO_bInArY_tO_tExt( buf )
++#else
++#define wxCONFIG_BINARY_TO_TEXT_ENCODING( buf ) wxBINARY_TO_TEXT_ENCODING( buf )
++#endif
++#ifndef wxTEXT_TO_BINARY_DECODING
++inline wxMemoryBuffer nO_tExt_tO_bInArY( const wxString& )
++{
++	wxASSERT_MSG( 0, wxT( "No file based Binary Config read capability without wxTEXT_TO_BINARY_DECODING.  #define wxUSE_BASE64 in the wxWidgets Setup.h to use BASE64 functionality." ) );
++	wxMemoryBuffer empt;
++	return empt;
++}
++#define wxCONFIG_TEXT_TO_BINARY_DECODING( str ) nO_tExt_tO_bInArY( str )
++#else
++#define wxCONFIG_TEXT_TO_BINARY_DECODING( str ) wxTEXT_TO_BINARY_DECODING( str )
++#endif
++
+ #endif // wxUSE_CONFIG
+ 
+ /*
+--- c:\CVSHome\wxWidgetsClean/include/wx/fileconf.h	2007-03-18 10:33:54.000000000 -0700
++++ c:\CVSHome\wxWidgets/include/wx/fileconf.h	2007-06-12 16:30:54.598808800 -0700
+@@ -194,9 +194,11 @@
+ protected:
+   virtual bool DoReadString(const wxString& key, wxString *pStr) const;
+   virtual bool DoReadLong(const wxString& key, long *pl) const;
++  virtual bool DoReadBinary(const wxString& key, wxMemoryBuffer* buf) const;
+ 
+   virtual bool DoWriteString(const wxString& key, const wxString& szValue);
+   virtual bool DoWriteLong(const wxString& key, long lValue);
++  virtual bool DoWriteBinary(const wxString& key, const wxMemoryBuffer& buf);
+ 
+ private:
+   // GetXXXFileName helpers: return ('/' terminated) directory names
+--- c:\CVSHome\wxWidgetsClean/include/wx/msw/iniconf.h	2007-03-10 10:15:34.000000000 -0800
++++ c:\CVSHome\wxWidgets/include/wx/msw/iniconf.h	2007-06-12 16:31:07.645591900 -0700
+@@ -78,9 +78,11 @@
+   // read/write
+   bool DoReadString(const wxString& key, wxString *pStr) const;
+   bool DoReadLong(const wxString& key, long *plResult) const;
++  bool DoReadBinary(const wxString& key, wxMemoryBuffer *buf) const;
+ 
+   bool DoWriteString(const wxString& key, const wxString& szValue);
+   bool DoWriteLong(const wxString& key, long lValue);
++  bool DoWriteBinary(const wxString& key, const wxMemoryBuffer& buf);
+ 
+ private:
+   // helpers
+--- c:\CVSHome\wxWidgetsClean/include/wx/msw/regconf.h	2007-03-10 10:15:34.000000000 -0800
++++ c:\CVSHome\wxWidgets/include/wx/msw/regconf.h	2007-06-12 16:31:08.132295000 -0700
+@@ -18,6 +18,7 @@
+ 
+ #include "wx/object.h"
+ #include "wx/confbase.h"
++#include "buffer.h"
+ 
+ // ----------------------------------------------------------------------------
+ // wxRegConfig
+@@ -90,9 +91,11 @@
+   // implement read/write methods
+   virtual bool DoReadString(const wxString& key, wxString *pStr) const;
+   virtual bool DoReadLong(const wxString& key, long *plResult) const;
++  virtual bool DoReadBinary(const wxString& key, wxMemoryBuffer* buf) const;
+ 
+   virtual bool DoWriteString(const wxString& key, const wxString& szValue);
+   virtual bool DoWriteLong(const wxString& key, long lValue);
++  virtual bool DoWriteBinary(const wxString& key, const wxMemoryBuffer& buf);
+ 
+ private:
+   // these keys are opened during all lifetime of wxRegConfig object
+--- c:\CVSHome\wxWidgetsClean/include/wx/palmos/prefconf.h	2007-03-10 10:15:41.000000000 -0800
++++ c:\CVSHome\wxWidgets/include/wx/palmos/prefconf.h	2007-06-12 16:31:09.859306000 -0700
+@@ -67,9 +67,11 @@
+   // implement read/write methods
+   virtual bool DoReadString(const wxString& key, wxString *pStr) const;
+   virtual bool DoReadLong(const wxString& key, long *plResult) const;
++  virtual bool DoReadBinary(const wxString& key, wxMemoryBuffer *buf) const;
+ 
+   virtual bool DoWriteString(const wxString& key, const wxString& szValue);
+   virtual bool DoWriteLong(const wxString& key, long lValue);
++  virtual bool DoWriteBinary(const wxString& key, const wxMemoryBuffer& buf);
+ 
+ private:
+   // current path (not '/' terminated)
+--- c:\CVSHome\wxWidgetsClean/samples/config/conftest.cpp	2007-02-03 16:31:48.000000000 -0800
++++ c:\CVSHome\wxWidgets/samples/config/conftest.cpp	2007-06-18 14:47:02.231513100 -0700
+@@ -1,269 +1,380 @@
+-///////////////////////////////////////////////////////////////////////////////
+-// Name:        conftest.cpp
+-// Purpose:     demo of wxConfig and related classes
+-// Author:      Vadim Zeitlin
+-// Modified by:
+-// Created:     03.08.98
+-// RCS-ID:      $Id: conftest.cpp,v 1.21 2007/02/04 00:31:48 VZ Exp $
+-// Copyright:   (c) 1998 Vadim Zeitlin <zeitlin@dptmaths.ens-cachan.fr>
+-// Licence:     wxWindows license
+-///////////////////////////////////////////////////////////////////////////////
+-
+-// ============================================================================
+-// declarations
+-// ============================================================================
+-
+-// ----------------------------------------------------------------------------
+-// headers
+-// ----------------------------------------------------------------------------
+-#include "wx/wxprec.h"
+-
+-#ifndef  WX_PRECOMP
+-  #include "wx/wx.h"
+-#endif //precompiled headers
+-
+-#include "wx/log.h"
+-#include "wx/config.h"
+-
+-// ----------------------------------------------------------------------------
+-// classes
+-// ----------------------------------------------------------------------------
+-
+-class MyApp: public wxApp
+-{
+-public:
+-  // implement base class virtuals
+-  virtual bool OnInit();
+-  virtual int OnExit();
+-};
+-
+-class MyFrame: public wxFrame
+-{
+-public:
+-  MyFrame();
+-  virtual ~MyFrame();
+-
+-  // callbacks
+-  void OnQuit(wxCommandEvent& event);
+-  void OnAbout(wxCommandEvent& event);
+-  void OnDelete(wxCommandEvent& event);
+-
+-private:
+-  wxTextCtrl *m_text;
+-  wxCheckBox *m_check;
+-
+-  DECLARE_EVENT_TABLE()
+-};
+-
+-enum
+-{
+-  ConfTest_Quit,
+-  ConfTest_About,
+-  ConfTest_Delete
+-};
+-
+-// ----------------------------------------------------------------------------
+-// event tables
+-// ----------------------------------------------------------------------------
+-
+-BEGIN_EVENT_TABLE(MyFrame, wxFrame)
+-  EVT_MENU(ConfTest_Quit, MyFrame::OnQuit)
+-  EVT_MENU(ConfTest_About, MyFrame::OnAbout)
+-  EVT_MENU(ConfTest_Delete, MyFrame::OnDelete)
+-END_EVENT_TABLE()
+-
+-// ============================================================================
+-// implementation
+-// ============================================================================
+-
+-// ----------------------------------------------------------------------------
+-// application
+-// ----------------------------------------------------------------------------
+-
+-IMPLEMENT_APP(MyApp)
+-
+-// `Main program' equivalent, creating windows and returning main app frame
+-bool MyApp::OnInit()
++///////////////////////////////////////////////////////////////////////////////
++// Name:        conftest.cpp
++// Purpose:     demo of wxConfig and related classes
++// Author:      Vadim Zeitlin
++// Modified by: Charles Reimers
++// Created:     03.08.98
++// RCS-ID:      $Id: conftest.cpp,v 1.20 2004/10/02 12:35:47 VS Exp $
++// Copyright:   (c) 1998 Vadim Zeitlin <zeitlin@dptmaths.ens-cachan.fr>
++// Licence:     wxWindows license
++///////////////////////////////////////////////////////////////////////////////
++
++// ============================================================================
++// declarations
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++#include "wx/wxprec.h"
++
++#ifndef  WX_PRECOMP
++  #include "wx/wx.h"
++#endif //precompiled headers
++
++#include "wx/log.h"
++
++//if you want to use fileconf instead of the default define it as 1, if not 0
++#define USE_FILECONF 0
++#if USE_FILECONF
++#include "wx/fileconf.h"
++#else
++#include "wx/config.h"
++#endif
++
++#include "wx/filedlg.h"
++#define ID_BITMAPBUTTON 2000
++
++// ----------------------------------------------------------------------------
++// classes
++// ----------------------------------------------------------------------------
++
++class MyApp: public wxApp
++{
++public:
++  // implement base class virtuals
++  virtual bool OnInit();
++  virtual int OnExit();
++};
++
++class MyFrame: public wxFrame
++{
++public:
++  MyFrame();
++  virtual ~MyFrame();
++
++  // callbacks
++  void OnQuit(wxCommandEvent& event);
++  void OnAbout(wxCommandEvent& event);
++  void OnDelete(wxCommandEvent& event);
++  void OnImage(wxCommandEvent& event);
++
++private:
++  wxTextCtrl *m_text;
++  wxCheckBox *m_check;
++  wxBitmapButton *m_bb;
++  wxImage m_image;
++
++  DECLARE_EVENT_TABLE()
++};
++
++enum
++{
++  Conftest_NoZeroValue,
++  ConfTest_Quit,
++  ConfTest_About,
++  ConfTest_Delete
++};
++
++// ----------------------------------------------------------------------------
++// event tables
++// ----------------------------------------------------------------------------
++
++BEGIN_EVENT_TABLE(MyFrame, wxFrame)
++  EVT_MENU(ConfTest_Quit, MyFrame::OnQuit)
++  EVT_MENU(ConfTest_About, MyFrame::OnAbout)
++  EVT_MENU(ConfTest_Delete, MyFrame::OnDelete)
++  EVT_BUTTON(ID_BITMAPBUTTON, MyFrame::OnImage)
++END_EVENT_TABLE()
++
++// ============================================================================
++// implementation
++// ============================================================================
++
++// ----------------------------------------------------------------------------
++// application
++// ----------------------------------------------------------------------------
++
++IMPLEMENT_APP(MyApp)
++
++// `Main program' equivalent, creating windows and returning main app frame
++bool MyApp::OnInit()
+ {
+   if ( !wxApp::OnInit() )
+-      return false;
+-
+-  // we're using wxConfig's "create-on-demand" feature: it will create the
+-  // config object when it's used for the first time. It has a number of
+-  // advantages compared with explicitly creating our wxConfig:
+-  //  1) we don't pay for it if we don't use it
+-  //  2) there is no danger to create it twice
+-
+-  // application and vendor name are used by wxConfig to construct the name
+-  // of the config file/registry key and must be set before the first call
+-  // to Get() if you want to override the default values (the application
+-  // name is the name of the executable and the vendor name is the same)
+-  SetVendorName(_T("wxWidgets"));
+-  SetAppName(_T("conftest")); // not needed, it's the default value
+-
+-  wxConfigBase *pConfig = wxConfigBase::Get();
+-
+-  // uncomment this to force writing back of the defaults for all values
+-  // if they're not present in the config - this can give the user an idea
+-  // of all possible settings for this program
+-  pConfig->SetRecordDefaults();
+-
+-  // or you could also write something like this:
+-  //  wxFileConfig *pConfig = new wxFileConfig("conftest");
+-  //  wxConfigBase::Set(pConfig);
+-  // where you can also specify the file names explicitly if you wish.
+-  // Of course, calling Set() is optional and you only must do it if
+-  // you want to later retrieve this pointer with Get().
+-
+-  // create the main program window
+-  MyFrame *frame = new MyFrame;
+-  frame->Show(true);
+-  SetTopWindow(frame);
+-
+-  // use our config object...
+-  if ( pConfig->Read(_T("/Controls/Check"), 1l) != 0 ) {
+-      wxMessageBox(_T("You can disable this message box by unchecking\n")
+-                   _T("the checkbox in the main window (of course, a real\n")
+-                   _T("program would have a checkbox right here but we\n")
+-                 _T("keep it simple)"), _T("Welcome to wxConfig demo"),
+-                 wxICON_INFORMATION | wxOK);
+-  }
+-
+-  return true;
+-}
+-
+-int MyApp::OnExit()
+-{
+-  // clean up: Set() returns the active config object as Get() does, but unlike
+-  // Get() it doesn't try to create one if there is none (definitely not what
+-  // we want here!)
+-  delete wxConfigBase::Set((wxConfigBase *) NULL);
+-
+-  return 0;
+-}
+-
+-// ----------------------------------------------------------------------------
+-// frame
+-// ----------------------------------------------------------------------------
+-
+-// main frame ctor
+-MyFrame::MyFrame()
+-       : wxFrame((wxFrame *) NULL, wxID_ANY, _T("wxConfig Demo"))
+-{
+-  // menu
+-  wxMenu *file_menu = new wxMenu;
+-
+-  file_menu->Append(ConfTest_Delete, _T("&Delete"), _T("Delete config file"));
+-  file_menu->AppendSeparator();
+-  file_menu->Append(ConfTest_About, _T("&About\tF1"), _T("About this sample"));
+-  file_menu->AppendSeparator();
+-  file_menu->Append(ConfTest_Quit, _T("E&xit\tAlt-X"), _T("Exit the program"));
+-  wxMenuBar *menu_bar = new wxMenuBar;
+-  menu_bar->Append(file_menu, _T("&File"));
+-  SetMenuBar(menu_bar);
+-
+-#if wxUSE_STATUSBAR
+-  CreateStatusBar();
+-#endif // wxUSE_STATUSBAR
+-
+-  // child controls
+-  wxPanel *panel = new wxPanel(this);
+-  (void)new wxStaticText(panel, wxID_ANY, _T("These controls remember their values!"),
+-                         wxPoint(10, 10), wxSize(300, 20));
+-  m_text = new wxTextCtrl(panel, wxID_ANY, _T(""), wxPoint(10, 40), wxSize(300, 20));
+-  m_check = new wxCheckBox(panel, wxID_ANY, _T("show welcome message box at startup"),
+-                           wxPoint(10, 70), wxSize(300, 20));
+-
+-  // restore the control's values from the config
+-
+-  // NB: in this program, the config object is already created at this moment
+-  // because we had called Get() from MyApp::OnInit(). However, if you later
+-  // change the code and don't create it before this line, it won't break
+-  // anything - unlike if you manually create wxConfig object with Create()
+-  // or in any other way (then you must be sure to create it before using it!).
+-  wxConfigBase *pConfig = wxConfigBase::Get();
+-
+-  // we could write Read("/Controls/Text") as well, it's just to show SetPath()
+-  pConfig->SetPath(_T("/Controls"));
+-
+-  m_text->SetValue(pConfig->Read(_T("Text"), _T("")));
+-  m_check->SetValue(pConfig->Read(_T("Check"), 1l) != 0);
+-
+-  // SetPath() understands ".."
+-  pConfig->SetPath(_T("../MainFrame"));
+-
+-  // restore frame position and size
+-  int x = pConfig->Read(_T("x"), 50),
+-      y = pConfig->Read(_T("y"), 50),
+-      w = pConfig->Read(_T("w"), 350),
+-      h = pConfig->Read(_T("h"), 200);
+-  Move(x, y);
+-  SetClientSize(w, h);
+-
+-  pConfig->SetPath(_T("/"));
+-  wxString s;
+-  if ( pConfig->Read(_T("TestValue"), &s) )
+-  {
+-      wxLogStatus(this, wxT("TestValue from config is '%s'"), s.c_str());
+-  }
+-  else
+-  {
+-      wxLogStatus(this, wxT("TestValue not found in the config"));
+-  }
+-}
+-
+-void MyFrame::OnQuit(wxCommandEvent&)
+-{
+-  Close(true);
+-}
+-
+-void MyFrame::OnAbout(wxCommandEvent&)
+-{
+-  wxMessageBox(_T("wxConfig demo\n(c) 1998-2001 Vadim Zeitlin"), _T("About"),
+-               wxICON_INFORMATION | wxOK);
+-}
+-
+-void MyFrame::OnDelete(wxCommandEvent&)
+-{
+-    wxConfigBase *pConfig = wxConfigBase::Get();
+-    if ( pConfig == NULL )
+-    {
+-        wxLogError(_T("No config to delete!"));
+-        return;
+-    }
+-
+-    if ( pConfig->DeleteAll() )
+-    {
+-        wxLogMessage(_T("Config file/registry key successfully deleted."));
+-
+-        delete wxConfigBase::Set(NULL);
+-        wxConfigBase::DontCreateOnDemand();
+-    }
+-    else
+-    {
+-        wxLogError(_T("Deleting config file/registry key failed."));
+-    }
+-}
+-
+-MyFrame::~MyFrame()
+-{
+-  wxConfigBase *pConfig = wxConfigBase::Get();
+-  if ( pConfig == NULL )
+-    return;
+-
+-  // save the control's values to the config
+-  pConfig->Write(_T("/Controls/Text"), m_text->GetValue());
+-  pConfig->Write(_T("/Controls/Check"), m_check->GetValue());
+-
+-  // save the frame position
+-  int x, y, w, h;
+-  GetClientSize(&w, &h);
+-  GetPosition(&x, &y);
+-  pConfig->Write(_T("/MainFrame/x"), (long) x);
+-  pConfig->Write(_T("/MainFrame/y"), (long) y);
+-  pConfig->Write(_T("/MainFrame/w"), (long) w);
+-  pConfig->Write(_T("/MainFrame/h"), (long) h);
+-
+-  pConfig->Write(_T("/TestValue"), wxT("A test value"));
+-}
+-
++	  return false;
++  // we're using wxConfig's "create-on-demand" feature: it will create the
++  // config object when it's used for the first time. It has a number of
++  // advantages compared with explicitly creating our wxConfig:
++  //  1) we don't pay for it if we don't use it
++  //  2) there is no danger to create it twice
++
++  // application and vendor name are used by wxConfig to construct the name
++  // of the config file/registry key and must be set before the first call
++  // to Get() if you want to override the default values (the application
++  // name is the name of the executable and the vendor name is the same)
++#if USE_FILECONF
++  wxFileConfig *pFConfig = new wxFileConfig();
++  wxConfigBase::Set(pFConfig);
++#endif
++  SetVendorName(_T("wxWidgets"));
++  SetAppName(_T("conftest")); // not needed, it's the default value
++
++  wxConfigBase *pConfig = wxConfigBase::Get();
++
++  wxInitAllImageHandlers();
++
++  // uncomment this to force writing back of the defaults for all values
++  // if they're not present in the config - this can give the user an idea
++  // of all possible settings for this program
++  pConfig->SetRecordDefaults();
++
++  // or you could also write something like this:
++  //  wxFileConfig *pConfig = new wxFileConfig("conftest");
++  //  wxConfigBase::Set(pConfig);
++  // where you can also specify the file names explicitly if you wish.
++  // Of course, calling Set() is optional and you only must do it if
++  // you want to later retrieve this pointer with Get().
++
++  // create the main program window
++  MyFrame *frame = new MyFrame;
++  frame->Show(true);
++  SetTopWindow(frame);
++
++  // use our config object...
++  if ( pConfig->Read(_T("/Controls/Check"), 1l) != 0 ) {
++      wxMessageBox(_T("You can disable this message box by unchecking\n")
++                   _T("the checkbox in the main window (of course, a real\n")
++                   _T("program would have a checkbox right here but we\n")
++                 _T("keep it simple)"), _T("Welcome to wxConfig demo"),
++                 wxICON_INFORMATION | wxOK);
++  }
++
++  return true;
++}
++
++int MyApp::OnExit()
++{
++  // clean up: Set() returns the active config object as Get() does, but unlike
++  // Get() it doesn't try to create one if there is none (definitely not what
++  // we want here!)
++  delete wxConfigBase::Set((wxConfigBase *) NULL);
++
++  return 0;
++}
++
++// ----------------------------------------------------------------------------
++// frame
++// ----------------------------------------------------------------------------
++
++// main frame ctor
++MyFrame::MyFrame()
++       : wxFrame((wxFrame *) NULL, wxID_ANY, _T("wxConfig Demo"))
++{
++  // menu
++  wxMenu *file_menu = new wxMenu;
++
++  file_menu->Append(ConfTest_Delete, _T("&Delete"), _T("Delete config file"));
++  file_menu->AppendSeparator();
++  file_menu->Append(ConfTest_About, _T("&About\tF1"), _T("About this sample"));
++  file_menu->AppendSeparator();
++  file_menu->Append(ConfTest_Quit, _T("E&xit\tAlt-X"), _T("Exit the program"));
++  wxMenuBar *menu_bar = new wxMenuBar;
++  menu_bar->Append(file_menu, _T("&File"));
++  SetMenuBar(menu_bar);
++
++#if wxUSE_STATUSBAR
++  CreateStatusBar();
++#endif // wxUSE_STATUSBAR
++
++  // NB: in this program, the config object is already created at this moment
++  // because we had called Get() from MyApp::OnInit(). However, if you later
++  // change the code and don't create it before this line, it won't break
++  // anything - unlike if you manually create wxConfig object with Create()
++  // or in any other way (then you must be sure to create it before using it!).
++  wxConfigBase *pConfig = wxConfigBase::Get();
++
++  wxMemoryBuffer mb;
++  int ix, iy;
++  pConfig->Read(_T("/Image/SizeX"), &ix, 0);
++  pConfig->Read(_T("/Image/SizeY"), &iy, 0);
++
++  wxBitmap bm(30,30);
++  if( ix > 0 && iy > 0 )
++  {
++	  if(pConfig->Read(_T("/Image/Data"), &mb))
++	  {
++		  size_t bufsize = 3 * ix * iy;
++		  unsigned char *buf = new unsigned char[bufsize];
++		  if(NULL != buf)
++		  {
++			  memcpy(buf, mb.GetData(), bufsize);
++			  m_image.SetData(buf, ix, iy);
++			  wxMemoryBuffer maskb;
++			  if(pConfig->Read(_T("/Image/Mask"), &maskb))
++			  {
++				  unsigned char *maskptr = (unsigned char*)maskb.GetData();
++				  m_image.SetMaskColour(maskptr[0], maskptr[1], maskptr[2]);
++			  }
++			  bm = (wxBitmap)m_image;
++		  }
++	  }
++  }
++
++  // child controls
++  wxPanel *panel = new wxPanel(this);
++  (void)new wxStaticText(panel, wxID_ANY, _T("These controls remember their values!"),
++                         wxPoint(10, 10), wxSize(300, 20));
++  m_text = new wxTextCtrl(panel, wxID_ANY, _T(""), wxPoint(10, 40), wxSize(300, 20));
++  m_check = new wxCheckBox(panel, wxID_ANY, _T("show welcome message box at startup"),
++                           wxPoint(10, 70), wxSize(300, 20));
++  m_bb = new wxBitmapButton(panel, ID_BITMAPBUTTON, bm, wxPoint(10,100));
++	  
++  // we could write Read("/Controls/Text") as well, it's just to show SetPath()
++  pConfig->SetPath(_T("/Controls"));
++
++  // restore the control's values from the config
++
++  m_text->SetValue(pConfig->Read(_T("Text"), _T("")));
++  m_check->SetValue(pConfig->Read(_T("Check"), 1l) != 0);
++
++  // SetPath() understands ".."
++  pConfig->SetPath(_T("../MainFrame"));
++
++  // restore frame position and size
++  int x = pConfig->Read(_T("x"), 50),
++      y = pConfig->Read(_T("y"), 50),
++      w = pConfig->Read(_T("w"), 350),
++      h = pConfig->Read(_T("h"), 200);
++  Move(x, y);
++  SetClientSize(w, h);
++
++  pConfig->SetPath(_T("/"));
++  wxString s;
++  if ( pConfig->Read(_T("TestValue"), &s) )
++  {
++      wxLogStatus(this, wxT("TestValue from config is '%s'"), s.c_str());
++  }
++  else
++  {
++      wxLogStatus(this, wxT("TestValue not found in the config"));
++  }
++}
++
++void MyFrame::OnQuit(wxCommandEvent&)
++{
++  Close(true);
++}
++
++void MyFrame::OnAbout(wxCommandEvent&)
++{
++  wxMessageBox(_T("wxConfig demo\n(c) 1998-2001 Vadim Zeitlin"), _T("About"),
++               wxICON_INFORMATION | wxOK);
++}
++
++void MyFrame::OnDelete(wxCommandEvent&)
++{
++    wxConfigBase *pConfig = wxConfigBase::Get();
++    if ( pConfig == NULL )
++    {
++        wxLogError(_T("No config to delete!"));
++        return;
++    }
++
++    if ( pConfig->DeleteAll() )
++    {
++        wxLogMessage(_T("Config file/registry key successfully deleted."));
++
++        delete wxConfigBase::Set(NULL);
++        wxConfigBase::DontCreateOnDemand();
++    }
++    else
++    {
++        wxLogError(_T("Deleting config file/registry key failed."));
++    }
++}
++
++MyFrame::~MyFrame()
++{
++  wxConfigBase *pConfig = wxConfigBase::Get();
++  if ( pConfig == NULL )
++    return;
++
++  // save the control's values to the config
++  pConfig->Write(_T("/Controls/Text"), m_text->GetValue());
++  pConfig->Write(_T("/Controls/Check"), m_check->GetValue());
++
++  // save the frame position
++  int x, y, w, h;
++  GetClientSize(&w, &h);
++  GetPosition(&x, &y);
++  pConfig->Write(_T("/MainFrame/x"), (long) x);
++  pConfig->Write(_T("/MainFrame/y"), (long) y);
++  pConfig->Write(_T("/MainFrame/w"), (long) w);
++  pConfig->Write(_T("/MainFrame/h"), (long) h);
++
++  pConfig->Write(_T("/TestValue"), wxT("A test value"));
++
++  if(m_image.IsOk())
++  {
++	  int ix = m_image.GetWidth(),
++		  iy = m_image.GetHeight();
++	  wxMemoryBuffer mb;
++	  mb.AppendData(m_image.GetData(), 3 * ix * iy);
++	  pConfig->Write(_T("/Image/SizeX"), ix);
++	  pConfig->Write(_T("/Image/SizeY"), iy);
++	  pConfig->Write(_T("/Image/Data"), mb);
++	  bool masked = false;
++	  if(m_image.HasMask())
++	  {
++		  wxMemoryBuffer maskb(3);
++		  unsigned char *maskbuf = (unsigned char*)maskb.GetData();
++		  if(m_image.GetOrFindMaskColour(maskbuf, maskbuf+1, maskbuf+2))
++		  {
++			  maskb.SetDataLen(3);
++			  pConfig->Write(_T("/Image/Mask"), maskb);
++			  masked = true;
++		  }
++	  }
++	  if(!masked)
++		  pConfig->DeleteEntry(_T("/Image/Mask"));
++  }
++}
++
++#define MAXSIZE 50
++
++void MyFrame::OnImage(wxCommandEvent&)
++{
++	wxConfigBase *pConfig = wxConfigBase::Get();
++
++	wxString sDirectory = pConfig->Read(_T("/Image/Directory"));
++	wxString sFilePath;
++
++	wxFileDialog dlg(this, _T("Select an Image"), sDirectory, wxEmptyString, wxFileSelectorDefaultWildcardStr, wxFD_OPEN | wxFD_FILE_MUST_EXIST);
++	int resp = dlg.ShowModal();
++
++	if( resp == wxID_OK )
++	{
++		sFilePath = dlg.GetPath();
++		sDirectory = dlg.GetDirectory();
++		if(m_image.LoadFile(sFilePath))
++		{
++			wxBitmap bm(m_image);
++			pConfig->Write(_T("/Image/Directory"), sDirectory);
++			int wx = bm.GetWidth(), wy = bm.GetHeight();
++			if(wx > MAXSIZE)
++				wx = MAXSIZE;
++			if(wy > MAXSIZE)
++				wy = MAXSIZE;
++			if(MAXSIZE == wx || MAXSIZE == wy)
++			{
++				bm = bm.GetSubBitmap(wxRect(0,0,wx,wy));
++				m_image.Resize(wxSize(wx,wy), wxPoint(0,0));
++			}
++			int bx, by;
++			m_bb->SetBitmapLabel(bm);
++			m_bb->SetClientSize(wx, wy);// + bx - cx, wy + by - cy);
++			m_bb->GetBestSize(&bx, &by);
++			m_bb->SetClientSize(bx, by);// + bx - cx, wy + by - cy);
++		}
++	}
++}
+--- c:\CVSHome\wxWidgetsClean/src/common/fileconf.cpp	2007-06-10 10:42:07.000000000 -0700
++++ c:\CVSHome\wxWidgets/src/common/fileconf.cpp	2007-06-18 14:15:47.652275100 -0700
+@@ -42,6 +42,8 @@
+ #include  "wx/fileconf.h"
+ #include  "wx/filefn.h"
+ 
++#include "wx/base64.h"
++
+ #include  "wx/stdpaths.h"
+ 
+ #if defined(__WXMAC__)
+@@ -916,6 +918,16 @@
+     return str.ToLong(pl);
+ }
+ 
++bool wxFileConfig::DoReadBinary(const wxString& key, wxMemoryBuffer* buf) const
++{
++    wxString str;
++    if ( !Read(key, &str) )
++        return false;
++
++	*buf = wxCONFIG_TEXT_TO_BINARY_DECODING(str);
++    return true;
++}
++
+ bool wxFileConfig::DoWriteString(const wxString& key, const wxString& szValue)
+ {
+     wxConfigPathChanger     path(this, key);
+@@ -981,6 +993,11 @@
+   return Write(key, wxString::Format(_T("%ld"), lValue));
+ }
+ 
++bool wxFileConfig::DoWriteBinary(const wxString& key, const wxMemoryBuffer& buf)
++{
++  return Write(key, wxCONFIG_BINARY_TO_TEXT_ENCODING(buf));
++}
++
+ bool wxFileConfig::Flush(bool /* bCurrentOnly */)
+ {
+   if ( !IsDirty() || !m_fnLocalFile.GetFullPath() )
+--- c:\CVSHome\wxWidgetsClean/src/msw/regconf.cpp	2007-03-10 10:15:56.000000000 -0800
++++ c:\CVSHome\wxWidgets/src/msw/regconf.cpp	2007-06-12 16:33:02.193521500 -0700
+@@ -53,6 +53,11 @@
+   return key.IsOpened() && key.HasValue(str) && key.QueryValue(str, plVal);
+ }
+ 
++bool TryGetValue(const wxRegKey& key, const wxString& str, wxMemoryBuffer &plVal)
++{
++  return key.IsOpened() && key.HasValue(str) && key.QueryValue(str, plVal);
++}
++
+ // ============================================================================
+ // implementation
+ // ============================================================================
+@@ -620,6 +625,40 @@
+   return false;
+ }
+ 
++bool wxRegConfig::DoReadBinary(const wxString& key, wxMemoryBuffer *buf) const
++{
++    wxCHECK_MSG( buf, false, _T("wxRegConfig::Read(): NULL param") );
++
++  wxConfigPathChanger path(this, key);
++
++  bool bQueryGlobal = true;
++
++  // if immutable key exists in global key we must check that it's not
++  // overriden by the local key with the same name
++  if ( IsImmutable(path.Name()) ) {
++    if ( TryGetValue(m_keyGlobal, path.Name(), *buf) ) {
++      if ( m_keyLocal.Exists() && LocalKey().HasValue(path.Name()) ) {
++        wxLogWarning(wxT("User value for immutable key '%s' ignored."),
++                   path.Name().c_str());
++      }
++
++      return true;
++    }
++    else {
++      // don't waste time - it's not there anyhow
++      bQueryGlobal = false;
++    }
++  }
++
++  // first try local key
++  if ( (m_keyLocal.Exists() && TryGetValue(LocalKey(), path.Name(), *buf)) ||
++       (bQueryGlobal && TryGetValue(m_keyGlobal, path.Name(), *buf)) ) {
++    return true;
++  }
++
++  return false;
++}
++
+ bool wxRegConfig::DoWriteString(const wxString& key, const wxString& szValue)
+ {
+   wxConfigPathChanger path(this, key);
+@@ -644,6 +683,18 @@
+   return LocalKey().SetValue(path.Name(), lValue);
+ }
+ 
++bool wxRegConfig::DoWriteBinary(const wxString& key, const wxMemoryBuffer& buf)
++{
++  wxConfigPathChanger path(this, key);
++
++  if ( IsImmutable(path.Name()) ) {
++    wxLogError(wxT("Can't change immutable entry '%s'."), path.Name().c_str());
++    return false;
++  }
++
++  return LocalKey().SetValue(path.Name(), buf);
++}
++
+ // ----------------------------------------------------------------------------
+ // renaming
+ // ----------------------------------------------------------------------------
+--- c:\CVSHome\wxWidgetsClean/src/palmos/prefconf.cpp	2007-03-10 10:16:04.000000000 -0800
++++ c:\CVSHome\wxWidgets/src/palmos/prefconf.cpp	2007-06-12 16:33:12.728288600 -0700
+@@ -178,6 +178,12 @@
+     return false;
+ }
+ 
++bool DoReadBinary(const wxString& key, wxMemoryBuffer *buf) const
++{
++    /* TODO */
++    return false;
++}
++
+ bool wxPrefConfig::DoWriteString(const wxString& key, const wxString& szValue)
+ {
+     /* TODO */
+@@ -190,6 +196,12 @@
+     return false;
+ }
+ 
++bool DoWriteBinary(const wxString& key, const wxMemoryBuffer& buf)
++{
++    /* TODO */
++    return false;
++}
++
+ // ----------------------------------------------------------------------------
+ // renaming
+ // ----------------------------------------------------------------------------
+
+ 	  	 

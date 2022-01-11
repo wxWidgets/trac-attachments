@@ -1,0 +1,205 @@
+Index: include/wx/msw/stattext.h
+===================================================================
+--- include/wx/msw/stattext.h	(revision 74981)
++++ include/wx/msw/stattext.h	(working copy)
+@@ -41,6 +41,10 @@
+ 
+     virtual WXDWORD MSWGetStyle(long flags, WXDWORD *exstyle = NULL) const;
+ 
++        // Some controls may need to change height to align better,
++        // e.g. wxStaticText on wxMSW for horizontal baseline alignment with text controls.
++    virtual wxSize GetExtraSizeForAlignment(int orientations) const;
++
+ protected:
+     // implement/override some base class virtuals
+     virtual void DoSetSize(int x, int y, int w, int h,
+Index: include/wx/sizer.h
+===================================================================
+--- include/wx/sizer.h	(revision 74981)
++++ include/wx/sizer.h	(working copy)
+@@ -397,6 +397,11 @@
+     // Returns true if it made use of the information (and min size was changed).
+     bool InformFirstDirection( int direction, int size, int availableOtherDir=-1 );
+ 
++    // Set to wxHORIZONTAL and/or wxVERTICAL if the item should be sized for optimal alignment,
++    // e.g. for the content of a static text control to be aligned with a text control.
++    int GetOptimalAlignmentOrientations() const { return m_optimalAlignmentOrientations; }
++    void SetOptimalAlignmentOrientations(int orientations) { m_optimalAlignmentOrientations = orientations; }
++
+     // these functions delete the current contents of the item if it's a sizer
+     // or a spacer but not if it is a window
+     void AssignWindow(wxWindow *window)
+@@ -430,7 +435,7 @@
+ 
+ protected:
+     // common part of several ctors
+-    void Init() { m_userData = NULL; m_kind = Item_None; }
++    void Init() { m_userData = NULL; m_kind = Item_None; m_optimalAlignmentOrientations = 0; }
+ 
+     // common part of ctors taking wxSizerFlags
+     void Init(const wxSizerFlags& flags);
+@@ -470,6 +475,10 @@
+     int          m_flag;
+     int          m_id;
+ 
++    // Set to wxHORIZONTAL and/or wxVERTICAL if the item should be sized for optimal alignment,
++    // e.g. for the content of a static text control to be aligned with a text control.
++    int          m_optimalAlignmentOrientations;
++
+     // on screen rectangle of this item (not including borders)
+     wxRect       m_rect;
+ 
+@@ -718,6 +727,9 @@
+     // items are shown.
+     virtual bool AreAnyItemsShown() const;
+ 
++    // Instructs all children to have optimal alignment in the given orientation(s).
++    void SetOptimalAlignmentOrientations(int orientations);
++
+ protected:
+     wxSize              m_size;
+     wxSize              m_minSize;
+Index: include/wx/window.h
+===================================================================
+--- include/wx/window.h	(revision 74981)
++++ include/wx/window.h	(working copy)
+@@ -400,6 +400,10 @@
+         // returns the results.
+     virtual wxSize GetEffectiveMinSize() const;
+ 
++        // Some controls may need to change height to align better,
++        // e.g. wxStaticText on wxMSW for horizontal baseline alignment with text controls.
++    virtual wxSize GetExtraSizeForAlignment(int WXUNUSED(orientations)) const { return wxSize(0, 0); }
++
+     wxDEPRECATED_MSG("use GetEffectiveMinSize() instead")
+     wxSize GetBestFittingSize() const;
+     wxDEPRECATED_MSG("use GetEffectiveMinSize() instead")
+Index: src/common/sizer.cpp
+===================================================================
+--- src/common/sizer.cpp	(revision 74981)
++++ src/common/sizer.cpp	(working copy)
+@@ -416,6 +416,14 @@
+         // Since the size of the window may change during runtime, we
+         // should use the current minimal/best size.
+         m_minSize = m_window->GetEffectiveMinSize();
++
++#ifdef __WXMSW__
++        if (m_optimalAlignmentOrientations != 0)
++        {
++            // Currently, this affects wxStaticText on Windows only.
++            m_minSize += m_window->GetExtraSizeForAlignment(m_optimalAlignmentOrientations);
++        }
++#endif
+     }
+ 
+     return GetMinSizeWithBorder();
+@@ -1341,6 +1349,17 @@
+     return m_children.Item( index )->GetData()->IsShown();
+ }
+ 
++// Instructs all children to have optimal alignment in the given orientation(s).
++void wxSizer::SetOptimalAlignmentOrientations(int orientations)
++{
++    wxSizerItemList::compatibility_iterator node = m_children.GetFirst();
++    while (node)
++    {
++        wxSizerItem     *item = node->GetData();
++        item->SetOptimalAlignmentOrientations(orientations);
++        node = node->GetNext();
++    }
++}
+ 
+ //---------------------------------------------------------------------------
+ // wxGridSizer
+@@ -1464,6 +1483,11 @@
+ 
+ wxSize wxGridSizer::CalcMin()
+ {
++#ifdef __WXMSW__
++    // Assume all wxStaticText items should be aligned with other controls
++    SetOptimalAlignmentOrientations(wxHORIZONTAL);
++#endif
++
+     int nrows, ncols;
+     if ( CalcRowsCols(nrows, ncols) == 0 )
+         return wxSize();
+@@ -1713,6 +1737,11 @@
+     int nrows,
+         ncols;
+ 
++#ifdef __WXMSW__
++    // Assume all wxStaticText items should be aligned with other controls
++    SetOptimalAlignmentOrientations(wxHORIZONTAL);
++#endif
++
+     // Number of rows/columns can change as items are added or removed.
+     if ( !CalcRowsCols(nrows, ncols) )
+         return wxSize();
+@@ -2395,6 +2424,12 @@
+ 
+ wxSize wxBoxSizer::CalcMin()
+ {
++#ifdef __WXMSW__
++    // wxStaticText items should be aligned with other controls
++    // when laid out horizontally.
++    SetOptimalAlignmentOrientations((m_orient == wxHORIZONTAL) ? wxHORIZONTAL : 0);
++#endif
++
+     m_totalProportion = 0;
+     m_minSize = wxSize(0, 0);
+ 
+Index: src/common/wrapsizer.cpp
+===================================================================
+--- src/common/wrapsizer.cpp	(revision 74981)
++++ src/common/wrapsizer.cpp	(working copy)
+@@ -169,6 +169,10 @@
+     if ( m_children.empty() )
+         return wxSize();
+ 
++#ifdef __WXMSW__
++    SetOptimalAlignmentOrientations(wxHORIZONTAL);
++#endif
++
+     // We come here to calculate min size in two different situations:
+     // 1 - Immediately after InformFirstDirection, then we find a min size that
+     //     uses one dimension maximally and the other direction minimally.
+Index: src/common/gbsizer.cpp
+===================================================================
+--- src/common/gbsizer.cpp	(revision 74981)
++++ src/common/gbsizer.cpp	(working copy)
+@@ -453,6 +453,10 @@
+     if (m_children.GetCount() == 0)
+         return m_emptyCellSize;
+ 
++#ifdef __WXMSW__
++    SetOptimalAlignmentOrientations(wxHORIZONTAL);
++#endif
++
+     m_rowHeights.Empty();
+     m_colWidths.Empty();
+ 
+Index: src/msw/stattext.cpp
+===================================================================
+--- src/msw/stattext.cpp	(revision 74981)
++++ src/msw/stattext.cpp	(working copy)
+@@ -127,11 +127,19 @@
+     // it for now. If we need something better later it might be worth looking
+     // at the height of the text control returned by ::GetComboBoxInfo() as it
+     // seems to be the "minimal acceptable" height.
+-    heightTextTotal += 2;
++    // heightTextTotal += 2;
+ 
+     return wxSize(widthTextMax, heightTextTotal);
+ }
+ 
++wxSize wxStaticText::GetExtraSizeForAlignment(int orientations) const
++{
++    if (orientations & wxHORIZONTAL)
++        return wxSize(0, 2);
++    else
++        return wxSize(0, 0);
++}
++
+ void wxStaticText::DoSetSize(int x, int y, int w, int h, int sizeFlags)
+ {
+     // note: we first need to set the size and _then_ call UpdateLabel

@@ -1,0 +1,227 @@
+Index: src/html/htmlcell.cpp
+===================================================================
+--- src/html/htmlcell.cpp	(revision 72568)
++++ src/html/htmlcell.cpp	(working copy)
+@@ -504,10 +504,12 @@
+     }
+     else
+     {
+-        dc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
++        wxBrushStyle mode = info.GetState().GetBgMode();
++        dc.SetBackgroundMode(mode);
+         dc.SetTextForeground(fg);
+         dc.SetTextBackground(bg);
+-        dc.SetBackground(wxBrush(bg, wxBRUSHSTYLE_SOLID));
++        if ( mode != wxBRUSHSTYLE_TRANSPARENT )
++            dc.SetBackground(wxBrush(bg, mode));
+     }
+ }
+ 
+@@ -572,16 +574,7 @@
+     {
+         wxHtmlSelectionState selstate = info.GetState().GetSelectionState();
+         // Not changing selection state, draw the word in single mode:
+-        if ( selstate != wxHTML_SEL_OUT &&
+-             dc.GetBackgroundMode() != wxBRUSHSTYLE_SOLID )
+-        {
+-            SwitchSelState(dc, info, true);
+-        }
+-        else if ( selstate == wxHTML_SEL_OUT &&
+-                  dc.GetBackgroundMode() == wxBRUSHSTYLE_SOLID )
+-        {
+-            SwitchSelState(dc, info, false);
+-        }
++        SwitchSelState(dc, info, selstate != wxHTML_SEL_OUT);
+         dc.DrawText(m_Word, x + m_PosX, y + m_PosY);
+         drawSelectionAfterCell = (selstate != wxHTML_SEL_OUT);
+     }
+@@ -1552,18 +1545,24 @@
+     if (m_Flags & wxHTML_CLR_BACKGROUND)
+     {
+         state.SetBgColour(m_Colour);
+-        if (state.GetSelectionState() != wxHTML_SEL_IN)
+-        {
+-            dc.SetTextBackground(m_Colour);
+-            dc.SetBackground(wxBrush(m_Colour, wxBRUSHSTYLE_SOLID));
+-        }
+-        else
+-        {
+-            wxColour c = info.GetStyle().GetSelectedTextBgColour(m_Colour);
+-            dc.SetTextBackground(c);
+-            dc.SetBackground(wxBrush(c, wxBRUSHSTYLE_SOLID));
+-        }
++        state.SetBgMode(wxBRUSHSTYLE_SOLID);
++        const wxColour c = state.GetSelectionState() == wxHTML_SEL_IN
++                         ? info.GetStyle().GetSelectedTextBgColour(m_Colour)
++                         : m_Colour;
++        dc.SetTextBackground(c);
++        dc.SetBackground(wxBrush(c, wxBRUSHSTYLE_SOLID));
++        dc.SetBackgroundMode(wxBRUSHSTYLE_SOLID);
+     }
++    if (m_Flags & wxHTML_CLR_TRANSPARENT_BACKGROUND)
++    {
++        state.SetBgColour(m_Colour);
++        state.SetBgMode(wxBRUSHSTYLE_TRANSPARENT);
++        const wxColour c = state.GetSelectionState() == wxHTML_SEL_IN
++                         ? info.GetStyle().GetSelectedTextBgColour(m_Colour)
++                         : m_Colour;
++        dc.SetTextBackground(c);
++        dc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
++    }
+ }
+ 
+ 
+Index: src/html/m_span.cpp
+===================================================================
+--- src/html/m_span.cpp	(revision 72568)
++++ src/html/m_span.cpp	(working copy)
+@@ -34,6 +34,8 @@
+     TAG_HANDLER_PROC(tag)
+     {
+         wxColour oldclr = m_WParser->GetActualColor();
++        wxColour oldbackclr = m_WParser->GetActualBackgroundColor();
++        wxBrushStyle oldbackmode = m_WParser->GetActualBackgroundMode();
+         int oldsize = m_WParser->GetFontSize();
+         int oldbold = m_WParser->GetFontBold();
+         int olditalic = m_WParser->GetFontItalic();
+@@ -56,6 +58,18 @@
+             }
+         }
+ 
++        str = styleParams.GetParam(wxS("background-color"));
++        if ( !str.empty() )
++        {
++            wxColour clr;
++            if ( wxHtmlTag::ParseAsColour(str, &clr) )
++            {
++                m_WParser->SetActualBackgroundColor(clr);
++                m_WParser->SetActualBackgroundMode(wxBRUSHSTYLE_SOLID);
++                m_WParser->GetContainer()->InsertCell(new wxHtmlColourCell(clr, wxHTML_CLR_BACKGROUND));
++            }
++        }
++
+         str = styleParams.GetParam(wxS("font-size"));
+         if ( !str.empty() )
+         {
+@@ -151,6 +165,15 @@
+                 new wxHtmlColourCell(oldclr));
+         }
+ 
++        if (oldbackmode != m_WParser->GetActualBackgroundMode() ||
++            oldbackclr != m_WParser->GetActualBackgroundColor())
++        {
++            m_WParser->SetActualBackgroundMode(oldbackmode);
++            m_WParser->SetActualBackgroundColor(oldbackclr);
++            m_WParser->GetContainer()->InsertCell(
++                new wxHtmlColourCell(oldbackclr, oldbackmode == wxBRUSHSTYLE_TRANSPARENT ? wxHTML_CLR_TRANSPARENT_BACKGROUND : wxHTML_CLR_BACKGROUND));
++        }
++
+         return true;
+     }
+ 
+Index: src/html/winpars.cpp
+===================================================================
+--- src/html/winpars.cpp	(revision 72568)
++++ src/html/winpars.cpp	(working copy)
+@@ -214,6 +214,11 @@
+     m_Link = wxHtmlLinkInfo( wxEmptyString );
+     m_LinkColor.Set(0, 0, 0xFF);
+     m_ActualColor.Set(0, 0, 0);
++    const wxColour windowColour = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW) ;
++    m_ActualBackgroundColor = m_windowInterface
++                            ? m_windowInterface->GetHTMLBackgroundColour()
++                            : windowColour;
++    m_ActualBackgroundMode = wxBRUSHSTYLE_TRANSPARENT;
+     m_Align = wxHTML_ALIGN_LEFT;
+     m_ScriptMode = wxHTML_SCRIPT_NORMAL;
+     m_ScriptBaseline = 0;
+@@ -238,16 +243,13 @@
+ #endif
+ 
+     m_Container->InsertCell(new wxHtmlColourCell(m_ActualColor));
+-    wxColour windowColour = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW) ;
+ 
+     m_Container->InsertCell
+                  (
+                    new wxHtmlColourCell
+                        (
+-                         m_windowInterface
+-                            ? m_windowInterface->GetHTMLBackgroundColour()
+-                            : windowColour,
+-                         wxHTML_CLR_BACKGROUND
++                         m_ActualBackgroundColor,
++                         m_ActualBackgroundMode == wxBRUSHSTYLE_TRANSPARENT ? wxHTML_CLR_TRANSPARENT_BACKGROUND : wxHTML_CLR_BACKGROUND
+                        )
+                   );
+ 
+Index: include/wx/html/htmlcell.h
+===================================================================
+--- include/wx/html/htmlcell.h	(revision 72568)
++++ include/wx/html/htmlcell.h	(working copy)
+@@ -91,10 +91,13 @@
+     const wxColour& GetFgColour() const { return m_fgColour; }
+     void SetBgColour(const wxColour& c) { m_bgColour = c; }
+     const wxColour& GetBgColour() const { return m_bgColour; }
++    void SetBgMode(wxBrushStyle m) { m_bgMode = m; }
++    wxBrushStyle GetBgMode() const { return m_bgMode; }
+ 
+ private:
+     wxHtmlSelectionState  m_selState;
+     wxColour              m_fgColour, m_bgColour;
++    wxBrushStyle          m_bgMode;
+ };
+ 
+ 
+Index: include/wx/html/htmldefs.h
+===================================================================
+--- include/wx/html/htmldefs.h	(revision 72568)
++++ include/wx/html/htmldefs.h	(working copy)
+@@ -36,8 +36,9 @@
+ //                  Used by wxHtmlColourCell to determine clr of what is changing
+ //--------------------------------------------------------------------------------
+ 
+-#define wxHTML_CLR_FOREGROUND        0x0001
+-#define wxHTML_CLR_BACKGROUND        0x0002
++#define wxHTML_CLR_FOREGROUND                0x0001
++#define wxHTML_CLR_BACKGROUND                0x0002
++#define wxHTML_CLR_TRANSPARENT_BACKGROUND    0x0004
+ 
+ 
+ 
+Index: include/wx/html/winpars.h
+===================================================================
+--- include/wx/html/winpars.h	(revision 72568)
++++ include/wx/html/winpars.h	(working copy)
+@@ -132,6 +132,10 @@
+     void SetLinkColor(const wxColour& clr) { m_LinkColor = clr; }
+     const wxColour& GetActualColor() const { return m_ActualColor; }
+     void SetActualColor(const wxColour& clr) { m_ActualColor = clr ;}
++    const wxColour& GetActualBackgroundColor() const { return m_ActualBackgroundColor; }
++    void SetActualBackgroundColor(const wxColour& clr) { m_ActualBackgroundColor = clr;}
++    wxBrushStyle GetActualBackgroundMode() const { return m_ActualBackgroundMode; }
++    void SetActualBackgroundMode(wxBrushStyle mode) { m_ActualBackgroundMode = mode;}
+     const wxHtmlLinkInfo& GetLink() const { return m_Link; }
+     void SetLink(const wxHtmlLinkInfo& link);
+ 
+@@ -188,6 +192,8 @@
+     int m_FontSize; // From 1 (smallest) to 7, default is 3.
+     wxColour m_LinkColor;
+     wxColour m_ActualColor;
++    wxColour m_ActualBackgroundColor;
++    wxBrushStyle m_ActualBackgroundMode;
+             // basic font parameters.
+     wxHtmlLinkInfo m_Link;
+             // actual hypertext link or empty string
+Index: samples/html/test/test.htm
+===================================================================
+--- samples/html/test/test.htm	(revision 72568)
++++ samples/html/test/test.htm	(working copy)
+@@ -10,7 +10,7 @@
+   <table border="0" cellspacing="0" cellpadding="5" style="width:100%; background:#C0C0C0;">
+    <tr style="vertical-align:middle">
+     <td style="text-align:left">
+-     <span style="font-size: 24pt; font-weight: bold;">Header using styles</span>
++     <span style="font-size: 24pt; font-weight: bold; background-color: #00BF00;">Header using styles</span>
+     </td>
+ 
+     <td style="text-align:right">

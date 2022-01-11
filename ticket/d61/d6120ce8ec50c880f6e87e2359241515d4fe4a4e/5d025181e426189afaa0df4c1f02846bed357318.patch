@@ -1,0 +1,160 @@
+Index: src/osx/carbon/window.cpp
+===================================================================
+--- src/osx/carbon/window.cpp	(revision 63775)
++++ src/osx/carbon/window.cpp	(working copy)
+@@ -622,10 +622,6 @@
+                 // EVT_CHAR
+                 for (int pos=0 ; pos < numChars ; pos++)
+                 {
+-                    WXEVENTREF formerEvent = wxTheApp->MacGetCurrentEvent() ;
+-                    WXEVENTHANDLERCALLREF formerHandler = wxTheApp->MacGetCurrentEventHandlerCallRef() ;
+-                    wxTheApp->MacSetCurrentEvent( event , handler ) ;
+-
+                     UInt32 message = uniChars[pos] < 128 ? (char)uniChars[pos] : '?';
+ /*
+     NB: faking a charcode here is problematic. The kEventTextInputUpdateActiveInputArea event is sent
+@@ -657,8 +653,6 @@
+                     {
+                         result = noErr ;
+                     }
+-
+-                    wxTheApp->MacSetCurrentEvent( formerEvent , formerHandler ) ;
+                 }
+             }
+             break ;
+@@ -681,17 +675,28 @@
+                 // EVT_CHAR
+                 for (int pos=0 ; pos < numChars ; pos++)
+                 {
+-                    WXEVENTREF formerEvent = wxTheApp->MacGetCurrentEvent() ;
+-                    WXEVENTHANDLERCALLREF formerHandler = wxTheApp->MacGetCurrentEventHandlerCallRef() ;
+-                    wxTheApp->MacSetCurrentEvent( event , handler ) ;
+-
+-                    if ( wxTheApp->MacSendCharEvent(
+-                        focus , message , modifiers , when , point.h , point.v , uniChars[pos] ) )
++                    bool handled = false;
++                    // Is this event from the keyboard? (if not, it may be from the Input Method)
++                    if ( wxApp::s_rawPressedKeys.Index( uniChars[pos] ) != wxNOT_FOUND )
+                     {
++                        if ( wxApp::s_pressedKeys.Index( uniChars[pos] ) == wxNOT_FOUND )
++                        {
++                            // EVT_KEY_UP for this key will be sent
++                            wxApp::s_pressedKeys.Add( uniChars[pos] ) ;
++                        }
++                        handled = wxTheApp->MacSendKeyDownEvent(
++                            focus , message , modifiers , when , point.h , point.v , uniChars[pos] ) ;
++                    }
++                    // EVT_CHAR will not be sent if the program handles EVT_KEY_DOWN
++                    if ( !handled )
++                    {
++                        handled = wxTheApp->MacSendCharEvent((wxWindow*)
++                            focus , message , modifiers , when , point.h , point.v , uniChars[pos] ) ;
++                    }
++                    if ( handled )
++                    {
+                         result = noErr ;
+                     }
+-
+-                    wxTheApp->MacSetCurrentEvent( formerEvent , formerHandler ) ;
+                 }
+             }
+             break;
+Index: src/osx/carbon/nonownedwnd.cpp
+===================================================================
+--- src/osx/carbon/nonownedwnd.cpp	(revision 63775)
++++ src/osx/carbon/nonownedwnd.cpp	(working copy)
+@@ -264,7 +264,6 @@
+     // TODO: remove control related event like key and mouse (except for WindowLeave events)
+ 
+     { kEventClassKeyboard, kEventRawKeyDown } ,
+-    { kEventClassKeyboard, kEventRawKeyRepeat } ,
+     { kEventClassKeyboard, kEventRawKeyUp } ,
+     { kEventClassKeyboard, kEventRawKeyModifiersChanged } ,
+ 
+@@ -342,26 +341,31 @@
+     UInt32 message = (keyCode << 8) + charCode;
+     switch ( GetEventKind( event ) )
+     {
+-        case kEventRawKeyRepeat :
+         case kEventRawKeyDown :
++            if ( wxApp::s_rawPressedKeys.Index( uniChar[0] ) == wxNOT_FOUND )
+             {
+-                WXEVENTREF formerEvent = wxTheApp->MacGetCurrentEvent() ;
+-                WXEVENTHANDLERCALLREF formerHandler = wxTheApp->MacGetCurrentEventHandlerCallRef() ;
+-                wxTheApp->MacSetCurrentEvent( event , handler ) ;
+-                if ( /* focus && */ wxTheApp->MacSendKeyDownEvent(
+-                    focus , message , modifiers , when , point.h , point.v , uniChar[0] ) )
+-                {
+-                    result = noErr ;
+-                }
+-                wxTheApp->MacSetCurrentEvent( formerEvent , formerHandler ) ;
++                wxApp::s_rawPressedKeys.Add( uniChar[0] );
+             }
+             break ;
+ 
+         case kEventRawKeyUp :
+-            if ( /* focus && */ wxTheApp->MacSendKeyUpEvent(
+-                focus , message , modifiers , when , point.h , point.v , uniChar[0] ) )
+             {
+-                result = noErr ;
++                int rawKeyIndex = wxApp::s_rawPressedKeys.Index( uniChar[0] );
++                if ( rawKeyIndex != wxNOT_FOUND )
++                {
++                    wxApp::s_rawPressedKeys.RemoveAt( rawKeyIndex );
++                }
++                // Check if EVT_KEYDOWN for this key had been sent
++                int keyIndex = wxApp::s_pressedKeys.Index( uniChar[0] ) ;
++                if ( keyIndex != wxNOT_FOUND )
++                {
++                    wxApp::s_pressedKeys.RemoveAt( keyIndex );
++                    if ( /* focus && */ wxTheApp->MacSendKeyUpEvent(
++                        focus , message , modifiers , when , point.h , point.v , uniChar[0] ) )
++                    {
++                        result = noErr ;
++                    }
++                }
+             }
+             break ;
+ 
+Index: src/osx/carbon/app.cpp
+===================================================================
+--- src/osx/carbon/app.cpp	(revision 63775)
++++ src/osx/carbon/app.cpp	(working copy)
+@@ -72,6 +72,13 @@
+ wxWindow* wxApp::s_captureWindow = NULL ;
+ long      wxApp::s_lastModifiers = 0 ;
+ 
++static int ComparewxChars(wxChar a, wxChar b)
++{
++    return (int)(a - b);
++}
++wxApp::PressedKeyArray wxApp::s_rawPressedKeys( ComparewxChars ) ;
++wxApp::PressedKeyArray wxApp::s_pressedKeys( ComparewxChars ) ;
++
+ long      wxApp::s_macAboutMenuItemId = wxID_ABOUT ;
+ long      wxApp::s_macPreferencesMenuItemId = wxID_PREFERENCES ;
+ long      wxApp::s_macExitMenuItemId = wxID_EXIT ;
+Index: include/wx/osx/app.h
+===================================================================
+--- include/wx/osx/app.h	(revision 63775)
++++ include/wx/osx/app.h	(working copy)
+@@ -16,6 +16,7 @@
+ #include "wx/object.h"
+ #include "wx/gdicmn.h"
+ #include "wx/event.h"
++#include "wx/dynarray.h"
+ 
+ class WXDLLIMPEXP_FWD_CORE wxFrame;
+ class WXDLLIMPEXP_FWD_CORE wxWindowMac;
+@@ -86,6 +87,11 @@
+ public:
+     static wxWindow*      s_captureWindow ;
+     static long           s_lastModifiers ;
++#if wxOSX_USE_CARBON
++    WX_DEFINE_SORTED_ARRAY_INT(wxChar, PressedKeyArray);
++    static PressedKeyArray s_rawPressedKeys;
++    static PressedKeyArray s_pressedKeys;
++#endif
+ 
+     int                   m_nCmdShow;
+ 

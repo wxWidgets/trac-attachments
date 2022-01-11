@@ -1,0 +1,238 @@
+From be8a456838e17c9df0434394956d212a7871bb80 Mon Sep 17 00:00:00 2001
+From: Carsten Fuchs <carsten.fuchs@cafu.de>
+Date: Fri, 15 Aug 2014 00:42:45 +0200
+Subject: [PATCH 6/8] Dissolve wxDataViewTreeNode's private struct
+ BranchNodeData.
+
+Makes the code simpler, shorter and more robust, especially as it removes the
+strange ambiguity as indicator for "HasChildren()" (see previous commit).
+---
+ src/generic/datavgen.cpp | 112 +++++++++++++----------------------------------
+ 1 file changed, 30 insertions(+), 82 deletions(-)
+
+diff --git a/src/generic/datavgen.cpp b/src/generic/datavgen.cpp
+index 6456f40..503ffcd 100644
+--- a/src/generic/datavgen.cpp
++++ b/src/generic/datavgen.cpp
+@@ -384,31 +384,25 @@ public:
+     wxDataViewTreeNode(wxDataViewTreeNode *parent, const wxDataViewItem& item)
+         : m_parent(parent),
+           m_item(item),
+-          m_branchData(NULL)
++          m_open(false)
+     {
+     }
+ 
+     ~wxDataViewTreeNode()
+     {
+-        if ( m_branchData )
++        for ( wxDataViewTreeNodes::iterator i = m_children.begin();
++              i != m_children.end();
++              ++i )
+         {
+-            wxDataViewTreeNodes& nodes = m_branchData->children;
+-            for ( wxDataViewTreeNodes::iterator i = nodes.begin();
+-                  i != nodes.end();
+-                  ++i )
+-            {
+-                delete *i;
+-            }
+-
+-            delete m_branchData;
++            delete *i;
+         }
+     }
+ 
+     static wxDataViewTreeNode* CreateRootNode()
+     {
+         wxDataViewTreeNode *n = new wxDataViewTreeNode(NULL, wxDataViewItem());
+-        n->m_branchData = new BranchNodeData;
+-        n->m_branchData->open = true;
++
++        n->m_open = true;
+         return n;
+     }
+ 
+@@ -416,8 +410,7 @@ public:
+ 
+     const wxDataViewTreeNodes& GetChildNodes() const
+     {
+-        wxASSERT( m_branchData != NULL );
+-        return m_branchData->children;
++        return m_children;
+     }
+ 
+     // Aligns the (sub-)tree that is rooted at this node to the tree that is
+@@ -425,25 +418,9 @@ public:
+     void AlignTree(const wxDataViewModel* model)
+     {
+         wxDataViewItemArray itemChildren;
+-
+         model->GetChildren(m_item, itemChildren);
+ 
+-        if (itemChildren.size() == 0)
+-        {
+-            if (m_branchData)
+-            {
+-                delete m_branchData;
+-                m_branchData = NULL;
+-            }
+-
+-            return;
+-        }
+-
+-        // This item has children (itemChildren.size() > 0).
+-        if (!m_branchData)
+-            m_branchData = new BranchNodeData;
+-
+-        wxDataViewTreeNodes& nodeChildren = m_branchData->children;
++        wxDataViewTreeNodes& nodeChildren = m_children;
+ 
+         // If the item has fewer children than the node, remove node children accordingly.
+         while (itemChildren.size() < nodeChildren.size())
+@@ -476,35 +453,29 @@ public:
+ 
+     void InsertChild(wxDataViewTreeNode *node, unsigned index)
+     {
+-        if ( !m_branchData )
+-            m_branchData = new BranchNodeData;
+-
+-        m_branchData->children.Insert(node, index);
++        m_children.Insert(node, index);
+ 
+         // TODO: insert into sorted array directly in O(log n) instead of resorting in O(n log n)
+         if (g_column >= -1)
+-            m_branchData->children.Sort( &wxGenericTreeModelNodeCmp );
++            m_children.Sort( &wxGenericTreeModelNodeCmp );
+     }
+ 
+     void RemoveChild(wxDataViewTreeNode *node)
+     {
+-        wxCHECK_RET( m_branchData != NULL, "leaf node doesn't have children" );
+-        m_branchData->children.Remove(node);
++        m_children.Remove(node);
+     }
+ 
+     // returns position of child node for given item in children list or wxNOT_FOUND
+     int FindChildByItem(const wxDataViewItem& item) const
+     {
+-        if ( !m_branchData )
+-            return wxNOT_FOUND;
++        const int len = m_children.size();
+ 
+-        const wxDataViewTreeNodes& nodes = m_branchData->children;
+-        const int len = nodes.size();
+         for ( int i = 0; i < len; i++ )
+         {
+-            if ( nodes[i]->m_item == item )
++            if ( m_children[i]->m_item == item )
+                 return i;
+         }
++
+         return wxNOT_FOUND;
+     }
+ 
+@@ -524,7 +495,7 @@ public:
+ 
+     bool IsOpen() const
+     {
+-        return m_branchData && m_branchData->open;
++        return m_open;
+     }
+ 
+     void ToggleOpen()
+@@ -534,9 +505,7 @@ public:
+         if ( !m_parent )
+             return;
+ 
+-        wxCHECK_RET( m_branchData != NULL, "can't open leaf node" );
+-
+-        m_branchData->open = !m_branchData->open;
++        m_open = !m_open;
+     }
+ 
+     // "HasChildren" property corresponds to model's IsContainer().
+@@ -547,7 +516,7 @@ public:
+         if (!m_parent)
+             return true;
+ 
+-        return m_branchData && m_branchData->children.size() > 0;
++        return m_children.size() > 0;
+     }
+ 
+     // Total count of expanded (i.e. visible with the help of some
+@@ -556,34 +525,26 @@ public:
+     // branch nodes.
+     int GetSubTreeCount() const
+     {
+-        if (!m_branchData) return 0;        // It's a leaf.
+-        if (!m_branchData->open) return 0;  // It's a node, but closed.
++        if (!m_open) return 0;
+ 
+-        const wxDataViewTreeNodes& children = m_branchData->children;
+-        int count = children.GetCount();
++        int count = m_children.GetCount();
+ 
+-        for (size_t i = 0; i < children.GetCount(); i++)
+-            count += children[i]->GetSubTreeCount();
++        for (size_t i = 0; i < m_children.GetCount(); i++)
++            count += m_children[i]->GetSubTreeCount();
+ 
+         return count;
+     }
+ 
+     void Resort()
+     {
+-        if ( !m_branchData )
+-            return;
+-
+         if (g_column >= -1)
+         {
+-            wxDataViewTreeNodes& nodes = m_branchData->children;
++            m_children.Sort( &wxGenericTreeModelNodeCmp );
++
++            int len = m_children.GetCount();
+ 
+-            nodes.Sort( &wxGenericTreeModelNodeCmp );
+-            int len = nodes.GetCount();
+             for (int i = 0; i < len; i ++)
+-            {
+-                if ( nodes[i]->HasChildren() )
+-                    nodes[i]->Resort();
+-            }
++                m_children[i]->Resort();
+         }
+     }
+ 
+@@ -594,24 +555,11 @@ private:
+     // Corresponding model item.
+     wxDataViewItem       m_item;
+ 
+-    // Data specific to non-leaf (branch, inner) nodes. They are kept in a
+-    // separate struct in order to conserve memory.
+-    struct BranchNodeData
+-    {
+-        BranchNodeData()
+-            : open(false)
+-        {
+-        }
+-
+-        // Child nodes. Note that this may be empty even if m_hasChildren in
+-        // case this branch of the tree wasn't expanded and realized yet.
+-        wxDataViewTreeNodes  children;
+-
+-        // Is the branch node currently open (expanded)?
+-        bool                 open;
+-    };
++    // This children of this node. Zero children indicates that this is a leaf node.
++    wxDataViewTreeNodes  m_children;
+ 
+-    BranchNodeData *m_branchData;
++    // Is the branch node currently open (expanded)?
++    bool                 m_open;
+ };
+ 
+ 
+-- 
+1.8.4.msysgit.0
+

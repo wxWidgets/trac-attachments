@@ -1,0 +1,817 @@
+? buildDebugGTK
+? buildDebugMOTIF
+? buildX
+? mypatch.patch
+Index: include/wx/gtk/bitmap.h
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/include/wx/gtk/bitmap.h,v
+retrieving revision 1.36
+diff -b -u -2 -r1.36 bitmap.h
+--- include/wx/gtk/bitmap.h	2002/09/07 12:28:46	1.36
++++ include/wx/gtk/bitmap.h	2003/09/24 12:08:09
+@@ -3,5 +3,5 @@
+ // Purpose:
+ // Author:      Robert Roebling
+-// RCS-ID:      $Id: bitmap.h,v 1.36 2002/09/07 12:28:46 GD Exp $
++// RCS-ID:      $Id: bitmap.h,v 1.4 2003/09/23 13:53:33 chris Exp $
+ // Copyright:   (c) 1998 Robert Roebling
+ // Licence:     wxWindows licence
+@@ -21,5 +21,33 @@
+ #include "wx/palette.h"
+ #include "wx/gdiobj.h"
++//sebb bw bitmap blit accel
++#include <math.h>
++#ifndef min
++#define min(x, y)                     (((int)(x) < (int)(y)) ? (x) : (y))
++#endif
++#ifndef max
++#define max(x, y)                     (((int)(x) > (int)(y)) ? (x) : (y))
++#endif
++#ifndef rinteger
++#define rinteger(x)                       floor(x + 0.5)
++#endif
++
++#ifndef GetBit
++#define GetBit(data,bytes_per_line, x, y) ((bool)((*(data + (x) / 8 + (y) * bytes_per_line) & (1 << ((x) % 8))) ? 1 : 0))
++#endif
++
++#ifndef InvertBit
++#define InvertBit(data,bytes_per_line, x, y) (*(data + (x) / 8 + (y) * bytes_per_line) ^= (bool) (1 << ((x) % 8)))
++#endif 
++
++#ifndef SetBit
++#define SetBit(data,bytes_per_line, x, y) (*(data + (x) / 8 + (y) * bytes_per_line) |= (bool) (1 << ((x) % 8)))
++#endif
+ 
++#ifndef ClearBit
++#define ClearBit(data,bytes_per_line, x, y) (*(data + (x) / 8 + (y) * bytes_per_line) &= (bool)~(1 << ((x) % 8)))
++#endif
++
++//
+ //-----------------------------------------------------------------------------
+ // classes
+@@ -78,4 +106,7 @@
+ 
+     bool Create(int width, int height, int depth = -1);
++//sebb    
++    wxBitmap Rescale(int clipx,int clipy,int clipwidth,int clipheight, int width,int height);
++//sebb end
+     
+     int GetHeight() const;
+@@ -111,5 +142,4 @@
+     GdkPixmap *GetPixmap() const;
+     GdkBitmap *GetBitmap() const;
+-    
+ protected:
+     bool CreateFromXpm(const char **bits);
+Index: src/generic/dcpsg.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/generic/dcpsg.cpp,v
+retrieving revision 1.88.2.8
+diff -b -u -2 -r1.88.2.8 dcpsg.cpp
+--- src/generic/dcpsg.cpp	2003/08/12 16:57:35	1.88.2.8
++++ src/generic/dcpsg.cpp	2003/09/24 12:08:22
+@@ -5,5 +5,5 @@
+ // Modified by:
+ // Created:     04/01/98
+-// RCS-ID:      $Id: dcpsg.cpp,v 1.88.2.8 2003/08/12 16:57:35 MBN Exp $
++// RCS-ID:      $Id: dcpsg.cpp,v 1.3 2003/09/24 11:19:14 chris Exp $
+ // Copyright:   (c) Julian Smart and Markus Holzem
+ // Licence:     wxWindows licence
+@@ -48,4 +48,16 @@
+ #include "wx/filefn.h"
+ 
++#include <gdk/gdk.h>
++#include <gtk/gtk.h>
++#include <gdk/gdkx.h>
++
++
++#ifdef __WXGTK20__
++    #include <gdk/gdkimage.h>
++#else // GTK+ 1.2
++    #include <gdk/gdkrgb.h>
++#endif // GTK+ 2.0/1.2
++
++
+ #include <math.h>
+ 
+@@ -1954,20 +1966,225 @@
+                            wxDC *source,
+                            wxCoord xsrc, wxCoord ysrc,
+-                           int rop, bool WXUNUSED(useMask), wxCoord WXUNUSED(xsrcMask), wxCoord WXUNUSED(ysrcMask) )
++                           int rop, bool useMask, wxCoord xsrcMask, wxCoord ysrcMask )
+ {
+     wxCHECK_MSG( m_ok && m_pstream, FALSE, wxT("invalid postscript dc") );
+ 
+     wxCHECK_MSG( source, FALSE, wxT("invalid source dc") );
++/*sebb, this is old and slow, it wastes a lot resources too, does not
++   do transparency either
++
++    // blit into a bitmap 
++    wxBitmap bitmap( (int)fwidth, (int)fheight );
++    wxMemoryDC memDC;
++    memDC.SelectObject(bitmap);
++    memDC.Blit(0, 0, fwidth, fheight, source, xsrc, ysrc, rop); // TODO: Blit transparently? 
++    memDC.SelectObject(wxNullBitmap);
++
++    // draw bitmap. scaling and positioning is done there 
++    DrawBitmap( bitmap, xdest, ydest );
++*/
++/*sebb, Lets try another way   
++There is no need to have the Bitmaps rescaled, the PS engine will
++do this for us*/
++   wxMemoryDC *memDC = (wxMemoryDC*)source;
++   GdkImage *img = (GdkImage*) NULL;
++   guint32 pixval;
++    	
++   wxBitmap bmp = memDC->m_selected;
++   wxCoord w = bmp.GetWidth();
++   wxCoord h = bmp.GetHeight();
++
++   wxCoord ww = LogicalToDeviceXRel(fwidth);
++   wxCoord hh = LogicalToDeviceYRel(fheight);
++
++   wxCoord xx = LogicalToDeviceX(xdest);
++   wxCoord yy = LogicalToDeviceY(ydest-fheight );
++   
++
++   if (bmp.GetPixmap())
++    {
++        		img = gdk_image_get( bmp.GetPixmap(),
++                                   0, 0,
++                                   bmp.GetWidth(), bmp.GetHeight() );
++    }
++    else if (bmp.GetBitmap())//no use blitting colorimages transparent
++    {
++        if(useMask)
++	{
++		img = gdk_image_get( bmp.GetMask()->GetBitmap(),
++                                   0, 0,
++                                   bmp.GetWidth(), bmp.GetHeight() );
++	}
++	else
++	{
++		img = gdk_image_get( bmp.GetBitmap(),
++                                   0, 0,
++                                   bmp.GetWidth(), bmp.GetHeight() );
++
++	}
++
++    }
++    else
++    {
++        wxFAIL_MSG( wxT("Ill-formed bitmap") );
++    }
++
++   int bpp=bmp.GetDepth();
++
++   if(bpp==1)
++   {
++    	int byteperline=w/8;
++    	if(w%8!=0)
++     	 byteperline+=1;	   
++    	guint8 outbyte=0;
++    	guint8 bit=1;
++    	guint8 shift;
++   
++    	fprintf( m_pstream,
++            "/origstate save def\n"
++            "/pix %d string def\n"
++	    "%d %d translate\n"
++            "%d %d scale\n"
++            "%d %d false\n"
++            "[%d 0 0 %d 0 %d]\n"
++	    "{currentfile pix readhexstring pop}\n",
++            byteperline,xx, yy, ww, -hh, w, h, w,h,h );
++
++	if(useMask)
++	{
++		fprintf( m_pstream,"imagemask\n");
++	}
++	else
++	{
++		fprintf( m_pstream,"image\n");
++
++	}
++	for (int y = 0; y < h; y++)
++    	{
++        	for (int x = 0; x < w; x++)
++        	{
++	    		//SeBB, be careful, the pixel in a byte are in reverse order
++	    		pixval = gdk_image_get_pixel(img,x+(7-(2*(x%8))),y);
++	    		if(!pixval)
++	    		{
++				shift = bit<<((x%8));
++				outbyte|=(shift);
++	    		}
++	    		if((x+1)%8==0)
++	    		{
++				fprintf( m_pstream,"%02x",outbyte );
++	    			outbyte=0;
++            		}
+ 
+-    /* blit into a bitmap */
++        	}
++		if(w%8!=0)
++		{
++	    		fprintf( m_pstream,"%02x",outbyte );
++		}
++        	fprintf( m_pstream, "\n" );
++    	}
++    }
++    else
++    {
++   	GdkVisual *visual = gdk_window_get_visual( bmp.GetPixmap() );
++        if (visual == NULL)
++            visual = wxTheApp->GetGdkVisual();
++
++        bpp = visual->depth;
++        if (bpp == 16)
++            bpp = visual->red_prec + visual->green_prec + visual->blue_prec;
++
++
++	int red_shift_right = 0;
++    	int green_shift_right = 0;
++    	int blue_shift_right = 0;
++    	int red_shift_left = 0;
++    	int green_shift_left = 0;
++    	int blue_shift_left = 0;
++    	bool use_shift = FALSE;
++
++        red_shift_right = visual->red_shift;
++        red_shift_left = 8-visual->red_prec;
++        green_shift_right = visual->green_shift;
++        green_shift_left = 8-visual->green_prec;
++        blue_shift_right = visual->blue_shift;
++        blue_shift_left = 8-visual->blue_prec;
++
++        use_shift = (visual->type == GDK_VISUAL_TRUE_COLOR) || (visual->type == GDK_VISUAL_DIRECT_COLOR);
++	GdkColormap *cmap = gtk_widget_get_default_colormap();
++        
++        char unsigned data[4]; 
++    	fprintf( m_pstream,
++            "/origstate save def\n"
++            "20 dict begin\n"
++            "/pix %d string def\n"
++            "/grays %d string def\n"
++            "/npixels 0 def\n"
++            "/rgbindx 0 def\n"
++            "%d %d translate\n"
++            "%d %d scale\n"
++            "%d %d 8\n"
++            "[%d 0 0 %d 0 %d]\n"
++            "{currentfile pix readhexstring pop}\n"
++            "false 3 colorimage\n",
++            w, w, xx, yy, ww, hh, w, h, w, -h, h );
++
++
++	for (int y = 0; y < h; y++)
++    	{
++        	for (int x = 0; x < w; x++)
++        	{
++	    		pixval = gdk_image_get_pixel(img,x,y);
++			if (use_shift)
++           		{
++                		data[0] =   (pixval >> red_shift_right)   << red_shift_left;
++                		data[1] = (pixval >> green_shift_right) << green_shift_left;
++                		data[2] = (pixval >> blue_shift_right)  << blue_shift_left;
++            		}
++            		else if (cmap->colors)
++            		{
++                		data[0] =   cmap->colors[pixval].red   >> 8;
++                		data[1] = cmap->colors[pixval].green >> 8;
++                		data[2] = cmap->colors[pixval].blue  >> 8;
++            		}
++			else
++		        {
++                		wxFAIL_MSG( wxT("Image conversion failed. Unknown visual type.") );
++            		}
++
++
++	    		fprintf( m_pstream,"%02x",data[0] );
++			fprintf( m_pstream,"%02x",data[1] );
++			fprintf( m_pstream,"%02x",data[2] );
++        	}
++        	fprintf( m_pstream, "\n" );
++    	}
++	fprintf( m_pstream, "end\n" );
++
++
++    }
++
++   	    
++    fprintf( m_pstream, "\n" );
++    fprintf( m_pstream, "origstate restore\n" );
++    gdk_image_destroy(img);
++/*
++	
++   }
++   else  //We will use the old Method for color
++   {
++	// blit into a bitmap 
+     wxBitmap bitmap( (int)fwidth, (int)fheight );
+     wxMemoryDC memDC;
+     memDC.SelectObject(bitmap);
+-    memDC.Blit(0, 0, fwidth, fheight, source, xsrc, ysrc, rop); /* TODO: Blit transparently? */
++    memDC.Blit(0, 0, fwidth, fheight, source, xsrc, ysrc, rop); // TODO: Blit transparently? 
+     memDC.SelectObject(wxNullBitmap);
+ 
+-    /* draw bitmap. scaling and positioning is done there */
++    // draw bitmap. scaling and positioning is done there 
+     DrawBitmap( bitmap, xdest, ydest );
+ 
++   }    
++  */  
++
+     return TRUE;
+ }
+Index: src/gtk/bitmap.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/gtk/bitmap.cpp,v
+retrieving revision 1.64.2.3
+diff -b -u -2 -r1.64.2.3 bitmap.cpp
+--- src/gtk/bitmap.cpp	2003/07/22 08:57:06	1.64.2.3
++++ src/gtk/bitmap.cpp	2003/09/24 12:08:24
+@@ -3,5 +3,5 @@
+ // Purpose:
+ // Author:      Robert Roebling
+-// RCS-ID:      $Id: bitmap.cpp,v 1.64.2.3 2003/07/22 08:57:06 RR Exp $
++// RCS-ID:      $Id: bitmap.cpp,v 1.5 2003/09/24 11:19:13 chris Exp $
+ // Copyright:   (c) 1998 Robert Roebling
+ // Licence:     wxWindows licence
+@@ -1082,3 +1082,149 @@
+ 
+     return M_BMPDATA->m_bitmap;
++}
++//added by sebb 17 Sep 2003 for speeding up blitting of bitmaps (rescaling was done
++//via image, which consumes too much mem for 10000x10000 pixel bitmaps
++//we use here (about 400 MB)
++wxBitmap wxBitmap::Rescale(int clipx,int clipy,int clipwidth,int clipheight, int newx,int newy)
++{
++      
++
++     char *dst;
++     int *tablex;
++     int *tabley;
++     int width, height,x,y;
++     long dstbyteperline;
++//     bool pixel;
++     wxBitmap bmp;
++     GdkPixmap *dstpix;
++
++
++    wxCHECK_MSG( Ok(), wxNullImage, wxT("invalid bitmap") );
++
++    GdkImage *img = (GdkImage*) NULL;
++    
++    if (GetPixmap())
++    {
++        img = gdk_image_get( GetPixmap(),
++                                   0, 0,
++                                   GetWidth(), GetHeight() );
++    }
++    else if (GetBitmap())
++    {
++        img = gdk_image_get( GetBitmap(),
++                                   0, 0,
++                                   GetWidth(), GetHeight() );
++    }
++    else
++    {
++        wxFAIL_MSG( wxT("Ill-formed bitmap") );
++    }
++
++    wxCHECK_MSG( img, wxNullImage, wxT("couldn't create image") );
++
++    int bpp = -1;
++    guint32 pixval;
++
++     width = max(newx, 1);
++     height = max(newy, 1);
++     width = min(width,clipwidth);
++     height = min(height,clipheight);
++    
++    GdkColor col;
++    GdkGC *gc;
++    
++
++    if (GetPixmap())
++    {
++        GdkVisual *visual = gdk_window_get_visual( GetPixmap() );
++        if (visual == NULL)
++            visual = wxTheApp->GetGdkVisual();
++
++        bpp = visual->depth;
++	bmp = wxBitmap(width,height,bpp);
++	dstpix = bmp.GetPixmap();
++	gc = gdk_gc_new( dstpix );
++    
++    }
++    if (GetBitmap())
++    {
++        bpp = 1;
++	dstbyteperline = width/8*M_BMPDATA->m_bpp;
++     	if (width*M_BMPDATA->m_bpp%8!=0)
++        	dstbyteperline++;
++  	dst = (char *)malloc(dstbyteperline*height);
++
++    }
++
++     if (newy==M_BMPDATA->m_width && newy==M_BMPDATA->m_height  )
++     {
++        return(*this);
++     }
++             
++        
++    char outbyte;
++    //be careful to use the right scaling factor
++    float scx=(float)M_BMPDATA->m_width/(float)newx;
++    float scy=(float)M_BMPDATA->m_height/(float)newy;
++    //prepare accel-tables
++    tablex = (int *)calloc(width,sizeof(int));
++    tabley = (int *)calloc(height,sizeof(int));
++
++//ATTENTION accel table filled with clipped values
++        for (x = 0; x < width; x++) {
++            tablex[x] = rinteger(scx * (x+clipx));
++        }
++        for (y = 0; y < height; y++) {
++            tabley[y] = rinteger(scy * (y+clipy));
++        }
++
++
++//Main rescaling routine starts here
++
++        for(int h=0; h<height; h++)
++        {
++	  outbyte=0;
++
++	  for(int w=0; w<width; w++)
++          {
++		pixval = gdk_image_get_pixel(img,tablex[w],tabley[h]);
++                if(bpp==1)
++		{
++			if(!pixval)
++			{
++				char bit=1;
++	           		char shift = bit<<w%8;
++		   		outbyte|=(shift);
++			}
++	        	if((w+1)%8==0)
++			{
++				dst[h*dstbyteperline+w/8]=~outbyte;
++				outbyte=0;
++             		}
++		}
++		else
++            	{
++			col.pixel = pixval;
++		    	gdk_gc_set_foreground( gc, &col );
++                	gdk_draw_point(dstpix,gc,w,h);
++            	}
++	  }
++          //do not forget the last byte
++	  if(bpp==1)
++	  	dst[h*dstbyteperline+width/8]=~outbyte;
++        }
++
++//free allocated mem
++    free(tablex);
++    free(tabley);
++    gdk_image_destroy(img);
++
++    if(bpp==1)
++    {
++	bmp = wxBitmap((const char *)dst,width,height,bpp);
++	wxMask* bmask= new wxMask(bmp);
++    	bmp.SetMask(bmask);
++    	free(dst);
++    }
++    return(bmp);	
+ }
+Index: src/gtk/dcclient.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/gtk/dcclient.cpp,v
+retrieving revision 1.160.2.7
+diff -b -u -2 -r1.160.2.7 dcclient.cpp
+--- src/gtk/dcclient.cpp	2003/02/11 11:35:12	1.160.2.7
++++ src/gtk/dcclient.cpp	2003/09/24 12:08:28
+@@ -3,5 +3,5 @@
+ // Purpose:
+ // Author:      Robert Roebling
+-// RCS-ID:      $Id: dcclient.cpp,v 1.160.2.7 2003/02/11 11:35:12 RR Exp $
++// RCS-ID:      $Id: dcclient.cpp,v 1.4 2003/09/23 13:53:33 chris Exp $
+ // Copyright:   (c) 1998 Robert Roebling, Markus Holzem, Chris Breeze
+ // Licence:     wxWindows licence
+@@ -1196,4 +1196,5 @@
+     if (srcDC->m_isMemDC)
+     {
++     
+         if (!memDC->m_selected.Ok()) return FALSE;
+ 
+@@ -1210,5 +1211,10 @@
+               about masks */
+             use_bitmap_method = TRUE;
++	    if (memDC->m_selected.GetDepth() == 1)
++            {
++                      is_mono = TRUE;
+         }
++
++        }
+         else if (memDC->m_selected.GetDepth() == 1)
+         {
+@@ -1262,5 +1268,23 @@
+         wxCoord bm_width = memDC->m_selected.GetWidth();
+         wxCoord bm_height = memDC->m_selected.GetHeight();
++       //get clip coords
++      	wxRegion tmp( xx,yy,ww,hh );
++      	tmp.Intersect( m_currentClippingRegion );
++      	wxCoord cx,cy,cw,ch;
++	tmp.GetBox(cx,cy,cw,ch);	
++   	
++ 
++	
++	/*sebb interpret userscale of src too*/
++	int dep = memDC->m_selected.GetDepth();
++	double xsc,ysc;
++
++	memDC->GetUserScale(&xsc,&ysc);
++
++	bm_width /=xsc;
++	bm_height /=ysc;
+ 
++			
++
+         wxCoord bm_ww = XLOG2DEVREL( bm_width );
+         wxCoord bm_hh = YLOG2DEVREL( bm_height );
+@@ -1269,13 +1293,25 @@
+         wxBitmap use_bitmap;
+ 
+-        if ((bm_width != bm_ww) || (bm_height != bm_hh))
++        if ( (bm_width != bm_ww) || (bm_height != bm_hh))
+         {
+-            wxImage image = memDC->m_selected.ConvertToImage();
+-            image = image.Scale( bm_ww, bm_hh );
+-
+             if (is_mono)
+-                use_bitmap = wxBitmap(image.ConvertToMono(255,255,255), 1);
++            {
++        	
++				
++	        use_bitmap=memDC->m_selected.Rescale(cx-xx,cy-yy,cw,ch,bm_ww,bm_hh);	
++		//use_bitmap=memDC->m_selected;
++		//use_bitmap=wxBitmap(bm_ww,bm_hh,1);
++	    }
++	    //   use_bitmap = wxBitmap(image.ConvertToMono(255,255,255), 1);
+             else
+-                use_bitmap = wxBitmap(image);
++            {
++		//sebb: this is old far too slow for bw bitmaps
++	    	//wxImage image = memDC->m_selected.ConvertToImage();
++            //	image = image.Scale( bm_ww, bm_hh );
++
++			//	use_bitmap = wxBitmap(image);
++		use_bitmap=memDC->m_selected.Rescale(cx-xx,cy-yy,cw,ch,bm_ww,bm_hh);
++       	    }
++	    
+         }
+         else
+@@ -1294,4 +1330,5 @@
+             if (!m_currentClippingRegion.IsNull())
+             {
++		
+                 GdkColor col;
+                 new_mask = gdk_pixmap_new( wxGetRootWindow()->window, bm_ww, bm_hh, 1 );
+@@ -1300,4 +1337,5 @@
+                 gdk_gc_set_foreground( gc, &col );
+                 gdk_draw_rectangle( new_mask, gc, TRUE, 0, 0, bm_ww, bm_hh );
++
+                 col.pixel = 0;
+                 gdk_gc_set_background( gc, &col );
+@@ -1305,8 +1343,13 @@
+                 gdk_gc_set_foreground( gc, &col );
+                 gdk_gc_set_clip_region( gc, m_currentClippingRegion.GetRegion() );
+-                gdk_gc_set_clip_origin( gc, -xx, -yy );
++                
++		//was: 	gdk_gc_set_clip_origin( gc, -xx, -yy );
++		gdk_gc_set_clip_origin( gc, -cx, -cy );
++                
+                 gdk_gc_set_fill( gc, GDK_OPAQUE_STIPPLED );
+                 gdk_gc_set_stipple( gc, mask );
++                
+                 gdk_draw_rectangle( new_mask, gc, TRUE, 0, 0, bm_ww, bm_hh );
++		
+                 gdk_gc_unref( gc );
+             }
+@@ -1318,5 +1361,6 @@
+                 else
+                     gdk_gc_set_clip_mask( m_textGC, mask );
+-                gdk_gc_set_clip_origin( m_textGC, xx, yy );
++		//was:  gdk_gc_set_clip_origin( m_textGC, xx,yy );
++                gdk_gc_set_clip_origin( m_textGC, cx,cy );
+             }
+             else
+@@ -1326,5 +1370,6 @@
+                 else
+                     gdk_gc_set_clip_mask( m_penGC, mask );
+-                gdk_gc_set_clip_origin( m_penGC, xx, yy );
++                //was: gdk_gc_set_clip_origin( m_penGC, xx, yy );
++		gdk_gc_set_clip_origin( m_penGC, cx, cy );
+             }
+             if (new_mask)
+@@ -1336,7 +1381,12 @@
+ 
+         if (is_mono)
+-            gdk_wx_draw_bitmap( m_window, m_textGC, use_bitmap.GetBitmap(), xsrc, ysrc, xx, yy, ww, hh );
++	{
++            //was: gdk_wx_draw_bitmap( m_window, m_textGC, use_bitmap.GetBitmap(), xsrc, ysrc, xx, yy, ww, hh );
++	    gdk_wx_draw_bitmap( m_window, m_textGC, use_bitmap.GetBitmap(),0,0,cx,cy,cw,ch); 
++
++
++        }
+         else
+-            gdk_draw_pixmap( m_window, m_penGC, use_bitmap.GetPixmap(), xsrc, ysrc, xx, yy, ww, hh );
++            gdk_draw_pixmap( m_window, m_penGC, use_bitmap.GetPixmap(), xsrc, ysrc, cx, cy, ww, hh );
+ 
+         /* remove mask again if any */
+@@ -1363,4 +1413,11 @@
+         if ((width != ww) || (height != hh))
+         {
++            //get clip coords
++      		wxRegion tmp( xx,yy,ww,hh );
++      		tmp.Intersect( m_currentClippingRegion );
++      		wxCoord cx,cy,cw,ch;
++		tmp.GetBox(cx,cy,cw,ch);	
++   	
++
+             /* draw source window into a bitmap as we cannot scale
+                a window in contrast to a bitmap. this would actually
+@@ -1376,23 +1433,25 @@
+                for a different implementation of the same problem. */
+ 
+-            wxBitmap bitmap( width, height );
++            //wxBitmap bitmap(width,height);
+ 
++	    /*sebb, this is old stuff, far too slow*/
+             /* copy including child window contents */
+-            gdk_gc_set_subwindow( m_penGC, GDK_INCLUDE_INFERIORS );
+-            gdk_window_copy_area( bitmap.GetPixmap(), m_penGC, 0, 0,
+-                                  srcDC->GetWindow(),
+-                                  xsrc, ysrc, width, height );
+-            gdk_gc_set_subwindow( m_penGC, GDK_CLIP_BY_CHILDREN );
++            //gdk_gc_set_subwindow( m_penGC, GDK_INCLUDE_INFERIORS );
++            //gdk_window_copy_area( bitmap.GetPixmap(), m_penGC, 0, 0,
++            //                      srcDC->GetWindow(),
++            //                      xsrc, ysrc, width, height );
++            //gdk_gc_set_subwindow( m_penGC, GDK_CLIP_BY_CHILDREN );
+ 
+             /* scale image */
+-            wxImage image = bitmap.ConvertToImage();
+-            image = image.Scale( ww, hh );
++            //wxImage image = bitmap.ConvertToImage();
++            //image = image.Scale( ww, hh );
+ 
+             /* convert to bitmap */
+-            bitmap = wxBitmap(image);
++	    /*new routine calls Bitmap::Rescale for more efficent rescaling with clipping*/ 
++            wxBitmap bitmap = memDC->m_selected.Rescale(cx-xx,cy-yy,cw,ch,ww,hh);//wxBitmap(image);
+ 
+             /* draw scaled bitmap */
+-            gdk_draw_pixmap( m_window, m_penGC, bitmap.GetPixmap(), 0, 0, xx, yy, -1, -1 );
+-
++            //was :gdk_draw_pixmap( m_window, m_penGC, bitmap.GetPixmap(), 0, 0, xx, yy, -1, -1 );
++	    gdk_draw_pixmap( m_window, m_penGC, bitmap.GetPixmap(), 0, 0, cx, cy, -1, -1 );
+         }
+         else
+@@ -1447,5 +1506,5 @@
+     pango_layout_set_text( layout, (const char*)data, strlen((const char*)data) );
+ 
+-    if (m_scaleY != 1.0)
++    if (m_scaleY - 1.0 < 0.000001)
+     {
+          // If there is a user or actually any scale applied to
+Index: src/msw/dc.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/dc.cpp,v
+retrieving revision 1.130.2.1
+diff -b -u -2 -r1.130.2.1 dc.cpp
+--- src/msw/dc.cpp	2003/06/02 22:41:02	1.130.2.1
++++ src/msw/dc.cpp	2003/09/24 12:08:33
+@@ -1902,7 +1902,9 @@
+     else // no mask, just BitBlt() it
+     {
++        SetStretchBltMode( GetHdc(),COLORONCOLOR);      
++        SetStretchBltMode( GetHdcOf(*source),COLORONCOLOR);      
+         success = ::BitBlt(GetHdc(), xdest, ydest,
+                            (int)width, (int)height,
+-                           GetHdcOf(*source), xsrc, ysrc, dwRop) != 0;
++                           GetHdcOf(*source), xsrc, ysrc,/*source->m_selectedBitmap.GetWidth(),source->m_selectedBitmap.GetHeight(),*/ dwRop) != 0;
+         if ( !success )
+         {
+Index: src/msw/dcprint.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwindows/wxWindows/src/msw/dcprint.cpp,v
+retrieving revision 1.31.2.2
+diff -b -u -2 -r1.31.2.2 dcprint.cpp
+--- src/msw/dcprint.cpp	2003/01/24 12:31:41	1.31.2.2
++++ src/msw/dcprint.cpp	2003/09/24 12:08:34
+@@ -69,4 +69,5 @@
+ // wxPrinterDC construction
+ // ----------------------------------------------------------------------------
++#define DSTCOPY 0x00AA0029      // a.k.a. NOP operation
+ 
+ // This form is deprecated
+@@ -491,10 +492,61 @@
+ {
+     bool success = TRUE;
++    //lets try like dcclient
+ 
++    wxMask *mask = NULL;
+     if ( useMask )
+     {
++        const wxBitmap& bmp = source->GetSelectedBitmap();
++        mask = bmp.GetMask();
++
++        if ( !(bmp.Ok() && mask && mask->GetMaskBitmap()) )
++        {
++            // don't give assert here because this would break existing
++            // programs - just silently ignore useMask parameter
++            useMask = FALSE;
++        }
++    }
++    int xsrcMask=-1,ysrcMask=-1;
++    if (xsrcMask == -1 && ysrcMask == -1)
++    {
++        xsrcMask = xsrc; ysrcMask = ysrc;
++    }
++    DWORD rop=wxCOPY;
++    DWORD dwRop = SRCCOPY;
++    switch (rop)
++    {
++        case wxXOR:          dwRop = SRCINVERT;        break;
++        case wxINVERT:       dwRop = DSTINVERT;        break;
++        case wxOR_REVERSE:   dwRop = 0x00DD0228;       break;
++        case wxAND_REVERSE:  dwRop = SRCERASE;         break;
++        case wxCLEAR:        dwRop = BLACKNESS;        break;
++        case wxSET:          dwRop = WHITENESS;        break;
++        case wxOR_INVERT:    dwRop = MERGEPAINT;       break;
++        case wxAND:          dwRop = SRCAND;           break;
++        case wxOR:           dwRop = SRCPAINT;         break;
++        case wxEQUIV:        dwRop = 0x00990066;       break;
++        case wxNAND:         dwRop = 0x007700E6;       break;
++        case wxAND_INVERT:   dwRop = 0x00220326;       break;
++        case wxCOPY:         dwRop = SRCCOPY;          break;
++        case wxNO_OP:        dwRop = DSTCOPY;          break;
++        case wxSRC_INVERT:   dwRop = NOTSRCCOPY;       break;
++        case wxNOR:          dwRop = NOTSRCCOPY;       break;
++        default:
++           wxFAIL_MSG( wxT("unsupported logical function") );
++           return FALSE;
++    }
++    if ( useMask )
++    {
+         // If we are printing source colours are screen colours
+         // not printer colours and so we need copy the bitmap
+         // pixel by pixel.
++        
++        success = ::StretchBlt(GetHdc(),xdest,ydest,width,height,GetHdcOf(*source),xsrc,ysrc,width,height,SRCAND);
++        
++/*        success = ::MaskBlt(GetHdc(), xdest, ydest, width, height,
++                            GetHdcOf(*source), xsrc, ysrc,
++                            (HBITMAP)mask->GetMaskBitmap(), xsrcMask, ysrcMask,
++                            MAKEROP4(dwRop, DSTCOPY)) != 0;
++            
+         RECT rect;
+         HDC dc_src = GetHdcOf(*source);
+@@ -512,6 +564,6 @@
+                     rect.left = xdest + x;
+                     rect.right = rect.left + 1;
+-                    rect.top = ydest + y;
+-                    rect.bottom = rect.top + 1;
++                    rect.top = rect.top + 1;
++                    rect.bottom = ydest + y;
+                     ::FillRect(GetHdc(), &rect, brush);
+                     ::DeleteObject(brush);
+@@ -521,4 +573,5 @@
+         ::SelectObject(dc_mask, 0);
+         ::DeleteDC(dc_mask);
++*/
+     }
+     else // no mask
+@@ -526,4 +579,7 @@
+         if ( ::GetDeviceCaps(GetHdc(), RASTERCAPS) & RC_STRETCHDIB )
+         {
++            int dwidth,dheight;
++            dwidth=width;
++            dheight=height;
+             wxBitmap& bmp = source->GetSelectedBitmap();
+             int width = bmp.GetWidth(),
+@@ -564,5 +620,5 @@
+             {
+                 success = ::StretchDIBits(GetHdc(), xdest, ydest,
+-                                          width, height,
++                                          dwidth, dheight,
+                                           xsrc, ysrc,
+                                           width, height,
+
+ 	  	 

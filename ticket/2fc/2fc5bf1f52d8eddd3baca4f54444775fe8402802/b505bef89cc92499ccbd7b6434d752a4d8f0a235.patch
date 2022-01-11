@@ -1,0 +1,794 @@
+? cs.patch
+? disp.patch
+? mapped_dispatcher.patch
+? samples/sockets/baseclient.cpp
+? samples/sockets/baseserver.cpp
+? samples/sockets/sockets_baseclient.dsp
+? samples/sockets/sockets_baseserver.dsp
+Index: include/wx/private/fdiodispatcher.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/private/fdiodispatcher.h,v
+retrieving revision 1.2
+diff -u -r1.2 fdiodispatcher.h
+--- include/wx/private/fdiodispatcher.h	2007/06/02 13:50:55	1.2
++++ include/wx/private/fdiodispatcher.h	2007/06/08 15:37:24
+@@ -45,6 +45,15 @@
+ public:
+     enum { TIMEOUT_INFINITE = -1 };
+ 
++    // one global instance for mainloop dispatcher
++    // first call will create best dispatcher for given platform
++    static wxFDIODispatcher* Get();
++
++    // if we have any registered handlers, check for any pending events to them
++    // and dispatch them -- this is used from wxX11 and wxDFB event loops
++    // implementation
++    static void DispatchPending();
++
+     // register handler for the given descriptor with the dispatcher, return
+     // true on success or false on error
+     virtual bool RegisterFD(int fd, wxFDIOHandler *handler, int flags) = 0;
+@@ -55,14 +64,24 @@
+     // unregister descriptor previously registered with RegisterFD(), the
+     // caller is responsible for deleting the returned handler pointer if
+     // necessary
+-    virtual bool UnregisterFD(int fd, int flags) = 0;
++    virtual bool UnregisterFD(int fd) = 0;
+ 
+-    // loops waiting for an event to happen on any of the descriptors
+-    virtual void RunLoop(int timeout) = 0;
++    // wait for an event on watched descriptors until one of condition below is met
++    // - timeout expired
++    // - event on at least one watched descriptor arrived
++    virtual void Dispatch(int timeout) = 0;
+ 
+     virtual ~wxFDIODispatcher() { }
++protected:
++    //for access to global dispatcher instance
++    friend class wxFDIODispatcherModule;
++
++    // global dispatcher instance
++    static wxFDIODispatcher* gs_dispatcher;
+ };
+ 
++
++
+ //entry for wxFDIOHandlerMap
+ struct wxFDIOHandlerEntry
+ {
+@@ -108,7 +127,7 @@
+     // unregister descriptor previously registered with RegisterFD(), the
+     // caller is responsible for deleting the returned handler pointer if
+     // necessary
+-    virtual bool UnregisterFD(int fd, int flags);
++    virtual bool UnregisterFD(int fd);
+ 
+     virtual ~wxMappedFDIODispatcher() { }
+ 
+Index: include/wx/private/selectdispatcher.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/private/selectdispatcher.h,v
+retrieving revision 1.6
+diff -u -r1.6 selectdispatcher.h
+--- include/wx/private/selectdispatcher.h	2007/06/02 13:50:55	1.6
++++ include/wx/private/selectdispatcher.h	2007/06/08 15:37:24
+@@ -36,9 +36,9 @@
+ 
+     // same as SetFD() except it unsets the bits set in the flags for the given
+     // fd
+-    bool ClearFD(int fd, int flags)
++    bool ClearFD(int fd)
+     {
+-        return SetFD(fd, wxFDIO_ALL & ~flags);
++        return SetFD(fd, 0);
+     }
+ 
+ 
+@@ -74,23 +74,14 @@
+ class WXDLLIMPEXP_BASE wxSelectDispatcher : public wxMappedFDIODispatcher
+ {
+ public:
+-    // returns the unique instance of this class, the pointer shouldn't be
+-    // deleted and is normally never NULL
+-    static wxSelectDispatcher *Get();
+-
+-    // if we have any registered handlers, check for any pending events to them
+-    // and dispatch them -- this is used from wxX11 and wxDFB event loops
+-    // implementation
+-    static void DispatchPending();
+-
++    wxSelectDispatcher();
+     // implement pure virtual methods of the base class
+     virtual bool RegisterFD(int fd, wxFDIOHandler *handler, int flags = wxFDIO_ALL);
+     virtual bool ModifyFD(int fd, wxFDIOHandler *handler, int flags = wxFDIO_ALL);
+-    virtual bool UnregisterFD(int fd, int flags = wxFDIO_ALL);
+-    virtual void RunLoop(int timeout = TIMEOUT_INFINITE);
++    virtual bool UnregisterFD(int fd);
++    virtual void Dispatch(int timeout = TIMEOUT_INFINITE);
+ 
+ protected:
+-    wxSelectDispatcher();
+ 
+ private:
+     // common part of RegisterFD() and ModifyFD()
+Index: include/wx/unix/evtloop.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/unix/evtloop.h,v
+retrieving revision 1.1
+diff -u -r1.1 evtloop.h
+--- include/wx/unix/evtloop.h	2007/05/14 23:42:49	1.1
++++ include/wx/unix/evtloop.h	2007/06/08 15:37:24
+@@ -29,7 +29,7 @@
+     virtual bool Pending() const;
+     virtual bool Dispatch();
+     virtual void WakeUp();
+-    virtual bool IsOk() const { return m_dispatcher != NULL; }
++    virtual bool IsOk() const { return wxFDIODispatcher::Get() != NULL; }
+ 
+ protected:
+     virtual void OnNextIteration();
+@@ -61,9 +61,6 @@
+     };
+ 
+     PipeIOHandler m_wakeupPipe;
+-
+-    // either wxSelectDispatcher or wxEpollDispatcher
+-    wxFDIODispatcher *m_dispatcher;
+ 
+     DECLARE_NO_COPY_CLASS(wxConsoleEventLoop)
+ };
+Index: include/wx/unix/gsockunx.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/unix/gsockunx.h,v
+retrieving revision 1.21
+diff -u -r1.21 gsockunx.h
+--- include/wx/unix/gsockunx.h	2005/05/04 18:53:05	1.21
++++ include/wx/unix/gsockunx.h	2007/06/08 15:37:24
+@@ -23,6 +23,8 @@
+ #include "gsocket.h"
+ #endif
+ 
++#include "wx/private/gsocketiohandler.h"
++
+ class GSocketGUIFunctionsTableConcrete: public GSocketGUIFunctionsTable
+ {
+ public:
+@@ -82,6 +84,7 @@
+     /* DFE: We can't protect these data member until the GUI code is updated */
+     /* protected: */
+   int m_fd;
++  wxGSocketIOHandler* m_handler;
+   GAddress *m_local;
+   GAddress *m_peer;
+   GSocketError m_error;
+Index: include/wx/unix/private/epolldispatcher.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/unix/private/epolldispatcher.h,v
+retrieving revision 1.2
+diff -u -r1.2 epolldispatcher.h
+--- include/wx/unix/private/epolldispatcher.h	2007/06/02 13:51:00	1.2
++++ include/wx/unix/private/epolldispatcher.h	2007/06/08 15:37:24
+@@ -20,24 +20,16 @@
+ class WXDLLIMPEXP_CORE wxEpollDispatcher : public wxFDIODispatcher
+ {
+ public:
+-    // get pointer to the unique instance of this class, can return NULL if
+-    // epoll() is not supported on this system
+-    //
+-    // do not delete the returned pointer
+-    static wxEpollDispatcher *Get();
+-
++    wxEpollDispatcher();
++    // return true if the object was successfully initialized
++    bool IsOk() const { return m_epollDescriptor != -1; }
+     // implement base class pure virtual methods
+     virtual bool RegisterFD(int fd, wxFDIOHandler* handler, int flags = wxFDIO_ALL);
+     virtual bool ModifyFD(int fd, wxFDIOHandler* handler, int flags = wxFDIO_ALL);
+-    virtual bool UnregisterFD(int fd, int flags = wxFDIO_ALL);
+-    virtual void RunLoop(int timeout = TIMEOUT_INFINITE);
++    virtual bool UnregisterFD(int fd);
++    virtual void Dispatch(int timeout = TIMEOUT_INFINITE);
+ 
+ private:
+-    // ctor is private, use Get()
+-    wxEpollDispatcher();
+-
+-    // return true if the object was successfully initialized
+-    bool IsOk() const { return m_epollDescriptor != -1; }
+ 
+     int m_epollDescriptor;
+ };
+Index: src/common/fdiodispatcher.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/fdiodispatcher.cpp,v
+retrieving revision 1.2
+diff -u -r1.2 fdiodispatcher.cpp
+--- src/common/fdiodispatcher.cpp	2007/06/02 13:51:02	1.2
++++ src/common/fdiodispatcher.cpp	2007/06/08 15:37:25
+@@ -27,11 +27,53 @@
+ #endif //WX_PRECOMP
+ 
+ #include "wx/private/fdiodispatcher.h"
++#include "wx/module.h"
++#ifdef __UNIX__
+ 
++//available dispatchers
++#include "wx/unix/private/epolldispatcher.h"
++#endif
++#include "wx/private/selectdispatcher.h"
++
++wxFDIODispatcher *wxFDIODispatcher::gs_dispatcher = NULL;
++
+ // ============================================================================
+ // implementation
+ // ============================================================================
+ 
++/* static */
++void wxFDIODispatcher::DispatchPending()
++{
++    if ( gs_dispatcher )
++        gs_dispatcher->Dispatch(0);
++}
++
++/* static */
++wxFDIODispatcher *wxFDIODispatcher::Get()
++{
++
++#ifdef HAVE_SYS_EPOLL_H
++    if (gs_dispatcher == NULL)
++    {
++        wxEpollDispatcher* disp = new wxEpollDispatcher;
++        // epoll call can be unreachable at rutime
++        if (!disp->IsOk())
++            delete disp;
++        else 
++        {
++            gs_dispatcher = disp;
++            return gs_dispatcher;
++        }
++    }
++#endif // HAVE_SYS_EPOLL_H
++    if (gs_dispatcher == NULL)
++    {
++        gs_dispatcher = new wxSelectDispatcher;
++    }
++    return gs_dispatcher;
++}
++
++
+ wxFDIOHandler *wxMappedFDIODispatcher::FindHandler(int fd) const
+ {
+     const wxFDIOHandlerMap::const_iterator it = m_handlers.find(fd);
+@@ -78,19 +120,29 @@
+     return true;
+ }
+ 
+-bool wxMappedFDIODispatcher::UnregisterFD(int fd, int flags)
++bool wxMappedFDIODispatcher::UnregisterFD(int fd)
+ {
+     wxFDIOHandlerMap::iterator i = m_handlers.find(fd);
+     if( i == m_handlers.end())
+       return false;
+-
+-    i->second.flags &= ~flags;
+-    if ( !i->second.flags )
+-    {
+-        // this handler is not registered for anything any more, get rid of it
+-        m_handlers.erase(i);
+-    }
+ 
++    m_handlers.erase(i);
+     return true;
+ }
++
++// ----------------------------------------------------------------------------
++// wxSelectDispatcherModule
++// ----------------------------------------------------------------------------
++
++class wxFDIODispatcherModule : public wxModule
++{
++public:
++    virtual bool OnInit() { return true; }
++    virtual void OnExit() { wxDELETE(wxFDIODispatcher::gs_dispatcher); }
++
++private:
++    DECLARE_DYNAMIC_CLASS(wxFDIODispatcherModule)
++};
++
++IMPLEMENT_DYNAMIC_CLASS(wxFDIODispatcherModule, wxModule)
+ 
+Index: src/common/gsocketiohandler.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/gsocketiohandler.cpp,v
+retrieving revision 1.2
+diff -u -r1.2 gsocketiohandler.cpp
+--- src/common/gsocketiohandler.cpp	2007/05/14 23:42:57	1.2
++++ src/common/gsocketiohandler.cpp	2007/06/08 15:37:25
+@@ -127,29 +127,33 @@
+     default: return;
+   }
+ 
+-  wxSelectDispatcher * const dispatcher = wxSelectDispatcher::Get();
+-  if ( !dispatcher )
+-      return;
++  wxFDIODispatcher * const dispatcher = wxFDIODispatcher::Get();
++  wxCHECK_RET(dispatcher,_T("Cannot use wxSocketBase::Notify(true) without ID Dispatcher"));
+ 
+-  wxGSocketIOHandler *
+-      handler = (wxGSocketIOHandler*)dispatcher->FindHandler(fd);
+-  if ( !handler )
++  // if socket has handler set then 
++  // we should modify its flags in dispatcher, not add them
++  bool modify_handler = true;
++  if (!socket->m_handler)
+   {
+-      handler = new wxGSocketIOHandler(socket);
++      socket->m_handler = new wxGSocketIOHandler(socket);
++      modify_handler = false;
+   }
+ 
+   if (c == 0)
+   {
+       m_id[0] = fd;
+-      handler->AddFlag(wxFDIO_INPUT);
++      socket->m_handler->AddFlag(wxFDIO_INPUT);
+   }
+   else
+   {
+       m_id[1] = fd;
+-      handler->AddFlag(wxFDIO_OUTPUT);
++      socket->m_handler->AddFlag(wxFDIO_OUTPUT);
+   }
+ 
+-  dispatcher->RegisterFD(fd, handler, handler->GetFlags());
++  if (modify_handler)
++    dispatcher->ModifyFD(fd, socket->m_handler, socket->m_handler->GetFlags());
++  else
++    dispatcher->RegisterFD(fd, socket->m_handler, socket->m_handler->GetFlags());
+ }
+ 
+ void GSocketGUIFunctionsTableConcrete::Uninstall_Callback(GSocket *socket,
+@@ -175,18 +179,24 @@
+ 
+   const wxFDIODispatcherEntryFlags flag = c == 0 ? wxFDIO_INPUT : wxFDIO_OUTPUT;
+ 
+-  wxSelectDispatcher * const dispatcher = wxSelectDispatcher::Get();
+-  if ( !dispatcher )
+-      return;
++  wxFDIODispatcher * const dispatcher = wxFDIODispatcher::Get();
++  wxCHECK_RET(dispatcher,_T("Cannot use wxSocketBase::Notify(true) without ID Dispatcher"));
++
+ 
+-  wxGSocketIOHandler * const
+-      handler = (wxGSocketIOHandler*)dispatcher->UnregisterFD(fd, flag);
+-  if ( handler )
++  if ( socket->m_handler )
+   {
+-      handler->RemoveFlag(flag);
++      socket->m_handler->RemoveFlag(flag);
+ 
+-      if ( !handler->GetFlags() )
+-          delete handler;
++      if ( !socket->m_handler->GetFlags() ) 
++      {
++          dispatcher->UnregisterFD(fd);
++          delete socket->m_handler;
++          socket->m_handler = NULL;
++      } else {
++          dispatcher->ModifyFD(fd, socket->m_handler, socket->m_handler->GetFlags());
++      }      
++  } else {
++      dispatcher->UnregisterFD(fd);
+   }
+ }
+ 
+Index: src/common/selectdispatcher.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/common/selectdispatcher.cpp,v
+retrieving revision 1.6
+diff -u -r1.6 selectdispatcher.cpp
+--- src/common/selectdispatcher.cpp	2007/06/02 13:51:02	1.6
++++ src/common/selectdispatcher.cpp	2007/06/08 15:37:25
+@@ -21,7 +21,6 @@
+ 
+ #include "wx/private/selectdispatcher.h"
+ #include "wx/module.h"
+-#include "wx/timer.h"
+ #include "wx/unix/private.h"
+ 
+ #ifndef WX_PRECOMP
+@@ -92,17 +91,13 @@
+ 
+     for ( int n = 0; n < Max; n++ )
+     {
+-        if ( flags & ms_flags[n] )
++        if ( (flags & ms_flags[n]) == ms_flags[n])
+         {
+             wxFD_SET(fd, &m_fds[n]);
+-            wxLogTrace(wxSelectDispatcher_Trace,
+-                       _T("Registered fd %d for %s events"), fd, ms_names[n]);
+         }
+         else if ( wxFD_ISSET(fd,  (fd_set*) &m_fds[n]) )
+         {
+             wxFD_CLR(fd, &m_fds[n]);
+-            wxLogTrace(wxSelectDispatcher_Trace,
+-                       _T("Unregistered fd %d from %s events"), fd, ms_names[n]);
+         }
+     }
+ 
+@@ -123,6 +118,9 @@
+             wxLogTrace(wxSelectDispatcher_Trace,
+                        _T("Got %s event on fd %d"), ms_names[n], fd);
+             (handler.*ms_handlers[n])();
++            // callback can modify sets and destroy handler
++            // this forces that one event can be processed at one time
++            return;
+         }
+     }
+ }
+@@ -130,29 +128,6 @@
+ // ----------------------------------------------------------------------------
+ // wxSelectDispatcher
+ // ----------------------------------------------------------------------------
+-
+-static wxSelectDispatcher *gs_selectDispatcher = NULL;
+-
+-/* static */
+-wxSelectDispatcher *wxSelectDispatcher::Get()
+-{
+-    if ( !gs_selectDispatcher )
+-    {
+-        // the dispatcher should be only created from one thread so it should
+-        // be ok to use a global without any protection here
+-        gs_selectDispatcher = new wxSelectDispatcher;
+-    }
+-
+-    return gs_selectDispatcher;
+-}
+-
+-/* static */
+-void wxSelectDispatcher::DispatchPending()
+-{
+-    if ( gs_selectDispatcher )
+-        gs_selectDispatcher->RunLoop(0);
+-}
+-
+ wxSelectDispatcher::wxSelectDispatcher()
+ {
+     m_maxFD = -1;
+@@ -169,6 +144,8 @@
+     if ( fd > m_maxFD )
+       m_maxFD = fd;
+ 
++    wxLogTrace(wxSelectDispatcher_Trace,
++                _T("Registered fd %d: input:%d, output:%d, exceptional:%d"), fd, (flags & wxFDIO_INPUT) == wxFDIO_INPUT, (flags & wxFDIO_OUTPUT), (flags & wxFDIO_EXCEPTION) == wxFDIO_EXCEPTION);
+     return true;
+ }
+ 
+@@ -179,12 +156,24 @@
+ 
+     wxASSERT_MSG( fd <= m_maxFD, _T("logic error: registered fd > m_maxFD?") );
+ 
+-    return m_sets.SetFD(fd, flags);
++    if (m_sets.SetFD(fd, flags))
++    {
++        wxLogTrace(wxSelectDispatcher_Trace,
++                    _T("Modified fd %d: input:%d, output:%d, exceptional:%d"), fd, (flags & wxFDIO_INPUT) == wxFDIO_INPUT, (flags & wxFDIO_OUTPUT) == wxFDIO_OUTPUT, (flags & wxFDIO_EXCEPTION) == wxFDIO_EXCEPTION);
++        return true;
++    }
++    else
++    {
++        return false;
++    }
+ }
+ 
+-bool wxSelectDispatcher::UnregisterFD(int fd, int flags)
++bool wxSelectDispatcher::UnregisterFD(int fd)
+ {
+-    m_sets.ClearFD(fd, flags);
++    m_sets.ClearFD(fd);
++
++    if ( !wxMappedFDIODispatcher::UnregisterFD(fd) )
++        return false;
+ 
+     // remove the handler if we don't need it any more
+     if ( !m_sets.HasFD(fd) )
+@@ -198,11 +187,15 @@
+                   ++it )
+             {
+                 if ( it->first > m_maxFD )
++                {
+                     m_maxFD = it->first;
++                }
+             }
+         }
+     }
+ 
++    wxLogTrace(wxSelectDispatcher_Trace,
++                _T("Removed fd %d, current max: %d"), fd, m_maxFD);
+     return true;
+ }
+ 
+@@ -224,7 +217,7 @@
+     }
+ }
+ 
+-void wxSelectDispatcher::RunLoop(int timeout)
++void wxSelectDispatcher::Dispatch(int timeout)
+ {
+     struct timeval tv,
+                   *ptv = NULL;
+@@ -235,14 +228,8 @@
+         tv.tv_usec = timeout*1000;
+     }
+ 
+-    for ( ;; )
+-    {
+         wxSelectSets sets = m_sets;
+ 
+-        wxStopWatch sw;
+-        if ( ptv && timeout )
+-          sw.Start(ptv->tv_usec/10);
+-
+         const int ret = sets.Select(m_maxFD + 1, ptv);
+         switch ( ret )
+         {
+@@ -262,31 +249,5 @@
+             default:
+                 ProcessSets(sets);
+         }
+-
+-        if ( ptv )
+-        {
+-            timeout -= sw.Time();
+-            if ( timeout <= 0 )
+-                break;
+-
+-            ptv->tv_usec = timeout*1000;
+-        }
+-    }
+ }
+-
+-// ----------------------------------------------------------------------------
+-// wxSelectDispatcherModule
+-// ----------------------------------------------------------------------------
+-
+-class wxSelectDispatcherModule : public wxModule
+-{
+-public:
+-    virtual bool OnInit() { return true; }
+-    virtual void OnExit() { wxDELETE(gs_selectDispatcher); }
+-
+-private:
+-    DECLARE_DYNAMIC_CLASS(wxSelectDispatcherModule)
+-};
+-
+-IMPLEMENT_DYNAMIC_CLASS(wxSelectDispatcherModule, wxModule)
+ 
+Index: src/unix/appunix.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/unix/appunix.cpp,v
+retrieving revision 1.3
+diff -u -r1.3 appunix.cpp
+--- src/unix/appunix.cpp	2007/06/04 13:39:23	1.3
++++ src/unix/appunix.cpp	2007/06/08 15:37:26
+@@ -11,6 +11,8 @@
+ #include "wx/app.h"
+ #include "wx/log.h"
+ #include "wx/evtloop.h"
++#include "wx/unix/private/epolldispatcher.h"
++#include "wx/private/selectdispatcher.h"
+ 
+ #include <signal.h>
+ #include <unistd.h>
+Index: src/unix/epolldispatcher.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/unix/epolldispatcher.cpp,v
+retrieving revision 1.3
+diff -u -r1.3 epolldispatcher.cpp
+--- src/unix/epolldispatcher.cpp	2007/06/02 13:51:05	1.3
++++ src/unix/epolldispatcher.cpp	2007/06/08 15:37:26
+@@ -35,8 +35,6 @@
+ 
+ #define wxEpollDispatcher_Trace wxT("epolldispatcher")
+ 
+-static wxEpollDispatcher *gs_epollDispatcher = NULL;
+-
+ // ============================================================================
+ // implementation
+ // ============================================================================
+@@ -82,6 +80,8 @@
+     {
+         wxLogSysError(_("Failed to create epoll descriptor"));
+     }
++    wxLogTrace(wxEpollDispatcher_Trace,
++                   _T("Epoll fd %d created"), m_epollDescriptor);
+ }
+ 
+ bool wxEpollDispatcher::RegisterFD(int fd, wxFDIOHandler* handler, int flags)
+@@ -98,6 +98,8 @@
+ 
+         return false;
+     }
++        wxLogTrace(wxEpollDispatcher_Trace,
++                   _T("Added fd %d (handler %p) to epoll %d"), fd, handler, m_epollDescriptor);
+ 
+     return true;
+ }
+@@ -116,11 +118,13 @@
+ 
+         return false;
+     }
++        wxLogTrace(wxEpollDispatcher_Trace,
++                   _T("Modified fd %d (handler: %p) on epoll %d"), fd, handler, m_epollDescriptor);
+ 
+     return true;
+ }
+ 
+-bool wxEpollDispatcher::UnregisterFD(int fd, int flags)
++bool wxEpollDispatcher::UnregisterFD(int fd)
+ {
+     epoll_event ev;
+     ev.events = 0;
+@@ -131,11 +135,13 @@
+         wxLogSysError(_("Failed to unregister descriptor %d from epoll descriptor %d"),
+                       fd, m_epollDescriptor);
+     }
++        wxLogTrace(wxEpollDispatcher_Trace,
++                   _T("removed fd %d from %d"), fd, m_epollDescriptor);
+ 
+     return true;
+ }
+ 
+-void wxEpollDispatcher::RunLoop(int timeout)
++void wxEpollDispatcher::Dispatch(int timeout)
+ {
+     epoll_event events[16];
+ 
+@@ -166,48 +172,20 @@
+             continue;
+         }
+ 
++        wxLogTrace(wxEpollDispatcher_Trace,
++                   _T("Got event for handler %p"), handler);
++
++        // we can process one event type at once,
++        // because handler callback can cause handler deletion
+         if ( p->events & EPOLLIN )
+             handler->OnReadWaiting();
+-
+-        if ( p->events & EPOLLOUT )
++                
++        else if ( p->events & EPOLLOUT )
+             handler->OnWriteWaiting();
+ 
+-        if ( p->events & (EPOLLERR | EPOLLHUP) )
++        else if ( p->events & (EPOLLERR | EPOLLHUP) )
+             handler->OnExceptionWaiting();
+     }
+ }
+-
+-/* static */
+-wxEpollDispatcher *wxEpollDispatcher::Get()
+-{
+-    if ( !gs_epollDispatcher )
+-    {
+-        gs_epollDispatcher = new wxEpollDispatcher;
+-        if ( !gs_epollDispatcher->IsOk() )
+-        {
+-            delete gs_epollDispatcher;
+-            gs_epollDispatcher = NULL;
+-        }
+-    }
+-
+-    return gs_epollDispatcher;
+-}
+-
+-// ----------------------------------------------------------------------------
+-// wxEpollDispatcherModule
+-// ----------------------------------------------------------------------------
+-
+-class wxEpollDispatcherModule : public wxModule
+-{
+-public:
+-    wxEpollDispatcherModule() { }
+-
+-    virtual bool OnInit() { return true; }
+-    virtual void OnExit() { wxDELETE(gs_epollDispatcher); }
+-
+-    DECLARE_DYNAMIC_CLASS(wxEpollDispatcherModule)
+-};
+-
+-IMPLEMENT_DYNAMIC_CLASS(wxEpollDispatcherModule, wxModule)
+ 
+ #endif // HAVE_SYS_EPOLL_H
+Index: src/unix/evtloopunix.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/unix/evtloopunix.cpp,v
+retrieving revision 1.2
+diff -u -r1.2 evtloopunix.cpp
+--- src/unix/evtloopunix.cpp	2007/05/16 23:12:30	1.2
++++ src/unix/evtloopunix.cpp	2007/06/08 15:37:26
+@@ -124,21 +124,11 @@
+ {
+     if ( !m_wakeupPipe.Create() )
+     {
+-        m_dispatcher = NULL;
+         return;
+     }
+ 
+-#ifdef HAVE_SYS_EPOLL_H
+-    m_dispatcher = wxEpollDispatcher::Get();
+-    if ( !m_dispatcher )
+-#endif // HAVE_SYS_EPOLL_H
+-    {
+-        m_dispatcher = wxSelectDispatcher::Get();
+-    }
+-
+-    wxCHECK_RET( m_dispatcher, _T("failed to create IO dispatcher") );
+-
+-    m_dispatcher->RegisterFD
++    wxCHECK_RET(wxFDIODispatcher::Get(), _T("wxConsoleEventLoop needs IO dispatcher to operate") );
++    wxFDIODispatcher::Get()->RegisterFD
+                   (
+                     m_wakeupPipe.GetReadFd(),
+                     &m_wakeupPipe,
+@@ -184,7 +174,7 @@
+         timeout = wxFDIODispatcher::TIMEOUT_INFINITE;
+     }
+ 
+-    m_dispatcher->RunLoop(timeout);
++    wxFDIODispatcher::Get()->Dispatch(timeout);
+ 
+ #if wxUSE_TIMER
+     wxTimerScheduler::Get().NotifyExpired();
+Index: src/unix/gsocket.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/unix/gsocket.cpp,v
+retrieving revision 1.70
+diff -u -r1.70 gsocket.cpp
+--- src/unix/gsocket.cpp	2007/03/30 19:02:30	1.70
++++ src/unix/gsocket.cpp	2007/06/08 15:37:26
+@@ -520,6 +520,7 @@
+   int i;
+ 
+   m_fd                  = INVALID_SOCKET;
++  m_handler             = NULL;
+   for (i=0;i<GSOCK_MAX_EVENT;i++)
+   {
+     m_cbacks[i]         = NULL;
+@@ -563,12 +564,16 @@
+   /* Per-socket GUI-specific cleanup */
+   gs_gui_functions->Destroy_Socket(this);
+ 
++  delete m_handler;
++
+   /* Destroy private addresses */
+   if (m_local)
+     GAddress_destroy(m_local);
+ 
+   if (m_peer)
+     GAddress_destroy(m_peer);
++
++  wxASSERT_MSG(m_handler == NULL, wxString::Format(wxT("Handler for socket %d was not deleted by Disable_Events\nOperations on wxFDIOHandler may crash"),m_fd));
+ }
+ 
+ /* GSocket_Shutdown:
+@@ -1534,6 +1539,7 @@
+     wxFD_ZERO(&readfds);
+     wxFD_SET(m_fd, &readfds);
+     ret = select(m_fd + 1, &readfds, NULL, NULL, &tv);
++    
+     if (ret == 0)
+     {
+       GSocket_Debug(( "GSocket_Input_Timeout, select returned 0\n" ));
+@@ -1577,6 +1583,7 @@
+     wxFD_ZERO(&writefds);
+     wxFD_SET(m_fd, &writefds);
+     ret = select(m_fd + 1, NULL, &writefds, NULL, &tv);
++
+     if (ret == 0)
+     {
+       GSocket_Debug(( "GSocket_Output_Timeout, select returned 0\n" ));
+
+ 	  	 

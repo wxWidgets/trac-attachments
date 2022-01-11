@@ -1,0 +1,103 @@
+Index: src/unix/evtloopunix.cpp
+===================================================================
+--- src/unix/evtloopunix.cpp	(revision 67627)
++++ src/unix/evtloopunix.cpp	(working copy)
+@@ -58,7 +58,7 @@
+ public:
+     // default ctor does nothing, call Create() to really initialize the
+     // object
+-    PipeIOHandler() { }
++    PipeIOHandler() : m_needWrite(true) { }
+ 
+     bool Create();
+ 
+@@ -73,6 +73,11 @@
+     virtual void OnExceptionWaiting() { }
+ 
+ private:
++    // flag that protects m_needWrite
++    wxCriticalSection m_writeLock;
++    // false when a byte is waiting to be read.
++    bool m_needWrite;
++
+     wxPipe m_pipe;
+ };
+ 
+@@ -88,12 +93,6 @@
+         return false;
+     }
+ 
+-    if ( !m_pipe.MakeNonBlocking(wxPipe::Read) )
+-    {
+-        wxLogSysError(_("Failed to switch wake up pipe to non-blocking mode"));
+-        return false;
+-    }
+-
+     wxLogTrace(TRACE_EVENTS, wxT("Wake up pipe (%d, %d) created"),
+                m_pipe[wxPipe::Read], m_pipe[wxPipe::Write]);
+ 
+@@ -106,39 +105,46 @@
+ 
+ void PipeIOHandler::WakeUp()
+ {
++    wxCriticalSectionLocker lock(m_writeLock);
++    // a lot of AddPendingEvent calls can saturate 
++    // wakeup pipe and if the first blocking call 
++    // is done by main thread we got a deadlock.
++    // that is why we protect pipe from multiple writes
++    if (!m_needWrite)
++      return;
++    
+     if ( write(m_pipe[wxPipe::Write], "s", 1) != 1 )
+     {
+         // don't use wxLog here, we can be in another thread and this could
+         // result in dead locks
+         perror("write(wake up pipe)");
++    } else {
++        //no need to write more than one byte to pipe
++        m_needWrite = false;
+     }
+ }
+ 
+ void PipeIOHandler::OnReadWaiting()
+ {
+-    // got wakeup from child thread: read all data available in pipe just to
+-    // make it empty (even though we write one byte at a time from WakeUp(),
+-    // it could have been called several times)
+-    char buf[4];
+-    for ( ;; )
+-    {
+-        const int size = read(GetReadFd(), buf, WXSIZEOF(buf));
++    // got wakeup from child thread: 
++    wxCriticalSectionLocker lock(m_writeLock);
+ 
+-        if ( size == 0 || (size == -1 && (errno == EAGAIN || errno == EINTR)) )
+-        {
+-            // nothing left in the pipe (EAGAIN is expected for an FD with
+-            // O_NONBLOCK)
+-            break;
+-        }
++    char buf;
++    const int size = read(GetReadFd(), &buf, 1);
+ 
+-        if ( size == -1 )
+-        {
+-            wxLogSysError(_("Failed to read from wake-up pipe"));
++    if ( size == -1  && errno != EINTR)
++    {
++        wxLogSysError(_("Failed to read from wake-up pipe"));
+ 
+-            break;
+-        }
++        return;
+     }
+ 
++    // only one byte should be in pipe         
++    wxASSERT(size == 1);
++
++    // allow all threads to write again
++    m_needWrite = true;
++
+     // writing to the wake up pipe will make wxConsoleEventLoop return from
+     // wxFDIODispatcher::Dispatch() it might be currently blocking in, nothing
+     // else needs to be done

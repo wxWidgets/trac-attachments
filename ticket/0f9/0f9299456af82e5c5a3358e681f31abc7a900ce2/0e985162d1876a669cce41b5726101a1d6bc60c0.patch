@@ -1,0 +1,201 @@
+ include/wx/stream.h    |  4 ++++
+ interface/wx/stream.h  | 39 ++++++++++++++++++++++++++++++++
+ src/common/docview.cpp | 61 +++++++++++++++-----------------------------------
+ src/common/stream.cpp  | 33 +++++++++++++++++++++++++++
+ 4 files changed, 94 insertions(+), 43 deletions(-)
+
+diff --git a/include/wx/stream.h b/include/wx/stream.h
+index 52217f6..08db167 100644
+--- a/include/wx/stream.h
++++ b/include/wx/stream.h
+@@ -23,11 +23,15 @@
+ class WXDLLIMPEXP_FWD_BASE wxStreamBase;
+ class WXDLLIMPEXP_FWD_BASE wxInputStream;
+ class WXDLLIMPEXP_FWD_BASE wxOutputStream;
++class wxMemoryBuffer;
+ 
+ typedef wxInputStream& (*__wxInputManip)(wxInputStream&);
+ typedef wxOutputStream& (*__wxOutputManip)(wxOutputStream&);
++typedef bool (*__wxStreamCopyCallback)(wxFileOffset position, wxUIntPtr user);
+ 
+ WXDLLIMPEXP_BASE wxOutputStream& wxEndL(wxOutputStream& o_stream);
++WXDLLIMPEXP_BASE bool wxStreamCopy(wxInputStream& i_stream, wxOutputStream& o_stream, wxMemoryBuffer* buf = NULL,
++                                   __wxStreamCopyCallback callback = NULL, wxUIntPtr callbackUserData = 0);
+ 
+ // ----------------------------------------------------------------------------
+ // constants
+diff --git a/interface/wx/stream.h b/interface/wx/stream.h
+index 5eccd60..10548cc 100644
+--- a/interface/wx/stream.h
++++ b/interface/wx/stream.h
+@@ -1152,3 +1152,42 @@ protected:
+     void InitParentStream(wxInputStream* stream);
+     //@}
+ };
++
++/**
++    Copies @a i_stream to @a o_stream, returning @true if successful.
++
++    @param i_stream
++            Input stream.
++    @param o_stream
++            Output stream.
++    @param buf
++            Optional buffer pointer. If not specified a default buffer of 1K is created.
++    @param callback
++            Optional progress callback function pointer.
++    @param callbackUserData
++            Optional progress callback user data pointer.
++
++    @since 3.1.0
++    @header{wx/stream.h}
++    @see __wxStreamCopyCallback, wxInputStream, wxOutputStream
++    @library{wxbase}
++    @category{streams}
++*/
++bool wxStreamCopy(wxInputStream& i_stream, wxOutputStream& o_stream, wxMemoryBuffer* buf = NULL,
++                  __wxStreamCopyCallback callback = NULL, wxUIntPtr callbackUserData = 0);
++
++/**
++    Progress callback function used by wxStreamCopy.
++
++    @param position
++            Current position in input stream.
++    @param user
++            Progress callback user data pointer.
++
++    @since 3.1.0
++    @header{wx/stream.h}
++    @see wxStreamCopy
++    @library{wxbase}
++    @category{streams}
++*/
++typedef bool (*__wxStreamCopyCallback)(wxFileOffset position, wxUIntPtr user);
+diff --git a/src/common/docview.cpp b/src/common/docview.cpp
+index 24d4508..a391d1c 100644
+--- a/src/common/docview.cpp
++++ b/src/common/docview.cpp
+@@ -2271,63 +2271,38 @@ bool wxTransferStreamToFile(wxSTD istream& stream, const wxString& filename)
+ 
+ #else // !wxUSE_STD_IOSTREAM
+ 
+-bool wxTransferFileToStream(const wxString& filename, wxOutputStream& stream)
++bool wxTransferFileToStream(const wxString& filename, wxOutputStream& o_stream)
+ {
+ #if wxUSE_FFILE
+     wxFFile file(filename, wxT("rb"));
++    if (!file.IsOpened())
++        return false;
++    wxFFileInputStream i_stream(file);
+ #elif wxUSE_FILE
+     wxFile file(filename, wxFile::read);
+-#endif
+-    if ( !file.IsOpened() )
++    if (!file.IsOpened())
+         return false;
+-
+-    char buf[4096];
+-
+-    size_t nRead;
+-    do
+-    {
+-        nRead = file.Read(buf, WXSIZEOF(buf));
+-        if ( file.Error() )
+-            return false;
+-
+-        stream.Write(buf, nRead);
+-        if ( !stream )
+-            return false;
+-    }
+-    while ( !file.Eof() );
+-
+-    return true;
++    wxFileInputStream i_stream(file);
++#endif
++    wxMemoryBuffer buf(4*1024);
++    return wxStreamCopy(i_stream, o_stream, &buf);
+ }
+ 
+-bool wxTransferStreamToFile(wxInputStream& stream, const wxString& filename)
++bool wxTransferStreamToFile(wxInputStream& i_stream, const wxString& filename)
+ {
+ #if wxUSE_FFILE
+     wxFFile file(filename, wxT("wb"));
++    if (!file.IsOpened())
++        return false;
++    wxFFileOutputStream o_stream(file);
+ #elif wxUSE_FILE
+     wxFile file(filename, wxFile::write);
+-#endif
+-    if ( !file.IsOpened() )
++    if (!file.IsOpened())
+         return false;
+-
+-    char buf[4096];
+-    for ( ;; )
+-    {
+-        stream.Read(buf, WXSIZEOF(buf));
+-
+-        const size_t nRead = stream.LastRead();
+-        if ( !nRead )
+-        {
+-            if ( stream.Eof() )
+-                break;
+-
+-            return false;
+-        }
+-
+-        if ( !file.Write(buf, nRead) )
+-            return false;
+-    }
+-
+-    return true;
++    wxFileOutputStream o_stream(file);
++#endif
++    wxMemoryBuffer buf(4*1024);
++    return wxStreamCopy(i_stream, o_stream, &buf);
+ }
+ 
+ #endif // wxUSE_STD_IOSTREAM/!wxUSE_STD_IOSTREAM
+diff --git a/src/common/stream.cpp b/src/common/stream.cpp
+index 97ba758..c3816e8 100644
+--- a/src/common/stream.cpp
++++ b/src/common/stream.cpp
+@@ -1621,4 +1621,37 @@ wxOutputStream& wxEndL(wxOutputStream& stream)
+     return stream.Write(eol, wxStrlen(eol));
+ }
+ 
++bool wxStreamCopy(wxInputStream& i_stream, wxOutputStream& o_stream, wxMemoryBuffer* buf,
++                  __wxStreamCopyCallback callback, wxUIntPtr callbackUserData)
++{
++    wxScopedPtr<wxMemoryBuffer> temp;
++    wxFileOffset position = 0;
++
++    if (buf == NULL)
++    {
++        buf = new wxMemoryBuffer(); // default size is 1024 bytes
++        temp.reset(buf);
++    }
++    if (callback && !(*callback)(position, callbackUserData))
++        return false;
++    for (;;)
++    {
++        size_t nRead = i_stream.Read(buf->GetData(), buf->GetBufSize()).LastRead();
++
++        if (0 == nRead)
++        {
++            if (i_stream.Eof())
++                break;
++            else
++                return false;
++        }
++        if (nRead != o_stream.Write(buf->GetData(), nRead).LastWrite())
++            return false;
++        position += nRead;
++        if (callback && !(*callback)(position, callbackUserData))
++            return false;
++    }
++    return true;
++}
++
+ #endif // wxUSE_STREAMS

@@ -1,0 +1,232 @@
+Index: window.mm
+===================================================================
+--- window.mm	(revision 67762)
++++ window.mm	(working copy)
+@@ -39,6 +39,96 @@
+ 
+ #include <objc/objc-runtime.h>
+ 
++
++@interface NSEvent (OsGuiUtilsAdditions)
++- (NSString*) charactersIgnoringModifiersIncludingShift;
++@end
++
++
++@implementation NSEvent (OsGuiUtilsAdditions)
++
++- (NSString*) charactersIgnoringModifiersIncludingShift {
++    // First, try -charactersIgnoringModifiers and look for keys which UCKeyTranslate translates
++    // differently than AppKit.
++    NSString* c = [self charactersIgnoringModifiers];
++    if ([c length] == 1) {
++        unichar codepoint = [c characterAtIndex:0];
++        if ((codepoint >= 0xF700 && codepoint <= 0xF8FF) || codepoint == 0x7F) {
++            return c;
++        }
++    }
++    // OK, this is not a "special" key, so ask UCKeyTranslate to give us the character with no
++    // modifiers attached. Actually, that's not quite accurate--we attach the Command modifier.
++    // Command hints the OS to use Latin characters where possible, which is generally what we
++    // are after here.
++    
++    OSStatus err;
++    TISInputSourceRef sourceRef = TISCopyCurrentKeyboardLayoutInputSource();
++    UCKeyboardLayout* uchrData = (UCKeyboardLayout*)CFDataGetBytePtr((CFDataRef)TISGetInputSourceProperty(sourceRef, kTISPropertyUnicodeKeyLayoutData));
++    CFRelease(sourceRef);
++    
++    NSString* result = @"";
++    if (uchrData != NULL) {
++        // Use UCKeyTranslate.
++        UniCharCount bufferLength = 32;
++        UniChar buf[bufferLength];
++        UniCharCount actualStringLength;
++        UInt32 deadKeyState = 0;
++        err = UCKeyTranslate(uchrData,
++                             [self keyCode],
++                             kUCKeyActionDown,
++                             cmdKey >> 8, // forcing the Command key to "on" hints the OS to show Latin characters where possible
++                             LMGetKbdType(),
++                             kUCKeyTranslateNoDeadKeysMask,
++                             &deadKeyState,
++                             bufferLength,
++                             &actualStringLength,
++                             buf);
++        if (err != noErr)
++            return @"";
++        
++        result = [NSString stringWithCharacters:buf length:actualStringLength]; 
++    }
++    
++/*
++    else {
++        UInt32 chars;
++        UInt32 deadKeyState = 0;
++        TextEncoding keyboardEncoding;
++        const void *kchrData;
++        err = KLGetKeyboardLayoutProperty(theCurrentLayout, kKLKCHRData, &kchrData);
++        if (err != noErr || kchrData == NULL)
++            return @"";
++        chars = KeyTranslate(
++                             kchrData,
++                             ([self keyCode] & 0x7F) | cmdKey, // forcing the Command key to "on" hints the OS to show Latin characters where possible
++                             &deadKeyState);
++        
++        err = UpgradeScriptInfoToTextEncoding(
++                                              (ScriptCode)GetScriptManagerVariable(smKeyScript),
++                                              kTextLanguageDontCare,
++                                              kTextRegionDontCare,
++                                              0, // no font name
++                                              &keyboardEncoding
++                                              );
++        
++        if (err != noErr)
++            return @"";
++        // There shouldn't be more than one character if dead key state was zero.
++        // Accented characters take a single byte in legacy encodings.
++        UInt8 singleChar = chars & 0xFF;
++        result = [[[NSString alloc] initWithBytes:&singleChar
++                                           length:1
++                                         encoding:CFStringConvertEncodingToNSStringEncoding(keyboardEncoding)] autorelease];
++    }
++*/
++    
++    return result;
++}
++
++@end
++
++
+ // Get the window with the focus
+ 
+ NSView* GetViewFromResponder( NSResponder* responder )
+@@ -143,7 +233,7 @@
+ 
+     if ([event type] != NSFlagsChanged)
+     {
+-        NSString* s = [event charactersIgnoringModifiers];
++        NSString* s = [event charactersIgnoringModifiersIncludingShift];
+         // backspace char reports as delete w/modifiers for some reason
+         if ([s length] == 1)
+         {
+@@ -206,83 +296,78 @@
+     {
+         // command key
+         case 54:
+-        case 55:
++        case kVK_Command:
+             retval = WXK_COMMAND;
+             break;
+-        // caps locks key
+-        case 57: // Capslock
++        case kVK_CapsLock:
+             retval = WXK_CAPITAL;
+             break;
+-        // shift key
+-        case 56: // Left Shift
+-        case 60: // Right Shift
++        case kVK_Shift:
++        case kVK_RightShift:
+             retval = WXK_SHIFT;
+             break;
+-        // alt key
+-        case 58: // Left Alt
+-        case 61: // Right Alt
++        case kVK_Option:
++        case kVK_RightOption:
+             retval = WXK_ALT;
+             break;
+-        // ctrl key
+-        case 59: // Left Ctrl
+-        case 62: // Right Ctrl
++        case kVK_Control:
++        case kVK_RightControl:
+             retval = WXK_CONTROL;
+             break;
+-        // clear key
+-        case 71:
+-            retval = WXK_CLEAR;
+-            break;
+-        // tab key
+-        case 48:
++        case kVK_Tab:
+             retval = WXK_TAB;
+             break;
+ 
+-        case 75: // /
++        // TODO: Keys with prefix kVK_ANSI_ are apparently dependent on the keyboard layout.  Check that these keys work with different layouts.
++        case kVK_ANSI_KeypadClear: 
++            retval = WXK_CLEAR;
++            break;
++        case kVK_ANSI_KeypadDivide:
+             retval = WXK_NUMPAD_DIVIDE;
+             break;
+-        case 67: // *
++        case kVK_ANSI_KeypadMultiply:
+             retval = WXK_NUMPAD_MULTIPLY;
+             break;
+-        case 78: // -
++        case kVK_ANSI_KeypadMinus:
+             retval = WXK_NUMPAD_SUBTRACT;
+             break;
+-        case 69: // +
++        case kVK_ANSI_KeypadPlus:
+             retval = WXK_NUMPAD_ADD;
+             break;
+-        case 76: // Enter
++        case kVK_ANSI_KeypadEnter:
+             retval = WXK_NUMPAD_ENTER;
+             break;
+-        case 65: // .
++        case kVK_ANSI_KeypadDecimal:
+             retval = WXK_NUMPAD_DECIMAL;
+             break;
+-        case 82: // 0
++        case kVK_ANSI_Keypad0:
+             retval = WXK_NUMPAD0;
+             break;
+-        case 83: // 1
++        case kVK_ANSI_Keypad1:
+             retval = WXK_NUMPAD1;
+             break;
+-        case 84: // 2
++        case kVK_ANSI_Keypad2:
+             retval = WXK_NUMPAD2;
+             break;
+-        case 85: // 3
++        case kVK_ANSI_Keypad3:
+             retval = WXK_NUMPAD3;
+             break;
+-        case 86: // 4
++        case kVK_ANSI_Keypad4:
+             retval = WXK_NUMPAD4;
+             break;
+-        case 87: // 5
++        case kVK_ANSI_Keypad5:
+             retval = WXK_NUMPAD5;
+             break;
+-        case 88: // 6
++        case kVK_ANSI_Keypad6:
+             retval = WXK_NUMPAD6;
+             break;
+-        case 89: // 7
++        case kVK_ANSI_Keypad7:
+             retval = WXK_NUMPAD7;
+             break;
+-        case 91: // 8
++        case kVK_ANSI_Keypad8:
+             retval = WXK_NUMPAD8;
+             break;
+-        case 92: // 9
++        case kVK_ANSI_Keypad9:
+             retval = WXK_NUMPAD9;
+             break;
+         default:
+@@ -310,7 +395,7 @@
+     wxString chars;
+     if ( eventType != NSFlagsChanged )
+     {
+-        NSString* nschars = [nsEvent charactersIgnoringModifiers];
++        NSString* nschars = [nsEvent charactersIgnoringModifiersIncludingShift];
+         if ( charString )
+         {
+             // if charString is set, it did not come from key up / key down

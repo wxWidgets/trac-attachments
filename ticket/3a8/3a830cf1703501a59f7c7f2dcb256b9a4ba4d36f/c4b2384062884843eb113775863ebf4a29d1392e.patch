@@ -1,0 +1,189 @@
+Index: tests/drawing/testimagefile.h
+===================================================================
+--- tests/drawing/testimagefile.h	(revision 76717)
++++ tests/drawing/testimagefile.h	(working copy)
+@@ -11,8 +11,43 @@
+ #ifndef _WX_TESTS_TESTIMAGEFILE_H_
+ #define _WX_TESTS_TESTIMAGEFILE_H_
+ 
+-bool AreFilesContentsEqual(const wxString &filename, const wxString &refFilename)
++#include "wx/wfstream.h"
++
++enum ImageNormalizationFunction
+ {
++    INF_None, // let images intact
++
++    // turns all pixels below given threshold to black, others to white
++    INF_BlackNWhite,
++};
++
++
++struct ImageNormalization {
++    ImageNormalizationFunction function;
++    // for black'n'white, colour to turn to white
++    unsigned char r,g,b;
++};
++
++enum ImageComparisonFunction
++{
++    // Use binary/image comparison as indicated by
++    // DrawingTestGCFactory::UseImageComparison
++    ICF_None,
++
++    // If DrawingTestGCFactory::UseImageComparison, differences in R, G, B or A
++    // components are studied pixel per pixel, differences lower or equal to the
++    // threshold are ignored
++    // If not DrawingTestGCFactory::UseImageComparison, use binary comparison
++    ICF_ComponentThreshold,
++};
++
++struct ImageComparison {
++    ImageComparisonFunction function;
++    int threshold;
++};
++
++inline bool AreFilesContentsEqual(const wxString &filename, const wxString &refFilename)
++{
+     wxFileInputStream input(filename);
+     wxFileInputStream refInput(refFilename);
+ 
+@@ -47,12 +82,9 @@
+             filename1, filename2),\
+         AreFilesContentsEqual(filename1, filename2))
+ 
+-bool AreImagesFilesContentsEqual(const wxString &filename,
+-                                 const wxString &refFilename)
++inline bool AreImagesMetadataEqual(const wxImage &input,
++                                 const wxImage &refInput)
+ {
+-    wxImage input(filename);
+-    wxImage refInput(refFilename);
+-
+     // assertion_traits<wxImage> could do part of the job or maybe the contrary
+     // there should probably be somethin common at least
+ 
+@@ -65,6 +97,24 @@
+     if (input.HasMask() != refInput.HasMask())
+         return false;
+ 
++    if (input.HasMask() &&
++        (input.GetMaskRed() != refInput.GetMaskRed() ||
++         input.GetMaskGreen() != refInput.GetMaskGreen() ||
++         input.GetMaskBlue() != refInput.GetMaskBlue()))
++         return false;
++
++    return true;
++}
++
++inline bool AreImagesContentsEqual(const wxImage &input,
++                                 const wxImage &refInput)
++{
++    // assertion_traits<wxImage> could do part of the job or maybe the contrary
++    // there should probably be somethin common at least
++
++    if (!AreImagesMetadataEqual (input, refInput))
++        return false;
++
+     long pixelsCount = input.GetSize().GetWidth() * input.GetSize().GetHeight();
+     const unsigned char *data = input.GetData();
+     const unsigned char *refData = refInput.GetData();
+@@ -79,19 +129,93 @@
+             return false;
+     }
+ 
+-    if (input.HasMask() &&
+-        (input.GetMaskRed() != refInput.GetMaskRed() ||
+-         input.GetMaskGreen() != refInput.GetMaskGreen() ||
+-         input.GetMaskBlue() != refInput.GetMaskBlue()))
+-         return false;
+-
+     return true;
+ }
+ 
++inline bool AreImagesFilesContentsEqual(const wxString &filename,
++                                 const wxString &refFilename)
++{
++    wxImage input(filename);
++    wxImage refInput(refFilename);
++
++    return AreImagesContentsEqual (input, refInput);
++}
++
+ #define WX_ASSERT_SAME_AS_IMAGE_FILE(filename1, filename2) \
+     WX_ASSERT_MESSAGE(\
+         ("Image files \"%s\" and \"%s\" differ.",\
+             filename1, filename2),\
+         AreImagesFilesContentsEqual(filename1, filename2))
+ 
++inline void NormalizeImage (const ImageNormalization& normalization, wxImage &image)
++{
++    if (image.Ok())
++        switch (normalization.function)
++        {
++        case INF_BlackNWhite:
++            image = image.ConvertToMono (normalization.r, normalization.g,
++                        normalization.b);
++            break;
++        default:
++            break;
++        }
++}
++
++inline bool IsComponentDiffWithinThreshold (int a, int b, int threshold) {
++    return wxMax(a,b) - wxMin(a,b) <= threshold;
++}
++
++inline bool AreImagesFilesContentsSimilar(const wxString &filename,
++    const wxString &refFilename, const ImageNormalization& normalization,
++    const ImageComparison &comparison)
++{
++    wxImage input(filename);
++    wxImage refInput(refFilename);
++
++    NormalizeImage (normalization, input);
++    NormalizeImage (normalization, refInput);
++
++    if (!AreImagesMetadataEqual (input, refInput))
++        return false;
++
++    switch (comparison.function)
++    {
++    default:
++        if (!AreImagesContentsEqual(input, refInput))
++            return false;
++        break;
++
++    case ICF_ComponentThreshold:
++
++        long pixelsCount = input.GetSize().GetWidth() * input.GetSize().GetHeight();
++        long componentsCount = pixelsCount*3;
++        const unsigned char *data = input.GetData();
++        const unsigned char *refData = refInput.GetData();
++        for (long idxc=0; idxc<componentsCount; ++idxc)
++            if ( !IsComponentDiffWithinThreshold(data[idxc], refData[idxc],
++                                                 comparison.threshold) )
++                return false;
++
++        if (input.HasAlpha())
++        {
++            const unsigned char *alpha = input.GetAlpha();
++            const unsigned char *refAlpha = refInput.GetAlpha();
++            for (long idxc=0; idxc<pixelsCount; ++idxc)
++                if ( !IsComponentDiffWithinThreshold(
++                            alpha[idxc], refAlpha[idxc], comparison.threshold) )
++                    return false;
++        }
++
++        break;
++    }
++
++    return true;
++}
++
++#define WX_ASSERT_SIMILAR_TO_IMAGE_FILE(filename1, filename2, normalization, comparison) \
++    WX_ASSERT_MESSAGE(\
++        ("Image files \"%s\" and \"%s\" differ too much.",\
++            filename1, filename2),\
++        AreImagesFilesContentsSimilar(filename1, filename2, normalization, comparison))
++
+ #endif // _WX_TESTS_TESTIMAGEFILE_H_

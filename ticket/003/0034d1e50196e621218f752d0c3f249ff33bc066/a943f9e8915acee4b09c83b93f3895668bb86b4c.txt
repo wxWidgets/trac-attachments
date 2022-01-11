@@ -1,0 +1,136 @@
+diff --git a/include/wx/dataview.h b/include/wx/dataview.h
+index 58b0fdafe4..6c868debac 100644
+--- a/include/wx/dataview.h
++++ b/include/wx/dataview.h
+@@ -846,7 +846,8 @@ public:
+         m_dataBuffer(event.m_dataBuffer),
+         m_dataSize(event.m_dataSize),
+         m_dragFlags(event.m_dragFlags),
+-        m_dropEffect(event.m_dropEffect)
++        m_dropEffect(event.m_dropEffect),
++        m_proposedDropIndex(event.m_proposedDropIndex)
+ #endif
+         { }
+ 
+@@ -889,6 +890,10 @@ public:
+     int GetDragFlags() const { return m_dragFlags; }
+     void SetDropEffect( wxDragResult effect ) { m_dropEffect = effect; }
+     wxDragResult GetDropEffect() const { return m_dropEffect; }
++    // for plaforms (currently only OSX) that support Drag/Drop insertion of items,
++    // this is the proposed child index for the insertion
++    void SetProposedDropIndex(int index) { m_proposedDropIndex = index; }
++    int GetProposedDropIndex() const { return m_proposedDropIndex;}
+ #endif // wxUSE_DRAG_AND_DROP
+ 
+     virtual wxEvent *Clone() const wxOVERRIDE { return new wxDataViewEvent(*this); }
+@@ -928,6 +933,7 @@ protected:
+ 
+     int                 m_dragFlags;
+     wxDragResult        m_dropEffect;
++    int                 m_proposedDropIndex;
+ #endif // wxUSE_DRAG_AND_DROP
+ 
+ private:
+diff --git a/src/common/datavcmn.cpp b/src/common/datavcmn.cpp
+index 1c3609261e..fd68880243 100644
+--- a/src/common/datavcmn.cpp
++++ b/src/common/datavcmn.cpp
+@@ -1683,6 +1683,7 @@ void wxDataViewEvent::Init(wxDataViewCtrlBase* dvc,
+     m_dataSize = 0;
+     m_dragFlags = 0;
+     m_dropEffect = wxDragNone;
++    m_proposedDropIndex = -1;
+ #endif // wxUSE_DRAG_AND_DROP
+ 
+     SetEventObject(dvc);
+diff --git a/src/osx/cocoa/dataview.mm b/src/osx/cocoa/dataview.mm
+index 3583ec9369..943f9cbc98 100644
+--- a/src/osx/cocoa/dataview.mm
++++ b/src/osx/cocoa/dataview.mm
+@@ -539,9 +539,8 @@ -(void) dealloc
+     item:(id)item childIndex:(NSInteger)index
+ {
+     wxUnusedVar(outlineView);
+-    wxUnusedVar(index);
+     
+-    return [self setupAndCallDataViewEvents:wxEVT_DATAVIEW_ITEM_DROP dropInfo:info item:item] != NSDragOperationNone;
++    return [self setupAndCallDataViewEvents:wxEVT_DATAVIEW_ITEM_DROP dropInfo:info item:item proposedChildIndex:index] != NSDragOperationNone;
+ }
+ 
+ -(id) outlineView:(NSOutlineView*)outlineView
+@@ -678,12 +677,11 @@ -(void) outlineView:(NSOutlineView*)outlineView sortDescriptorsDidChange:(NSArra
+ -(NSDragOperation) outlineView:(NSOutlineView*)outlineView validateDrop:(id<NSDraggingInfo>)info proposedItem:(id)item proposedChildIndex:(NSInteger)index
+ {
+     wxUnusedVar(outlineView);
+-    wxUnusedVar(index);
+ 
+-    return [self setupAndCallDataViewEvents:wxEVT_DATAVIEW_ITEM_DROP_POSSIBLE dropInfo:info item:item];
++    return [self setupAndCallDataViewEvents:wxEVT_DATAVIEW_ITEM_DROP_POSSIBLE dropInfo:info item:item proposedChildIndex:index];
+ }
+ 
+--(NSDragOperation) callDataViewEvents:(wxEventType)eventType dataObjects:(wxDataObjectComposite*)dataObjects item:(id)item
++-(NSDragOperation) callDataViewEvents:(wxEventType)eventType dataObjects:(wxDataObjectComposite*)dataObjects item:(id)item proposedChildIndex:(NSInteger)index
+ {
+     NSDragOperation dragOperation = NSDragOperationNone;
+     wxDataViewCtrl* const dvc(implementation->GetDataViewCtrl());
+@@ -693,7 +691,20 @@ -(NSDragOperation) callDataViewEvents:(wxEventType)eventType dataObjects:(wxData
+         // copy data into data object:
+         event.SetDataObject(dataObjects);
+         event.SetDataFormat(implementation->GetDnDDataFormat(dataObjects));
+-        event.SetDropEffect(wxDragCopy);
++        event.SetProposedDropIndex(index);
++        if (index == -1)
++        {
++            event.SetDropEffect(wxDragCopy);
++        }
++        else
++        {
++            //if index is not -1, we're going to set the default
++            //for the drop effect to None to be compatible with
++            //the other wxPlatforms that don't support it.  In the
++            //user code for for the event, they can set this to
++            //copy/move or similar to support it.
++            event.SetDropEffect(wxDragNone);
++        }
+         wxDataFormatId formatId = event.GetDataFormat().GetType();
+         wxMemoryBuffer buffer;
+         
+@@ -744,7 +755,7 @@ -(NSDragOperation) callDataViewEvents:(wxEventType)eventType dataObjects:(wxData
+     return dragOperation;
+ }
+ 
+--(NSDragOperation) setupAndCallDataViewEvents:(wxEventType)eventType dropInfo:(id<NSDraggingInfo>)info item:(id)item
++-(NSDragOperation) setupAndCallDataViewEvents:(wxEventType)eventType dropInfo:(id<NSDraggingInfo>)info item:(id)item proposedChildIndex:(NSInteger)index
+ {
+     NSArray* supportedTypes(
+                             [NSArray arrayWithObjects:DataViewPboardType,NSStringPboardType,nil]
+@@ -774,7 +785,7 @@ -(NSDragOperation) setupAndCallDataViewEvents:(wxEventType)eventType dropInfo:(i
+         {
+             wxDataObjectComposite* dataObjects(implementation->GetDnDDataObjects((NSData*)[dataArray objectAtIndex:indexDraggedItem]));
+             
+-            dragOperation = [self callDataViewEvents:eventType dataObjects:dataObjects item:item];
++            dragOperation = [self callDataViewEvents:eventType dataObjects:dataObjects item:item proposedChildIndex:index];
+             
+             if ( dragOperation != NSDragOperationNone )
+                 ++indexDraggedItem;
+@@ -806,7 +817,7 @@ -(NSDragOperation) setupAndCallDataViewEvents:(wxEventType)eventType dropInfo:(i
+             delete textDataObject;
+         // send event if data could be copied:
+         
+-        dragOperation = [self callDataViewEvents:eventType dataObjects:dataObjects item:item];
++        dragOperation = [self callDataViewEvents:eventType dataObjects:dataObjects item:item proposedChildIndex:index];
+ 
+         // clean up:
+         ::CFRelease(osxData);
+@@ -850,8 +861,10 @@ -(BOOL) outlineView:(NSOutlineView*)outlineView writeItems:(NSArray*)writeItems
+             wxDataViewEvent event(wxEVT_DATAVIEW_ITEM_BEGIN_DRAG, dvc, item);
+             itemString = ::ConcatenateDataViewItemValues(dvc, item);
+             itemObject->Add(new wxTextDataObject(itemString));
++            event.SetDataObject(itemObject);
+             // check if event has not been vetoed:
+-            if (dvc->HandleWindowEvent(event) && event.IsAllowed() && (event.GetDataObject()->GetFormatCount() > 0))
++            if (dvc->HandleWindowEvent(event) && event.IsAllowed()
++                && (event.GetDataObject()->GetFormatCount() > 0))
+             {
+                 size_t const noOfFormats = event.GetDataObject()->GetFormatCount();
+                 wxDataFormat* dataFormats(new wxDataFormat[noOfFormats]);

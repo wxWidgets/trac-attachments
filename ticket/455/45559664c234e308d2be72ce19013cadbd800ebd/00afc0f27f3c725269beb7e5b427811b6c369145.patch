@@ -1,0 +1,544 @@
+diff --git a/build/files b/build/files
+index a9e82a4..44844fc 100644
+--- a/build/files
++++ b/build/files
+@@ -165,6 +165,7 @@ BASE_AND_GUI_OSX_CARBON_SRC =
+ 
+ BASE_AND_GUI_OSX_COCOA_SRC =
+     src/osx/cocoa/utils.mm
++    src/osx/cocoa/power.mm
+ 
+ BASE_AND_GUI_OSX_IPHONE_SRC =
+     src/osx/iphone/utils.mm
+diff --git a/configure.in b/configure.in
+index 4d35d4f..75442cf 100644
+--- a/configure.in
++++ b/configure.in
+@@ -7496,7 +7496,8 @@ if test "$wxUSE_GUI" = "yes"; then
+     dnl TODO some samples are never built so far: mfc (requires VC++)
+     SAMPLES_SUBDIRS="$SAMPLES_SUBDIRS artprov controls dialogs drawing \
+                      erase event exec font image minimal render \
+-                     shaped svg taborder vscroll widgets wrapsizer"
++                     shaped svg taborder vscroll widgets wrapsizer \
++                     power"
+ 
+     if test "$wxUSE_MONOLITHIC" != "yes"; then
+         SAMPLES_SUBDIRS="$SAMPLES_SUBDIRS console"
+diff --git a/include/wx/power.h b/include/wx/power.h
+index 17e81b6..b4ec1a7 100644
+--- a/include/wx/power.h
++++ b/include/wx/power.h
+@@ -96,6 +96,48 @@ typedef void (wxEvtHandler::*wxPowerEventFunction)(wxPowerEvent&);
+ #endif // support for power events/no support
+ 
+ // ----------------------------------------------------------------------------
++// wxPowerResourceBlocker
++// ----------------------------------------------------------------------------
++
++enum wxPowerResourceKind
++{
++    wxPOWER_RESOURCE_SCREEN,
++    wxPOWER_RESOURCE_SYSTEM
++};
++
++class WXDLLIMPEXP_CORE wxPowerResource
++{
++public:
++    static bool Acquire(wxPowerResourceKind kind, const wxString& reason = wxString());
++    static void Release(wxPowerResourceKind kind);
++};
++
++class WXDLLIMPEXP_CORE wxPowerResourceBlocker
++{
++public:
++    explicit wxPowerResourceBlocker(wxPowerResourceKind kind, 
++        const wxString& reason = wxString())
++        : m_kind(kind),
++          m_acquired(wxPowerResource::Acquire(kind, reason))
++    {
++    }
++
++    bool IsInEffect() const { return m_acquired; }
++
++    ~wxPowerResourceBlocker()
++    {
++        if (m_acquired)
++            wxPowerResource::Release(m_kind);
++    }
++
++private:
++    const wxPowerResourceKind m_kind;
++    const bool m_acquired;
++
++    wxDECLARE_NO_COPY_CLASS(wxPowerResourceBlocker);
++};
++
++// ----------------------------------------------------------------------------
+ // power management functions
+ // ----------------------------------------------------------------------------
+ 
+diff --git a/interface/wx/power.h b/interface/wx/power.h
+index 1b20ce1..17ff447 100644
+--- a/interface/wx/power.h
++++ b/interface/wx/power.h
+@@ -21,6 +21,13 @@ enum wxBatteryState
+     wxBATTERY_UNKNOWN_STATE
+ };
+ 
++enum wxPowerResourceKind
++{
++    /// Use to prevent automatic display power off
++    wxPOWER_RESOURCE_SCREEN,
++    /// Use to prevent automatic system suspend
++    wxPOWER_RESOURCE_SYSTEM
++};
+ 
+ /**
+     @class wxPowerEvent
+@@ -35,6 +42,8 @@ enum wxBatteryState
+     use the test <tt>ifdef wxHAS_POWER_EVENTS</tt> instead of directly testing for
+     the platform in your code: this symbol will be defined for all platforms
+     supporting the power events.
++    
++    @b Warning: Support for this event was removed in Windows Vista. Use wxPowerResourceBlocker instead (which also works on XP).
+ 
+     @beginEventTable{wxPowerEvent}
+     @event{EVT_POWER_SUSPENDING(func)}
+@@ -80,4 +89,112 @@ wxEventType wxEVT_POWER_SUSPENDED;
+ wxEventType wxEVT_POWER_SUSPEND_CANCEL;
+ wxEventType wxEVT_POWER_RESUME;
+ 
++/**
++    @class wxPowerResource
++    
++    If an application performs a long running task without user interaction it is often necessary to prevent
++    the system from automatically suspending or the powering off the screen. On supported platforms wxPowerResource
++    can be used to prevent the system from suspending or powering off the screen. See the description of
++    wxPowerResourceLocker for an usage example.
++    
++    Notice that currently this is only fully functional under MS Windows and OSX. But on OSX < 10.9 only
++    @c wxPOWER_RESOURCE_SYSTEM is supported.
++    
++    You should try to use the wxPowerResourceBlocker class whenever possible instead of directly using
++    wxPowerResource for the same reasons wxMutexLocker is preferable to wxMutex - please see wxMutex for an example.
++    
++    @since 3.1.0
++    @library{wxbase}
++    @category{misc}
++    
++    @see wxPowerResourceBlocker
++*/
++class wxPowerResource
++{
++public:
++    /**
++       Tell the system to acquire a power resource for the application. While it is acquired
++       the system will not automatically power of the screen or suspend.
++       
++       Every call to Acquire @b must be matched by a corresponding call to Release() or the system 
++       will not suspend until the application ends.
++       
++       @param kind Power resource required, either @c wxPOWER_RESOURCE_SCREEN or @c wxPOWER_RESOURCE_SYSTEM.
++       @param reason Optional reason may be specified which might be used on some platforms to inform the user
++       what is preventing power saving. It should usually describe the operation requiring the resource.
++       @return Returns true if the acquisition was successful
++       
++       @see Release()
++    */
++    static bool Acquire(wxPowerResourceKind kind, const wxString& reason = wxString());
++    
++    /**
++       Release @b must be called for every Acquire() call made to restore normal power saving behaviour
++       
++       @param kind Power resource to be released
++       
++       @see Acquire()
++    */
++    static void Release(wxPowerResourceKind kind);
++};
+ 
++/**
++    @class wxPowerResourceBlocker
++    
++    This is a small helper class which should be used to prevent the system from automatically powering of 
++    the screen or suspending when required.
++    
++    A wxPowerResourceBlocker acquires a power resource in the constructor and releases it in the destructor
++    making it much more difficult to forget to release the power resource (which would prevent suspending
++    or screen power off until the application ends.
++    
++    Example:
++
++    @code
++    void MyWindow::DoSomething()
++    {
++        wxPowerResourceBlocker blocker(wxPOWER_RESOURCE_SYSTEM, "Downloading something important");
++        if (!blocker.IsInEffect())
++        {
++            // If the resource could not be acquired, tell the user that he has to keep the system alive
++            wxLogInformation("System will not be kept alive automatically");
++        }
++        
++        // Run an important download and the system will not suspend while downloading
++        for (int i = 0; i < download.size(); ++i)
++            download.readByte();
++    }
++    @endcode
++    
++    @since 3.1.0
++    @library{wxbase}
++    @category{misc}
++
++    @see wxPowerResource
++*/
++class wxPowerResourceBlocker
++{
++public:
++    /**
++       Acquires the power resource. Uses the same parameters as Acquire
++
++       @see wxPowerResource::Acquire()
++    */
++    explicit wxPowerResourceBlocker(wxPowerResourceKind kind, 
++        const wxString& reason = wxString());
++
++    /**
++       Returns whether the power resource could be acquired.
++       This can be used to inform the user that the application will not prevent automatic suspending.
++       
++       @see wxPowerResource::Acquire()
++    */
++    bool IsInEffect() const;
++
++    /**
++       Releases the power resource
++    
++       @see wxPowerResource::Release()
++    */
++    ~wxPowerResourceBlocker();
++};
+diff --git a/samples/power/power.cpp b/samples/power/power.cpp
+index 9bdad67..bee0f7d 100644
+--- a/samples/power/power.cpp
++++ b/samples/power/power.cpp
+@@ -29,6 +29,8 @@
+ 
+ #include "wx/textctrl.h"
+ #include "wx/msgdlg.h"
++#include "wx/menu.h"
++#include "wx/timer.h"
+ 
+ #include "wx/power.h"
+ 
+@@ -47,6 +49,18 @@ public:
+         : wxFrame(NULL, wxID_ANY, wxT("wxWidgets Power Management Sample"),
+                   wxDefaultPosition, wxSize(500, 200))
+     {
++        m_powerResourceBlocker = NULL;
++
++        wxMenu *fileMenu = new wxMenu;
++        wxMenuItem *startItem = new wxMenuItem(fileMenu, wxID_NEW, wxT("Start long running task\tCtrl-S"));
++        fileMenu->Append(startItem);
++        wxMenuItem *stopItem = new wxMenuItem(fileMenu, wxID_ABORT, wxT("Stop long running task"));
++        fileMenu->Append(stopItem);
++
++        wxMenuBar* menuBar = new wxMenuBar();
++        menuBar->Append(fileMenu, wxT("&Task"));
++        SetMenuBar(menuBar);
++
+         wxTextCtrl *text = new wxTextCtrl(this, wxID_ANY, wxT(""),
+                                           wxDefaultPosition, wxDefaultSize,
+                                           wxTE_MULTILINE | wxTE_READONLY);
+@@ -58,6 +72,11 @@ public:
+ 
+         UpdatePowerSettings(wxPOWER_UNKNOWN, wxBATTERY_UNKNOWN_STATE);
+ 
++        StopLongTask();
++        Bind(wxEVT_COMMAND_MENU_SELECTED, &MyFrame::OnStartTaskClicked, this, wxID_NEW);
++        Bind(wxEVT_COMMAND_MENU_SELECTED, &MyFrame::OnStopTaskClicked, this, wxID_ABORT);
++        m_taskTimer.Bind(wxEVT_TIMER, &MyFrame::OnTaskTimer, this);
++
+         Show();
+     }
+ 
+@@ -162,10 +181,56 @@ private:
+                         batteryStr.c_str()));
+     }
+ 
++    void OnStartTaskClicked( wxCommandEvent& WXUNUSED(event) )
++    {
++        wxLogMessage("Starting long running task (screen should keep powered on while running)...");
++        StartLongTask();
++    }
++
++    void OnStopTaskClicked(wxCommandEvent& WXUNUSED(event))
++    {
++        StopLongTask();
++        wxLogMessage("Stopped long running task");
++    }
++
++    void OnTaskTimer( wxTimerEvent& WXUNUSED(event) )
++    {
++        ++m_taskProgress;
++
++        if (m_taskProgress == 100)
++        {
++            StopLongTask();
++            wxLogMessage("Long running task finished");
++        } else
++            wxLogMessage("Long running task at %d%%...", m_taskProgress);
++    }
++
++    void StartLongTask()
++    {
++        m_taskProgress = 0;
++        m_taskTimer.Start(2000);
++        GetMenuBar()->Enable(wxID_NEW, false);
++        GetMenuBar()->Enable(wxID_ABORT, true);
++        m_powerResourceBlocker = new wxPowerResourceBlocker(wxPOWER_RESOURCE_SYSTEM);
++        if (!m_powerResourceBlocker->IsInEffect())
++            wxLogMessage("Power resource could not be acquired, user input is required to prevent system standby");
++    }
++
++    void StopLongTask()
++    {
++        GetMenuBar()->Enable(wxID_NEW, true);
++        GetMenuBar()->Enable(wxID_ABORT, false);
++        m_taskTimer.Stop();
++        wxDELETE(m_powerResourceBlocker);
++    }
++
+     wxPowerType m_powerType;
+     wxBatteryState m_batteryState;
+ 
+     wxLog *m_logOld;
++    wxTimer m_taskTimer;
++    wxPowerResourceBlocker *m_powerResourceBlocker;
++    int m_taskProgress;
+ 
+     wxDECLARE_EVENT_TABLE();
+ };
+diff --git a/src/common/powercmn.cpp b/src/common/powercmn.cpp
+index 40a31aa..3bf29a5 100644
+--- a/src/common/powercmn.cpp
++++ b/src/common/powercmn.cpp
+@@ -41,6 +41,21 @@
+     IMPLEMENT_DYNAMIC_CLASS(wxPowerEvent, wxEvent)
+ #endif
+ 
++// Provide stubs for systems without power resource management functions
++#if !defined(__WINDOWS__) && !defined(__APPLE__)
++
++bool wxPowerResource::Acquire(wxPowerResourceKind kind, const wxString& WXUNUSED(reason))
++{
++    return false;
++}
++
++void wxPowerResource::Release(wxPowerResourceKind kind)
++{
++
++}
++
++#endif
++
+ // provide stubs for the systems not implementing these functions
+ #if !defined(__WINDOWS__)
+ 
+diff --git a/src/msw/power.cpp b/src/msw/power.cpp
+index fa74db7..7610e0f 100644
+--- a/src/msw/power.cpp
++++ b/src/msw/power.cpp
+@@ -27,6 +27,7 @@
+ #endif //WX_PRECOMP
+ 
+ #include "wx/power.h"
++#include "wx/atomic.h"
+ #include "wx/msw/private.h"
+ 
+ #if !defined(__WINCE_STANDARDSDK__)
+@@ -40,6 +41,65 @@
+ #endif
+ 
+ // ----------------------------------------------------------------------------
++// wxPowerResource
++// ----------------------------------------------------------------------------
++wxAtomicInt g_powerResourceScreenRefCount = 0;
++wxAtomicInt g_powerResourceSystemRefCount = 0;
++
++bool UpdatePowerResourceExecutionState()
++{
++    EXECUTION_STATE executionState = ES_CONTINUOUS;
++    if ( g_powerResourceScreenRefCount > 0 )
++        executionState |= ES_DISPLAY_REQUIRED;
++
++    if ( g_powerResourceSystemRefCount > 0 )
++        executionState |= ES_SYSTEM_REQUIRED;
++
++    if ( ::SetThreadExecutionState(executionState) == NULL )
++    {
++        wxLogLastError(wxT("SetThreadExecutionState()"));
++        return false;
++    }
++
++    return true;
++}
++
++bool wxPowerResource::Acquire(wxPowerResourceKind kind, const wxString& WXUNUSED(reason))
++{
++    switch (kind)
++    {
++    case wxPOWER_RESOURCE_SCREEN:
++        wxAtomicInc(g_powerResourceScreenRefCount);
++        break;
++    case wxPOWER_RESOURCE_SYSTEM:
++        wxAtomicInc(g_powerResourceSystemRefCount);
++        break;
++    }
++
++    return UpdatePowerResourceExecutionState();
++}
++
++void wxPowerResource::Release(wxPowerResourceKind kind)
++{
++    switch (kind)
++    {
++    case wxPOWER_RESOURCE_SCREEN:
++        wxASSERT_MSG(g_powerResourceScreenRefCount > 0, "Power resource screen was not acquired");
++        if ( g_powerResourceScreenRefCount > 0 )
++            wxAtomicDec(g_powerResourceScreenRefCount);
++        break;
++    case wxPOWER_RESOURCE_SYSTEM:
++        wxASSERT_MSG(g_powerResourceSystemRefCount > 0, "Power resource system was not acquired");
++        if ( g_powerResourceSystemRefCount > 0 )
++            wxAtomicDec(g_powerResourceSystemRefCount);
++        break;
++    }
++
++    UpdatePowerResourceExecutionState();
++}
++
++
++// ----------------------------------------------------------------------------
+ // helper functions
+ // ----------------------------------------------------------------------------
+ 
+diff --git a/src/osx/cocoa/power.mm b/src/osx/cocoa/power.mm
+new file mode 100644
+index 0000000..79f2034
+--- /dev/null
++++ b/src/osx/cocoa/power.mm
+@@ -0,0 +1,114 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        src/osx/cocoa/power.mm
++// Purpose:     wxPowerResource implementation for OSX
++// Author:      Tobias Taschner
++// Created:     2014-08-09
++// Copyright:   (c) wxWidgets team
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++// ----------------------------------------------------------------------------
++// headers
++// ----------------------------------------------------------------------------
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++    #pragma hdrstop
++#endif
++
++#include "wx/power.h"
++#include "wx/atomic.h"
++#include "wx/osx/private.h"
++
++#include <IOKit/pwr_mgt/IOPMLib.h>
++
++// ----------------------------------------------------------------------------
++// wxPowerResource
++// ----------------------------------------------------------------------------
++wxAtomicInt g_powerResourceSystemRefCount = 0;
++
++IOPMAssertionID g_pmAssertionID = 0;
++NSObject* g_processInfoActivity = nil;
++
++bool UpdatePowerResourceUsage(wxPowerResourceKind kind, const wxString& reason)
++{
++    if ( g_powerResourceSystemRefCount >= 1 )
++    {
++        wxCFStringRef cfreason(reason);
++        if( reason.IsEmpty())
++            cfreason = wxString("User Activity");
++            
++        if ( UMAGetSystemVersion() >= 0x1090 )
++        {
++            // Use NSProcessInfo for 10.9 and newer
++            if ( !g_processInfoActivity )
++            {
++            	NSActivityOptions options = NSActivityUserInitiated | NSActivityIdleSystemSleepDisabled;
++            	if (kind == wxPOWER_RESOURCE_SCREEN)
++            		options |= NSActivityIdleDisplaySleepDisabled;
++            	
++                g_processInfoActivity = [[NSProcessInfo processInfo] beginActivityWithOptions:options reason:cfreason.AsNSString()];
++                [g_processInfoActivity retain];
++                return true;
++            }
++        } 
++        else if ( !g_pmAssertionID )
++        {
++            // Use power manager API for < 10.9 systems
++            IOReturn success = IOPMAssertionCreateWithName(kIOPMAssertionTypeNoIdleSleep, kIOPMAssertionLevelOn, cfreason, &g_pmAssertionID);
++            if (success == kIOReturnSuccess)
++                return true;
++        }
++    } 
++    else if ( g_powerResourceSystemRefCount == 0 )
++    {
++        // Release power assertion
++        if ( UMAGetSystemVersion() >= 0x1090 )
++        {
++            // Use NSProcessInfo for 10.9 and newer
++            if ( g_processInfoActivity )
++            {
++                [[NSProcessInfo processInfo] endActivity:(id)g_processInfoActivity];
++                g_processInfoActivity = nil;
++                return true;
++            }
++        }
++        else if ( g_pmAssertionID )
++        {
++            // Use power manager API for < 10.9 systems
++            IOReturn success = IOPMAssertionRelease(g_pmAssertionID);
++            g_pmAssertionID = 0;
++            if (success == kIOReturnSuccess)
++                return true;
++        }
++    }
++
++    return true;
++}
++
++bool wxPowerResource::Acquire(wxPowerResourceKind kind, const wxString& reason)
++{
++    wxAtomicInc(g_powerResourceSystemRefCount);
++
++	bool success = UpdatePowerResourceUsage(kind, reason);
++	if (!success)
++        wxAtomicDec(g_powerResourceSystemRefCount);
++	
++    return success;
++}
++
++void wxPowerResource::Release(wxPowerResourceKind kind)
++{
++    switch (kind)
++    {
++    case wxPOWER_RESOURCE_SCREEN:
++    case wxPOWER_RESOURCE_SYSTEM:
++        wxASSERT_MSG(g_powerResourceSystemRefCount > 0, "Power resource system was not acquired");
++        if ( g_powerResourceSystemRefCount > 0 )
++            wxAtomicDec(g_powerResourceSystemRefCount);
++        UpdatePowerResourceUsage(kind, "");
++        break;
++    }
++}

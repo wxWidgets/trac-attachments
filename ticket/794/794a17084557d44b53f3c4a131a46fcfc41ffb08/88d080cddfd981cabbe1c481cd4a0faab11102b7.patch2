@@ -1,0 +1,183 @@
+Index: include/wx/unix/stdpaths.h
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/include/wx/unix/stdpaths.h,v
+retrieving revision 1.4
+diff -bu2 -r1.4 include/wx/unix/stdpaths.h
+--- include/wx/unix/stdpaths.h
++++ include/wx/unix/stdpaths.h
+@@ -13,4 +13,6 @@
+ #define _WX_UNIX_STDPATHS_H_
+ 
++#include "wx/module.h"
++
+ // ----------------------------------------------------------------------------
+ // wxStandardPaths
+@@ -20,4 +22,11 @@
+ {
+ public:
++    // tries to determine the installation prefix automatically (Linux only right
++    // now) and returns /usr/local if it failed;
++    // because of the trick used eventually here, this function must be called
++    // right after the program startup, before changing environment vars or the
++    // current working directory - that's why we use wxStandardPathsModule
++    void DetectPrefix();
++
+     // set the program installation directory which is /usr/local by default
+     //
+@@ -30,6 +39,5 @@
+     //
+     // if the prefix had been previously by SetInstallPrefix, returns that
+-    // value, otherwise tries to determine it automatically (Linux only right
+-    // now) and returns /usr/local if it failed
++    // value, otherwise calls DetectPrefix()
+     wxString GetInstallPrefix() const;
+ 
+@@ -49,4 +57,24 @@
+ };
+ 
++
++class wxStandardPathsModule : public wxModule
++{
++public:
++    wxStandardPathsModule() {}
++
++    // see DetectPrefix() description to find why we need to call this function
++    // at wxWidgets startup
++    virtual bool OnInit()
++    {
++        ((wxStandardPaths&)wxStandardPaths::Get()).DetectPrefix();
++        return true;
++    }
++
++    virtual void OnExit() {}
++
++private:
++    DECLARE_DYNAMIC_CLASS(wxDDEModule)
++};
++
+ #endif // _WX_UNIX_STDPATHS_H_
+ 
+Index: src/unix/stdpaths.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/unix/stdpaths.cpp,v
+retrieving revision 1.14
+diff -bu2 -r1.14 src/unix/stdpaths.cpp
+--- src/unix/stdpaths.cpp
++++ src/unix/stdpaths.cpp
+@@ -107,14 +107,12 @@
+ // ============================================================================
+ 
+-wxString wxStandardPaths::GetInstallPrefix() const
++void wxStandardPaths::DetectPrefix()
+ {
+-    if ( m_prefix.empty() )
+-    {
+-        wxStandardPaths *pathPtr = wx_const_cast(wxStandardPaths *, this);
+-
+ #ifdef __LINUX__
+         // under Linux, we can try to infer the prefix from the location of the
+         // executable
+         char buf[4096];
++    wxString exeStr;
++
+         int result = readlink("/proc/self/exe", buf, WXSIZEOF(buf) - sizeof(char));
+         if ( result != -1 )
+@@ -122,17 +120,92 @@
+             buf[result] = '\0'; // readlink() doesn't NUL-terminate the buffer
+ 
+-            const wxString exeStr(buf, wxConvLibc);
++        // if the /proc/self/exe symlink has been dropped by the kernel for some reason,
++        // then readlink() could also return success but "(deleted)" as link destination...
++        if (strcmp(buf, "(deleted)") != 0)
++            exeStr = wxString(buf, wxConvLibc);
++    }
++
++    if ( exeStr.empty() &&
++         (wxPlatformInfo().GetOSMajorVersion() == 2 &&
++          wxPlatformInfo().GetOSMinorVersion() <= 6) )
++    {
++        // Sometimes the /proc/self/exe link is not available; this happens when
++        // e.g. you use an executable compressor like UPX.
++        // in this case we can try a last "trick" which works on linux kernels:
++        // the pathname passed to execve() in Linux is recorded just beyond the
++        // terminating '\0' of the last environment string.
++        // Thus we can try to get this info reading past the last env var.
++        //
++        // NB: if the kernel omits the "extra environemnt variable" then there
++        //     will be no SIGSEGV.
++        //     Infact the initial layout of the stack is:
++        //
++        //  %esp: .long argc
++        // .long argv[0], argv[1], ...  # pointers to character arrays
++        // .long 0  # end of argv
++        // .long env[0], env[1], ...    # pointers to character arrays
++        // .long 0  # end of env
++        // .struct auxv[0], auxv[1], ...  # Elf32_auxv_t  <elf.h>
++        // .long 0, 0  # two words to end auxv
++        // .asciz argv strings, each terminated by '\0'
++        // .asciz env strings, each terminated by '\0'
++        // .asciz pathname of execve, terminated by '\0'
++        // .long 0  # highest-addressed 32-bits of user address space
++        // top:  # lowest-addressed byte of kernel-only address space
++        //
++        // So if the extra environment variable is omitted, then the access
++        // "beyond the last environment string" will touch the last 32-bit word
++        // of zeroed bytes (which is 4-byte aligned.)
++        //
++        // Also, for maximum security, we try to read past extra env var only
++        // for linux kernels from 2.0 to 2.6 which are known to provide this feature.
++        //
++        // Great thanks to John Reiser for his help and knowledge about this linux
++        // kernel feature!
++
++        // iterate over our environment array
++        size_t envcount;
++        for (envcount=0; environ[envcount] != NULL; envcount++)
++            ;
++
++        // read after the \0 of the last environment variable
++        if (envcount > 0)
++        {
++            char *last = environ[envcount - 1];
++            if (last)
++            {
++                exeStr = wxString(&last[strlen(last) + 1], wxConvLibc);
++
++                if (!exeStr.empty())
++                {
++                    // if we've got a relative path, make it absolute using the
++                    // current working directory.
++                    wxFileName fn(exeStr);
++                    if (fn.IsRelative())
++                        fn.MakeAbsolute();
++                    exeStr = fn.GetFullPath();
++                }
++            }
++        }
++    }
+ 
+             // consider that we're in the last "bin" subdirectory of our prefix
+             size_t pos = exeStr.rfind(wxT("/bin/"));
+             if ( pos != wxString::npos )
+-                pathPtr->m_prefix.assign(exeStr, 0, pos);
+-        }
++        m_prefix.assign(exeStr, 0, pos);
+ #endif // __LINUX__
+ 
+         if ( m_prefix.empty() )
+         {
+-            pathPtr->m_prefix = wxT("/usr/local");
++        m_prefix = wxT("/usr/local");
+         }
++}
++
++wxString wxStandardPaths::GetInstallPrefix() const
++{
++    if ( m_prefix.empty() )
++    {
++        wxStandardPaths *pathPtr = wx_const_cast(wxStandardPaths *, this);
++        pathPtr->DetectPrefix();
+     }
+ 
+
+ 	  	 

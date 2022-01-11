@@ -1,0 +1,241 @@
+--- wxWidgets-trunk/include/wx/msw/menuitem.h	2013-12-29
++++ wxWidgets-work/include/wx/msw/menuitem.h	2014-03-15
+@@ -31,6 +31,7 @@
+                              , public wxOwnerDrawn
+ #endif
+ {
++    friend class wxMenu;
+ public:
+     // ctor & dtor
+     wxMenuItem(wxMenu *parentMenu = NULL,
+@@ -118,6 +119,12 @@
+     // helper function for draw std menu check mark
+     void DrawStdCheckMark(WXHDC hdc, const tagRECT* rc, wxODStatus stat);
+ 
++    // helper function to determine if the item must be owner-drawn
++    bool MustUseOwnerDrawn();
++
++    // helper function to get a handle of bitmap associated with item
++    HBITMAP GetHBitmapForMenu(bool checked = true);
++
+ #else // !wxUSE_OWNER_DRAWN
+     // Provide stubs for the public functions above to ensure that the code
+     // still compiles without wxUSE_OWNER_DRAWN -- it makes sense to just drop
+--- wxWidgets-trunk/src/msw/menu.cpp	2014-01-07
++++ wxWidgets-work/src/msw/menu.cpp	2014-03-15
+@@ -236,12 +236,6 @@
+ }
+ #endif // __WXWINCE__
+ 
+-inline bool IsGreaterThanStdSize(const wxBitmap& bmp)
+-{
+-    return bmp.GetWidth() > ::GetSystemMetrics(SM_CXMENUCHECK) ||
+-            bmp.GetHeight() > ::GetSystemMetrics(SM_CYMENUCHECK);
+-}
+-
+ } // anonymous namespace
+ 
+ // ============================================================================
+@@ -412,49 +406,6 @@
+ namespace
+ {
+ 
+-// helper of DoInsertOrAppend(): returns the HBITMAP to use in MENUITEMINFO
+-HBITMAP GetHBitmapForMenu(wxMenuItem *pItem, bool checked = true)
+-{
+-    // Under versions of Windows older than Vista we can't pass HBITMAP
+-    // directly as hbmpItem for 2 reasons:
+-    //  1. We can't draw it with transparency then (this is not
+-    //     very important now but would be with themed menu bg)
+-    //  2. Worse, Windows inverts the bitmap for the selected
+-    //     item and this looks downright ugly
+-    //
+-    // So we prefer to instead draw it ourselves in MSWOnDrawItem().by using
+-    // HBMMENU_CALLBACK when inserting it
+-    //
+-    // However under Vista using HBMMENU_CALLBACK causes the entire menu to be
+-    // drawn using the classic theme instead of the current one and it does
+-    // handle transparency just fine so do use the real bitmap there
+-#if wxUSE_IMAGE
+-    if ( wxGetWinVersion() >= wxWinVersion_Vista )
+-    {
+-#if wxUSE_OWNER_DRAWN
+-        wxBitmap bmp = pItem->GetBitmap(checked);
+-        if ( bmp.IsOk() )
+-        {
+-            // we must use PARGB DIB for the menu bitmaps so ensure that we do
+-            wxImage img(bmp.ConvertToImage());
+-            if ( !img.HasAlpha() )
+-            {
+-                img.InitAlpha();
+-                pItem->SetBitmap(img, checked);
+-            }
+-
+-            return GetHbitmapOf(pItem->GetBitmap(checked));
+-        }
+-#endif // wxUSE_OWNER_DRAWN
+-        //else: bitmap is not set
+-
+-        return NULL;
+-    }
+-#endif // wxUSE_IMAGE
+-
+-    return HBMMENU_CALLBACK;
+-}
+-
+ } // anonymous namespace
+ 
+ bool wxMenu::MSWGetRadioGroupRange(int pos, int *start, int *end) const
+@@ -558,36 +509,9 @@
+ 
+         if ( !m_ownerDrawn && !pItem->IsSeparator() )
+         {
+-            // MIIM_BITMAP only works under WinME/2000+ so we always use owner
+-            // drawn item under the previous versions and we also have to use
+-            // them in any case if the item has custom colours or font
+-            static const wxWinVersion winver = wxGetWinVersion();
+-            bool mustUseOwnerDrawn = winver < wxWinVersion_98 ||
+-                                     pItem->GetTextColour().IsOk() ||
+-                                     pItem->GetBackgroundColour().IsOk() ||
+-                                     pItem->GetFont().IsOk();
+-
+-            // Windows XP or earlier don't display menu bitmaps bigger than
+-            // standard size correctly (they're truncated), so we must use
+-            // owner-drawn items to show them correctly there. OTOH Win7
+-            // doesn't seem to have any problems with even very large bitmaps
+-            // so don't use owner-drawn items unnecessarily there (Vista wasn't
+-            // actually tested but I assume it works as 7 rather than as XP).
+-            if ( !mustUseOwnerDrawn && winver < wxWinVersion_Vista )
+-            {
+-                const wxBitmap& bmpUnchecked = pItem->GetBitmap(false),
+-                                bmpChecked   = pItem->GetBitmap(true);
+-
+-                if ( (bmpUnchecked.IsOk() && IsGreaterThanStdSize(bmpUnchecked)) ||
+-                     (bmpChecked.IsOk()   && IsGreaterThanStdSize(bmpChecked)) )
+-                {
+-                    mustUseOwnerDrawn = true;
+-                }
+-            }
+-
+             // use InsertMenuItem() if possible as it's guaranteed to look
+             // correct while our owner-drawn code is not
+-            if ( !mustUseOwnerDrawn )
++            if ( !pItem->MustUseOwnerDrawn() )
+             {
+                 WinStruct<MENUITEMINFO> mii;
+                 mii.fMask = MIIM_STRING | MIIM_DATA;
+@@ -597,13 +521,13 @@
+                 if ( pItem->IsCheckable() )
+                 {
+                     mii.fMask |= MIIM_CHECKMARKS;
+-                    mii.hbmpChecked = GetHBitmapForMenu(pItem, true);
+-                    mii.hbmpUnchecked = GetHBitmapForMenu(pItem, false);
++                    mii.hbmpChecked = pItem->GetHBitmapForMenu(true);
++                    mii.hbmpUnchecked = pItem->GetHBitmapForMenu(false);
+                 }
+                 else if ( pItem->GetBitmap().IsOk() )
+                 {
+                     mii.fMask |= MIIM_BITMAP;
+-                    mii.hbmpItem = GetHBitmapForMenu(pItem);
++                    mii.hbmpItem = pItem->GetHBitmapForMenu();
+                 }
+ 
+                 mii.cch = itemText.length();
+--- wxWidgets-trunk/src/msw/menuitem.cpp	2014-03-02
++++ wxWidgets-work/src/msw/menuitem.cpp	2014-03-15
+@@ -134,6 +134,12 @@
+     int m_modeOld;
+ };
+ 
++inline bool IsGreaterThanStdSize(const wxBitmap& bmp)
++{
++    return bmp.GetWidth() > ::GetSystemMetrics(SM_CXMENUCHECK) ||
++            bmp.GetHeight() > ::GetSystemMetrics(SM_CYMENUCHECK);
++}
++
+ } // anonymous namespace
+ 
+ // ============================================================================
+@@ -1249,6 +1256,82 @@
+         wxOwnerDrawn::GetColourToUse(stat, colText, colBack);
+     }
+ }
++
++bool wxMenuItem::MustUseOwnerDrawn()
++{
++    // MIIM_BITMAP only works under WinME/2000+ so we always use owner
++    // drawn item under the previous versions and we also have to use
++    // them in any case if the item has custom colours or font
++    static const wxWinVersion winver = wxGetWinVersion();
++    bool mustUseOwnerDrawn = winver < wxWinVersion_98 ||
++                                GetTextColour().IsOk() ||
++                                GetBackgroundColour().IsOk() ||
++                                GetFont().IsOk();
++
++    // Windows XP or earlier don't display menu bitmaps bigger than
++    // standard size correctly (they're truncated), so we must use
++    // owner-drawn items to show them correctly there. OTOH Win7
++    // doesn't seem to have any problems with even very large bitmaps
++    // so don't use owner-drawn items unnecessarily there (Vista wasn't
++    // actually tested but I assume it works as 7 rather than as XP).
++    if ( !mustUseOwnerDrawn && winver < wxWinVersion_Vista )
++    {
++        const wxBitmap& bmpUnchecked = GetBitmap(false),
++                        bmpChecked   = GetBitmap(true);
++
++        if ( (bmpUnchecked.IsOk() && IsGreaterThanStdSize(bmpUnchecked)) ||
++                (bmpChecked.IsOk()   && IsGreaterThanStdSize(bmpChecked)) )
++        {
++            mustUseOwnerDrawn = true;
++        }
++    }
++
++    return mustUseOwnerDrawn;
++}
++
++// returns the HBITMAP to use in MENUITEMINFO
++HBITMAP wxMenuItem::GetHBitmapForMenu(bool checked)
++{
++    // Under versions of Windows older than Vista we can't pass HBITMAP
++    // directly as hbmpItem for 2 reasons:
++    //  1. We can't draw it with transparency then (this is not
++    //     very important now but would be with themed menu bg)
++    //  2. Worse, Windows inverts the bitmap for the selected
++    //     item and this looks downright ugly
++    //
++    // So we prefer to instead draw it ourselves in MSWOnDrawItem().by using
++    // HBMMENU_CALLBACK when inserting it
++    //
++    // However under Vista using HBMMENU_CALLBACK causes the entire menu to be
++    // drawn using the classic theme instead of the current one and it does
++    // handle transparency just fine so do use the real bitmap there
++#if wxUSE_IMAGE
++    if ( wxGetWinVersion() >= wxWinVersion_Vista )
++    {
++#if wxUSE_OWNER_DRAWN
++        wxBitmap bmp = GetBitmap(checked);
++        if ( bmp.IsOk() )
++        {
++            // we must use PARGB DIB for the menu bitmaps so ensure that we do
++            wxImage img(bmp.ConvertToImage());
++            if ( !img.HasAlpha() )
++            {
++                img.InitAlpha();
++                SetBitmap(img, checked);
++            }
++
++            return GetHbitmapOf(GetBitmap(checked));
++        }
++#endif // wxUSE_OWNER_DRAWN
++        //else: bitmap is not set
++
++        return NULL;
++    }
++#endif // wxUSE_IMAGE
++
++    return HBMMENU_CALLBACK;
++}
++
+ #endif // wxUSE_OWNER_DRAWN
+ 
+ // ----------------------------------------------------------------------------

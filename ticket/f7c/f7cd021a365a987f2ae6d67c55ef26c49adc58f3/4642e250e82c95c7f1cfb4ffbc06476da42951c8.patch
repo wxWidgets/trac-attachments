@@ -1,0 +1,236 @@
+Index: include/wx/calctrl.h
+===================================================================
+--- include/wx/calctrl.h	(revision 54021)
++++ include/wx/calctrl.h	(working copy)
+@@ -248,8 +248,18 @@
+     // some special appearance (which can be customized using SetMark() for the
+     // generic version) to the given day
+ 
+-    virtual void Mark(size_t day, bool mark) = 0;
++    virtual void Mark(size_t WXUNUSED(day), bool WXUNUSED(mark))
++    {
++        // no implementation in MSW
++    }
+ 
++    // Special Mark implementation for MSW
++    virtual bool Mark(const wxDateTime& day, bool mark)
++    {
++        Mark(day.GetDay(), mark);
++        return true;
++    }
++
+     virtual wxCalendarDateAttr *GetAttr(size_t WXUNUSED(day)) const
+         { return NULL; }
+     virtual void SetAttr(size_t WXUNUSED(day), wxCalendarDateAttr *attr)
+Index: include/wx/msw/calctrl.h
+===================================================================
+--- include/wx/msw/calctrl.h	(revision 54021)
++++ include/wx/msw/calctrl.h	(working copy)
+@@ -44,14 +44,19 @@
+ 
+     virtual bool EnableMonthChange(bool enable = true);
+ 
+-    virtual void Mark(size_t day, bool mark);
++    // corresponds to wxCAL_SHOW_HOLIDAYS bit
++    virtual void EnableHolidayDisplay(bool display = true);
+ 
++    virtual bool Mark(const wxDateTime& day, bool mark);
++
+     virtual wxCalendarHitTestResult HitTest(const wxPoint& pos,
+                                             wxDateTime *date = NULL,
+                                             wxDateTime::WeekDay *wd = NULL);
+ 
+     virtual void SetWindowStyleFlag(long style);
+ 
++    bool FindMark(const wxDateTime&, size_t* index = NULL);
++
+ protected:
+     virtual wxSize DoGetBestSize() const;
+ 
+@@ -63,7 +68,7 @@
+     void MSWOnDoubleClick(wxMouseEvent& event);
+ 
+ private:
+-    void Init() { m_marks = 0; }
++    void Init() { }
+ 
+     // bring the control in sync with m_marks
+     void UpdateMarks();
+@@ -78,10 +83,8 @@
+     // from MSWOnNotify()
+     wxDateTime m_date;
+ 
+-    // bit field containing the state (marked or not) of all days in the month
+-    wxUint32 m_marks;
++    wxDateTimeArray m_marks;
+ 
+-
+     DECLARE_DYNAMIC_CLASS(wxCalendarCtrl)
+     DECLARE_NO_COPY_CLASS(wxCalendarCtrl)
+ };
+Index: samples/calendar/calendar.cpp
+===================================================================
+--- samples/calendar/calendar.cpp	(revision 54021)
++++ samples/calendar/calendar.cpp	(working copy)
+@@ -275,7 +275,7 @@
+ #ifdef __WXGTK20__
+     EVT_UPDATE_UI(Calendar_Cal_Monday, MyFrame::OnUpdateUIGenericOnly)
+ #endif
+-    EVT_UPDATE_UI(Calendar_Cal_Holidays, MyFrame::OnUpdateUIGenericOnly)
++    //EVT_UPDATE_UI(Calendar_Cal_Holidays, MyFrame::OnUpdateUIGenericOnly)
+     EVT_UPDATE_UI(Calendar_Cal_Special, MyFrame::OnUpdateUIGenericOnly)
+     EVT_UPDATE_UI(Calendar_Cal_SurroundWeeks, MyFrame::OnUpdateUIGenericOnly)
+ END_EVENT_TABLE()
+@@ -657,7 +657,7 @@
+ 
+     s_dateLast = event.GetDate();
+ 
+-    m_calendar->Mark(event.GetDate().GetDay(), mark);
++    m_calendar->Mark(event.GetDate(), mark);
+     wxLogMessage(wxT("Selected (and %smarked) %s from calendar."),
+                  mark ? "" : "un", s_dateLast.FormatISODate().c_str());
+ }
+Index: src/msw/calctrl.cpp
+===================================================================
+--- src/msw/calctrl.cpp	(revision 54021)
++++ src/msw/calctrl.cpp	(working copy)
+@@ -133,6 +133,8 @@
+ 
+     if ( HasFlag(wxCAL_MONDAY_FIRST) != hadMondayFirst )
+         UpdateFirstDayOfWeek();
++
++    UpdateMarks();
+ }
+ 
+ // ----------------------------------------------------------------------------
+@@ -313,28 +315,108 @@
+     return true;
+ }
+ 
+-void wxCalendarCtrl::Mark(size_t day, bool mark)
++bool wxCalendarCtrl::FindMark(const wxDateTime& day, size_t* index)
+ {
+-    wxCHECK_RET( day > 0 && day < 32, "invalid day" );
++    for (size_t i = 0; i < m_marks.GetCount(); i++)
++    {
++        if (m_marks.Item(i) == day)
++        {
++            if (index) *index = i;
++            return true;
++        }
++    }
++    return false;
++}
+ 
+-    int mask = 1 << (day - 1);
+-    if ( mark )
+-        m_marks |= mask;
++bool wxCalendarCtrl::Mark(const wxDateTime& day, bool mark)
++{
++    bool changed = false;
++    if (mark)
++    {
++        if (!FindMark(day)) // could be there already
++        {
++            m_marks.Add(day);
++            changed = true;
++        }
++    }
+     else
+-        m_marks &= ~mask;
++    {
++        size_t i;
++        if (FindMark(day, &i))
++        {
++            m_marks.RemoveAt(i);
++            changed = true;
++        }
++    }
++    if (changed)
++    {
++        UpdateMarks();
++    }
++    return changed;
++}
+ 
+-    // calling Refresh() here is not enough to change the day appearance
++// ----------------------------------------------------------------------------
++// holidays handling
++// ----------------------------------------------------------------------------
++
++void wxCalendarCtrl::EnableHolidayDisplay(bool display)
++{
++    long style = GetWindowStyle();
++    if ( display )
++        style |= wxCAL_SHOW_HOLIDAYS;
++    else
++        style &= ~wxCAL_SHOW_HOLIDAYS;
++
++    SetWindowStyle(style);
++
+     UpdateMarks();
+ }
+ 
++static void UpdateMarkBits(const wxDateTimeArray& usermarks, const SYSTEMTIME& stStart, MONTHDAYSTATE* array, int count, bool holidays)
++{
++    for ( int i = 0; i < count; i++ )
++    {
++        array[i] = 0;
++        if (holidays)
++        {
++            size_t n;
++
++            wxDateTime dtStart;
++            dtStart.SetFromMSWSysTime(stStart);
++            dtStart.SetDay(1);
++            dtStart.Add(wxDateSpan::Months(i));
++            wxDateTime dtEnd = dtStart.GetLastMonthDay();
++
++            wxDateTimeArray hol;
++            wxDateTimeHolidayAuthority::GetHolidaysInRange(dtStart, dtEnd, hol);
++
++            for ( n = 0; n < hol.GetCount(); n++ )
++            {
++                array[i] |= 1 << (hol[n].GetDay()-1);
++            }
++
++            for ( n = 0; n < usermarks.GetCount(); n++ )
++            {
++                const wxDateTime& item = usermarks.Item(n);
++                if (   (dtStart.GetYear () == item.GetYear ())
++                    && (dtStart.GetMonth() == item.GetMonth())
++                    )
++                {
++                    array[i] |= 1 << (item.GetDay()-1);
++                }
++            }
++        }
++    }
++}
++
+ void wxCalendarCtrl::UpdateMarks()
+ {
+     MONTHDAYSTATE states[3];
+-    const int nMonths = MonthCal_GetMonthRange(GetHwnd(), GMR_DAYSTATE, NULL);
++    SYSTEMTIME stStart;
++    const int nMonths = MonthCal_GetMonthRange(GetHwnd(), GMR_DAYSTATE, &stStart);
+     wxCHECK_RET( nMonths <= (int)WXSIZEOF(states), "unexpected months range" );
+ 
+-    for ( int i = 0; i < nMonths; i++ )
+-        states[i] = m_marks;
++    ::UpdateMarkBits(m_marks, stStart, states, nMonths, HasFlag(wxCAL_SHOW_HOLIDAYS));
+ 
+     if ( !MonthCal_SetDayState(GetHwnd(), nMonths, states) )
+     {
+@@ -377,10 +459,7 @@
+         case MCN_GETDAYSTATE:
+             {
+                 const NMDAYSTATE * const ds = (NMDAYSTATE *)lParam;
+-                for ( int i = 0; i < ds->cDayState; i++ )
+-                {
+-                    ds->prgDayState[i] = m_marks;
+-                }
++                ::UpdateMarkBits(m_marks, ds->stStart, ds->prgDayState, ds->cDayState, HasFlag(wxCAL_SHOW_HOLIDAYS));
+             }
+             break;
+ 

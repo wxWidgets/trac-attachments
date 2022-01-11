@@ -1,0 +1,746 @@
+Index: src/ribbon/panel.cpp
+===================================================================
+--- src/ribbon/panel.cpp	(revision 71378)
++++ src/ribbon/panel.cpp	(working copy)
+@@ -32,6 +32,10 @@
+ #include "wx/msw/private.h"
+ #endif
+ 
++wxDEFINE_EVENT(wxEVT_COMMAND_RIBBONPANEL_EXTBUTTON_ACTIVATED, wxRibbonPanelEvent);
++
++IMPLEMENT_DYNAMIC_CLASS(wxRibbonPanelEvent, wxCommandEvent)
++
+ IMPLEMENT_CLASS(wxRibbonPanel, wxRibbonControl)
+ 
+ BEGIN_EVENT_TABLE(wxRibbonPanel, wxRibbonControl)
+@@ -39,6 +43,7 @@
+     EVT_ERASE_BACKGROUND(wxRibbonPanel::OnEraseBackground)
+     EVT_KILL_FOCUS(wxRibbonPanel::OnKillFocus)
+     EVT_LEAVE_WINDOW(wxRibbonPanel::OnMouseLeave)
++    EVT_MOTION(wxRibbonPanel::OnMotion)
+     EVT_LEFT_DOWN(wxRibbonPanel::OnMouseClick)
+     EVT_PAINT(wxRibbonPanel::OnPaint)
+     EVT_SIZE(wxRibbonPanel::OnSize)
+@@ -119,6 +124,7 @@
+     m_minimised_icon = icon;
+     m_minimised = false;
+     m_hovered = false;
++    m_ext_button_hovered = false;
+ 
+     if(m_art == NULL)
+     {
+@@ -144,6 +150,11 @@
+     return m_hovered;
+ }
+ 
++bool wxRibbonPanel::IsExtButtonHovered() const
++{
++    return m_ext_button_hovered;
++}
++
+ void wxRibbonPanel::OnMouseEnter(wxMouseEvent& evt)
+ {
+     TestPositionForHover(evt.GetPosition());
+@@ -178,9 +189,14 @@
+     evt.Skip();
+ }
+ 
++void wxRibbonPanel::OnMotion(wxMouseEvent& evt)
++{
++    TestPositionForHover(evt.GetPosition());
++}
++
+ void wxRibbonPanel::TestPositionForHover(const wxPoint& pos)
+ {
+-    bool hovered = false;
++    bool hovered = false, ext_button_hovered = false;
+     if(pos.x >= 0 && pos.y >= 0)
+     {
+         wxSize size = GetSize();
+@@ -189,9 +205,17 @@
+             hovered = true;
+         }
+     }
+-    if(hovered != m_hovered)
++    if(hovered)
+     {
++        if(HasExtButton())
++            ext_button_hovered = m_ext_button_rect.Contains(pos);
++        else
++            ext_button_hovered = false;
++    }
++    if(hovered != m_hovered || ext_button_hovered != m_ext_button_hovered)
++    {
+         m_hovered = hovered;
++        m_ext_button_hovered = ext_button_hovered;
+         Refresh(false);
+     }
+ }
+@@ -216,6 +240,15 @@
+     wxRibbonControl::RemoveChild(child);
+ }
+ 
++bool wxRibbonPanel::HasExtButton()const
++{
++    wxRibbonBar* bar = GetAncestorRibbonBar();
++    if(bar==NULL)
++        return false;
++    return (m_flags & wxRIBBON_PANEL_EXT_BUTTON) && 
++        (bar->GetWindowStyleFlag() & wxRIBBON_BAR_SHOW_PANEL_EXT_BUTTONS);
++}
++
+ void wxRibbonPanel::OnSize(wxSizeEvent& evt)
+ {
+     if(GetAutoLayout())
+@@ -721,6 +754,10 @@
+         wxWindow* child = GetChildren().Item(0)->GetData();
+         child->SetSize(position.x, position.y, size.GetWidth(), size.GetHeight());
+     }
++
++    if(HasExtButton())
++        m_ext_button_rect = m_art->GetPanelExtButtonArea(dc, this, GetSize());
++
+     return true;
+ }
+ 
+@@ -737,6 +774,13 @@
+             ShowExpanded();
+         }
+     }
++    else if(IsExtButtonHovered())
++    {
++        wxRibbonPanelEvent notification(wxEVT_COMMAND_RIBBONPANEL_EXTBUTTON_ACTIVATED, GetId());
++        notification.SetEventObject(this);
++        notification.SetPanel(this);
++        ProcessEvent(notification);
++    }
+ }
+ 
+ wxRibbonPanel* wxRibbonPanel::GetExpandedDummy()
+Index: src/ribbon/control.cpp
+===================================================================
+--- src/ribbon/control.cpp	(revision 71378)
++++ src/ribbon/control.cpp	(working copy)
+@@ -18,6 +18,7 @@
+ #if wxUSE_RIBBON
+ 
+ #include "wx/ribbon/control.h"
++#include "wx/ribbon/bar.h"
+ 
+ #ifndef WX_PRECOMP
+ #endif
+@@ -109,4 +110,16 @@
+     return true;
+ }
+ 
++wxRibbonBar* wxRibbonControl::GetAncestorRibbonBar()const
++{
++    wxWindow* window = GetParent();
++    while(window!=NULL)
++    {
++        if(window->IsKindOf(CLASSINFO(wxRibbonBar)))
++            break;
++        window = window->GetParent();
++    }
++    return (wxRibbonBar*)window;
++}
++
+ #endif // wxUSE_RIBBON
+Index: src/ribbon/art_aui.cpp
+===================================================================
+--- src/ribbon/art_aui.cpp	(revision 71378)
++++ src/ribbon/art_aui.cpp	(working copy)
+@@ -642,6 +642,27 @@
+     return size;
+ }
+ 
++wxRect wxRibbonAUIArtProvider::GetPanelExtButtonArea(wxDC& dc,
++                        const wxRibbonPanel* wnd,
++                        wxRect rect)
++{
++    wxRect true_rect(rect);
++    RemovePanelPadding(&true_rect);
++
++    true_rect.x++;
++    true_rect.width -= 2;
++    true_rect.y++;
++
++    dc.SetFont(m_panel_label_font);
++    wxSize label_size = dc.GetTextExtent(wnd->GetLabel());
++    int label_height = label_size.GetHeight() + 5;
++    wxRect label_rect(true_rect);
++    label_rect.height = label_height - 1;
++
++    rect = wxRect(label_rect.GetRight()-13, label_rect.GetBottom()-13, 13, 13);
++    return rect;
++}
++
+ void wxRibbonAUIArtProvider::DrawPanelBackground(
+                         wxDC& dc,
+                         wxRibbonPanel* wnd,
+@@ -705,6 +726,19 @@
+ #endif
+         dc.GradientFillLinear(gradient_rect, colour, gradient, wxSOUTH);
+     }
++
++    if(wnd->HasExtButton())
++    {
++        if(wnd->IsExtButtonHovered())
++        {
++            dc.SetPen(m_panel_hover_button_border_pen);
++            dc.SetBrush(m_panel_hover_button_background_brush);
++            dc.DrawRoundedRectangle(label_rect.GetRight() - 13, label_rect.GetBottom() - 13, 13, 13, 1.0);
++            dc.DrawBitmap(m_panel_extension_bitmap[1], label_rect.GetRight() - 10, label_rect.GetBottom() - 10, true);
++        }
++        else
++            dc.DrawBitmap(m_panel_extension_bitmap[0], label_rect.GetRight() - 10, label_rect.GetBottom() - 10, true);
++    }
+ }
+ 
+ void wxRibbonAUIArtProvider::DrawMinimisedPanel(
+Index: src/ribbon/art_msw.cpp
+===================================================================
+--- src/ribbon/art_msw.cpp	(revision 71378)
++++ src/ribbon/art_msw.cpp	(working copy)
+@@ -82,6 +82,18 @@
+   " xxx ",
+   "  x  "};
+ 
++static const char* const panel_extension_xpm[] = {
++  "7 7 2 1",
++  "  c None",
++  "x c #FF00FF",
++  "xxxxxx ",
++  "x      ",
++  "x      ",
++  "x  x  x",
++  "x   xxx",
++  "x   xxx",
++  "   xxxx"};
++
+ wxRibbonMSWArtProvider::wxRibbonMSWArtProvider(bool set_colour_scheme)
+ {
+     m_flags = 0;
+@@ -212,6 +224,10 @@
+     m_panel_label_colour = LikePrimary(2.8, -0.14, -0.35);
+     m_panel_hover_label_colour = m_panel_label_colour;
+     m_panel_minimised_label_colour = m_tab_label_colour;
++    m_panel_hover_button_background_brush = LikeSecondary(-0.9, 0.16, -0.07);
++    m_panel_hover_button_border_pen = LikeSecondary(-3.9, -0.16, -0.14);
++    SetColour(wxRIBBON_ART_PANEL_BUTTON_FACE_COLOUR, LikePrimary(1.4, -0.21, -0.23));
++    SetColour(wxRIBBON_ART_PANEL_BUTTON_HOVER_FACE_COLOUR, LikePrimary(1.5, -0.24, -0.29));
+ 
+     m_gallery_button_disabled_background_colour = LikePrimary(-2.8, -0.46, 0.09);
+     m_gallery_button_disabled_background_top_brush = LikePrimary(-2.8, -0.36, 0.15);
+@@ -284,6 +300,10 @@
+         copy->m_gallery_down_bitmap[i] = m_gallery_down_bitmap[i];
+         copy->m_gallery_extension_bitmap[i] = m_gallery_extension_bitmap[i];
+     }
++    for(int i = 0; i < 2; ++i)
++    {
++        copy->m_panel_extension_bitmap[i] = m_panel_extension_bitmap[i];
++    }
+     copy->m_toolbar_drop_bitmap = m_toolbar_drop_bitmap;
+ 
+     copy->m_primary_scheme_colour = m_primary_scheme_colour;
+@@ -303,6 +323,8 @@
+     copy->m_panel_label_colour = m_panel_label_colour;
+     copy->m_panel_hover_label_colour = m_panel_hover_label_colour;
+     copy->m_panel_minimised_label_colour = m_panel_minimised_label_colour;
++    copy->m_panel_button_face_colour = m_panel_button_face_colour;
++    copy->m_panel_button_hover_face_colour = m_panel_button_hover_face_colour;
+     copy->m_panel_active_background_colour = m_panel_active_background_colour;
+     copy->m_panel_active_background_gradient_colour = m_panel_active_background_gradient_colour;
+     copy->m_panel_active_background_top_colour = m_panel_active_background_top_colour;
+@@ -339,6 +361,7 @@
+     copy->m_tab_ctrl_background_brush = m_tab_ctrl_background_brush;
+     copy->m_panel_label_background_brush = m_panel_label_background_brush;
+     copy->m_panel_hover_label_background_brush = m_panel_hover_label_background_brush;
++    copy->m_panel_hover_button_background_brush = m_panel_hover_button_background_brush;
+     copy->m_gallery_hover_background_brush = m_gallery_hover_background_brush;
+     copy->m_gallery_button_background_top_brush = m_gallery_button_background_top_brush;
+     copy->m_gallery_button_hover_background_top_brush = m_gallery_button_hover_background_top_brush;
+@@ -354,6 +377,7 @@
+     copy->m_panel_border_gradient_pen = m_panel_border_gradient_pen;
+     copy->m_panel_minimised_border_pen = m_panel_minimised_border_pen;
+     copy->m_panel_minimised_border_gradient_pen = m_panel_minimised_border_gradient_pen;
++    copy->m_panel_hover_button_border_pen = m_panel_hover_button_border_pen;
+     copy->m_tab_border_pen = m_tab_border_pen;
+     copy->m_gallery_border_pen = m_gallery_border_pen;
+     copy->m_button_bar_hover_border_pen = m_button_bar_hover_border_pen;
+@@ -407,6 +431,8 @@
+     Reload(wxRIBBON_ART_GALLERY_BUTTON_HOVER_FACE_COLOUR);
+     Reload(wxRIBBON_ART_GALLERY_BUTTON_ACTIVE_FACE_COLOUR);
+     Reload(wxRIBBON_ART_GALLERY_BUTTON_DISABLED_FACE_COLOUR);
++    Reload(wxRIBBON_ART_PANEL_BUTTON_FACE_COLOUR);
++    Reload(wxRIBBON_ART_PANEL_BUTTON_HOVER_FACE_COLOUR);
+ #undef Reload
+ }
+ 
+@@ -647,6 +673,10 @@
+             return m_panel_active_background_colour;
+         case wxRIBBON_ART_PANEL_ACTIVE_BACKGROUND_GRADIENT_COLOUR:
+             return m_panel_active_background_gradient_colour;
++        case wxRIBBON_ART_PANEL_BUTTON_FACE_COLOUR:
++            return m_panel_button_face_colour;
++        case wxRIBBON_ART_PANEL_BUTTON_HOVER_FACE_COLOUR:
++            return m_panel_button_hover_face_colour;
+         case wxRIBBON_ART_PAGE_BORDER_COLOUR:
+             return m_page_border_pen.GetColour();
+         case wxRIBBON_ART_PAGE_BACKGROUND_TOP_COLOUR:
+@@ -897,6 +927,14 @@
+         case wxRIBBON_ART_PANEL_ACTIVE_BACKGROUND_GRADIENT_COLOUR:
+             m_panel_active_background_gradient_colour = colour;
+             break;
++        case wxRIBBON_ART_PANEL_BUTTON_FACE_COLOUR:
++            m_panel_button_face_colour = colour;
++            m_panel_extension_bitmap[0] = wxRibbonLoadPixmap(panel_extension_xpm, colour);
++            break;
++        case wxRIBBON_ART_PANEL_BUTTON_HOVER_FACE_COLOUR:
++            m_panel_button_hover_face_colour = colour;
++            m_panel_extension_bitmap[1] = wxRibbonLoadPixmap(panel_extension_xpm, colour);
++            break;
+         case wxRIBBON_ART_PAGE_BORDER_COLOUR:
+             m_page_border_pen.SetColour(colour);
+             break;
+@@ -1464,6 +1502,7 @@
+ 
+     wxRect true_rect(rect);
+     RemovePanelPadding(&true_rect);
++    bool has_ext_button = wnd->HasExtButton();
+ 
+     int label_height;
+     {
+@@ -1491,6 +1530,11 @@
+         label_rect.SetY(true_rect.GetBottom() - label_rect.GetHeight());
+         label_height = label_rect.GetHeight();
+ 
++        wxRect label_bg_rect = label_rect;
++
++        if(has_ext_button)
++            label_rect.SetWidth(label_rect.GetWidth() - 13);
++
+         if(label_size.GetWidth() > label_rect.GetWidth())
+         {
+             // Test if there is enough length for 3 letters and ...
+@@ -1519,7 +1563,7 @@
+             }
+         }
+ 
+-        dc.DrawRectangle(label_rect.GetX(), label_rect.GetY(), label_rect.GetWidth(), label_rect.GetHeight());
++        dc.DrawRectangle(label_bg_rect);
+         if(clip_label)
+         {
+             wxDCClipper clip(dc, label_rect);
+@@ -1533,6 +1577,19 @@
+                 label_rect.y +
+                 (label_rect.GetHeight() - label_size.GetHeight()) / 2);
+         }
++
++        if(has_ext_button)
++        {
++            if(wnd->IsExtButtonHovered())
++            {
++                dc.SetPen(m_panel_hover_button_border_pen);
++                dc.SetBrush(m_panel_hover_button_background_brush);
++                dc.DrawRoundedRectangle(label_rect.GetRight(), label_rect.GetBottom() - 13, 13, 13, 1.0);
++                dc.DrawBitmap(m_panel_extension_bitmap[1], label_rect.GetRight() + 3, label_rect.GetBottom() - 10, true);
++            }
++            else
++                dc.DrawBitmap(m_panel_extension_bitmap[0], label_rect.GetRight() + 3, label_rect.GetBottom() - 10, true);
++        }
+     }
+ 
+     if(wnd->IsHovered())
+@@ -1548,6 +1605,15 @@
+     DrawPanelBorder(dc, true_rect, m_panel_border_pen, m_panel_border_gradient_pen);
+ }
+ 
++wxRect wxRibbonMSWArtProvider::GetPanelExtButtonArea(wxDC& WXUNUSED(dc),
++                        const wxRibbonPanel* WXUNUSED(wnd),
++                        wxRect rect)
++{
++    RemovePanelPadding(&rect);
++    rect = wxRect(rect.GetRight()-13, rect.GetBottom()-13, 13, 13);
++    return rect;
++}
++
+ void wxRibbonMSWArtProvider::DrawGalleryBackground(
+                         wxDC& dc,
+                         wxRibbonGallery* wnd,
+Index: include/wx/ribbon/panel.h
+===================================================================
+--- include/wx/ribbon/panel.h	(revision 71378)
++++ include/wx/ribbon/panel.h	(working copy)
+@@ -57,6 +57,7 @@
+     bool IsMinimised() const;
+     bool IsMinimised(wxSize at_size) const;
+     bool IsHovered() const;
++    bool IsExtButtonHovered() const;
+     bool CanAutoMinimise() const;
+ 
+     bool ShowExpanded();
+@@ -73,6 +74,8 @@
+     virtual void AddChild(wxWindowBase *child);
+     virtual void RemoveChild(wxWindowBase *child);
+ 
++    virtual bool HasExtButton() const;
++
+     wxRibbonPanel* GetExpandedDummy();
+     wxRibbonPanel* GetExpandedPanel();
+ 
+@@ -102,6 +105,7 @@
+     void OnMouseLeave(wxMouseEvent& evt);
+     void OnMouseLeaveChild(wxMouseEvent& evt);
+     void OnMouseClick(wxMouseEvent& evt);
++    void OnMotion(wxMouseEvent& evt);
+     void OnKillFocus(wxFocusEvent& evt);
+     void OnChildKillFocus(wxFocusEvent& evt);
+ 
+@@ -125,6 +129,8 @@
+     long m_flags;
+     bool m_minimised;
+     bool m_hovered;
++    bool m_ext_button_hovered;
++    wxRect m_ext_button_rect;
+ 
+ #ifndef SWIG
+     DECLARE_CLASS(wxRibbonPanel)
+@@ -132,6 +138,58 @@
+ #endif
+ };
+ 
++
++class WXDLLIMPEXP_RIBBON wxRibbonPanelEvent : public wxCommandEvent
++{
++public:
++    wxRibbonPanelEvent(wxEventType command_type = wxEVT_NULL,
++                       int win_id = 0,
++                       wxRibbonPanel* panel = NULL)
++        : wxCommandEvent(command_type, win_id)
++        , m_panel(panel)
++    {
++    }
++#ifndef SWIG
++    wxRibbonPanelEvent(const wxRibbonPanelEvent& e) : wxCommandEvent(e)
++    {
++        m_panel = e.m_panel;
++    }
++#endif
++    wxEvent *Clone() const { return new wxRibbonPanelEvent(*this); }
++
++    wxRibbonPanel* GetPanel() {return m_panel;}
++    void SetPanel(wxRibbonPanel* panel) {m_panel = panel;}
++
++protected:
++    wxRibbonPanel* m_panel;
++
++#ifndef SWIG
++private:
++    DECLARE_DYNAMIC_CLASS_NO_ASSIGN(wxRibbonPanelEvent)
++#endif
++};
++
++#ifndef SWIG
++
++wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_RIBBON, wxEVT_COMMAND_RIBBONPANEL_EXTBUTTON_ACTIVATED, wxRibbonPanelEvent);
++
++typedef void (wxEvtHandler::*wxRibbonPanelEventFunction)(wxRibbonPanelEvent&);
++
++#define wxRibbonPanelEventHandler(func) \
++    wxEVENT_HANDLER_CAST(wxRibbonPanelEventFunction, func)
++
++#define EVT_RIBBONPANEL_EXTBUTTON_ACTIVATED(winid, fn) \
++    wx__DECLARE_EVT1(wxEVT_COMMAND_RIBBONPANEL_EXTBUTTON_ACTIVATED, winid, wxRibbonPanelEventHandler(fn))
++#else
++
++// wxpython/swig event work
++%constant wxEventType wxEVT_COMMAND_RIBBONPANEL_ACTIVATED;
++
++%pythoncode {
++    EVT_RIBBONPANEL_EXTBUTTON_ACTIVATED = wx.PyEventBinder( wxEVT_COMMAND_RIBBONPANEL_EXTBUTTON_ACTIVATED, 1 )
++}
++#endif
++
+ #endif // wxUSE_RIBBON
+ 
+ #endif // _WX_RIBBON_PANEL_H_
+Index: include/wx/ribbon/control.h
+===================================================================
+--- include/wx/ribbon/control.h	(revision 71378)
++++ include/wx/ribbon/control.h	(working copy)
+@@ -19,6 +19,7 @@
+ #include "wx/control.h"
+ #include "wx/dynarray.h"
+ 
++class wxRibbonBar;
+ class wxRibbonArtProvider;
+ 
+ class WXDLLIMPEXP_RIBBON wxRibbonControl : public wxControl
+@@ -55,6 +56,8 @@
+     virtual bool Realize();
+     bool Realise() {return Realize();}
+ 
++    virtual wxRibbonBar* GetAncestorRibbonBar()const;
++
+     // Finds the best width and height given the parent's width and height
+     virtual wxSize GetBestSizeForParentSize(const wxSize& WXUNUSED(parentSize)) const { return GetBestSize(); }
+ 
+Index: include/wx/ribbon/art.h
+===================================================================
+--- include/wx/ribbon/art.h	(revision 71378)
++++ include/wx/ribbon/art.h	(working copy)
+@@ -101,6 +101,8 @@
+     wxRIBBON_ART_PANEL_ACTIVE_BACKGROUND_TOP_GRADIENT_COLOUR,
+     wxRIBBON_ART_PANEL_ACTIVE_BACKGROUND_COLOUR,
+     wxRIBBON_ART_PANEL_ACTIVE_BACKGROUND_GRADIENT_COLOUR,
++    wxRIBBON_ART_PANEL_BUTTON_FACE_COLOUR,
++    wxRIBBON_ART_PANEL_BUTTON_HOVER_FACE_COLOUR,
+     wxRIBBON_ART_PAGE_BORDER_COLOUR,
+     wxRIBBON_ART_PAGE_BACKGROUND_TOP_COLOUR,
+     wxRIBBON_ART_PAGE_BACKGROUND_TOP_GRADIENT_COLOUR,
+@@ -327,6 +329,11 @@
+                         wxSize size,
+                         wxPoint* client_offset) = 0;
+ 
++    virtual wxRect GetPanelExtButtonArea(
++                        wxDC& dc,
++                        const wxRibbonPanel* wnd,
++                        wxRect rect) = 0;
++
+     virtual wxSize GetGallerySize(
+                         wxDC& dc,
+                         const wxRibbonGallery* wnd,
+@@ -511,6 +518,11 @@
+                         wxSize size,
+                         wxPoint* client_offset);
+ 
++    wxRect GetPanelExtButtonArea(
++                        wxDC& dc,
++                        const wxRibbonPanel* wnd,
++                        wxRect rect);
++
+     wxSize GetGallerySize(
+                         wxDC& dc,
+                         const wxRibbonGallery* wnd,
+@@ -592,6 +604,7 @@
+     wxBitmap m_gallery_down_bitmap[4];
+     wxBitmap m_gallery_extension_bitmap[4];
+     wxBitmap m_toolbar_drop_bitmap;
++    wxBitmap m_panel_extension_bitmap[2];
+ 
+     wxColour m_primary_scheme_colour;
+     wxColour m_secondary_scheme_colour;
+@@ -614,6 +627,8 @@
+     wxColour m_panel_active_background_gradient_colour;
+     wxColour m_panel_active_background_top_colour;
+     wxColour m_panel_active_background_top_gradient_colour;
++    wxColour m_panel_button_face_colour;
++    wxColour m_panel_button_hover_face_colour;
+     wxColour m_page_background_colour;
+     wxColour m_page_background_gradient_colour;
+     wxColour m_page_background_top_colour;
+@@ -660,6 +675,7 @@
+     wxBrush m_tab_ctrl_background_brush;
+     wxBrush m_panel_label_background_brush;
+     wxBrush m_panel_hover_label_background_brush;
++    wxBrush m_panel_hover_button_background_brush;
+     wxBrush m_gallery_hover_background_brush;
+     wxBrush m_gallery_button_background_top_brush;
+     wxBrush m_gallery_button_hover_background_top_brush;
+@@ -675,6 +691,7 @@
+     wxPen m_panel_border_gradient_pen;
+     wxPen m_panel_minimised_border_pen;
+     wxPen m_panel_minimised_border_gradient_pen;
++    wxPen m_panel_hover_button_border_pen;
+     wxPen m_tab_border_pen;
+     wxPen m_button_bar_hover_border_pen;
+     wxPen m_button_bar_active_border_pen;
+@@ -737,6 +754,11 @@
+                         wxSize size,
+                         wxPoint* client_offset);
+ 
++    wxRect GetPanelExtButtonArea(
++                        wxDC& dc,
++                        const wxRibbonPanel* wnd,
++                        wxRect rect);
++
+     void DrawTabCtrlBackground(
+                         wxDC& dc,
+                         wxWindow* wnd,
+Index: interface/wx/ribbon/panel.h
+===================================================================
+--- interface/wx/ribbon/panel.h	(revision 71378)
++++ interface/wx/ribbon/panel.h	(working copy)
+@@ -7,6 +7,39 @@
+ ///////////////////////////////////////////////////////////////////////////////
+ 
+ /**
++    @class wxRibbonPanelEvent
++
++    Event used to indicate various actions relating to a wxRibbonPanel.
++
++    See wxRibbonPanel for available event types.
++
++    @library{wxribbon}
++    @category{events,ribbon}
++
++    @see wxRibbonPanel
++*/
++class wxRibbonPanelEvent : public wxCommandEvent
++{
++public:
++    /**
++        Constructor.
++    */
++    wxRibbonPanelEvent(wxEventType command_type = wxEVT_NULL,
++                       int win_id = 0,
++                       wxRibbonPanel* panel = NULL)
++
++    /**
++        Returns the panel relating to this event.
++    */
++    wxRibbonPanel* GetPanel();
++    
++    /**
++        Sets the page relating to this event.
++    */
++    void SetPanel(wxRibbonPanel* page);
++};
++
++/**
+     @class wxRibbonPanel
+ 
+     Serves as a container for a group of (ribbon) controls. A wxRibbonPage will
+@@ -53,6 +86,11 @@
+         toolbar rows to take full advantage of this wrapping behaviour.
+     @endStyleTable
+ 
++    @beginEventEmissionTable{wxRibbonPanelEvent}
++    @event{EVT_RIBBONPANEL_EXTBUTTON_ACTIVATED(id, func)}
++        Triggered when the user activate the extended button of the panel.
++    @endEventTable
++
+     @library{wxribbon}
+     @category{ribbon}
+ */
+@@ -124,6 +162,12 @@
+     const wxBitmap& GetMinimisedIcon() const;
+ 
+     /**
++        Test if the panel has an extended button.
++        @return @true if the panel and its wxRibbonBar allow it in their styles.
++    */
++    virtual bool HasExtButton() const;    
++
++    /**
+         Query if the panel is currently minimised.
+     */
+     bool IsMinimised() const;
+@@ -141,6 +185,11 @@
+     bool IsHovered() const;
+ 
+     /**
++        Query if the mouse is currently hovered the extended button.
++    */
++    bool IsExtButtonHovered() const;    
++
++    /**
+         Query if the panel can automatically minimise itself at small sizes.
+     */
+     bool CanAutoMinimise() const;
+Index: interface/wx/ribbon/control.h
+===================================================================
+--- interface/wx/ribbon/control.h	(revision 71378)
++++ interface/wx/ribbon/control.h	(working copy)
+@@ -149,6 +149,13 @@
+     bool Realise();
+ 
+     /**
++        Get the first ancestor which is a wxRibbonBar (or derived) or NULL
++        if not having such parent.
++     */
++    virtual wxRibbonBar* GetAncestorRibbonBar()const;
++
++    
++    /**
+         Finds the best width and height given the parent's width and height.
+         Used to implement the wxRIBBON_PANEL_FLEXIBLE panel style.
+     */
+Index: interface/wx/ribbon/art.h
+===================================================================
+--- interface/wx/ribbon/art.h	(revision 71378)
++++ interface/wx/ribbon/art.h	(working copy)
+@@ -776,8 +776,22 @@
+                         const wxRibbonPanel* wnd,
+                         wxSize size,
+                         wxPoint* client_offset) = 0;
+-    
++
+     /**
++        Calculate the position and size of the extended button of the panel.
++        @param dc
++            A device context to use if one is required for size calculations.
++        @param wnd
++            The ribbon panel in question.
++        @param rect
++            The panel rectangle from which calculate extended button rectangle.
++    */
++    virtual wxRect GetPanelExtButtonArea(
++                        wxDC& dc,
++                        const wxRibbonPanel* wnd,
++                        wxRect rect) = 0;
++
++    /**
+         Calculate the size of a wxRibbonGallery control for a given client
+         size. This should increment the given size by enough to fit the gallery
+         border, buttons, and any other chrome.
+Index: samples/ribbon/ribbondemo.cpp
+===================================================================
+--- samples/ribbon/ribbondemo.cpp	(revision 71378)
++++ samples/ribbon/ribbondemo.cpp	(working copy)
+@@ -129,6 +129,8 @@
+ 
+     void OnTogglePanels(wxCommandEvent& evt);
+ 
++    void OnExtButton(wxRibbonPanelEvent& evt);
++
+ protected:
+     wxRibbonGallery* PopulateColoursPanel(wxWindow* panel, wxColour def,
+         int gallery_id);
+@@ -222,6 +224,7 @@
+ EVT_MENU(ID_POSITION_TOP_ICONS, MyFrame::OnPositionTopIcons)
+ EVT_MENU(ID_POSITION_TOP_BOTH, MyFrame::OnPositionTopBoth)
+ EVT_TOGGLEBUTTON(ID_TOGGLE_PANELS, MyFrame::OnTogglePanels)
++EVT_RIBBONPANEL_EXTBUTTON_ACTIVATED(wxID_ANY, MyFrame::OnExtButton)
+ END_EVENT_TABLE()
+ 
+ #include "align_center.xpm"
+@@ -250,13 +253,13 @@
+ MyFrame::MyFrame()
+     : wxFrame(NULL, wxID_ANY, wxT("wxRibbon Sample Application"), wxDefaultPosition, wxSize(800, 600), wxDEFAULT_FRAME_STYLE)
+ {
+-    m_ribbon = new wxRibbonBar(this, wxID_ANY);
++    m_ribbon = new wxRibbonBar(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxRIBBON_BAR_DEFAULT_STYLE|wxRIBBON_BAR_SHOW_PANEL_EXT_BUTTONS);
+ 
+     {
+         wxRibbonPage* home = new wxRibbonPage(m_ribbon, wxID_ANY, wxT("Examples"), ribbon_xpm);
+         wxRibbonPanel *toolbar_panel = new wxRibbonPanel(home, wxID_ANY, wxT("Toolbar"), 
+                                             wxNullBitmap, wxDefaultPosition, wxDefaultSize, 
+-                                            wxRIBBON_PANEL_NO_AUTO_MINIMISE);
++                                            wxRIBBON_PANEL_NO_AUTO_MINIMISE|wxRIBBON_PANEL_EXT_BUTTON);
+         wxRibbonToolBar *toolbar = new wxRibbonToolBar(toolbar_panel, ID_MAIN_TOOLBAR);
+         toolbar->AddToggleTool(wxID_JUSTIFY_LEFT, align_left_xpm);
+         toolbar->AddToggleTool(wxID_JUSTIFY_CENTER , align_center_xpm);
+@@ -821,6 +824,11 @@
+     m_ribbon->ShowPanels(m_togglePanels->GetValue());
+ }
+ 
++void MyFrame::OnExtButton(wxRibbonPanelEvent& WXUNUSED(evt))
++{
++    wxMessageBox("Extended button activated");
++}
++
+ void MyFrame::AddText(wxString msg)
+ {
+     m_logwindow->AppendText(msg);

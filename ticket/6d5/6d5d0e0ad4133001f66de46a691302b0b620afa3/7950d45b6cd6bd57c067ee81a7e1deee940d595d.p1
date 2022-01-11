@@ -1,0 +1,212 @@
+--- toplevel-o.cpp	2007-06-23 06:51:24.000000000 +0200
++++ toplevel.cpp	2007-08-03 11:51:05.000000000 +0200
+@@ -7,6 +7,25 @@
+ // Licence:     wxWindows licence
+ /////////////////////////////////////////////////////////////////////////////
+ 
++// A note on GTK top level window positioning:
++// For a top level widget, we have both the widget position and size,
++// and the container frame position and size (the frame includes the 
++// window manager decorations). 
++// When positioning a window from wxWidgets point of view, we use the 
++// position and size of the full frame. 
++// GTK hoever works with an odd mix of these two coorinate systems. 
++// GTK expects to receive:
++// - In calls to gtk_widget_set_uposition and gtk_window_move it  
++//   expects the position of the container frame
++// - In calls to gtk_window_resize the size of the widget
++//
++// This gives a rectangle that does not correspond to either the frame 
++// nor the widget.
++// The variables m_width, m_height is the widget width/height (GTK style)
++// The variables m_x and m_y is the frame position (also GTK style). 
++// - ATS
++ 
++
+ // For compilers that support precompilation, includes "wx.h".
+ #include "wx/wxprec.h"
+ 
+@@ -63,6 +82,56 @@
+ // send any activate events at all
+ static int g_sendActivateEvent = -1;
+ 
++
++
++// This caches decoration sizes, so we can show windows with correct 
++// size when it's resized on creation, and reasonably well when the 1st
++// window of its style is shown.
++#define WX_GTK_MAX_STYLE_DECOR_CACHE 16		// We have limited number of distinct frame types
++wxSize g_decor_sizes[WX_GTK_MAX_STYLE_DECOR_CACHE];
++int    g_decor_style[WX_GTK_MAX_STYLE_DECOR_CACHE];
++
++wxSize GetDecorSizeForStyle( int gdkDecor )
++{
++    for( int ix=0; ix<WX_GTK_MAX_STYLE_DECOR_CACHE && g_decor_style[ix]; ix++ )
++    {
++    	if( g_decor_style[ix]==gdkDecor )
++    		return g_decor_sizes[ix];
++    }
++    // Calculate some reasonable default values - Only used when 1st window of a type is created
++    int w=0, h=0;
++    if( gdkDecor&GDK_DECOR_TITLE )
++    	h += 22;
++    if( gdkDecor&GDK_DECOR_BORDER )
++    {	
++    	w += 2*5;
++    	h += gdkDecor&GDK_DECOR_TITLE ? 5 : 2*5;
++    }
++    if( gdkDecor&GDK_DECOR_MENU )
++    	; // h += 18;	// When testing it seems that the menu is not included in decoration size
++    	
++    return wxSize(w,h); 
++}
++
++void SetDecorSizeForStyle( int gdkDecor, wxSize sz )
++{
++    // For some themes, negative values show up here (ignore)
++    // (It probably happens in the middle of a move/resize, 
++    //  where the state is inconsistent).
++    if( sz.x<0 || sz.y<0 ) return;
++    
++    for( int ix=0; ix<WX_GTK_MAX_STYLE_DECOR_CACHE; ix++ )
++    {
++    	if( !g_decor_style[ix] || g_decor_style[ix]==gdkDecor ){
++    		g_decor_style[ix] = gdkDecor;
++    		g_decor_sizes[ix] = sz;
++    		return;
++    	}
++    }
++}
++
++
++
+ //-----------------------------------------------------------------------------
+ // RequestUserAttention related functions
+ //-----------------------------------------------------------------------------
+@@ -378,6 +447,8 @@
+ }
+ }
+ 
++
++
+ // ----------------------------------------------------------------------------
+ // wxTopLevelWindowGTK creation
+ // ----------------------------------------------------------------------------
+@@ -532,10 +603,14 @@
+                       G_CALLBACK (wxgtk_tlw_size_request_callback), this);
+     PostCreation();
+ 
++    /*
++    // Postpone until we know decoration size better
+     if ((m_x != -1) || (m_y != -1))
+         gtk_widget_set_uposition( m_widget, m_x, m_y );
+ 
+     gtk_window_set_default_size( GTK_WINDOW(m_widget), m_width, m_height );
++    */
++    
+ 
+     //  we cannot set MWM hints and icons before the widget has
+     //  been realized, so we do this directly after realization
+@@ -607,7 +682,19 @@
+            m_gdkFunc |= GDK_FUNC_RESIZE;
+            m_gdkDecor |= GDK_DECOR_RESIZEH;
+         }
++        
++        // Adjust the size we have (which is requested size including decorations)
++        // GDK adds the decorations on top of this size, so we must reduce accordingly
++        wxSize sz = GetDecorSizeForStyle( m_gdkDecor );
++        m_width -= sz.GetWidth();
++        m_height -= sz.GetHeight();
+     }
++    
++    if ((m_x != -1) || (m_y != -1))
++        gtk_widget_set_uposition( m_widget, m_x, m_y );
++
++    gtk_window_set_default_size( GTK_WINDOW(m_widget), m_width, m_height );
++    
+ 
+     return true;
+ }
+@@ -785,6 +872,23 @@
+ // window geometry
+ // ----------------------------------------------------------------------------
+ 
++void wxTopLevelWindowGTK::ConstrainSize()
++{
++    // This is just copied from wxWindowGTK, with added adjustment for decorations.
++    wxSize minSize = GetMinSize();
++    wxSize maxSize = GetMaxSize();
++    // Min and max sizes are again including decorations. Compensate.
++    // Our size is without decorations
++    wxSize sz = GetDecorSizeForStyle( m_gdkDecor );
++    minSize -= sz;
++    maxSize -= sz;
++    if (minSize.x > 0 && m_width  < minSize.x) m_width  = minSize.x;
++    if (minSize.y > 0 && m_height < minSize.y) m_height = minSize.y;
++    if (maxSize.x > 0 && m_width  > maxSize.x) m_width  = maxSize.x;
++    if (maxSize.y > 0 && m_height > maxSize.y) m_height = maxSize.y;
++}
++
++
+ void wxTopLevelWindowGTK::GTKDoGetSize(int *width, int *height) const
+ {
+     return wxTopLevelWindowBase::DoGetSize(width, height);
+@@ -874,15 +978,19 @@
+     GTKDoSetSize(width, height);
+ }
+ 
++
+ void wxTopLevelWindowGTK::DoGetSize(int *width, int *height) const
+ {
+     wxCHECK_RET( m_widget, wxT("invalid frame") );
+ 
+     if ( !m_widget->window )
+     {
+-        // this can happen if we're called before the window is realized, so
+-        // don't assert but just return the stored values
++        // this can happen if we're called before the window is realized.
++        // Adjust return value with cached decoration values
+         GTKDoGetSize(width, height);
++        wxSize sz_decor = GetDecorSizeForStyle( m_gdkDecor );
++		if( width ) *width += sz_decor.GetWidth();
++		if( height ) *height += sz_decor.GetHeight();
+         return;
+     }
+ 
+@@ -893,6 +1001,8 @@
+         *width = rect.width;
+     if ( height )
+         *height = rect.height;
++
++    SetDecorSizeForStyle( m_gdkDecor, wxSize(rect.width-m_width,rect.height-m_height) );
+ }
+ 
+ void wxTopLevelWindowGTK::DoGetClientSize( int *width, int *height ) const
+@@ -931,8 +1041,14 @@
+ {
+     wxTopLevelWindowBase::DoSetSizeHints( minW, minH, maxW, maxH, incW, incH );
+ 
+-    const wxSize minSize = GetMinSize();
+-    const wxSize maxSize = GetMaxSize();
++    wxSize minSize = GetMinSize();
++    wxSize maxSize = GetMaxSize();
++	// Remove decoration size, GTK uses size hints excluding decorations
++    // minSize and maxSize include them.
++    wxSize sz_decor = GetDecorSizeForStyle(m_gdkDecor);
++    minSize -= sz_decor; 
++    maxSize -= sz_decor; 
++    
+     GdkGeometry hints;
+     int hints_mask = 0;
+     if (minSize.x > 0 || minSize.y > 0)
+@@ -978,7 +1094,7 @@
+     m_sizeSet = true;
+ 
+     // send size event to frame
+-    wxSizeEvent event( wxSize(m_width,m_height), GetId() );
++    wxSizeEvent event( wxSize(m_width,m_height)+GetDecorSizeForStyle(m_gdkDecor), GetId() );
+     event.SetEventObject( this );
+     GetEventHandler()->ProcessEvent( event );
+ 
+
+ 	  	 

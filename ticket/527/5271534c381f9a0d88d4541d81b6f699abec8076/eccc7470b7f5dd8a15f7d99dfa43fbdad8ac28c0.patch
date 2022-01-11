@@ -1,0 +1,163 @@
+Index: wxWidgets-2.8/src/common/timercmn.cpp
+===================================================================
+--- wxWidgets-2.8/src/common/timercmn.cpp	(revision 53558)
++++ wxWidgets-2.8/src/common/timercmn.cpp	(working copy)
+@@ -59,13 +59,6 @@
+ 
+ bool wxTimerBase::Start(int milliseconds, bool oneShot)
+ {
+-    // under MSW timers only work when they're started from the main thread so
+-    // let the caller know about it
+-#if wxUSE_THREADS
+-    wxASSERT_MSG( wxThread::IsMain(),
+-                  _T("timer can only be started from the main thread") );
+-#endif // wxUSE_THREADS
+-
+     if ( IsRunning() )
+     {
+         // not stopping the already running timer might work for some
+Index: wxWidgets-2.8/src/msw/timer.cpp
+===================================================================
+--- wxWidgets-2.8/src/msw/timer.cpp	(revision 53558)
++++ wxWidgets-2.8/src/msw/timer.cpp	(working copy)
+@@ -41,6 +41,8 @@
+ WX_DECLARE_HASH_MAP(unsigned long, wxTimer *, wxIntegerHash, wxIntegerEqual,
+                     wxTimerMap);
+ 
++wxCRIT_SECT_DECLARE(timerCrit);
++
+ // instead of using a global here, wrap it in a static function as otherwise it
+ // could have been used before being initialized if a timer object were created
+ // globally
+@@ -88,13 +90,30 @@
+ 
+     wxCHECK_MSG( m_milli > 0, false, wxT("invalid value for timer timeout") );
+ 
+-    m_id = ::SetTimer
+-             (
+-                NULL,                       // don't use window
+-                1,                          // id ignored with NULL hwnd anyhow
+-                (UINT)m_milli,              // delay
+-                wxTimerProc                 // timer proc to call
+-             );
++    wxWindow*   ownerWin = m_owner ? dynamic_cast<wxWindow*>((wxWindow*)m_owner) : 0;
++    HWND        ownerHandle = ownerWin ? (HWND)ownerWin->GetHandle() : 0;
++    if ( ownerHandle )
++        m_id = ::SetTimer
++                 (  ownerHandle,                // use window
++                    m_idTimer,                  // timer id
++                    (UINT)m_milli,              // delay
++                    NULL                        // no timer proc
++                 );
++    else {
++        // under MSW onerless timers only work when they're started from the main thread so
++        // let the caller know about it
++#if wxUSE_THREADS
++        wxASSERT_MSG( wxThread::IsMain(),
++                      _T("timer can only be started from the main thread when it has no owner") );
++#endif // wxUSE_THREADS
++        m_id = ::SetTimer
++                 (
++                    NULL,                       // don't use window
++                    1,                          // id ignored with NULL hwnd anyhow
++                    (UINT)m_milli,              // delay
++                    wxTimerProc                 // timer proc to call
++                 );
++    }
+ 
+     if ( !m_id )
+     {
+@@ -106,17 +125,23 @@
+     // check that SetTimer() didn't reuse an existing id: according to the MSDN
+     // this can happen and this would be catastrophic to us as we rely on ids
+     // uniquely identifying the timers because we use them as keys in the hash
++    wxENTER_CRIT_SECT(timerCrit);
+     if ( TimerMap().find(m_id) != TimerMap().end() )
+     {
+-        wxLogError(_("Timer creation failed."));
++        wxLEAVE_CRIT_SECT(timerCrit);
++        wxLogError(_("Timer creation failed - duplicate timer id."));
+ 
+-        ::KillTimer(NULL, m_id);
++        if ( ownerHandle )
++            ::KillTimer(ownerHandle, m_id);
++        else
++            ::KillTimer(NULL, m_id);
+         m_id = 0;
+ 
+         return false;
+     }
+ 
+     TimerMap()[m_id] = this;
++    wxLEAVE_CRIT_SECT(timerCrit);
+ 
+     return true;
+ }
+@@ -125,14 +150,31 @@
+ {
+     if ( m_id )
+     {
+-        ::KillTimer(NULL, m_id);
++        wxWindow*   ownerWin = m_owner ? dynamic_cast<wxWindow*>((wxWindow*)m_owner) : 0;
++        HWND        ownerHandle = ownerWin ? (HWND)ownerWin->GetHandle() : 0;
++        if ( ownerHandle )
++            ::KillTimer(ownerHandle, m_id);
++        else
++            ::KillTimer(NULL, m_id);
+ 
++        wxENTER_CRIT_SECT(timerCrit);
+         TimerMap().erase(m_id);
++        wxLEAVE_CRIT_SECT(timerCrit);
+     }
+ 
+     m_id = 0;
+ }
+ 
++wxTimer * wxTimer::FindTimer(unsigned long idTimer)
++{
++    wxENTER_CRIT_SECT(timerCrit);
++    wxTimerMap::iterator node = TimerMap().find((unsigned long)idTimer);
++    wxTimerMap::iterator notfound = TimerMap().end();
++    wxLEAVE_CRIT_SECT(timerCrit);
++
++    return( node == notfound ? NULL : node->second);
++}
++
+ // ----------------------------------------------------------------------------
+ // private functions
+ // ----------------------------------------------------------------------------
+@@ -150,14 +192,14 @@
+ void WINAPI
+ wxTimerProc(HWND WXUNUSED(hwnd),
+             UINT WXUNUSED(msg),
+-            UINT_PTR idTimer,
++            UINT idTimer,
+             DWORD WXUNUSED(dwTime))
+ {
+-    wxTimerMap::iterator node = TimerMap().find((unsigned long)idTimer);
+-
+-    wxCHECK_RET( node != TimerMap().end(), wxT("bogus timer id in wxTimerProc") );
+-
+-    wxProcessTimer(*(node->second));
++    wxTimer * timer = wxTimer::FindTimer((unsigned long)idTimer);
++    if (timer == NULL)
++        wxFAIL_MSG("bogus timer id in wxTimerProc");
++    else
++        wxProcessTimer(*timer);
+ }
+ 
+ #endif // wxUSE_TIMER
+Index: wxWidgets-2.8/include/wx/msw/timer.h
+===================================================================
+--- wxWidgets-2.8/include/wx/msw/timer.h	(revision 53558)
++++ wxWidgets-2.8/include/wx/msw/timer.h	(working copy)
+@@ -26,6 +26,7 @@
+     virtual void Stop();
+ 
+     virtual bool IsRunning() const { return m_id != 0; }
++    static wxTimer * FindTimer(unsigned long idTimer);
+ 
+ protected:
+     void Init();
+
+ 	  	 

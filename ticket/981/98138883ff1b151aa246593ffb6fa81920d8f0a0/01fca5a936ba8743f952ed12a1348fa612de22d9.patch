@@ -1,0 +1,3031 @@
+Index: src/gtk/evtloop.cpp
+===================================================================
+--- src/gtk/evtloop.cpp	(revisione 58817)
++++ src/gtk/evtloop.cpp	(copia locale)
+@@ -36,6 +36,8 @@
+ // wxEventLoop implementation
+ // ============================================================================
+
++extern GtkWidget *wxGetRootWindow();
++
+ // ----------------------------------------------------------------------------
+ // wxEventLoop running and exiting
+ // ----------------------------------------------------------------------------
+@@ -126,4 +128,156 @@
+     return !quit;
+ }
+
++//-----------------------------------------------------------------------------
++// DoYield
++//-----------------------------------------------------------------------------
++
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
++{
++    if ( m_isInsideYield )
++    {
++        if ( !onlyIfNeeded )
++        {
++            wxFAIL_MSG( wxT("wxYield called recursively" ) );
++        }
++
++        return false;
++    }
++
++#if wxUSE_THREADS
++    if ( !wxThread::IsMain() )
++    {
++        // can't call gtk_main_iteration() from other threads like this
++        return true;
++    }
++#endif // wxUSE_THREADS
++
++    m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
++
++#if wxUSE_LOG
++    // disable log flushing from here because a call to wxYield() shouldn't
++    // normally result in message boxes popping up &c
++    wxLog::Suspend();
++#endif
++
++    // NOTE: gtk_main_iteration() doesn't allow us to filter events, so we
++    //       rather use gtk_main_do_event() after filtering the events at
++    //       GDK level
++
++    GdkDisplay* disp = gtk_widget_get_display(wxGetRootWindow());
++
++    // gdk_display_get_event() will transform X11 events into GDK events
++    // and will queue all of them in the display (private) structure;
++    // finally it will "unqueue" the last one and return it to us
++    GdkEvent* event = gdk_display_get_event(disp);
++    while (event)
++    {
++        // categorize the GDK event according to wxEventCategory.
++        // See http://library.gnome.org/devel/gdk/unstable/gdk-Events.html#GdkEventType
++        // for more info.
++
++        wxEventCategory cat = wxEVT_CATEGORY_UNKNOWN;
++        switch (event->type)
++        {
++        case GDK_SELECTION_REQUEST:
++        case GDK_SELECTION_NOTIFY:
++        case GDK_SELECTION_CLEAR:
++        case GDK_OWNER_CHANGE:
++            cat = wxEVT_CATEGORY_CLIPBOARD;
++            break;
++
++
++        case GDK_KEY_PRESS:
++        case GDK_KEY_RELEASE:
++        case GDK_BUTTON_PRESS:
++        case GDK_2BUTTON_PRESS:
++        case GDK_3BUTTON_PRESS:
++        case GDK_BUTTON_RELEASE:
++        case GDK_SCROLL:        // generated from mouse buttons
++        case GDK_CLIENT_EVENT:
++            cat = wxEVT_CATEGORY_USER_INPUT;
++            break;
++
+
++        case GDK_PROXIMITY_IN:
++        case GDK_PROXIMITY_OUT:
++
++        case GDK_MOTION_NOTIFY:
++        case GDK_ENTER_NOTIFY:
++        case GDK_LEAVE_NOTIFY:
++        case GDK_VISIBILITY_NOTIFY:
++        case GDK_PROPERTY_NOTIFY:
++
++        case GDK_FOCUS_CHANGE:
++        case GDK_CONFIGURE:
++        case GDK_WINDOW_STATE:
++        case GDK_SETTING:
++        case GDK_DELETE:
++        case GDK_DESTROY:
++
++        case GDK_EXPOSE:
++        case GDK_NO_EXPOSE:
++        case GDK_MAP:
++        case GDK_UNMAP:
++        //case GDK_DAMAGE:
++
++        case GDK_DRAG_ENTER:
++        case GDK_DRAG_LEAVE:
++        case GDK_DRAG_MOTION:
++        case GDK_DRAG_STATUS:
++        case GDK_DROP_START:
++        case GDK_DROP_FINISHED:
++        case GDK_GRAB_BROKEN:
++            cat = wxEVT_CATEGORY_UI;
++            break;
++
++        default:
++            cat = wxEVT_CATEGORY_UNKNOWN;
++            break;
++        }
++
++        if (eventsToProcess & cat)
++            gtk_main_do_event(event);       // process it now
++        else
++            m_arrGdkEvents.Add(event);      // process it later
++
++        // get next event
++        event = gdk_display_get_event(disp);
++    }
++
++    if (eventsToProcess != wxEVT_CATEGORY_CLIPBOARD)
++    {
++        // It's necessary to call ProcessIdle() to update the frames sizes which
++        // might have been changed (it also will update other things set from
++        // OnUpdateUI() which is a nice (and desired) side effect). But we
++        // call ProcessIdle() only once since this is not meant for longish
++        // background jobs (controlled by wxIdleEvent::RequestMore() and the
++        // return value of Processidle().
++        ProcessIdle();      // ProcessIdle() also calls ProcessPendingEvents()
++    }
++    //else: if we are inside ~wxClipboardSync() and we call ProcessIdle() and
++    //      the user app contains an UI update handler which calls wxClipboard::IsSupported,
++    //      then we fall into a never-ending loop...
++
++    // put all unprocessed GDK events back in the queue
++    for (size_t i=0; i<m_arrGdkEvents.GetCount(); i++)
++    {
++        GdkEvent* ev = (GdkEvent*)m_arrGdkEvents[i];
++
++        // NOTE: gdk_display_put_event makes a copy of the event passed to it
++        gdk_display_put_event(disp, ev);
++        gdk_event_free(ev);
++    }
++
++    m_arrGdkEvents.Clear();
++
++#if wxUSE_LOG
++    // let the logs be flashed again
++    wxLog::Resume();
++#endif
++
++    m_isInsideYield = false;
++
++    return true;
++}
+Index: src/gtk/toplevel.cpp
+===================================================================
+--- src/gtk/toplevel.cpp	(revisione 58817)
++++ src/gtk/toplevel.cpp	(copia locale)
+@@ -1250,7 +1250,7 @@
+     // If RequestUserAttention is called for example right after a wxSleep, OnInternalIdle hasn't
+     // yet been processed, and the internal focus system is not up to date yet.
+     // wxYieldIfNeeded ensures the processing of it, but can have unwanted side effects - MR
+-    ::wxYieldIfNeeded();
++    wxEventLoopBase::GetActive()->YieldFor(wxEVT_CATEGORY_UI);
+
+     if(m_urgency_hint >= 0)
+         g_source_remove(m_urgency_hint);
+Index: src/gtk/clipbrd.cpp
+===================================================================
+--- src/gtk/clipbrd.cpp	(revisione 58817)
++++ src/gtk/clipbrd.cpp	(copia locale)
+@@ -32,6 +32,7 @@
+
+ #include "wx/scopedarray.h"
+ #include "wx/scopeguard.h"
++#include "wx/evtloop.h"
+
+ #include "wx/gtk/private.h"
+
+@@ -75,7 +76,7 @@
+     ~wxClipboardSync()
+     {
+         while (ms_clipboard)
+-            wxTheApp->YieldFor(wxEVT_CATEGORY_CLIPBOARD);
++            wxEventLoopBase::GetActive()->YieldFor(wxEVT_CATEGORY_CLIPBOARD);
+     }
+
+     // this method must be called by GTK+ callbacks to indicate that we got the
+Index: src/gtk/app.cpp
+===================================================================
+--- src/gtk/app.cpp	(revisione 58817)
++++ src/gtk/app.cpp	(copia locale)
+@@ -45,167 +45,6 @@
+ #endif
+
+ //-----------------------------------------------------------------------------
+-// global data
+-//-----------------------------------------------------------------------------
+-
+-static GtkWidget *gs_RootWindow = NULL;
+-static wxArrayPtrVoid g_arrGdkEvents;
+-
+-//-----------------------------------------------------------------------------
+-// wxYield
+-//-----------------------------------------------------------------------------
+-
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-    if ( m_isInsideYield )
+-    {
+-        if ( !onlyIfNeeded )
+-        {
+-            wxFAIL_MSG( wxT("wxYield called recursively" ) );
+-        }
+-
+-        return false;
+-    }
+-
+-#if wxUSE_THREADS
+-    if ( !wxThread::IsMain() )
+-    {
+-        // can't call gtk_main_iteration() from other threads like this
+-        return true;
+-    }
+-#endif // wxUSE_THREADS
+-
+-    m_isInsideYield = true;
+-    m_eventsToProcessInsideYield = eventsToProcess;
+-
+-#if wxUSE_LOG
+-    // disable log flushing from here because a call to wxYield() shouldn't
+-    // normally result in message boxes popping up &c
+-    wxLog::Suspend();
+-#endif
+-
+-    // NOTE: gtk_main_iteration() doesn't allow us to filter events, so we
+-    //       rather use gtk_main_do_event() after filtering the events at
+-    //       GDK level
+-
+-    GdkDisplay* disp = gtk_widget_get_display(gs_RootWindow);
+-
+-    // gdk_display_get_event() will transform X11 events into GDK events
+-    // and will queue all of them in the display (private) structure;
+-    // finally it will "unqueue" the last one and return it to us
+-    GdkEvent* event = gdk_display_get_event(disp);
+-    while (event)
+-    {
+-        // categorize the GDK event according to wxEventCategory.
+-        // See http://library.gnome.org/devel/gdk/unstable/gdk-Events.html#GdkEventType
+-        // for more info.
+-
+-        wxEventCategory cat = wxEVT_CATEGORY_UNKNOWN;
+-        switch (event->type)
+-        {
+-        case GDK_SELECTION_REQUEST:
+-        case GDK_SELECTION_NOTIFY:
+-        case GDK_SELECTION_CLEAR:
+-        case GDK_OWNER_CHANGE:
+-            cat = wxEVT_CATEGORY_CLIPBOARD;
+-            break;
+-
+-
+-        case GDK_KEY_PRESS:
+-        case GDK_KEY_RELEASE:
+-        case GDK_BUTTON_PRESS:
+-        case GDK_2BUTTON_PRESS:
+-        case GDK_3BUTTON_PRESS:
+-        case GDK_BUTTON_RELEASE:
+-        case GDK_SCROLL:        // generated from mouse buttons
+-        case GDK_CLIENT_EVENT:
+-            cat = wxEVT_CATEGORY_USER_INPUT;
+-            break;
+-
+-
+-        case GDK_PROXIMITY_IN:
+-        case GDK_PROXIMITY_OUT:
+-
+-        case GDK_MOTION_NOTIFY:
+-        case GDK_ENTER_NOTIFY:
+-        case GDK_LEAVE_NOTIFY:
+-        case GDK_VISIBILITY_NOTIFY:
+-        case GDK_PROPERTY_NOTIFY:
+-
+-        case GDK_FOCUS_CHANGE:
+-        case GDK_CONFIGURE:
+-        case GDK_WINDOW_STATE:
+-        case GDK_SETTING:
+-        case GDK_DELETE:
+-        case GDK_DESTROY:
+-
+-        case GDK_EXPOSE:
+-        case GDK_NO_EXPOSE:
+-        case GDK_MAP:
+-        case GDK_UNMAP:
+-        //case GDK_DAMAGE:
+-
+-        case GDK_DRAG_ENTER:
+-        case GDK_DRAG_LEAVE:
+-        case GDK_DRAG_MOTION:
+-        case GDK_DRAG_STATUS:
+-        case GDK_DROP_START:
+-        case GDK_DROP_FINISHED:
+-        case GDK_GRAB_BROKEN:
+-            cat = wxEVT_CATEGORY_UI;
+-            break;
+-
+-        default:
+-            cat = wxEVT_CATEGORY_UNKNOWN;
+-            break;
+-        }
+-
+-        if (eventsToProcess & cat)
+-            gtk_main_do_event(event);       // process it now
+-        else
+-            g_arrGdkEvents.Add(event);      // process it later
+-
+-        // get next event
+-        event = gdk_display_get_event(disp);
+-    }
+-
+-    if (eventsToProcess != wxEVT_CATEGORY_CLIPBOARD)
+-    {
+-        // It's necessary to call ProcessIdle() to update the frames sizes which
+-        // might have been changed (it also will update other things set from
+-        // OnUpdateUI() which is a nice (and desired) side effect). But we
+-        // call ProcessIdle() only once since this is not meant for longish
+-        // background jobs (controlled by wxIdleEvent::RequestMore() and the
+-        // return value of Processidle().
+-        ProcessIdle();      // ProcessIdle() also calls ProcessPendingEvents()
+-    }
+-    //else: if we are inside ~wxClipboardSync() and we call ProcessIdle() and
+-    //      the user app contains an UI update handler which calls wxClipboard::IsSupported,
+-    //      then we fall into a never-ending loop...
+-
+-    // put all unprocessed GDK events back in the queue
+-    for (size_t i=0; i<g_arrGdkEvents.GetCount(); i++)
+-    {
+-        GdkEvent* ev = (GdkEvent*)g_arrGdkEvents[i];
+-
+-        // NOTE: gdk_display_put_event makes a copy of the event passed to it
+-        gdk_display_put_event(disp, ev);
+-        gdk_event_free(ev);
+-    }
+-
+-    g_arrGdkEvents.Clear();
+-
+-#if wxUSE_LOG
+-    // let the logs be flashed again
+-    wxLog::Resume();
+-#endif
+-
+-    m_isInsideYield = false;
+-
+-    return true;
+-}
+-
+-//-----------------------------------------------------------------------------
+ // local functions
+ //-----------------------------------------------------------------------------
+
+@@ -324,12 +163,14 @@
+
+ GtkWidget* wxGetRootWindow()
+ {
+-    if (gs_RootWindow == NULL)
++    static GtkWidget *s_RootWindow = NULL;
++
++    if (s_RootWindow == NULL)
+     {
+-        gs_RootWindow = gtk_window_new( GTK_WINDOW_TOPLEVEL );
+-        gtk_widget_realize( gs_RootWindow );
++        s_RootWindow = gtk_window_new( GTK_WINDOW_TOPLEVEL );
++        gtk_widget_realize( s_RootWindow );
+     }
+-    return gs_RootWindow;
++    return s_RootWindow;
+ }
+
+ //-----------------------------------------------------------------------------
+Index: src/motif/evtloop.cpp
+===================================================================
+--- src/motif/evtloop.cpp	(revisione 58817)
++++ src/motif/evtloop.cpp	(copia locale)
+@@ -137,6 +137,30 @@
+     ::wxBreakDispatch();
+ }
+
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
++{
++    if ( m_isInsideYield )
++    {
++        if ( !onlyIfNeeded )
++        {
++            wxFAIL_MSG( wxT("wxYield called recursively" ) );
++        }
++
++        return false;
++    }
++
++    m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
++
++    while (wxTheApp && wxTheApp->Pending())
++        // TODO: implement event filtering using the eventsToProcess mask
++        wxTheApp->Dispatch();
++
++    m_isInsideYield = false;
++
++    return true;
++}
++
+ // ----------------------------------------------------------------------------
+ // wxEventLoop message processing dispatching
+ // ----------------------------------------------------------------------------
+Index: src/motif/app.cpp
+===================================================================
+--- src/motif/app.cpp	(revisione 58817)
++++ src/motif/app.cpp	(copia locale)
+@@ -468,32 +468,6 @@
+         .m_topLevelRealizedWidget = (Widget)widget;
+ }
+
+-// Yield to other processes
+-
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-    if ( m_isInsideYield )
+-    {
+-        if ( !onlyIfNeeded )
+-        {
+-            wxFAIL_MSG( wxT("wxYield called recursively" ) );
+-        }
+-
+-        return false;
+-    }
+-
+-    m_isInsideYield = true;
+-    m_eventsToProcessInsideYield = eventsToProcess;
+-
+-    wxEventLoopGuarantor dummyLoopIfNeeded;
+-    while (wxTheApp && wxTheApp->Pending())
+-        // TODO: implement event filtering using the eventsToProcess mask
+-        wxTheApp->Dispatch();
+-
+-    m_isInsideYield = false;
+-
+-    return true;
+-}
+
+ // ----------------------------------------------------------------------------
+ // accessors for C modules
+Index: src/mgl/app.cpp
+===================================================================
+--- src/mgl/app.cpp	(revisione 58817)
++++ src/mgl/app.cpp	(copia locale)
+@@ -44,56 +44,6 @@
+     exit(0);
+ }
+
+-//-----------------------------------------------------------------------------
+-// wxYield
+-//-----------------------------------------------------------------------------
+-
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-    if ( m_isInsideYield )
+-    {
+-        if ( !onlyIfNeeded )
+-        {
+-            wxFAIL_MSG( wxT("wxYield called recursively" ) );
+-        }
+-
+-        return false;
+-    }
+-
+-#if wxUSE_THREADS
+-    if ( !wxThread::IsMain() )
+-    {
+-        // can't process events from other threads, MGL is thread-unsafe
+-        return true;
+-    }
+-#endif // wxUSE_THREADS
+-
+-    m_isInsideYield = true;
+-    m_eventsToProcessInsideYield = eventsToProcess;
+-
+-    wxLog::Suspend();
+-
+-    wxEventLoopBase * const eventLoop = wxEventLoop::GetActive();
+-    if ( eventLoop )
+-    {
+-        // TODO: implement event filtering using the eventsToProcess mask
+-
+-        while (eventLoop->Pending())
+-            eventLoop->Dispatch();
+-    }
+-
+-    /* it's necessary to call ProcessIdle() to update the frames sizes which
+-       might have been changed (it also will update other things set from
+-       OnUpdateUI() which is a nice (and desired) side effect) */
+-    while (wxTheApp->ProcessIdle()) { }
+-
+-    wxLog::Resume();
+-
+-    m_isInsideYield = false;
+-
+-    return true;
+-}
+-
+
+ //-----------------------------------------------------------------------------
+ // wxWakeUpIdle
+Index: src/mgl/evtloop.cpp
+===================================================================
+--- src/mgl/evtloop.cpp	(revisione 58817)
++++ src/mgl/evtloop.cpp	(copia locale)
+@@ -184,3 +184,49 @@
+     return m_impl->GetKeepLooping();
+ }
+
++
++//-----------------------------------------------------------------------------
++// wxYield
++//-----------------------------------------------------------------------------
++
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
++{
++    if ( m_isInsideYield )
++    {
++        if ( !onlyIfNeeded )
++        {
++            wxFAIL_MSG( wxT("wxYield called recursively" ) );
++        }
++
++        return false;
++    }
++
++#if wxUSE_THREADS
++    if ( !wxThread::IsMain() )
++    {
++        // can't process events from other threads, MGL is thread-unsafe
++        return true;
++    }
++#endif // wxUSE_THREADS
++
++    m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
++
++    wxLog::Suspend();
++
++    // TODO: implement event filtering using the eventsToProcess mask
++
++    while (Pending())
++        Dispatch();
++
++    /* it's necessary to call ProcessIdle() to update the frames sizes which
++       might have been changed (it also will update other things set from
++       OnUpdateUI() which is a nice (and desired) side effect) */
++    while (wxTheApp->ProcessIdle()) { }
++
++    wxLog::Resume();
++
++    m_isInsideYield = false;
++
++    return true;
++}
+Index: src/common/event.cpp
+===================================================================
+--- src/common/event.cpp	(revisione 58817)
++++ src/common/event.cpp	(copia locale)
+@@ -145,16 +145,6 @@
+ // global variables
+ // ----------------------------------------------------------------------------
+
+-// List containing event handlers with pending events (each handler can occur
+-// at most once here)
+-wxList *wxHandlersWithPendingEvents = NULL;
+-wxList *wxHandlersWithPendingDelayedEvents = NULL;
+-
+-#if wxUSE_THREADS
+-    // protects wxHandlersWithPendingEvents list
+-    wxCriticalSection *wxHandlersWithPendingEventsLocker = NULL;
+-#endif
+-
+ // common event types are defined here, other event types are defined by the
+ // components which use them
+
+@@ -1037,10 +1027,6 @@
+ // wxEvtHandler
+ // ----------------------------------------------------------------------------
+
+-/*
+- * Event handler
+- */
+-
+ wxEvtHandler::wxEvtHandler()
+ {
+     m_nextHandler = NULL;
+@@ -1085,41 +1071,16 @@
+             delete entry;
+         }
+         delete m_dynamicEvents;
+-    };
++    }
+
+     if (m_pendingEvents)
+         m_pendingEvents->DeleteContents(true);
+     delete m_pendingEvents;
+
+-    // Remove us from wxHandlersWithPendingEvents if necessary.
+-    if ( wxHandlersWithPendingEvents )
+-    {
+-#if wxUSE_THREADS
+-        if (wxHandlersWithPendingEventsLocker)
+-            wxENTER_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
+-#endif
+-
+-        if ( wxHandlersWithPendingEvents->DeleteObject(this) )
+-        {
+-            // check that we were present only once in the list
+-            wxASSERT_MSG( !wxHandlersWithPendingEvents->Find(this),
+-                          "Handler occurs twice in wxHandlersWithPendingEvents list" );
+-        }
+-        //else: we weren't in this list at all, it's ok
+-
+-        if ( wxHandlersWithPendingDelayedEvents->DeleteObject(this) )
+-        {
+-            // check that we were present only once in the list
+-            wxASSERT_MSG( !wxHandlersWithPendingDelayedEvents->Find(this),
+-                          "Handler occurs twice in wxHandlersWithPendingDelayedEvents list" );
+-        }
+-        //else: we weren't in this list at all, it's ok
+-
+-#if wxUSE_THREADS
+-        if (wxHandlersWithPendingEventsLocker)
+-            wxLEAVE_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
+-#endif
+-    }
++    // Remove us from the list of the pending events if necessary.
++    wxEventLoopBase *loop = wxEventLoopBase::GetActive();
++    if (loop)
++        loop->RemovePendingEventHandler(this);
+
+     // we only delete object data, not untyped
+     if ( m_clientDataType == wxClientData_Object )
+@@ -1165,6 +1126,15 @@
+ {
+     wxCHECK_RET( event, "NULL event can't be posted" );
+
++    wxEventLoopBase* loop = wxEventLoopBase::GetActive();
++    if (!loop)
++    {
++        // we need an event loop which manages the list of event handlers with
++        // pending events... cannot proceed without it!
++        wxLogDebug("No event loop is running!");
++        return;
++    }
++
+     // 1) Add this event to our list of pending events
+     wxENTER_CRIT_SECT( m_pendingEventsLock );
+
+@@ -1176,14 +1146,7 @@
+     // 2) Add this event handler to list of event handlers that
+     //    have pending events.
+
+-    wxENTER_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
+-
+-    if ( !wxHandlersWithPendingEvents )
+-        wxHandlersWithPendingEvents = new wxList;
+-    if ( !wxHandlersWithPendingEvents->Find(this) )
+-        wxHandlersWithPendingEvents->Append(this);
+-
+-    wxLEAVE_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
++    loop->AppendPendingEventHandler(this);
+
+     // only release m_pendingEventsLock now because otherwise there is a race
+     // condition as described in the ticket #9093: we could process the event
+@@ -1200,6 +1163,16 @@
+
+ void wxEvtHandler::ProcessPendingEvents()
+ {
++
++    wxEventLoopBase* loop = wxEventLoopBase::GetActive();
++    if (!loop)
++    {
++        // we need an event loop which manages the list of event handlers with
++        // pending events... cannot proceed without it!
++        wxLogDebug("No event loop is running!");
++        return;
++    }
++
+     // we need to process only a single pending event in this call because
+     // each call to ProcessEvent() could result in the destruction of this
+     // same event handler (see the comment at the end of this function)
+@@ -1215,9 +1188,10 @@
+     wxEvent* pEvent = static_cast<wxEvent *>(node->GetData());
+
+     // find the first event which can be processed now:
+-    if (wxTheApp && wxTheApp->IsYielding())
++    wxEventLoopBase* evtLoop = wxEventLoopBase::GetActive();
++    if (evtLoop && evtLoop->IsYielding())
+     {
+-        while (node && pEvent && !wxTheApp->IsEventAllowedInsideYield(pEvent->GetEventCategory()))
++        while (node && pEvent && !evtLoop->IsEventAllowedInsideYield(pEvent->GetEventCategory()))
+         {
+             node = node->GetNext();
+             pEvent = node ? static_cast<wxEvent *>(node->GetData()) : NULL;
+@@ -1226,19 +1200,8 @@
+         if (!node)
+         {
+             // all our events are NOT processable now... signal this:
+-#if wxUSE_THREADS
+-            if (wxHandlersWithPendingEventsLocker)
+-                wxENTER_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
+-#endif
+-            // move us from the list of handlers with processable pending events
+-            // to the list of handlers with pending events which needs to be processed later
+-            wxHandlersWithPendingEvents->DeleteObject(this);
+-            if ( !wxHandlersWithPendingDelayedEvents->Find(this) )
+-                wxHandlersWithPendingDelayedEvents->Append(this);
+-#if wxUSE_THREADS
+-            if (wxHandlersWithPendingEventsLocker)
+-                wxLEAVE_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
+-#endif
++            loop->DelayPendingEventHandler(this);
++
+             wxLEAVE_CRIT_SECT( m_pendingEventsLock );
+
+             return;
+@@ -1252,19 +1215,11 @@
+     // same event again.
+     m_pendingEvents->Erase(node);
+
+-    // if there are no more pending events left, we don't need to stay in this
+-    // list
+     if ( m_pendingEvents->IsEmpty() )
+     {
+-#if wxUSE_THREADS
+-        if (wxHandlersWithPendingEventsLocker)
+-            wxENTER_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
+-#endif
+-        wxHandlersWithPendingEvents->DeleteObject(this);
+-#if wxUSE_THREADS
+-        if (wxHandlersWithPendingEventsLocker)
+-            wxLEAVE_CRIT_SECT(*wxHandlersWithPendingEventsLocker);
+-#endif
++        // if there are no more pending events left, we don't need to
++        // stay in this list
++        loop->RemovePendingEventHandler(this);
+     }
+
+     wxLEAVE_CRIT_SECT( m_pendingEventsLock );
+Index: src/common/appbase.cpp
+===================================================================
+--- src/common/appbase.cpp	(revisione 58817)
++++ src/common/appbase.cpp	(copia locale)
+@@ -162,11 +162,6 @@
+     GetTraits()->SetLocale();
+ #endif // wxUSE_INTL
+
+-#if wxUSE_THREADS
+-    wxHandlersWithPendingEventsLocker = new wxCriticalSection;
+-    wxHandlersWithPendingDelayedEvents = new wxList;
+-#endif
+-
+ #ifndef __WXPALMOS__
+     if ( m_appName.empty() && argv && argv[0] )
+     {
+@@ -190,17 +185,6 @@
+         delete m_mainLoop;
+         m_mainLoop = NULL;
+     }
+-
+-    delete wxHandlersWithPendingEvents;
+-    wxHandlersWithPendingEvents = NULL;
+-
+-    delete wxHandlersWithPendingDelayedEvents;
+-    wxHandlersWithPendingDelayedEvents = NULL;
+-
+-#if wxUSE_THREADS
+-    delete wxHandlersWithPendingEventsLocker;
+-    wxHandlersWithPendingEventsLocker = NULL;
+-#endif // wxUSE_THREADS
+ }
+
+ // ----------------------------------------------------------------------------
+@@ -291,7 +275,7 @@
+ }
+
+ // ----------------------------------------------------------------------------
+-// event processing
++// wxEventLoop redirection
+ // ----------------------------------------------------------------------------
+
+ int wxAppConsoleBase::MainLoop()
+@@ -331,81 +315,37 @@
+
+ bool wxAppConsoleBase::HasPendingEvents() const
+ {
+-    wxENTER_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
+-
+-    bool has = wxHandlersWithPendingEvents && !wxHandlersWithPendingEvents->IsEmpty();
+-
+-    wxLEAVE_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
++    wxEventLoopBase * const loop = wxEventLoopBase::GetActive();
+
+-    return has;
++    return loop && loop->HasPendingEvents();
+ }
+
+ void wxAppConsoleBase::SuspendProcessingOfPendingEvents()
+ {
+-    wxENTER_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
+-}
++    wxEventLoopBase * const loop = wxEventLoopBase::GetActive();
+
+-void wxAppConsoleBase::ResumeProcessingOfPendingEvents()
+-{
+-    wxLEAVE_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
++    if (loop) loop->SuspendProcessingOfPendingEvents();
+ }
+
+-/* static */
+-bool wxAppConsoleBase::IsMainLoopRunning()
++void wxAppConsoleBase::ResumeProcessingOfPendingEvents()
+ {
+-    const wxAppConsole * const app = GetInstance();
++    wxEventLoopBase * const loop = wxEventLoopBase::GetActive();
+
+-    return app && app->m_mainLoop != NULL;
++    if (loop) loop->ResumeProcessingOfPendingEvents();
+ }
+
+ void wxAppConsoleBase::ProcessPendingEvents()
+ {
+-#if wxUSE_THREADS
+-    if ( !wxHandlersWithPendingEventsLocker )
+-        return;
+-#endif
+-
+-    wxENTER_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
+-
+-    wxCHECK_RET( wxHandlersWithPendingDelayedEvents->IsEmpty(),
+-                 "this helper list should be empty" );
+-
+-    if (wxHandlersWithPendingEvents)
+-    {
+-        // iterate until the list becomes empty: the handlers remove themselves
+-        // from it when they don't have any more pending events
+-        wxList::compatibility_iterator node = wxHandlersWithPendingEvents->GetFirst();
+-        while (node)
+-        {
+-            // In ProcessPendingEvents(), new handlers might be added
+-            // and we can safely leave the critical section here.
+-            wxLEAVE_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
+-
+-            wxEvtHandler *handler = (wxEvtHandler *)node->GetData();
+-            handler->ProcessPendingEvents();
+-
+-            wxENTER_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
++    wxEventLoopBase * const loop = wxEventLoopBase::GetActive();
+
+-            // restart as the iterators could have been invalidated
+-            node = wxHandlersWithPendingEvents->GetFirst();
+-        }
++    if (loop) loop->ProcessPendingEvents();
+     }
+
+-    // now the wxHandlersWithPendingEvents is surely empty; however some event
+-    // handlers may have moved themselves into wxHandlersWithPendingDelayedEvents
+-    // because of a selective wxYield call in progress.
+-    // Now we need to move them back to wxHandlersWithPendingEvents so the next
+-    // call to this function has the chance of processing them:
+-    if (!wxHandlersWithPendingDelayedEvents->IsEmpty())
++bool wxAppConsoleBase::Yield(bool onlyIfNeeded)
+     {
+-        if (!wxHandlersWithPendingEvents)
+-            wxHandlersWithPendingEvents = new wxList;
+-
+-        WX_APPEND_LIST(wxHandlersWithPendingEvents, wxHandlersWithPendingDelayedEvents);
+-        wxHandlersWithPendingDelayedEvents->Clear();
+-    }
++    wxEventLoopBase * const loop = wxEventLoopBase::GetActive();
+
+-    wxLEAVE_CRIT_SECT( *wxHandlersWithPendingEventsLocker );
++    return loop && loop->Yield(onlyIfNeeded);
+ }
+
+ void wxAppConsoleBase::WakeUpIdle()
+@@ -416,14 +356,21 @@
+
+ bool wxAppConsoleBase::ProcessIdle()
+ {
+-    // process pending wx events before sending idle events
+-    ProcessPendingEvents();
++    wxEventLoopBase * const loop = wxEventLoopBase::GetActive();
++
++    return loop && loop->ProcessIdle();
++}
+
+-    wxIdleEvent event;
++// ----------------------------------------------------------------------------
++// events
++// ----------------------------------------------------------------------------
+
+-    event.SetEventObject(this);
+-    ProcessEvent(event);
+-    return event.MoreRequested();
++/* static */
++bool wxAppConsoleBase::IsMainLoopRunning()
++{
++    const wxAppConsole * const app = GetInstance();
++
++    return app && app->m_mainLoop != NULL;
+ }
+
+ int wxAppConsoleBase::FilterEvent(wxEvent& WXUNUSED(event))
+@@ -603,7 +550,6 @@
+         // normally wxLogFatalError doesn't return
+         return false;
+     }
+-#undef wxCMP
+
+     return true;
+ }
+Index: src/common/appcmn.cpp
+===================================================================
+--- src/common/appcmn.cpp	(revisione 58817)
++++ src/common/appcmn.cpp	(copia locale)
+@@ -40,6 +40,7 @@
+ #include "wx/msgout.h"
+ #include "wx/thread.h"
+ #include "wx/vidmode.h"
++#include "wx/evtloop.h"
+
+ #ifdef __WXDEBUG__
+     #if wxUSE_STACKWALKER
+@@ -78,9 +79,6 @@
+
+     m_isActive = true;
+
+-    m_isInsideYield = false;
+-    m_eventsToProcessInsideYield = wxEVT_CATEGORY_ALL;
+-
+     // We don't want to exit the app if the user code shows a dialog from its
+     // OnInit() -- but this is what would happen if we set m_exitOnFrameDelete
+     // to Yes initially as this dialog would be the last top level window.
+@@ -326,23 +324,22 @@
+     (void)ProcessEvent(event);
+ }
+
+-bool wxAppBase::IsEventAllowedInsideYield(wxEventCategory cat) const
+-{
+-    return (m_eventsToProcessInsideYield & cat) != 0;
+-}
+-
+ bool wxAppBase::SafeYield(wxWindow *win, bool onlyIfNeeded)
+ {
+     wxWindowDisabler wd(win);
+
+-    return Yield(onlyIfNeeded);
++    wxEventLoopBase * const loop = wxEventLoopBase::GetActive();
++
++    return loop && loop->Yield(onlyIfNeeded);
+ }
+
+ bool wxAppBase::SafeYieldFor(wxWindow *win, long eventsToProcess)
+ {
+     wxWindowDisabler wd(win);
+
+-    return YieldFor(eventsToProcess);
++    wxEventLoopBase * const loop = wxEventLoopBase::GetActive();
++
++    return loop && loop->YieldFor(eventsToProcess);
+ }
+
+
+Index: src/common/evtloopcmn.cpp
+===================================================================
+--- src/common/evtloopcmn.cpp	(revisione 58817)
++++ src/common/evtloopcmn.cpp	(copia locale)
+@@ -36,6 +36,143 @@
+
+ wxEventLoopBase *wxEventLoopBase::ms_activeLoop = NULL;
+
++wxEventLoopBase::wxEventLoopBase()
++{
++    m_isInsideYield = false;
++    m_eventsToProcessInsideYield = wxEVT_CATEGORY_ALL;
++}
++
++void wxEventLoopBase::DelayPendingEventHandler(wxEvtHandler* toDelay)
++{
++    wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
++
++    // move the handler from the list of handlers with processable pending events
++    // to the list of handlers with pending events which needs to be processed later
++    m_handlersWithPendingEvents.Remove(toDelay);
++
++    if (m_handlersWithPendingDelayedEvents.Index(toDelay) == wxNOT_FOUND)
++        m_handlersWithPendingDelayedEvents.Add(toDelay);
++
++    wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
++}
++
++void wxEventLoopBase::RemovePendingEventHandler(wxEvtHandler* toRemove)
++{
++    wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
++
++    if (m_handlersWithPendingEvents.Index(toRemove) != wxNOT_FOUND)
++    {
++        m_handlersWithPendingEvents.Remove(toRemove);
++
++        // check that the handler was present only once in the list
++        wxASSERT_MSG( m_handlersWithPendingEvents.Index(toRemove) == wxNOT_FOUND,
++                        "Handler occurs twice in the m_handlersWithPendingEvents list!" );
++    }
++    //else: it wasn't in this list at all, it's ok
++
++    if (m_handlersWithPendingDelayedEvents.Index(toRemove) != wxNOT_FOUND)
++    {
++        m_handlersWithPendingDelayedEvents.Remove(toRemove);
++
++        // check that the handler was present only once in the list
++        wxASSERT_MSG( m_handlersWithPendingDelayedEvents.Index(toRemove) == wxNOT_FOUND,
++                        "Handler occurs twice in m_handlersWithPendingDelayedEvents list!" );
++    }
++    //else: it wasn't in this list at all, it's ok
++
++    wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
++}
++
++void wxEventLoopBase::AppendPendingEventHandler(wxEvtHandler* toAppend)
++{
++    wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
++
++    if ( m_handlersWithPendingEvents.Index(toAppend) == wxNOT_FOUND )
++        m_handlersWithPendingEvents.Add(toAppend);
++
++    wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
++}
++
++bool wxEventLoopBase::HasPendingEvents() const
++{
++    wxENTER_CRIT_SECT(const_cast<wxEventLoopBase*>(this)->m_handlersWithPendingEventsLocker);
++
++    bool has = !m_handlersWithPendingEvents.IsEmpty();
++
++    wxLEAVE_CRIT_SECT(const_cast<wxEventLoopBase*>(this)->m_handlersWithPendingEventsLocker);
++
++    return has;
++}
++
++void wxEventLoopBase::SuspendProcessingOfPendingEvents()
++{
++    wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
++}
++
++void wxEventLoopBase::ResumeProcessingOfPendingEvents()
++{
++    wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
++}
++
++void wxEventLoopBase::ProcessPendingEvents()
++{
++    wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
++
++    wxCHECK_RET( m_handlersWithPendingDelayedEvents.IsEmpty(),
++                 "this helper list should be empty" );
++
++    // iterate until the list becomes empty: the handlers remove themselves
++    // from it when they don't have any more pending events
++    /*wxList::compatibility_iterator node = m_handlersWithPendingEvents->GetFirst();
++    while (node)*/
++    /*for (wxEvtHandlerArray::const_iterator i = m_handlersWithPendingEvents.begin();
++         i != m_handlersWithPendingEvents.end();
++         ++i)*/
++    while (!m_handlersWithPendingEvents.IsEmpty())
++    {
++        // In ProcessPendingEvents(), new handlers might be added
++        // and we can safely leave the critical section here.
++        wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
++
++        m_handlersWithPendingEvents[0]->ProcessPendingEvents();
++
++        wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
++
++        // restart as the iterators could have been invalidated
++        //i = m_handlersWithPendingEvents.begin();
++    }
++
++    // now the wxHandlersWithPendingEvents is surely empty; however some event
++    // handlers may have moved themselves into wxHandlersWithPendingDelayedEvents
++    // because of a selective wxYield call in progress.
++    // Now we need to move them back to wxHandlersWithPendingEvents so the next
++    // call to this function has the chance of processing them:
++    if (!m_handlersWithPendingDelayedEvents.IsEmpty())
++    {
++        WX_APPEND_ARRAY(m_handlersWithPendingEvents, m_handlersWithPendingDelayedEvents);
++        m_handlersWithPendingDelayedEvents.Clear();
++    }
++
++    wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
++}
++
++void wxEventLoopBase::WakeUpIdle()
++{
++    WakeUp();
++}
++
++bool wxEventLoopBase::ProcessIdle()
++{
++    // process pending wx events before sending idle events
++    ProcessPendingEvents();
++
++    wxIdleEvent event;
++
++    event.SetEventObject(wxTheApp);
++    wxTheApp->ProcessEvent(event);
++    return event.MoreRequested();
++}
++
+ // wxEventLoopManual is unused in the other ports
+ #if defined(__WXMSW__) || defined(__WXMAC__) || defined(__WXDFB__) || (defined(__UNIX__) && wxUSE_BASE)
+
+Index: src/palmos/evtloop.cpp
+===================================================================
+--- src/palmos/evtloop.cpp	(revisione 58817)
++++ src/palmos/evtloop.cpp	(copia locale)
+@@ -144,3 +144,11 @@
+     return;
+ }
+
++
++// Yield to incoming messages
++
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
++{
++    return true;
++}
++
+Index: src/palmos/app.cpp
+===================================================================
+--- src/palmos/app.cpp	(revisione 58817)
++++ src/palmos/app.cpp	(copia locale)
+@@ -285,13 +285,6 @@
+     return 0;
+ }
+
+-// Yield to incoming messages
+-
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-    return true;
+-}
+-
+ #if wxUSE_EXCEPTIONS
+
+ // ----------------------------------------------------------------------------
+Index: src/dfb/app.cpp
+===================================================================
+--- src/dfb/app.cpp	(revisione 58817)
++++ src/dfb/app.cpp	(copia locale)
+@@ -162,46 +162,3 @@
+         wxMutexGuiLeave();
+ #endif
+ }
+-
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-#if wxUSE_THREADS
+-    if ( !wxThread::IsMain() )
+-        return true; // can't process events from other threads
+-#endif // wxUSE_THREADS
+-
+-    if ( m_isInsideYield )
+-    {
+-        if ( !onlyIfNeeded )
+-        {
+-            wxFAIL_MSG( wxT("wxYield called recursively" ) );
+-        }
+-
+-        return false;
+-    }
+-
+-    m_isInsideYield = true;
+-    m_eventsToProcessInsideYield = eventsToProcess;
+-
+-#if wxUSE_LOG
+-    wxLog::Suspend();
+-#endif // wxUSE_LOG
+-
+-    wxEventLoop * const
+-        loop = static_cast<wxEventLoop *>(wxEventLoop::GetActive());
+-    if ( loop )
+-        loop->Yield();
+-
+-    // it's necessary to call ProcessIdle() to update the frames sizes which
+-    // might have been changed (it also will update other things set from
+-    // OnUpdateUI() which is a nice (and desired) side effect)
+-    while ( ProcessIdle() ) {}
+-
+-#if wxUSE_LOG
+-    wxLog::Resume();
+-#endif // wxUSE_LOG
+-
+-    m_isInsideYield = false;
+-
+-    return true;
+-}
+Index: src/dfb/evtloop.cpp
+===================================================================
+--- src/dfb/evtloop.cpp	(revisione 58817)
++++ src/dfb/evtloop.cpp	(copia locale)
+@@ -202,8 +202,30 @@
+ // events dispatch and loop handling
+ //-----------------------------------------------------------------------------
+
+-void wxGUIEventLoop::Yield()
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
+ {
++#if wxUSE_THREADS
++    if ( !wxThread::IsMain() )
++        return true; // can't process events from other threads
++#endif // wxUSE_THREADS
++
++    if ( m_isInsideYield )
++    {
++        if ( !onlyIfNeeded )
++        {
++            wxFAIL_MSG( wxT("wxYield called recursively" ) );
++        }
++
++        return false;
++    }
++
++    m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
++
++#if wxUSE_LOG
++    wxLog::Suspend();
++#endif // wxUSE_LOG
++
+     // TODO: implement event filtering using the eventsToProcess mask
+
+     // process all pending events:
+@@ -212,4 +234,17 @@
+
+     // handle timers, sockets etc.
+     OnNextIteration();
++
++    // it's necessary to call ProcessIdle() to update the frames sizes which
++    // might have been changed (it also will update other things set from
++    // OnUpdateUI() which is a nice (and desired) side effect)
++    while ( ProcessIdle() ) {}
++
++#if wxUSE_LOG
++    wxLog::Resume();
++#endif // wxUSE_LOG
++
++    m_isInsideYield = false;
++
++    return true;
+ }
+Index: src/os2/evtloop.cpp
+===================================================================
+--- src/os2/evtloop.cpp	(revisione 58817)
++++ src/os2/evtloop.cpp	(copia locale)
+@@ -365,3 +365,62 @@
+
+     return true;
+ }
++
++//
++// Yield to incoming messages
++//
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
++{
++    if ( m_isInsideYield )
++    {
++        if ( !onlyIfNeeded )
++        {
++            wxFAIL_MSG( _T("wxYield() called recursively") );
++        }
++
++        return false;
++    }
++
++    HAB vHab = 0;
++    QMSG vMsg;
++
++    //
++    // Disable log flushing from here because a call to wxYield() shouldn't
++    // normally result in message boxes popping up &c
++    //
++    wxLog::Suspend();
++
++    m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
++
++    //
++    // We want to go back to the main message loop
++    // if we see a WM_QUIT. (?)
++    //
++    while (::WinPeekMsg(vHab, &vMsg, (HWND)NULL, 0, 0, PM_NOREMOVE) && vMsg.msg != WM_QUIT)
++    {
++        // TODO: implement event filtering using the eventsToProcess mask
++
++#if wxUSE_THREADS
++        wxMutexGuiLeaveOrEnter();
++#endif // wxUSE_THREADS
++        if (!wxTheApp->Dispatch())
++            break;
++    }
++
++    //
++    // If they are pending events, we must process them.
++    //
++    if (wxTheApp)
++        wxTheApp->ProcessPendingEvents();
++
++    HandleSockets();
++
++    //
++    // Let the logs be flashed again
++    //
++    wxLog::Resume();
++    m_isInsideYield = false;
++
++    return true;
++} // end of wxYield
+Index: src/os2/app.cpp
+===================================================================
+--- src/os2/app.cpp	(revisione 58817)
++++ src/os2/app.cpp	(copia locale)
+@@ -504,66 +504,6 @@
+     }
+ } // end of wxApp::OnQueryEndSession
+
+-//
+-// Yield to incoming messages
+-//
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-    if ( m_isInsideYield )
+-    {
+-        if ( !onlyIfNeeded )
+-        {
+-            wxFAIL_MSG( _T("wxYield() called recursively") );
+-        }
+-
+-        return false;
+-    }
+-
+-    HAB vHab = 0;
+-    QMSG vMsg;
+-
+-    //
+-    // Disable log flushing from here because a call to wxYield() shouldn't
+-    // normally result in message boxes popping up &c
+-    //
+-    wxLog::Suspend();
+-
+-    m_isInsideYield = true;
+-    m_eventsToProcessInsideYield = eventsToProcess;
+-
+-    //
+-    // We want to go back to the main message loop
+-    // if we see a WM_QUIT. (?)
+-    //
+-    wxEventLoopGuarantor dummyLoopIfNeeded;
+-    while (::WinPeekMsg(vHab, &vMsg, (HWND)NULL, 0, 0, PM_NOREMOVE) && vMsg.msg != WM_QUIT)
+-    {
+-        // TODO: implement event filtering using the eventsToProcess mask
+-
+-#if wxUSE_THREADS
+-        wxMutexGuiLeaveOrEnter();
+-#endif // wxUSE_THREADS
+-        if (!wxTheApp->Dispatch())
+-            break;
+-    }
+-
+-    //
+-    // If they are pending events, we must process them.
+-    //
+-    if (wxTheApp)
+-        wxTheApp->ProcessPendingEvents();
+-
+-    HandleSockets();
+-
+-    //
+-    // Let the logs be flashed again
+-    //
+-    wxLog::Resume();
+-    m_isInsideYield = false;
+-
+-    return true;
+-} // end of wxYield
+-
+ int wxApp::AddSocketHandler(int handle, int mask,
+                             void (*callback)(void*), void * gsock)
+ {
+Index: src/gtk1/evtloop.cpp
+===================================================================
+--- src/gtk1/evtloop.cpp	(revisione 58817)
++++ src/gtk1/evtloop.cpp	(copia locale)
+@@ -117,3 +117,62 @@
+
+     return true;
+ }
++
++//-----------------------------------------------------------------------------
++// wxYield
++//-----------------------------------------------------------------------------
++
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
++{
++    if ( m_isInsideYield )
++    {
++        if ( !onlyIfNeeded )
++        {
++            wxFAIL_MSG( wxT("wxYield called recursively" ) );
++        }
++
++        return false;
++    }
++
++#if wxUSE_THREADS
++    if ( !wxThread::IsMain() )
++    {
++        // can't call gtk_main_iteration() from other threads like this
++        return true;
++    }
++#endif // wxUSE_THREADS
++
++    m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
++
++    // We need to remove idle callbacks or the loop will
++    // never finish.
++    wxTheApp->RemoveIdleTag();
++
++#if wxUSE_LOG
++    // disable log flushing from here because a call to wxYield() shouldn't
++    // normally result in message boxes popping up &c
++    wxLog::Suspend();
++#endif
++
++    // TODO: implement event filtering using the eventsToProcess mask
++    while (gtk_events_pending())
++        gtk_main_iteration();
++
++    // It's necessary to call ProcessIdle() to update the frames sizes which
++    // might have been changed (it also will update other things set from
++    // OnUpdateUI() which is a nice (and desired) side effect). But we
++    // call ProcessIdle() only once since this is not meant for longish
++    // background jobs (controlled by wxIdleEvent::RequestMore() and the
++    // return value of Processidle().
++    ProcessIdle();
++
++#if wxUSE_LOG
++    // let the logs be flashed again
++    wxLog::Resume();
++#endif
++
++    m_isInsideYield = false;
++
++    return true;
++}
+Index: src/gtk1/app.cpp
+===================================================================
+--- src/gtk1/app.cpp	(revisione 58817)
++++ src/gtk1/app.cpp	(copia locale)
+@@ -99,64 +99,6 @@
+ static wxMutex gs_idleTagsMutex;
+ #endif
+
+-//-----------------------------------------------------------------------------
+-// wxYield
+-//-----------------------------------------------------------------------------
+-
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-    if ( m_isInsideYield )
+-    {
+-        if ( !onlyIfNeeded )
+-        {
+-            wxFAIL_MSG( wxT("wxYield called recursively" ) );
+-        }
+-
+-        return false;
+-    }
+-
+-#if wxUSE_THREADS
+-    if ( !wxThread::IsMain() )
+-    {
+-        // can't call gtk_main_iteration() from other threads like this
+-        return true;
+-    }
+-#endif // wxUSE_THREADS
+-
+-    m_isInsideYield = true;
+-    m_eventsToProcessInsideYield = eventsToProcess;
+-
+-    // We need to remove idle callbacks or the loop will
+-    // never finish.
+-    wxTheApp->RemoveIdleTag();
+-
+-#if wxUSE_LOG
+-    // disable log flushing from here because a call to wxYield() shouldn't
+-    // normally result in message boxes popping up &c
+-    wxLog::Suspend();
+-#endif
+-
+-    // TODO: implement event filtering using the eventsToProcess mask
+-    while (gtk_events_pending())
+-        gtk_main_iteration();
+-
+-    // It's necessary to call ProcessIdle() to update the frames sizes which
+-    // might have been changed (it also will update other things set from
+-    // OnUpdateUI() which is a nice (and desired) side effect). But we
+-    // call ProcessIdle() only once since this is not meant for longish
+-    // background jobs (controlled by wxIdleEvent::RequestMore() and the
+-    // return value of Processidle().
+-    ProcessIdle();
+-
+-#if wxUSE_LOG
+-    // let the logs be flashed again
+-    wxLog::Resume();
+-#endif
+-
+-    m_isInsideYield = false;
+-
+-    return true;
+-}
+
+ //-----------------------------------------------------------------------------
+ // wxWakeUpIdle
+Index: src/msw/app.cpp
+===================================================================
+--- src/msw/app.cpp	(revisione 58817)
++++ src/msw/app.cpp	(copia locale)
+@@ -1011,177 +1011,6 @@
+
+ #endif // !__WXWINCE__
+
+-// ----------------------------------------------------------------------------
+-// Yield to incoming messages
+-// ----------------------------------------------------------------------------
+-
+-WX_DECLARE_OBJARRAY(MSG, wxMSGArray);
+-
+-#include <wx/arrimpl.cpp>
+-WX_DEFINE_OBJARRAY(wxMSGArray);
+-
+-static wxMSGArray g_arrMSG;
+-
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-    if ( m_isInsideYield )
+-    {
+-        if ( !onlyIfNeeded )
+-        {
+-            wxFAIL_MSG( wxT("wxYield called recursively" ) );
+-        }
+-
+-        return false;
+-    }
+-
+-    // set the flag and don't forget to reset it before returning
+-    m_isInsideYield = true;
+-    m_eventsToProcessInsideYield = eventsToProcess;
+-
+-    wxON_BLOCK_EXIT_SET(m_isInsideYield, false);
+-
+-#if wxUSE_LOG
+-    // disable log flushing from here because a call to wxYield() shouldn't
+-    // normally result in message boxes popping up &c
+-    wxLog::Suspend();
+-
+-    // ensure the logs will be flashed again when we exit
+-    wxON_BLOCK_EXIT0(wxLog::Resume);
+-#endif // wxUSE_LOG
+-
+-    // we don't want to process WM_QUIT from here - it should be processed in
+-    // the main event loop in order to stop it
+-    wxEventLoopGuarantor dummyLoopIfNeeded;
+-    MSG msg;
+-    while ( PeekMessage(&msg, (HWND)0, 0, 0, PM_NOREMOVE) &&
+-            msg.message != WM_QUIT )
+-    {
+-#if wxUSE_THREADS
+-        wxMutexGuiLeaveOrEnter();
+-#endif // wxUSE_THREADS
+-
+-        if (msg.message == WM_PAINT)
+-        {
+-            // WM_PAINT messages are the last ones of the queue...
+-            break;
+-        }
+-
+-        // choose a wxEventCategory for this Windows message
+-        wxEventCategory cat;
+-        switch (msg.message)
+-        {
+-            case WM_NCMOUSEMOVE:
+-            case WM_NCLBUTTONDOWN:
+-            case WM_NCLBUTTONUP:
+-            case WM_NCLBUTTONDBLCLK:
+-            case WM_NCRBUTTONDOWN:
+-            case WM_NCRBUTTONUP:
+-            case WM_NCRBUTTONDBLCLK:
+-            case WM_NCMBUTTONDOWN:
+-            case WM_NCMBUTTONUP:
+-            case WM_NCMBUTTONDBLCLK:
+-
+-            case WM_KEYDOWN:
+-            case WM_KEYUP:
+-            case WM_CHAR:
+-            case WM_DEADCHAR:
+-            case WM_SYSKEYDOWN:
+-            case WM_SYSKEYUP:
+-            case WM_SYSCHAR:
+-            case WM_SYSDEADCHAR:
+-#ifdef WM_UNICHAR
+-            case WM_UNICHAR:
+-#endif
+-            case WM_HOTKEY:
+-            case WM_IME_STARTCOMPOSITION:
+-            case WM_IME_ENDCOMPOSITION:
+-            case WM_IME_COMPOSITION:
+-            case WM_COMMAND:
+-            case WM_SYSCOMMAND:
+-
+-            case WM_IME_SETCONTEXT:
+-            case WM_IME_NOTIFY:
+-            case WM_IME_CONTROL:
+-            case WM_IME_COMPOSITIONFULL:
+-            case WM_IME_SELECT:
+-            case WM_IME_CHAR:
+-            case WM_IME_KEYDOWN:
+-            case WM_IME_KEYUP:
+-
+-            case WM_MOUSEHOVER:
+-#ifdef WM_NCMOUSELEAVE
+-            case WM_NCMOUSELEAVE:
+-#endif
+-            case WM_MOUSELEAVE:
+-
+-            case WM_CUT:
+-            case WM_COPY:
+-            case WM_PASTE:
+-            case WM_CLEAR:
+-            case WM_UNDO:
+-
+-            case WM_MOUSEMOVE:
+-            case WM_LBUTTONDOWN:
+-            case WM_LBUTTONUP:
+-            case WM_LBUTTONDBLCLK:
+-            case WM_RBUTTONDOWN:
+-            case WM_RBUTTONUP:
+-            case WM_RBUTTONDBLCLK:
+-            case WM_MBUTTONDOWN:
+-            case WM_MBUTTONUP:
+-            case WM_MBUTTONDBLCLK:
+-            case WM_MOUSEWHEEL:
+-                cat = wxEVT_CATEGORY_USER_INPUT;
+-                break;
+-
+-            case WM_TIMER:
+-                cat = wxEVT_CATEGORY_TIMER;
+-                break;
+-
+-            default:
+-                if (msg.message < WM_USER)
+-                {
+-                    // 0;WM_USER-1 is the range of message IDs reserved for use
+-                    // by the system.
+-
+-                    // there are too many of these types of messages to handle
+-                    // them in this switch
+-                    cat = wxEVT_CATEGORY_UI;
+-                }
+-                else
+-                    cat = wxEVT_CATEGORY_UNKNOWN;
+-        }
+-
+-        // should we process this event now?
+-        if (cat & eventsToProcess)
+-        {
+-            if ( !wxTheApp->Dispatch() )
+-                break;
+-        }
+-        else
+-        {
+-            // remove the message and store it
+-            ::GetMessage(&msg, NULL, 0, 0);
+-            g_arrMSG.Add(msg);
+-        }
+-    }
+-
+-    // if there are pending events, we must process them.
+-    ProcessPendingEvents();
+-
+-    // put back unprocessed events in the queue
+-    DWORD id = GetCurrentThreadId();
+-    for (size_t i=0; i<g_arrMSG.GetCount(); i++)
+-    {
+-        PostThreadMessage(id, g_arrMSG[i].message,
+-                          g_arrMSG[i].wParam, g_arrMSG[i].lParam);
+-    }
+-
+-    g_arrMSG.Clear();
+-
+-    return true;
+-}
+-
+ #if wxUSE_EXCEPTIONS
+
+ // ----------------------------------------------------------------------------
+Index: src/msw/evtloop.cpp
+===================================================================
+--- src/msw/evtloop.cpp	(revisione 58817)
++++ src/msw/evtloop.cpp	(copia locale)
+@@ -35,6 +35,7 @@
+ #include "wx/thread.h"
+ #include "wx/except.h"
+ #include "wx/msw/private.h"
++#include "wx/scopeguard.h"
+
+ #if wxUSE_GUI
+     #include "wx/tooltip.h"
+@@ -358,6 +359,174 @@
+     ::PostMessage(NULL, WM_NULL, 0, 0);
+ }
+
++
++// ----------------------------------------------------------------------------
++// Yield to incoming messages
++// ----------------------------------------------------------------------------
++
++#include <wx/arrimpl.cpp>
++WX_DEFINE_OBJARRAY(wxMSGArray);
++
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
++{
++    if ( m_isInsideYield )
++    {
++        if ( !onlyIfNeeded )
++        {
++            wxFAIL_MSG( wxT("wxYield called recursively" ) );
++        }
++
++        return false;
++    }
++
++    // set the flag and don't forget to reset it before returning
++    m_isInsideYield = true;
++    m_eventsToProcessInsideYield = eventsToProcess;
++
++    wxON_BLOCK_EXIT_SET(m_isInsideYield, false);
++
++#if wxUSE_LOG
++    // disable log flushing from here because a call to wxYield() shouldn't
++    // normally result in message boxes popping up &c
++    wxLog::Suspend();
++
++    // ensure the logs will be flashed again when we exit
++    wxON_BLOCK_EXIT0(wxLog::Resume);
++#endif // wxUSE_LOG
++
++    // we don't want to process WM_QUIT from here - it should be processed in
++    // the main event loop in order to stop it
++    MSG msg;
++    while ( PeekMessage(&msg, (HWND)0, 0, 0, PM_NOREMOVE) &&
++            msg.message != WM_QUIT )
++    {
++#if wxUSE_THREADS
++        wxMutexGuiLeaveOrEnter();
++#endif // wxUSE_THREADS
++
++        if (msg.message == WM_PAINT)
++        {
++            // WM_PAINT messages are the last ones of the queue...
++            break;
++        }
++
++        // choose a wxEventCategory for this Windows message
++        wxEventCategory cat;
++        switch (msg.message)
++        {
++            case WM_NCMOUSEMOVE:
++            case WM_NCLBUTTONDOWN:
++            case WM_NCLBUTTONUP:
++            case WM_NCLBUTTONDBLCLK:
++            case WM_NCRBUTTONDOWN:
++            case WM_NCRBUTTONUP:
++            case WM_NCRBUTTONDBLCLK:
++            case WM_NCMBUTTONDOWN:
++            case WM_NCMBUTTONUP:
++            case WM_NCMBUTTONDBLCLK:
++
++            case WM_KEYDOWN:
++            case WM_KEYUP:
++            case WM_CHAR:
++            case WM_DEADCHAR:
++            case WM_SYSKEYDOWN:
++            case WM_SYSKEYUP:
++            case WM_SYSCHAR:
++            case WM_SYSDEADCHAR:
++#ifdef WM_UNICHAR
++            case WM_UNICHAR:
++#endif
++            case WM_HOTKEY:
++            case WM_IME_STARTCOMPOSITION:
++            case WM_IME_ENDCOMPOSITION:
++            case WM_IME_COMPOSITION:
++            case WM_COMMAND:
++            case WM_SYSCOMMAND:
++
++            case WM_IME_SETCONTEXT:
++            case WM_IME_NOTIFY:
++            case WM_IME_CONTROL:
++            case WM_IME_COMPOSITIONFULL:
++            case WM_IME_SELECT:
++            case WM_IME_CHAR:
++            case WM_IME_KEYDOWN:
++            case WM_IME_KEYUP:
++
++            case WM_MOUSEHOVER:
++#ifdef WM_NCMOUSELEAVE
++            case WM_NCMOUSELEAVE:
++#endif
++            case WM_MOUSELEAVE:
++
++            case WM_CUT:
++            case WM_COPY:
++            case WM_PASTE:
++            case WM_CLEAR:
++            case WM_UNDO:
++
++            case WM_MOUSEMOVE:
++            case WM_LBUTTONDOWN:
++            case WM_LBUTTONUP:
++            case WM_LBUTTONDBLCLK:
++            case WM_RBUTTONDOWN:
++            case WM_RBUTTONUP:
++            case WM_RBUTTONDBLCLK:
++            case WM_MBUTTONDOWN:
++            case WM_MBUTTONUP:
++            case WM_MBUTTONDBLCLK:
++            case WM_MOUSEWHEEL:
++                cat = wxEVT_CATEGORY_USER_INPUT;
++                break;
++
++            case WM_TIMER:
++                cat = wxEVT_CATEGORY_TIMER;
++                break;
++
++            default:
++                if (msg.message < WM_USER)
++                {
++                    // 0;WM_USER-1 is the range of message IDs reserved for use
++                    // by the system.
++
++                    // there are too many of these types of messages to handle
++                    // them in this switch
++                    cat = wxEVT_CATEGORY_UI;
++                }
++                else
++                    cat = wxEVT_CATEGORY_UNKNOWN;
++        }
++
++        // should we process this event now?
++        if (cat & eventsToProcess)
++        {
++            if ( !wxTheApp->Dispatch() )
++                break;
++        }
++        else
++        {
++            // remove the message and store it
++            ::GetMessage(&msg, NULL, 0, 0);
++            m_arrMSG.Add(msg);
++        }
++    }
++
++    // if there are pending events, we must process them.
++    ProcessPendingEvents();
++
++    // put back unprocessed events in the queue
++    DWORD id = GetCurrentThreadId();
++    for (size_t i=0; i<m_arrMSG.GetCount(); i++)
++    {
++        PostThreadMessage(id, m_arrMSG[i].message,
++                          m_arrMSG[i].wParam, m_arrMSG[i].lParam);
++    }
++
++    m_arrMSG.Clear();
++
++    return true;
++}
++
++
+ #else // !wxUSE_GUI
+
+
+Index: src/x11/evtloop.cpp
+===================================================================
+--- src/x11/evtloop.cpp	(revisione 58817)
++++ src/x11/evtloop.cpp	(copia locale)
+@@ -243,3 +243,43 @@
+     (void) m_impl->ProcessEvent( &event );
+     return true;
+ }
++
++bool wxGUIEventLoop::DoYield(bool onlyIfNeeded, long eventsToProcess)
++{
++    // Sometimes only 2 yields seem
++    // to do the trick, e.g. in the
++    // progress dialog
++    int i;
++    for (i = 0; i < 2; i++)
++    {
++        if ( m_isInsideYield )
++        {
++            if ( !onlyIfNeeded )
++            {
++                wxFAIL_MSG( wxT("wxYield called recursively" ) );
++            }
++
++            return false;
++        }
++
++        m_isInsideYield = true;
++        m_eventsToProcessInsideYield = eventsToProcess;
++
++        // Call dispatch at least once so that sockets
++        // can be tested
++        wxTheApp->Dispatch();
++
++        // TODO: implement event filtering using the eventsToProcess mask
++        while (wxTheApp && wxTheApp->Pending())
++            wxTheApp->Dispatch();
++
++#if wxUSE_TIMER
++        wxGenericTimerImpl::NotifyTimers();
++#endif
++        ProcessIdle();
++
++        m_isInsideYield = false;
++    }
++
++    return true;
++}
+Index: src/x11/app.cpp
+===================================================================
+--- src/x11/app.cpp	(revisione 58817)
++++ src/x11/app.cpp	(copia locale)
+@@ -767,52 +767,6 @@
+     wxAppConsole::Exit();
+ }
+
+-// Yield to other processes
+-
+-bool wxApp::DoYield(bool onlyIfNeeded, long eventsToProcess)
+-{
+-    // Sometimes only 2 yields seem
+-    // to do the trick, e.g. in the
+-    // progress dialog
+-    int i;
+-    for (i = 0; i < 2; i++)
+-    {
+-        if ( m_isInsideYield )
+-        {
+-            if ( !onlyIfNeeded )
+-            {
+-                wxFAIL_MSG( wxT("wxYield called recursively" ) );
+-            }
+-
+-            return false;
+-        }
+-
+-        m_isInsideYield = true;
+-        m_eventsToProcessInsideYield = eventsToProcess;
+-
+-        // Make sure we have an event loop object,
+-        // or Pending/Dispatch will fail
+-        wxEventLoopGuarantor dummyLoopIfNeeded;
+-
+-        // Call dispatch at least once so that sockets
+-        // can be tested
+-        wxTheApp->Dispatch();
+-
+-        // TODO: implement event filtering using the eventsToProcess mask
+-        while (wxTheApp && wxTheApp->Pending())
+-            wxTheApp->Dispatch();
+-
+-#if wxUSE_TIMER
+-        wxGenericTimerImpl::NotifyTimers();
+-#endif
+-        ProcessIdle();
+-
+-        m_isInsideYield = false;
+-    }
+-
+-    return true;
+-}
+-
+ #ifdef __WXDEBUG__
+
+ void wxApp::OnAssert(const wxChar *file, int line, const wxChar* cond, const wxChar *msg)
+Index: src/generic/progdlgg.cpp
+===================================================================
+--- src/generic/progdlgg.cpp	(revisione 58817)
++++ src/generic/progdlgg.cpp	(copia locale)
+@@ -42,6 +42,7 @@
+ #endif
+
+ #include "wx/progdlg.h"
++#include "wx/evtloop.h"
+
+ // ---------------------------------------------------------------------------
+ // macros
+@@ -402,7 +403,7 @@
+                 m_msg->SetLabel(_("Done."));
+             }
+
+-            wxTheApp->YieldFor(wxEVT_CATEGORY_UI);
++            wxEventLoopBase::GetActive()->YieldFor(wxEVT_CATEGORY_UI);
+
+             (void)ShowModal();
+         }
+@@ -452,7 +453,7 @@
+ {
+     // we have to yield because not only we want to update the display but
+     // also to process the clicks on the cancel and skip buttons
+-    wxTheApp->YieldFor(wxEVT_CATEGORY_UI|wxEVT_CATEGORY_USER_INPUT);
++    wxEventLoopBase::GetActive()->YieldFor(wxEVT_CATEGORY_UI|wxEVT_CATEGORY_USER_INPUT);
+
+     Update();
+
+@@ -671,7 +672,7 @@
+
+         Fit();   // adapt to the new label size
+
+-        wxTheApp->YieldFor(wxEVT_CATEGORY_UI);
++        wxEventLoopBase::GetActive()->YieldFor(wxEVT_CATEGORY_UI);
+     }
+ }
+
+Index: include/wx/app.h
+===================================================================
+--- include/wx/app.h	(revisione 58817)
++++ include/wx/app.h	(copia locale)
+@@ -221,6 +221,10 @@
+     // had been already processed or won't be processed at all, respectively
+     virtual int FilterEvent(wxEvent& event);
+
++    // return true if we're running event loop, i.e. if the events can
++    // (already) be dispatched
++    static bool IsMainLoopRunning();
++
+ #if wxUSE_EXCEPTIONS
+     // execute the functor to handle the given event
+     //
+@@ -246,88 +250,35 @@
+     // exit, if you need to really handle the exceptions you need to override
+     // OnExceptionInMainLoop()
+     virtual void OnUnhandledException();
++
++    // Function called if an uncaught exception is caught inside the main
++    // event loop: it may return true to continue running the event loop or
++    // false to stop it (in the latter case it may rethrow the exception as
++    // well)
++    virtual bool OnExceptionInMainLoop();
++
+ #endif // wxUSE_EXCEPTIONS
+
+-    // event processing functions
+-    // --------------------------
+
+-    // return true if we're running event loop, i.e. if the events can
+-    // (already) be dispatched
+-    static bool IsMainLoopRunning();
++    // wxEventLoop redirections
++    // ------------------------
+
+-    // temporary suspends processing of the pending events
+     virtual void SuspendProcessingOfPendingEvents();
+-
+-    // resume processing of the pending events previously stopped because of a
+-    // call to SuspendProcessingOfPendingEvents()
+     virtual void ResumeProcessingOfPendingEvents();
+-
+-    // process all events in the wxHandlersWithPendingEvents list -- it is necessary
+-    // to call this function to process posted events. This happens during each
+-    // event loop iteration in GUI mode but if there is no main loop, it may be
+-    // also called directly.
+     virtual void ProcessPendingEvents();
+-
+-    // check if there are pending events on global pending event list
+     bool HasPendingEvents() const;
+
+-    // make sure that idle events are sent again
+-    virtual void WakeUpIdle();
++    virtual bool Pending();
++    virtual bool Dispatch();
+
+-        // execute the main GUI loop, the function returns when the loop ends
+     virtual int MainLoop();
+-
+-        // exit the main GUI loop during the next iteration (i.e. it does not
+-        // stop the program immediately!)
+     virtual void ExitMainLoop();
+
+-        // returns true if there are unprocessed events in the event queue
+-    virtual bool Pending();
++    bool Yield(bool onlyIfNeeded = false);
+
+-        // process the first event in the event queue (blocks until an event
+-        // appears if there are none currently, use Pending() if this is not
+-        // wanted), returns false if the event loop should stop and true
+-        // otherwise
+-    virtual bool Dispatch();
+-
+-        // this virtual function is called  when the application
+-        // becomes idle and normally just sends wxIdleEvent to all interested
+-        // parties
+-        //
+-        // it should return true if more idle events are needed, false if not
++    virtual void WakeUpIdle();
+     virtual bool ProcessIdle();
+
+-#if wxUSE_EXCEPTIONS
+-    // Function called if an uncaught exception is caught inside the main
+-    // event loop: it may return true to continue running the event loop or
+-    // false to stop it (in the latter case it may rethrow the exception as
+-    // well)
+-    virtual bool OnExceptionInMainLoop();
+-#endif // wxUSE_EXCEPTIONS
+-
+-    // Yield-related hooks
+-    // -------------------
+-
+-        // process all currently pending events right now
+-        //
+-        // it is an error to call Yield() recursively unless the value of
+-        // onlyIfNeeded is true
+-        //
+-        // WARNING: this function is dangerous as it can lead to unexpected
+-        //          reentrancies (i.e. when called from an event handler it
+-        //          may result in calling the same event handler again), use
+-        //          with _extreme_ care or, better, don't use at all!
+-        // NOTE: in wxConsoleBase it doesn't do anything, just a hook for GUI wxApp
+-    bool Yield(bool onlyIfNeeded = false)
+-        { return DoYield(onlyIfNeeded, wxEVT_CATEGORY_ALL); }
+-    bool YieldFor(long eventsToProcess)
+-        { return DoYield(true, eventsToProcess); }
+-    virtual bool IsYielding() const
+-        { return false; }
+-    virtual bool IsEventAllowedInsideYield(wxEventCategory WXUNUSED(cat)) const
+-        { return true; }
+-    // no SafeYield hooks since it uses wxWindow which is not available when wxUSE_GUI=0
+-
+
+     // debugging support
+     // -----------------
+@@ -395,10 +346,6 @@
+     // for the first time
+     virtual wxAppTraits *CreateTraits();
+
+-    // the real yield function hook:
+-    virtual bool DoYield(bool WXUNUSED(onlyIfNeeded), long WXUNUSED(eventsToProcess))
+-        { return true; }
+-
+     // function used for dynamic wxApp creation
+     static wxAppInitializerFunction ms_appInitFn;
+
+@@ -424,13 +371,6 @@
+     // been started yet or has already terminated)
+     wxEventLoopBase *m_mainLoop;
+
+-    // the array of the handlers with pending events which needs to be processed
+-    // inside ProcessPendingEvents()
+-    // wxEvtHandlerArray m_handlersWithPendingEvents;    FIXME: enable this and remove global lists
+-
+-    // helper array used by ProcessPendingEvents()
+-    // wxEvtHandlerArray m_handlersWithPendingDelayedEvents;    FIXME: enable this and remove global lists
+-
+     friend class WXDLLIMPEXP_FWD_BASE wxEvtHandler;
+
+     // the application object is a singleton anyhow, there is no sense in
+@@ -496,15 +436,6 @@
+     virtual bool SafeYield(wxWindow *win, bool onlyIfNeeded);
+     virtual bool SafeYieldFor(wxWindow *win, long eventsToProcess);
+
+-        // returns true if the main thread is inside a Yield() call
+-    virtual bool IsYielding() const
+-        { return m_isInsideYield; }
+-
+-        // returns true if events of the given event category should be immediately
+-        // processed inside a wxApp::Yield() call or rather should be queued for
+-        // later processing by the main event loop
+-    virtual bool IsEventAllowedInsideYield(wxEventCategory cat) const;
+-
+         // this virtual function is called in the GUI mode when the application
+         // becomes idle and normally just sends wxIdleEvent to all interested
+         // parties
+@@ -627,10 +558,6 @@
+     // does any of our windows have focus?
+     bool m_isActive;
+
+-    // Yield() helpers:
+-    bool m_isInsideYield;
+-    long m_eventsToProcessInsideYield;
+-
+     wxDECLARE_NO_COPY_CLASS(wxAppBase);
+ };
+
+Index: include/wx/motif/app.h
+===================================================================
+--- include/wx/motif/app.h	(revisione 58817)
++++ include/wx/motif/app.h	(copia locale)
+@@ -65,7 +65,6 @@
+     // Implementation
+     virtual bool Initialize(int& argc, wxChar **argv);
+     virtual void CleanUp();
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     // Motif-specific
+     WXAppContext   GetAppContext() const { return m_appContext; }
+Index: include/wx/gtk1/app.h
+===================================================================
+--- include/wx/gtk1/app.h	(revisione 58817)
++++ include/wx/gtk1/app.h	(copia locale)
+@@ -70,8 +70,6 @@
+     bool m_isInAssert;
+ #endif // __WXDEBUG__
+
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+-
+     DECLARE_DYNAMIC_CLASS(wxApp)
+ };
+
+Index: include/wx/palmos/app.h
+===================================================================
+--- include/wx/palmos/app.h	(revisione 58817)
++++ include/wx/palmos/app.h	(copia locale)
+@@ -51,8 +51,6 @@
+ protected:
+     int    m_printMode; // wxPRINT_WINDOWS, wxPRINT_POSTSCRIPT
+
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+-
+ public:
+     // Implementation
+     static bool RegisterWindowClasses();
+Index: include/wx/palmos/evtloop.h
+===================================================================
+--- include/wx/palmos/evtloop.h	(revisione 58817)
++++ include/wx/palmos/evtloop.h	(copia locale)
+@@ -41,6 +41,8 @@
+     virtual void WakeUp();
+
+ protected:
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+     // should we exit the loop?
+     bool m_shouldExit;
+
+Index: include/wx/event.h
+===================================================================
+--- include/wx/event.h	(revisione 58817)
++++ include/wx/event.h	(copia locale)
+@@ -3986,24 +3986,6 @@
+ #define EVT_THREAD(id, func)  wx__DECLARE_EVT1(wxEVT_COMMAND_THREAD, id, wxThreadEventHandler(func))
+
+ // ----------------------------------------------------------------------------
+-// Global data
+-// ----------------------------------------------------------------------------
+-
+-// list containing event handlers with pending events for them
+-//
+-// notice that each event handler should occur at most once in this list
+-extern WXDLLIMPEXP_BASE wxList *wxHandlersWithPendingEvents;
+-extern WXDLLIMPEXP_BASE wxList *wxHandlersWithPendingDelayedEvents;
+-#if wxUSE_THREADS
+-    // this critical section protectes both the lists above
+-    extern WXDLLIMPEXP_BASE wxCriticalSection *wxHandlersWithPendingEventsLocker;
+-#endif
+-
+-// old list names:
+-#define wxPendingEvents         wxHandlersWithPendingEvents
+-#define wxPendingEventsLocker   wxHandlersWithPendingEventsLocker
+-
+-// ----------------------------------------------------------------------------
+ // Helper functions
+ // ----------------------------------------------------------------------------
+
+Index: include/wx/dfb/app.h
+===================================================================
+--- include/wx/dfb/app.h	(revisione 58817)
++++ include/wx/dfb/app.h	(copia locale)
+@@ -39,8 +39,6 @@
+ private:
+     wxVideoMode m_videoMode;
+
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+-
+     DECLARE_DYNAMIC_CLASS(wxApp)
+ };
+
+Index: include/wx/dfb/evtloop.h
+===================================================================
+--- include/wx/dfb/evtloop.h	(revisione 58817)
++++ include/wx/dfb/evtloop.h	(copia locale)
+@@ -29,9 +29,7 @@
+     static wxIDirectFBEventBufferPtr GetDirectFBEventBuffer();
+
+ private:
+-    // wxYield implementation: iterate the loop as long as there are any
+-    // pending events
+-    void Yield();
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     static void InitBuffer();
+     static void CleanUp();
+Index: include/wx/msw/app.h
+===================================================================
+--- include/wx/msw/app.h	(revisione 58817)
++++ include/wx/msw/app.h	(copia locale)
+@@ -78,8 +78,6 @@
+ protected:
+     int    m_printMode; // wxPRINT_WINDOWS, wxPRINT_POSTSCRIPT
+
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+-
+ public:
+     // unregister any window classes registered by GetRegisteredClassName()
+     static void UnregisterWindowClasses();
+Index: include/wx/msw/evtloop.h
+===================================================================
+--- include/wx/msw/evtloop.h	(revisione 58817)
++++ include/wx/msw/evtloop.h	(copia locale)
+@@ -40,6 +40,8 @@
+
+ #if wxUSE_GUI
+
++WX_DECLARE_OBJARRAY(MSG, wxMSGArray);
++
+ class WXDLLIMPEXP_CORE wxGUIEventLoop : public wxMSWEventLoopBase
+ {
+ public:
+@@ -76,11 +78,16 @@
+ protected:
+     virtual void OnNextIteration();
+
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
++
+ private:
+     // check if the given window is a child of ms_winCritical (which must be
+     // non NULL)
+     static bool IsChildOfCriticalWindow(wxWindowMSW *win);
+
++    // array of messages used for temporary storage by DoYield()
++    wxMSGArray m_arrMSG;
+
+     // critical window or NULL
+     static wxWindowMSW *ms_winCritical;
+Index: include/wx/x11/app.h
+===================================================================
+--- include/wx/x11/app.h	(revisione 58817)
++++ include/wx/x11/app.h	(copia locale)
+@@ -63,7 +63,6 @@
+     // Implementation
+     virtual bool Initialize(int& argc, wxChar **argv);
+     virtual void CleanUp();
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     WXWindow       GetTopLevelWidget() const { return m_topLevelWidget; }
+     WXColormap     GetMainColormap(WXDisplay* display);
+Index: include/wx/os2/app.h
+===================================================================
+--- include/wx/os2/app.h	(revisione 58817)
++++ include/wx/os2/app.h	(copia locale)
+@@ -110,8 +110,6 @@
+     // Implementation
+     static bool  RegisterWindowClasses(HAB vHab);
+
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+-
+ public:
+     int                             m_nCmdShow;
+     HMQ                             m_hMq;
+Index: include/wx/evtloop.h
+===================================================================
+--- include/wx/evtloop.h	(revisione 58817)
++++ include/wx/evtloop.h	(copia locale)
+@@ -22,7 +22,7 @@
+ {
+ public:
+     // trivial, but needed (because of wxEventLoopBase) ctor
+-    wxEventLoopBase() { }
++    wxEventLoopBase();
+
+     // dtor
+     virtual ~wxEventLoopBase() { }
+@@ -32,9 +32,18 @@
+     virtual bool IsOk() const { return true; }
+
+
++    // dispatch&processing
++    // -------------------
++
+     // start the event loop, return the exit code when it is finished
+     virtual int Run() = 0;
+
++    // is this event loop running now?
++    //
++    // notice that even if this event loop hasn't terminated yet but has just
++    // spawned a nested (e.g. modal) event loop, this would return false
++    bool IsRunning() const;
++
+     // exit from the loop with the given exit code
+     virtual void Exit(int rc = 0) = 0;
+
+@@ -49,6 +58,88 @@
+     // exit the loop or -1 if timeout expired
+     virtual int DispatchTimeout(unsigned long timeout) = 0;
+
++    // implement this to wake up the loop: usually done by posting a dummy event
++    // to it (can be called from non main thread)
++    virtual void WakeUp() = 0;
++
++
++    // pending events
++    // --------------
++
++    // process all events in the wxHandlersWithPendingEvents list -- it is necessary
++    // to call this function to process posted events. This happens during each
++    // event loop iteration in GUI mode but if there is no main loop, it may be
++    // also called directly.
++    virtual void ProcessPendingEvents();
++
++    // check if there are pending events on global pending event list
++    bool HasPendingEvents() const;
++
++    // temporary suspends processing of the pending events
++    void SuspendProcessingOfPendingEvents();
++
++    // resume processing of the pending events previously stopped because of a
++    // call to SuspendProcessingOfPendingEvents()
++    void ResumeProcessingOfPendingEvents();
++
++    // called by ~wxEvtHandler to (eventually) remove the handler from the list of
++    // the pending events
++    void RemovePendingEventHandler(wxEvtHandler* toRemove);
++
++    // adds an event handler to the list of the pending events
++    void AppendPendingEventHandler(wxEvtHandler* toAppend);
++
++    // moves the event handler from the list of the pending events to the list
++    // of the delayed pending events
++    void DelayPendingEventHandler(wxEvtHandler* toDelay);
++
++
++    // idle handling
++    // -------------
++
++    // make sure that idle events are sent again
++    virtual void WakeUpIdle();
++
++        // this virtual function is called  when the application
++        // becomes idle and normally just sends wxIdleEvent to all interested
++        // parties
++        //
++        // it should return true if more idle events are needed, false if not
++    virtual bool ProcessIdle();
++
++
++    // Yield-related hooks
++    // -------------------
++
++        // process all currently pending events right now
++        //
++        // it is an error to call Yield() recursively unless the value of
++        // onlyIfNeeded is true
++        //
++        // WARNING: this function is dangerous as it can lead to unexpected
++        //          reentrancies (i.e. when called from an event handler it
++        //          may result in calling the same event handler again), use
++        //          with _extreme_ care or, better, don't use at all!
++    bool Yield(bool onlyIfNeeded = false)
++        { return DoYield(onlyIfNeeded, wxEVT_CATEGORY_ALL); }
++    bool YieldFor(long eventsToProcess)
++        { return DoYield(true, eventsToProcess); }
++
++        // returns true if the main thread is inside a Yield() call
++    virtual bool IsYielding() const
++        { return m_isInsideYield; }
++
++        // returns true if events of the given event category should be immediately
++        // processed inside a wxApp::Yield() call or rather should be queued for
++        // later processing by the main event loop
++    virtual bool IsEventAllowedInsideYield(wxEventCategory cat) const
++        { return (m_eventsToProcessInsideYield & cat) != 0; }
++
++    // no SafeYield hooks since it uses wxWindow which is not available when wxUSE_GUI=0
++
++
++    // active loop
++    // -----------
+
+     // return currently active (running) event loop, may be NULL
+     static wxEventLoopBase *GetActive() { return ms_activeLoop; }
+@@ -56,15 +147,6 @@
+     // set currently active (running) event loop
+     static void SetActive(wxEventLoopBase* loop) { ms_activeLoop = loop; }
+
+-    // is this event loop running now?
+-    //
+-    // notice that even if this event loop hasn't terminated yet but has just
+-    // spawned a nested (e.g. modal) event loop, this would return false
+-    bool IsRunning() const;
+-
+-    // implement this to wake up the loop: usually done by posting a dummy event
+-    // to it (can be called from non main thread)
+-    virtual void WakeUp() = 0;
+
+ protected:
+     // this function should be called before the event loop terminates, whether
+@@ -72,10 +154,29 @@
+     // an exception thrown from inside the loop)
+     virtual void OnExit() { }
+
++    // the real yield function hook:
++    virtual bool DoYield(bool WXUNUSED(onlyIfNeeded), long WXUNUSED(eventsToProcess))
++        { return true; }
+
+     // the pointer to currently active loop
+     static wxEventLoopBase *ms_activeLoop;
+
++    // the array of the handlers with pending events which needs to be processed
++    // inside ProcessPendingEvents()
++    wxEvtHandlerArray m_handlersWithPendingEvents;
++
++    // helper array used by ProcessPendingEvents()
++    wxEvtHandlerArray m_handlersWithPendingDelayedEvents;
++
++#if wxUSE_THREADS
++    // this critical section protects both the lists above
++    wxCriticalSection m_handlersWithPendingEventsLocker;
++#endif
++
++    // Yield() helpers:
++    bool m_isInsideYield;
++    long m_eventsToProcessInsideYield;
++
+     wxDECLARE_NO_COPY_CLASS(wxEventLoopBase);
+ };
+
+@@ -163,6 +264,8 @@
+     virtual void WakeUp() { }
+
+ protected:
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+     // the pointer to the port specific implementation class
+     wxEventLoopImpl *m_impl;
+
+Index: include/wx/mgl/app.h
+===================================================================
+--- include/wx/mgl/app.h	(revisione 58817)
++++ include/wx/mgl/app.h	(copia locale)
+@@ -51,8 +51,6 @@
+ private:
+     DECLARE_DYNAMIC_CLASS(wxApp)
+
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+-
+     wxVideoMode m_displayMode;
+ };
+
+Index: include/wx/osx/app.h
+===================================================================
+--- include/wx/osx/app.h	(revisione 58817)
++++ include/wx/osx/app.h	(copia locale)
+@@ -66,7 +66,6 @@
+     // Implementation
+     virtual bool Initialize(int& argc, wxChar **argv);
+     virtual void CleanUp();
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     // the installed application event handler
+     WXEVENTHANDLERREF    MacGetEventHandler() { return m_macEventHandler ; }
+Index: include/wx/osx/cocoa/evtloop.h
+===================================================================
+--- include/wx/osx/cocoa/evtloop.h	(revisione 58817)
++++ include/wx/osx/cocoa/evtloop.h	(copia locale)
+@@ -24,6 +24,7 @@
+     virtual void WakeUp();
+
+ private:
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+     double m_sleepTime;
+ };
+
+Index: include/wx/osx/carbon/evtloop.h
+===================================================================
+--- include/wx/osx/carbon/evtloop.h	(revisione 58817)
++++ include/wx/osx/carbon/evtloop.h	(copia locale)
+@@ -30,6 +30,7 @@
+ private:
+     // dispatch an event and release it
+     void DispatchAndReleaseEvent(EventRef event);
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     double      m_sleepTime;
+ };
+Index: include/wx/gtk/app.h
+===================================================================
+--- include/wx/gtk/app.h	(revisione 58817)
++++ include/wx/gtk/app.h	(copia locale)
+@@ -78,10 +78,6 @@
+     bool EventsPending();
+     bool DoIdle();
+
+-protected:
+-
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+-
+ private:
+     // true if we're inside an assert modal dialog
+ #ifdef __WXDEBUG__
+Index: include/wx/gtk/evtloop.h
+===================================================================
+--- include/wx/gtk/evtloop.h	(revisione 58817)
++++ include/wx/gtk/evtloop.h	(copia locale)
+@@ -28,9 +28,15 @@
+     virtual void WakeUp();
+
+ protected:
++
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
++
+     // the exit code of this event loop
+     int m_exitcode;
+
++    // used to temporarily store events in DoYield()
++    wxArrayPtrVoid m_arrGdkEvents;
++
+     wxDECLARE_NO_COPY_CLASS(wxGUIEventLoop);
+ };
+
+Index: include/wx/cocoa/app.h
+===================================================================
+--- include/wx/cocoa/app.h	(revisione 58817)
++++ include/wx/cocoa/app.h	(copia locale)
+@@ -57,7 +57,6 @@
+     // Implement wxAppBase pure virtuals
+     virtual void Exit();
+
+-    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+     virtual void WakeUpIdle();
+
+     virtual bool Initialize(int& argc, wxChar **argv);
+Index: include/wx/cocoa/evtloop.h
+===================================================================
+--- include/wx/cocoa/evtloop.h	(revisione 58817)
++++ include/wx/cocoa/evtloop.h	(copia locale)
+@@ -29,6 +29,7 @@
+
+ protected:
+     int m_exitcode;
++    virtual bool DoYield(bool onlyIfNeeded, long eventsToProcess);
+
+     wxDECLARE_NO_COPY_CLASS(wxGUIEventLoop);
+ };
+Index: interface/wx/app.h
+===================================================================
+--- interface/wx/app.h	(revisione 58817)
++++ interface/wx/app.h	(copia locale)
+@@ -57,31 +57,26 @@
+
+     /**
+         @name Event-handling
++
++        Note that you should at wxEvtLoopBase for more event-processing
++        documentation.
+     */
+     //@{
+
+     /**
+-        Dispatches the next event in the windowing system event queue.
+-        Blocks until an event appears if there are none currently
+-        (use Pending() if this is not wanted).
+-
+-        This can be used for programming event loops, e.g.
+-
+-        @code
+-        while (app.Pending())
+-            Dispatch();
+-        @endcode
+-
+-        @return @false if the event loop should stop and @true otherwise.
++        Called by wxWidgets on creation of the application. Override this if you wish
++        to provide your own (environment-dependent) main loop.
+
+-        @see Pending(), wxEventLoopBase
++        @return 0 under X, and the wParam of the WM_QUIT message under Windows.
+     */
+-    virtual bool Dispatch();
++    virtual int MainLoop();
+
+     /**
+         Call this to explicitly exit the main message (event) loop.
+         You should normally exit the main loop (and the application) by deleting
+         the top window.
++
++        This function simply calls wxEvtLoopBase::Exit() on the active loop.
+     */
+     virtual void ExitMainLoop();
+
+@@ -108,81 +103,6 @@
+                              wxEventFunction func,
+                              wxEvent& event) const;
+
+-    /**
+-        Returns @true if called from inside Yield().
+-    */
+-    virtual bool IsYielding() const;
+-
+-    /**
+-        Process all pending events; it is necessary to call this function to
+-        process posted events.
+-
+-        This happens during each event loop iteration in GUI mode but if there is
+-        no main loop, it may be also called directly.
+-    */
+-    virtual void ProcessPendingEvents();
+-
+-    /**
+-        Called by wxWidgets on creation of the application. Override this if you wish
+-        to provide your own (environment-dependent) main loop.
+-
+-        @return 0 under X, and the wParam of the WM_QUIT message under Windows.
+-    */
+-    virtual int MainLoop();
+-
+-    /**
+-        Returns @true if unprocessed events are in the window system event queue.
+-
+-        @see Dispatch()
+-    */
+-    virtual bool Pending();
+-
+-    /**
+-        Yields control to pending messages in the windowing system.
+-
+-        This can be useful, for example, when a time-consuming process writes to a
+-        text window. Without an occasional yield, the text window will not be updated
+-        properly, and on systems with cooperative multitasking, such as Windows 3.1
+-        other processes will not respond.
+-
+-        Caution should be exercised, however, since yielding may allow the
+-        user to perform actions which are not compatible with the current task.
+-        Disabling menu items or whole menus during processing can avoid unwanted
+-        reentrance of code: see ::wxSafeYield for a better function.
+-        You can avoid unwanted reentrancies also using IsYielding().
+-
+-        Note that Yield() will not flush the message logs. This is intentional as
+-        calling Yield() is usually done to quickly update the screen and popping up
+-        a message box dialog may be undesirable. If you do wish to flush the log
+-        messages immediately (otherwise it will be done during the next idle loop
+-        iteration), call wxLog::FlushActive.
+-
+-        Calling Yield() recursively is normally an error and an assert failure is
+-        raised in debug build if such situation is detected. However if the
+-        @a onlyIfNeeded parameter is @true, the method will just silently
+-        return @false instead.
+-    */
+-    bool Yield(bool onlyIfNeeded = false);
+-
+-    /**
+-        Works like Yield() with @e onlyIfNeeded == @true, except that it allows
+-        the caller to specify a mask of the ::wxEventCategory values which
+-        indicates which events should be processed and which should instead
+-        be "delayed" (i.e. processed by the main loop later).
+-
+-        Note that this is a safer alternative to Yield() since it ensures that
+-        only the events you're interested to are processed; i.e. helps to avoid
+-        unwanted reentrancies.
+-    */
+-    bool YieldFor(long eventsToProcess);
+-
+-    /**
+-        Returns @true if the given event category is allowed inside
+-        a YieldFor() call (i.e. compares the given category against the
+-        last mask passed to YieldFor()).
+-    */
+-    virtual bool IsEventAllowedInsideYield(wxEventCategory cat) const;
+-
+     //@}
+
+
+Index: interface/wx/evtloop.h
+===================================================================
+--- interface/wx/evtloop.h	(revisione 58817)
++++ interface/wx/evtloop.h	(copia locale)
+@@ -18,7 +18,7 @@
+     @library{wxbase}
+     @category{appmanagement}
+
+-    @see wxApp
++    @see wxApp, wxEventLoopActivator
+ */
+ class wxEventLoopBase
+ {
+@@ -42,10 +42,9 @@
+
+
+     /**
+-        Use this to check whether the event loop was successfully created
+-        before using it
++        @name Dispatch and processing
+      */
+-    virtual bool IsOk() const;
++    //@{
+
+     /**
+         Start the event loop, return the exit code when it is finished.
+@@ -61,6 +60,21 @@
+     virtual int Run() = 0;
+
+     /**
++        Return true if this event loop is currently running.
++
++        Notice that even if this event loop hasn't terminated yet but has just
++        spawned a nested (e.g. modal) event loop, this method would return
++        @false.
++     */
++    bool IsRunning() const;
++
++    /**
++        Use this to check whether the event loop was successfully created
++        before using it
++     */
++    virtual bool IsOk() const;
++
++    /**
+         Exit from the loop with the given exit code.
+      */
+     virtual void Exit(int rc = 0) = 0;
+@@ -73,6 +87,22 @@
+     virtual bool Pending() const = 0;
+
+     /**
++        Dispatches the next event in the windowing system event queue.
++        Blocks until an event appears if there are none currently
++        (use Pending() if this is not wanted).
++
++        This can be used for programming event loops, e.g.
++
++        @code
++        while (app.Pending())
++            Dispatch();
++        @endcode
++
++        @return @false if the event loop should stop and @true otherwise.
++
++        @see Pending(), wxEventLoopBase
++    */
++    /**
+         Dispatch a single event.
+
+         If there are currently no events in the queue, blocks until an event
+@@ -101,19 +131,128 @@
+     virtual int DispatchTimeout(unsigned long timeout) = 0;
+
+     /**
+-        Return true if this event loop is currently running.
++        Called by wxWidgets to wake up the event loop even if it is currently
++        blocked inside Dispatch().
++     */
++    virtual void WakeUp() = 0;
+
+-        Notice that even if this event loop hasn't terminated yet but has just
+-        spawned a nested (e.g. modal) event loop, this method would return
+-        @false.
++    //@}
++
++
++    /**
++        @name Pending events
+      */
+-    bool IsRunning() const;
++    //@{
+
+     /**
+-        Called by wxWidgets to wake up the event loop even if it is currently
+-        blocked inside Dispatch().
++        Process all pending events; it is necessary to call this function to
++        process posted events.
++
++        This happens during each event loop iteration in GUI mode but
++        it may be also called directly.
+      */
+-    virtual void WakeUp() = 0;
++    virtual void ProcessPendingEvents();
++
++    /**
++        Returns @true if there are pending events on the internal pending event list.
++    */
++    bool HasPendingEvents() const;
++
++    /**
++        Temporary suspends processing of the pending events.
++
++        @see ResumeProcessingOfPendingEvents()
++    */
++    void SuspendProcessingOfPendingEvents();
++
++    /**
++        Resume processing of the pending events previously stopped because of a
++        call to SuspendProcessingOfPendingEvents().
++    */
++    void ResumeProcessingOfPendingEvents();
++
++    //@}
++
++
++    /**
++        @name Idle handling
++    */
++    //@{
++
++    /**
++        Makes sure that idle events are sent again.
++    */
++    virtual void WakeUpIdle();
++
++    /**
++        This virtual function is called  when the application becomes idle and
++        normally just sends wxIdleEvent to all interested parties.
++
++        It should return @true if more idle events are needed, @false if not.
++    */
++    virtual bool ProcessIdle();
++
++    //@}
++
++
++    /**
++        @name Yield-related hooks
++    */
++    //@{
++
++    /**
++        Returns @true if called from inside Yield().
++    */
++    virtual bool IsYielding() const;
++
++    /**
++        Yields control to pending messages in the windowing system.
++
++        This can be useful, for example, when a time-consuming process writes to a
++        text window. Without an occasional yield, the text window will not be updated
++        properly, and on systems with cooperative multitasking, such as Windows 3.1
++        other processes will not respond.
++
++        Caution should be exercised, however, since yielding may allow the
++        user to perform actions which are not compatible with the current task.
++        Disabling menu items or whole menus during processing can avoid unwanted
++        reentrance of code: see ::wxSafeYield for a better function.
++        You can avoid unwanted reentrancies also using IsYielding().
++
++        Note that Yield() will not flush the message logs. This is intentional as
++        calling Yield() is usually done to quickly update the screen and popping up
++        a message box dialog may be undesirable. If you do wish to flush the log
++        messages immediately (otherwise it will be done during the next idle loop
++        iteration), call wxLog::FlushActive.
++
++        Calling Yield() recursively is normally an error and an assert failure is
++        raised in debug build if such situation is detected. However if the
++        @a onlyIfNeeded parameter is @true, the method will just silently
++        return @false instead.
++    */
++    bool Yield(bool onlyIfNeeded = false);
++
++    /**
++        Works like Yield() with @e onlyIfNeeded == @true, except that it allows
++        the caller to specify a mask of the ::wxEventCategory values which
++        indicates which events should be processed and which should instead
++        be "delayed" (i.e. processed by the main loop later).
++
++        Note that this is a safer alternative to Yield() since it ensures that
++        only the events you're interested to are processed; i.e. helps to avoid
++        unwanted reentrancies.
++    */
++    bool YieldFor(long eventsToProcess);
++
++    /**
++        Returns @true if the given event category is allowed inside
++        a YieldFor() call (i.e. compares the given category against the
++        last mask passed to YieldFor()).
++    */
++    virtual bool IsEventAllowedInsideYield(wxEventCategory cat) const;
++
++    //@}
++
+
+ protected:
+     /**

@@ -1,0 +1,167 @@
+Index: src/unix/sockunix.cpp
+===================================================================
+--- src/unix/sockunix.cpp	(revision 69871)
++++ src/unix/sockunix.cpp	(working copy)
+@@ -106,16 +106,28 @@
+     if ( enable )
+     {
+         if ( flags & wxSOCKET_INPUT_FLAG )
++        {
+             manager->Install_Callback(this, wxSOCKET_INPUT);
++            m_socket_input_flag_enabled = true;
++        }
+         if ( flags & wxSOCKET_OUTPUT_FLAG )
++        {
+             manager->Install_Callback(this, wxSOCKET_OUTPUT);
++            m_socket_output_flag_enabled = true;
++        }
+     }
+     else // off
+     {
+         if ( flags & wxSOCKET_INPUT_FLAG )
++        {
+             manager->Uninstall_Callback(this, wxSOCKET_INPUT);
++            m_socket_input_flag_enabled = false;
++        }
+         if ( flags & wxSOCKET_OUTPUT_FLAG )
++        {
+             manager->Uninstall_Callback(this, wxSOCKET_OUTPUT);
++            m_socket_output_flag_enabled = false;
++        }
+     }
+ }
+ 
+Index: src/common/socket.cpp
+===================================================================
+--- src/common/socket.cpp	(revision 69871)
++++ src/common/socket.cpp	(working copy)
+@@ -207,6 +207,8 @@
+         wxASSERT_MSG( !m_socket->m_reading, "read reentrancy?" );
+ 
+         m_socket->m_reading = true;
++
++        m_reenable = m_socket->m_impl->IsEventEnabled(wxSOCKET_INPUT_FLAG);
+     }
+ 
+     ~wxSocketReadGuard()
+@@ -216,13 +218,15 @@
+         // connection could have been lost while reading, in this case calling
+         // ReenableEvents() would assert and is not necessary anyhow
+         wxSocketImpl * const impl = m_socket->m_impl;
+-        if ( impl && impl->m_fd != INVALID_SOCKET )
++        if ( m_reenable && impl && impl->m_fd != INVALID_SOCKET )
+             impl->ReenableEvents(wxSOCKET_INPUT_FLAG);
+     }
+ 
+ private:
+     wxSocketBase * const m_socket;
+ 
++    bool m_reenable;
++
+     wxDECLARE_NO_COPY_CLASS(wxSocketReadGuard);
+ };
+ 
+@@ -235,6 +239,8 @@
+         wxASSERT_MSG( !m_socket->m_writing, "write reentrancy?" );
+ 
+         m_socket->m_writing = true;
++
++        m_reenable = m_socket->m_impl->IsEventEnabled(wxSOCKET_OUTPUT_FLAG);
+     }
+ 
+     ~wxSocketWriteGuard()
+@@ -242,13 +248,15 @@
+         m_socket->m_writing = false;
+ 
+         wxSocketImpl * const impl = m_socket->m_impl;
+-        if ( impl && impl->m_fd != INVALID_SOCKET )
++        if ( m_reenable && impl && impl->m_fd != INVALID_SOCKET )
+             impl->ReenableEvents(wxSOCKET_OUTPUT_FLAG);
+     }
+ 
+ private:
+     wxSocketBase * const m_socket;
+ 
++    bool m_reenable;
++
+     wxDECLARE_NO_COPY_CLASS(wxSocketWriteGuard);
+ };
+ 
+Index: include/wx/unix/private/sockunix.h
+===================================================================
+--- include/wx/unix/private/sockunix.h	(revision 69871)
++++ include/wx/unix/private/sockunix.h	(working copy)
+@@ -33,6 +33,10 @@
+     {
+         m_fds[0] =
+         m_fds[1] = -1;
++
++        m_socket_input_flag_enabled = false;
++
++        m_socket_output_flag_enabled = false;
+     }
+ 
+     virtual wxSocketError GetLastError() const;
+@@ -54,6 +58,21 @@
+         EnableEvents(flags);
+     }
+ 
++    virtual bool IsEventEnabled(wxSocketEventFlags flags)
++    {
++      if ((flags & wxSOCKET_INPUT_FLAG) && m_socket_input_flag_enabled)
++      {
++        return true;
++      }
++
++      if ((flags & wxSOCKET_OUTPUT_FLAG) && m_socket_output_flag_enabled)
++      {
++        return true;
++      }
++
++      return false;
++    }
++
+     // wxFDIOHandler methods
+     virtual void OnReadWaiting();
+     virtual void OnWriteWaiting();
+@@ -90,6 +109,10 @@
+     // with the socket
+     int m_fds[2];
+ 
++    bool m_socket_input_flag_enabled;
++
++    bool m_socket_output_flag_enabled;
++
+ private:
+     // notify the associated wxSocket about a change in socket state and shut
+     // down the socket if the event is wxSOCKET_LOST
+Index: include/wx/msw/private/sockmsw.h
+===================================================================
+--- include/wx/msw/private/sockmsw.h	(revision 69871)
++++ include/wx/msw/private/sockmsw.h	(working copy)
+@@ -47,6 +47,12 @@
+         // anything here
+     }
+ 
++    virtual bool IsEventEnabled(wxSocketEventFlags flags)
++    {
++      // See comment in ReenableEvents: notifications are never disabled
++      return true;
++    }
++
+ private:
+     virtual void DoClose();
+ 
+Index: include/wx/private/socket.h
+===================================================================
+--- include/wx/private/socket.h	(revision 69871)
++++ include/wx/private/socket.h	(working copy)
+@@ -290,6 +290,8 @@
+     // turned off when this data was first detected
+     virtual void ReenableEvents(wxSocketEventFlags flags) = 0;
+ 
++    virtual bool IsEventEnabled(wxSocketEventFlags flags) = 0;
++
+     // TODO: make these fields protected and provide accessors for those of
+     //       them that wxSocketBase really needs
+ //protected:

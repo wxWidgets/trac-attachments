@@ -1,0 +1,169 @@
+Index: src/msw/treectrl.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/src/msw/treectrl.cpp,v
+retrieving revision 1.247
+diff -u -r1.247 treectrl.cpp
+--- src/msw/treectrl.cpp	2006/12/23 00:10:15	1.247
++++ src/msw/treectrl.cpp	2006/12/25 23:38:31
+@@ -2009,30 +2009,41 @@
+     {
+         int x = GET_X_LPARAM(lParam),
+             y = GET_Y_LPARAM(lParam);
+-        // Convert the screen point to a client point
+-        wxPoint MenuPoint = ScreenToClient(wxPoint(x, y));
+ 
+-        // can't use GetSelection() here as it would assert in multiselect mode
+-        wxTreeEvent event(wxEVT_COMMAND_TREE_ITEM_MENU, this,
+-                          wxTreeItemId(TreeView_GetSelection(GetHwnd())));
++        bool bFromKeyboard = (x == -1 || y == -1);
++        wxTreeItemId item;
++        wxPoint pt;
+ 
+-        // Get the bounding rectangle for the item, including the non-text areas
+-        wxRect ItemRect;
+-        GetBoundingRect(event.m_item, ItemRect, false);
+-        // If the point is inside the bounding rectangle, use it as the click position.
+-        // This should be the case for WM_CONTEXTMENU as the result of a right-click
+-        if (ItemRect.Contains(MenuPoint))
++        if (bFromKeyboard)
+         {
+-            event.m_pointDrag = MenuPoint;
++            // Use the Explorer standard of putting the menu at the left edge of the text,
++            // in the vertical middle of the text. Should be the case for the "menu" key
++            item = wxTreeItemId(TreeView_GetSelection(GetHwnd()));
++            if (item.IsOk())
++            {
++                // Use the bounding rectangle of only the text part
++                wxRect ItemRect;
++                GetBoundingRect(item, ItemRect, true);
++                pt = wxPoint(ItemRect.GetX(), ItemRect.GetY() + ItemRect.GetHeight() / 2);
++            }
+         }
+-        // Use the Explorer standard of putting the menu at the left edge of the text,
+-        // in the vertical middle of the text. Should be the case for the "menu" key
+         else
+         {
+-            // Use the bounding rectangle of only the text part
+-            GetBoundingRect(event.m_item, ItemRect, true);
+-            event.m_pointDrag = wxPoint(ItemRect.GetX(), ItemRect.GetY() + ItemRect.GetHeight() / 2);
++            pt = ScreenToClient(wxPoint(x,y));
++
++            TV_HITTESTINFO tvhti;
++            tvhti.pt.x = pt.x;
++            tvhti.pt.y = pt.y;
++            if ( TreeView_HitTest(GetHwnd(), &tvhti) )
++                item = wxTreeItemId(tvhti.hItem);
+         }
++
++        // create the event
++        wxTreeEvent event(wxEVT_COMMAND_TREE_ITEM_MENU, this, item);
++
++        // set the event point in client coordinates: it can be passed
++        // directly to wxWindow::PopupMenu() to popup the context menu
++        event.m_pointDrag = pt;
+ 
+         if ( GetEventHandler()->ProcessEvent(event) )
+             processed = true;
+Index: docs/latex/wx/treeevt.tex
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/docs/latex/wx/treeevt.tex,v
+retrieving revision 1.21
+diff -u -r1.21 treeevt.tex
+--- docs/latex/wx/treeevt.tex	2006/05/28 23:56:50	1.21
++++ docs/latex/wx/treeevt.tex	2006/12/25 23:56:39
+@@ -90,13 +90,15 @@
+ 
+ Returns the old item index (valid for EVT\_TREE\_ITEM\_CHANGING and CHANGED events)
+ 
+-\membersection{wxTreeEvent::GetPoint()}\label{wxtreeeventgetpoint}
++\membersection{wxTreeEvent::GetPoint}\label{wxtreeeventgetpoint}
+ 
+ \constfunc{wxPoint}{GetPoint}{}
+ 
+-Returns the position of the mouse pointer if the event is a drag event.
++Returns the position of the mouse pointer if the event is a drag or menu-context event.
++In both cases the position is in client coordinates - i.e. relative to the wxTreeCtrl
++window (so that you can pass it directly to e.g. \helpref{wxWindow::PopupMenu}{wxwindowpopupmenu}).
+ 
+-\membersection{wxTreeEvent::IsEditCancelled()}\label{wxtreeeventiseditcancelled}
++\membersection{wxTreeEvent::IsEditCancelled}\label{wxtreeeventiseditcancelled}
+ 
+ \constfunc{bool}{IsEditCancelled}{}
+ 
+Index: samples/treectrl/treetest.cpp
+===================================================================
+RCS file: /pack/cvsroots/wxwidgets/wxWidgets/samples/treectrl/treetest.cpp,v
+retrieving revision 1.110
+diff -u -r1.110 treetest.cpp
+--- samples/treectrl/treetest.cpp	2006/11/04 11:26:51	1.110
++++ samples/treectrl/treetest.cpp	2006/12/25 23:58:35
+@@ -1084,9 +1084,13 @@
+     {
+         m_draggedItem = event.GetItem();
+ 
+-        wxLogMessage(wxT("OnBeginDrag: started dragging %s"),
+-                     GetItemText(m_draggedItem).c_str());
++        wxPoint clientpt = event.GetPoint();
++        wxPoint screenpt = ClientToScreen(clientpt);
+ 
++        wxLogMessage(wxT("OnBeginDrag: started dragging %s at screen coords (%i,%i)"),
++                     GetItemText(m_draggedItem).c_str(),
++                     screenpt.x, screenpt.y);
++
+         event.Allow();
+     }
+     else
+@@ -1195,45 +1199,21 @@
+     wxTreeItemId itemId = event.GetItem();
+     MyTreeItemData *item = itemId.IsOk() ? (MyTreeItemData *)GetItemData(itemId)
+                                          : NULL;
++    wxPoint clientpt = event.GetPoint();
++    wxPoint screenpt = ClientToScreen(clientpt);
+ 
+-    wxLogMessage(wxT("OnItemMenu for item \"%s\""), item ? item->GetDesc()
+-                                                         : _T(""));
++    wxLogMessage(wxT("OnItemMenu for item \"%s\" at screen coords (%i, %i)"), 
++                 item ? item->GetDesc() : _T(""), screenpt.x, screenpt.y);
+ 
++    ShowMenu(itemId, clientpt);
+     event.Skip();
+ }
+ 
+ void MyTreeCtrl::OnContextMenu(wxContextMenuEvent& event)
+ {
+     wxPoint pt = event.GetPosition();
+-    wxTreeItemId item;
+-    wxLogMessage(wxT("OnContextMenu at screen coords (%i, %i)"), pt.x, pt.y);
+ 
+-    // check if event was generated by keyboard (MSW-specific?)
+-    if ( pt.x == -1 && pt.y == -1 ) //(this is how MSW indicates it)
+-    {
+-        if ( !HasFlag(wxTR_MULTIPLE) )
+-            item = GetSelection();
+-
+-        // attempt to guess where to show the menu
+-        if ( item.IsOk() )
+-        {
+-            // if an item was clicked, show menu to the right of it
+-            wxRect rect;
+-            GetBoundingRect(item, rect, true /* only the label */);
+-            pt = wxPoint(rect.GetRight(), rect.GetTop());
+-        }
+-        else
+-        {
+-            pt = wxPoint(0, 0);
+-        }
+-    }
+-    else // event was generated by mouse, use supplied coords
+-    {
+-        pt = ScreenToClient(pt);
+-        item = HitTest(pt);
+-    }
+-
+-    ShowMenu(item, pt);
++    wxLogMessage(wxT("OnContextMenu at screen coords (%i, %i)"), pt.x, pt.y);
+ }
+ 
+ void MyTreeCtrl::ShowMenu(wxTreeItemId id, const wxPoint& pt)
+
+ 	  	 

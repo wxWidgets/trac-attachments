@@ -1,0 +1,189 @@
+diff -rup ./original/include/wx/msw/combobox.h ./modified/include/wx/msw/combobox.h
+--- ./original/include/wx/msw/combobox.h	2015-07-27 10:35:00.000000000 +0700
++++ ./modified/include/wx/msw/combobox.h	2015-08-20 21:48:46.158299000 +0700
+@@ -129,6 +129,12 @@ public:
+     virtual void SetLayoutDirection(wxLayoutDirection dir) wxOVERRIDE;
+ 
+ protected:
++#ifdef wxUSE_OLE
++    // override wxTextEntry method to handle some lost key events
++    // due to enabled autocomplete.
++    virtual bool MSWHandleAutoComplete(const wxKeyEvent& event);
++#endif // wxUSE_OLE
++
+ #if wxUSE_TOOLTIPS
+     virtual void DoSetToolTip(wxToolTip *tip);
+ #endif
+diff -rup ./original/include/wx/msw/textctrl.h ./modified/include/wx/msw/textctrl.h
+--- ./original/include/wx/msw/textctrl.h	2015-07-27 10:35:00.000000000 +0700
++++ ./modified/include/wx/msw/textctrl.h	2015-08-20 21:48:58.775901200 +0700
+@@ -189,6 +189,12 @@ public:
+     virtual WXDWORD MSWGetStyle(long style, WXDWORD *exstyle) const;
+ 
+ protected:
++#ifdef wxUSE_OLE
++    // override wxTextEntry method to handle some lost key events
++    // due to enabled autocomplete.
++    virtual bool MSWHandleAutoComplete(const wxKeyEvent& event);
++#endif // wxUSE_OLE
++    
+     // common part of all ctors
+     void Init();
+ 
+diff -rup ./original/include/wx/msw/textentry.h ./modified/include/wx/msw/textentry.h
+--- ./original/include/wx/msw/textentry.h	2015-07-27 10:35:00.000000000 +0700
++++ ./modified/include/wx/msw/textentry.h	2015-08-20 21:50:09.438374200 +0700
+@@ -78,6 +78,10 @@ protected:
+     virtual bool DoAutoCompleteFileNames(int flags);
+ #endif // wxUSE_DYNLIB_CLASS
+     virtual bool DoAutoCompleteCustom(wxTextCompleter *completer);
++
++    // Base class methods which need to be overriden in derived class
++    // to handle some lost key events due to enabled autocomplete.
++    virtual bool MSWHandleAutoComplete(const wxKeyEvent& WXUNUSED(event)) { return false; }
+ #endif // wxUSE_OLE
+ 
+ private:
+diff -rup ./original/src/msw/combobox.cpp ./modified/src/msw/combobox.cpp
+--- ./original/src/msw/combobox.cpp	2015-07-27 10:35:00.000000000 +0700
++++ ./modified/src/msw/combobox.cpp	2015-08-20 21:53:33.122738900 +0700
+@@ -49,6 +49,9 @@
+     #include "wx/tooltip.h"
+ #endif // wxUSE_TOOLTIPS
+ 
++#if wxUSE_OLE
++    #define HAS_AUTOCOMPLETE
++#endif
+ // ----------------------------------------------------------------------------
+ // wxWin macros
+ // ----------------------------------------------------------------------------
+@@ -740,4 +743,28 @@ void wxComboBox::SetLayoutDirection(wxLa
+     wxChoice::SetLayoutDirection(dir);
+ }
+ 
++#ifdef HAS_AUTOCOMPLETE
++// ----------------------------------------------------------------------------
++// autocomplete
++// ----------------------------------------------------------------------------
++bool wxComboBox::MSWHandleAutoComplete( const wxKeyEvent& event )
++{
++    // using raw key, to eliminate the use of wxUSE_UNICODE conditional block.
++    switch ( event.GetRawKeyCode() )
++    {
++        case WXK_RETURN:
++            if ( !HasFlag(wxTE_PROCESS_ENTER) )
++                return false;
++            // fall through
++        case WXK_TAB:
++            // better re-use the internal handling.
++            // immediately process char event.
++            MSWProcessEditMsg( WM_CHAR, event.GetRawKeyCode(), 
++                event.GetRawKeyFlags() );
++            return true;
++    }
++    return false;
++}
++#endif // HAS_AUTOCOMPLETE
++
+ #endif // wxUSE_COMBOBOX
+diff -rup ./original/src/msw/textctrl.cpp ./modified/src/msw/textctrl.cpp
+--- ./original/src/msw/textctrl.cpp	2015-07-27 10:35:00.000000000 +0700
++++ ./modified/src/msw/textctrl.cpp	2015-08-20 21:53:27.656544800 +0700
+@@ -96,6 +96,8 @@ DEFINE_GUID(wxIID_IRichEditOleCallback,
+     0x00020d03, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+ 
+ } // anonymous namespace
++
++    #define HAS_AUTOCOMPLETE
+ #endif // wxUSE_OLE
+ 
+ // ----------------------------------------------------------------------------
+@@ -1435,7 +1437,31 @@ void wxTextCtrl::DoSetSelection(long fro
+ #endif // wxUSE_RICHEDIT
+     }
+ }
++#ifdef HAS_AUTOCOMPLETE
++// ----------------------------------------------------------------------------
++// autocomplete
++// ----------------------------------------------------------------------------
++bool wxTextCtrl::MSWHandleAutoComplete( const wxKeyEvent& event )
++{
++    // using raw key, to eliminate the use of wxUSE_UNICODE conditional block.
++    switch ( event.GetRawKeyCode() )
++    {
++        case WXK_RETURN:
++            if ( !HasFlag(wxTE_PROCESS_ENTER) )
++                return false;
++            // fall through
++        case WXK_TAB:
++            // since the wxKeyEvent in wxEVT_CHAR_HOOK is slightly different,
++            // simulate and recreate the char key event.
++            wxKeyEvent char_event(CreateCharEvent(wxEVT_CHAR, event.GetRawKeyCode(), 
++                event.GetRawKeyFlags()));
+ 
++            GetEventHandler()->AddPendingEvent(char_event);
++            return true;
++    }
++    return false;
++}
++#endif // HAS_AUTOCOMPLETE
+ // ----------------------------------------------------------------------------
+ // dirty status
+ // ----------------------------------------------------------------------------
+diff -rup ./original/src/msw/textentry.cpp ./modified/src/msw/textentry.cpp
+--- ./original/src/msw/textentry.cpp	2015-07-27 10:35:00.000000000 +0700
++++ ./modified/src/msw/textentry.cpp	2015-08-20 21:53:30.659426100 +0700
+@@ -573,24 +573,39 @@ private:
+ 
+     void OnCharHook(wxKeyEvent& event)
+     {
+-        // If the autocomplete drop-down list is currently displayed when the
+-        // user presses Escape, we need to dismiss it manually from here as
+-        // Escape could be eaten by something else (e.g. EVT_CHAR_HOOK in the
+-        // dialog that this control is found in) otherwise.
+-        if ( event.GetKeyCode() == WXK_ESCAPE )
++        // using raw key, to eliminate the use of wxUSE_UNICODE conditional block.
++        int iKeyCode = event.GetRawKeyCode();
++        switch ( iKeyCode )
+         {
+-            DWORD dwFlags = 0;
+-            if ( SUCCEEDED(m_autoCompleteDropDown->GetDropDownStatus(&dwFlags,
+-                                                                     NULL))
+-                    && dwFlags == ACDD_VISIBLE )
++        case WXK_RETURN:
++        case WXK_ESCAPE:
++        case WXK_TAB:
+             {
+-                ::SendMessage(GetHwndOf(m_win), WM_KEYDOWN, WXK_ESCAPE, 0);
+-
+-                // Do not skip the event in this case, we've already handled it.
+-                return;
++                // If the autocomplete drop-down list is currently displayed when the
++                // user presses Escape, we need to dismiss it manually from here as
++                // Escape could be eaten by something else (e.g. EVT_CHAR_HOOK in the
++                // dialog that this control is found in) otherwise.
++                // Also handle the return key (and the numpad return) and TAB as well.
++                DWORD dwFlags = 0;
++                if ( SUCCEEDED(m_autoCompleteDropDown->GetDropDownStatus(&dwFlags,
++                    NULL)))
++                {
++                    if ( dwFlags == ACDD_VISIBLE && iKeyCode != WXK_TAB )
++                    {
++                        ::SendMessage(GetHwndOf(m_win), WM_KEYDOWN, iKeyCode, 0);
++
++                        // Do not skip the event in this case, we've already handled it.
++                        return;
++                    }
++                    else if ( dwFlags == 0x00 && m_entry )
++                    {
++                        if ( m_entry->MSWHandleAutoComplete(event) )
++                            return;
++                    }
++                }
+             }
++            break;
+         }
+-
+         event.Skip();
+     }
+ 

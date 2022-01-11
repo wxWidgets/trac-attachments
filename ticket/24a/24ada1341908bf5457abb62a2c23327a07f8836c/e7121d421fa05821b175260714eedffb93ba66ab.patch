@@ -1,0 +1,168 @@
+diff -ru wxWidgets.orig/include/wx/msw/bitmap.h wxWidgets/include/wx/msw/bitmap.h
+--- wxWidgets.orig/include/wx/msw/bitmap.h	2007-05-14 11:09:06.000000000 +0200
++++ wxWidgets/include/wx/msw/bitmap.h	2007-07-19 11:26:45.000000000 +0200
+@@ -30,6 +30,16 @@
+ class WXDLLEXPORT wxPalette;
+ class WXDLLEXPORT wxPixelDataBase;
+ 
++// Copying from icon
++
++enum wxBitmapAlpha
++{
++  wxBitmapAlpha_Auto, // default: copy alpha if the source has it
++  wxBitmapAlpha_None, // never create alpha
++  wxBitmapAlpha_Always // always use alpha
++};
++
++
+ // ----------------------------------------------------------------------------
+ // wxBitmap: a mono or colour bitmap
+ // ----------------------------------------------------------------------------
+@@ -80,18 +90,18 @@
+ 
+     // we must have this, otherwise icons are silently copied into bitmaps using
+     // the copy ctor but the resulting bitmap is invalid!
+-    wxBitmap(const wxIcon& icon) { CopyFromIcon(icon); }
++    wxBitmap(const wxIcon& icon, enum wxBitmapAlpha alpha_detection = wxBitmapAlpha_Auto) { CopyFromIcon(icon, alpha_detection); }
+ 
+     wxBitmap& operator=(const wxIcon& icon)
+     {
+-        (void)CopyFromIcon(icon);
++        (void)CopyFromIcon(icon, wxBitmapAlpha_Auto);
+ 
+         return *this;
+     }
+ 
+     wxBitmap& operator=(const wxCursor& cursor)
+     {
+-        (void)CopyFromCursor(cursor);
++        (void)CopyFromCursor(cursor, wxBitmapAlpha_Auto);
+ 
+         return *this;
+     }
+@@ -106,10 +116,10 @@
+     wxBitmap GetSubBitmap( const wxRect& rect ) const;
+ 
+     // copies the contents and mask of the given (colour) icon to the bitmap
+-    bool CopyFromIcon(const wxIcon& icon);
++    bool CopyFromIcon(const wxIcon& icon, enum wxBitmapAlpha alpha_detection = wxBitmapAlpha_Auto);
+ 
+     // copies the contents and mask of the given cursor to the bitmap
+-    bool CopyFromCursor(const wxCursor& cursor);
++    bool CopyFromCursor(const wxCursor& cursor, enum wxBitmapAlpha alpha_detection = wxBitmapAlpha_Auto);
+ 
+ #if wxUSE_WXDIB
+     // copies from a device independent bitmap
+@@ -182,7 +192,7 @@
+ 
+ private:
+     // common part of CopyFromIcon/CopyFromCursor for Win32
+-    bool CopyFromIconOrCursor(const wxGDIImage& icon);
++    bool CopyFromIconOrCursor(const wxGDIImage& icon, enum wxBitmapAlpha alpha_detection = wxBitmapAlpha_Auto);
+ 
+ 
+     DECLARE_DYNAMIC_CLASS(wxBitmap)
+diff -ru wxWidgets.orig/src/msw/bitmap.cpp wxWidgets/src/msw/bitmap.cpp
+--- wxWidgets.orig/src/msw/bitmap.cpp	2007-05-14 11:09:05.000000000 +0200
++++ wxWidgets/src/msw/bitmap.cpp	2007-07-19 13:37:56.000000000 +0200
+@@ -291,7 +291,7 @@
+ 
+ #ifdef __WIN32__
+ 
+-bool wxBitmap::CopyFromIconOrCursor(const wxGDIImage& icon)
++bool wxBitmap::CopyFromIconOrCursor(const wxGDIImage& icon, enum wxBitmapAlpha alpha_detection)
+ {
+ #if !defined(__WXMICROWIN__) && !defined(__WXWINCE__)
+     // it may be either HICON or HCURSOR
+@@ -318,29 +318,44 @@
+     refData->m_hBitmap = (WXHBITMAP)iconInfo.hbmColor;
+ 
+ #if wxUSE_WXDIB
+-    // If the icon is 32 bits per pixel then it may have alpha channel data,
+-    // although there are some icons that are 32 bpp but have no alpha... So
+-    // convert to a DIB and manually check the 4th byte for each pixel.
+-    BITMAP bm;
+-    if ( ::GetObject(iconInfo.hbmColor, sizeof(BITMAP), (LPVOID)&bm)
+-         && bm.bmBitsPixel == 32)
++    switch (alpha_detection)
+     {
+-        wxDIB dib(iconInfo.hbmColor);
+-        if (dib.IsOk())
+-        {
+-            unsigned char* pixels = dib.GetData();
+-            for (int idx=0; idx<w*h*4; idx+=4)
++        case wxBitmapAlpha_None:
++            refData->m_hasAlpha = false;
++            break;
++        case wxBitmapAlpha_Always:
++            refData->m_hasAlpha = true;
++            break;
++        case wxBitmapAlpha_Auto:
++        {
++            // If the icon is 32 bits per pixel then it may have alpha channel data,
++            // although there are some icons that are 32 bpp but have no alpha... So
++            // convert to a DIB and manually check the 4th byte for each pixel.
++            BITMAP bm;
++            if (    ::GetObject(iconInfo.hbmColor, sizeof(bm), &bm)
++                && (bm.bmBitsPixel == 32) )
+             {
+-                if (pixels[idx+3] != 0)
++                wxDIB dib(iconInfo.hbmColor);
++                if (dib.IsOk())
+                 {
+-                    // If there is an alpha byte that is non-zero then set the
+-                    // alpha flag and bail out of the loop.
+-                    refData->m_hasAlpha = true;
+-                    break;
++                    const unsigned char* pixels = dib.GetData();
++                    for (int idx = 0; idx < w*h*4; idx+=4)
++                    {
++                        if (pixels[idx+3] != 0)
++                        {
++                            // If there is an alpha byte that is non-zero then set the
++                            // alpha flag and bail out of the loop.
++                            refData->m_hasAlpha = true;
++                            break;
++                        }
++                    }
+                 }
+             }
++            break;
+         }
+     }
++#else
++    WXUNUSED(alpha_detection);
+ #endif
+     if ( !refData->m_hasAlpha )
+     {
+@@ -361,24 +376,24 @@
+ 
+ #endif // Win32
+ 
+-bool wxBitmap::CopyFromCursor(const wxCursor& cursor)
++bool wxBitmap::CopyFromCursor(const wxCursor& cursor, enum wxBitmapAlpha alpha_detection)
+ {
+     UnRef();
+ 
+     if ( !cursor.Ok() )
+         return false;
+ 
+-    return CopyFromIconOrCursor(cursor);
++    return CopyFromIconOrCursor(cursor, alpha_detection);
+ }
+ 
+-bool wxBitmap::CopyFromIcon(const wxIcon& icon)
++bool wxBitmap::CopyFromIcon(const wxIcon& icon, enum wxBitmapAlpha alpha_detection)
+ {
+     UnRef();
+ 
+     if ( !icon.Ok() )
+         return false;
+ 
+-    return CopyFromIconOrCursor(icon);
++    return CopyFromIconOrCursor(icon, alpha_detection);
+ }
+ 
+ #ifndef NEVER_USE_DIB
+
+ 	  	 

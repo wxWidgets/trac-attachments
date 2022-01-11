@@ -1,0 +1,290 @@
+diff --git a/include/wx/dataview.h b/include/wx/dataview.h
+index 8950f40..46b5e99 100644
+--- a/include/wx/dataview.h
++++ b/include/wx/dataview.h
+@@ -234,6 +234,13 @@ public:
+         return false;
+     }
+ 
++    // Override this if you want to disable specific items
++    virtual bool IsEnabled(const wxDataViewItem &WXUNUSED(item),
++                           unsigned int WXUNUSED(col)) const
++    {
++        return true;
++    }
++
+     // define hierachy
+     virtual wxDataViewItem GetParent( const wxDataViewItem &item ) const = 0;
+     virtual bool IsContainer( const wxDataViewItem &item ) const = 0;
+@@ -304,6 +311,12 @@ public:
+         return false;
+     }
+ 
++    virtual bool IsEnabledByRow(unsigned int WXUNUSED(row),
++                                unsigned int WXUNUSED(col)) const
++    {
++        return true;
++    }
++
+ 
+     // helper methods provided by list models only
+     virtual unsigned GetRow( const wxDataViewItem &item ) const = 0;
+@@ -344,6 +357,11 @@ public:
+         return GetAttrByRow( GetRow(item), col, attr );
+     }
+ 
++    virtual bool IsEnabled(const wxDataViewItem &item, unsigned int col) const
++    {
++        return IsEnabledByRow( GetRow(item), col );
++    }
++
+ 
+     virtual bool IsListModel() const { return true; }
+ };
+diff --git a/include/wx/dvrenderers.h b/include/wx/dvrenderers.h
+index 1be414f..717f736 100644
+--- a/include/wx/dvrenderers.h
++++ b/include/wx/dvrenderers.h
+@@ -116,6 +116,8 @@ public:
+ 
+     virtual void SetAttr(const wxDataViewItemAttr& WXUNUSED(attr)) { }
+ 
++    virtual void SetEnabled(bool WXUNUSED(enabled)) { }
++
+     wxString GetVariantType() const             { return m_variantType; }
+ 
+     // helper that calls SetValue and SetAttr:
+@@ -261,6 +263,11 @@ public:
+     virtual void SetAttr(const wxDataViewItemAttr& attr) { m_attr = attr; }
+     const wxDataViewItemAttr& GetAttr() const { return m_attr; }
+ 
++    // Store the enabled state of the item so that it can be accessed from
++    // Render() via GetEnabled() if needed.
++    virtual void SetEnabled(bool enabled) { m_enabled = enabled; }
++    bool GetEnabled() const { return m_enabled; }
++
+ 
+     // Implementation only from now on
+ 
+@@ -277,6 +284,7 @@ protected:
+ 
+ private:
+     wxDataViewItemAttr m_attr;
++    bool m_enabled;
+ 
+     wxDECLARE_NO_COPY_CLASS(wxDataViewCustomRendererBase);
+ };
+diff --git a/include/wx/osx/dvrenderer.h b/include/wx/osx/dvrenderer.h
+index b0513b2..3128952 100644
+--- a/include/wx/osx/dvrenderer.h
++++ b/include/wx/osx/dvrenderer.h
+@@ -87,6 +87,9 @@ public:
+     // called to ensure that the given attribute will be used for rendering the
+     // next cell (which had been already associated with this renderer before)
+     virtual void OSXApplyAttr(const wxDataViewItemAttr& attr);
++
++    // called to set the state of the next cell to be rendered
++    virtual void OSXApplyEnabled(bool enabled);
+ #endif // Cocoa
+ 
+ private:
+diff --git a/interface/wx/dataview.h b/interface/wx/dataview.h
+index bfbf140..524685c 100644
+--- a/interface/wx/dataview.h
++++ b/interface/wx/dataview.h
+@@ -168,6 +168,25 @@ public:
+                          wxDataViewItemAttr& attr) const;
+ 
+     /**
++        Override this to indicate that the item should be disabled. Disabled items
++        are displayed differently (e.g. grayed out) and cannot be interacted with.
++
++        The base class version always returns @true, thus making all items
++        enabled by default.
++
++        @param item
++            The item whose enabled status is requested.
++        @param col
++            The column of the item whose enabled status is requested.
++        @return
++            @true if this item should be enabled, @false otherwise.
++
++        @since 2.9.2
++    */
++    virtual bool IsEnabled(const wxDataViewItem &item,
++                           unsigned int col) const;
++
++    /**
+         Override this so the control can query the child items of an item.
+         Returns the number of items.
+     */
+@@ -372,6 +391,25 @@ public:
+                          wxDataViewItemAttr& attr) const;
+ 
+     /**
++        Override this if you want to disable specific items.
++
++        The base class version always returns @true, thus making all items
++        enabled by default.
++
++        @param row
++            The row of the item whose enabled status is requested.
++        @param col
++            The column of the item whose enabled status is requested.
++        @return
++            @true if the item at this row and column should be enabled,
++            @false otherwise.
++
++        @since 2.9.2
++    */
++    virtual bool IsEnabledByRow(unsigned int row,
++                                unsigned int col) const;
++
++    /**
+         Returns the number of items (i.e. rows) in the list.
+     */
+     unsigned int GetCount() const;
+diff --git a/samples/dataview/dataview.cpp b/samples/dataview/dataview.cpp
+index 252cca4..baf7166 100644
+--- a/samples/dataview/dataview.cpp
++++ b/samples/dataview/dataview.cpp
+@@ -653,6 +653,10 @@ void MyFrame::BuildDataViewCtrl(wxPanel* parent, unsigned int nPanel, unsigned l
+                                         wxDefaultSize, style );
+             m_ctrl[2] = lc;
+ 
++            MyListStoreDerivedModel* page2_model = new MyListStoreDerivedModel();
++            lc->AssociateModel(page2_model);
++            page2_model->DecRef();
++
+             lc->AppendToggleColumn( "Toggle" );
+             lc->AppendTextColumn( "Text" );
+             lc->AppendProgressColumn( "Progress" );
+diff --git a/samples/dataview/mymodels.cpp b/samples/dataview/mymodels.cpp
+index 79fc717..a3cb111 100644
+--- a/samples/dataview/mymodels.cpp
++++ b/samples/dataview/mymodels.cpp
+@@ -244,6 +244,17 @@ bool MyMusicTreeModel::SetValue( const wxVariant &variant,
+     return false;
+ }
+ 
++bool MyMusicTreeModel::IsEnabled( const wxDataViewItem &item,
++                                  unsigned int col ) const
++{
++    wxASSERT(item.IsOk());
++
++    MyMusicTreeModelNode *node = (MyMusicTreeModelNode*) item.GetID();
++
++    // disable Beethoven's ratings, his pieces can only be good
++    return !(col == 3 && node->m_artist.EndsWith("Beethoven"));
++}
++
+ wxDataViewItem MyMusicTreeModel::GetParent( const wxDataViewItem &item ) const
+ {
+     // the invisible root node has no parent
+@@ -525,3 +536,14 @@ bool MyListModel::SetValueByRow( const wxVariant &variant,
+ 
+     return false;
+ }
++
++
++// ----------------------------------------------------------------------------
++// MyListStoreDerivedModel
++// ----------------------------------------------------------------------------
++
++bool MyListStoreDerivedModel::IsEnabledByRow(unsigned int row, unsigned int col) const
++{
++    // disabled the last two checkboxes
++    return !(col == 0 && 8 <= row && row <= 9);
++}
+diff --git a/samples/dataview/mymodels.h b/samples/dataview/mymodels.h
+index bb9ca8f..996bd3e 100644
+--- a/samples/dataview/mymodels.h
++++ b/samples/dataview/mymodels.h
+@@ -163,6 +163,9 @@ public:
+     virtual bool SetValue( const wxVariant &variant,
+                            const wxDataViewItem &item, unsigned int col );
+ 
++    virtual bool IsEnabled( const wxDataViewItem &item,
++                            unsigned int col ) const;
++
+     virtual wxDataViewItem GetParent( const wxDataViewItem &item ) const;
+     virtual bool IsContainer( const wxDataViewItem &item ) const;
+     virtual unsigned int GetChildren( const wxDataViewItem &parent,
+@@ -235,3 +238,12 @@ private:
+     wxIcon           m_icon[2];
+ };
+ 
++// ----------------------------------------------------------------------------
++// MyListStoreDerivedModel
++// ----------------------------------------------------------------------------
++
++class MyListStoreDerivedModel : public wxDataViewListStore
++{
++public:
++    virtual bool IsEnabledByRow(unsigned int row, unsigned int col) const;
++};
+diff --git a/src/common/datavcmn.cpp b/src/common/datavcmn.cpp
+index 94ddc67..3e52749 100644
+--- a/src/common/datavcmn.cpp
++++ b/src/common/datavcmn.cpp
+@@ -790,6 +790,8 @@ void wxDataViewRendererBase::PrepareForItem(const wxDataViewModel *model,
+     wxDataViewItemAttr attr;
+     model->GetAttr(item, column, attr);
+     SetAttr(attr);
++
++    SetEnabled(model->IsEnabled(item, column));
+ }
+ 
+ 
+diff --git a/src/generic/datavgen.cpp b/src/generic/datavgen.cpp
+index df22e98..377f0f7 100644
+--- a/src/generic/datavgen.cpp
++++ b/src/generic/datavgen.cpp
+@@ -845,7 +845,8 @@ bool wxDataViewToggleRenderer::Render( wxRect cell, wxDC *dc, int WXUNUSED(state
+     int flags = 0;
+     if (m_toggle)
+         flags |= wxCONTROL_CHECKED;
+-    if (GetMode() != wxDATAVIEW_CELL_ACTIVATABLE)
++    if (GetMode() != wxDATAVIEW_CELL_ACTIVATABLE ||
++        GetEnabled() == false)
+         flags |= wxCONTROL_DISABLED;
+ 
+     // check boxes we draw must always have the same, standard size (if it's
+@@ -868,7 +869,10 @@ void wxDataViewToggleRenderer::WXOnActivate(wxDataViewModel *model,
+                                             const wxDataViewItem & item,
+                                             unsigned int col)
+ {
+-    model->ChangeValue(!valueOld.GetBool(), item, col);
++    if (model->IsEnabled(item, col))
++    {
++        model->ChangeValue(!valueOld.GetBool(), item, col);
++    }
+ }
+ 
+ wxSize wxDataViewToggleRenderer::GetSize() const
+diff --git a/src/osx/cocoa/dataview.mm b/src/osx/cocoa/dataview.mm
+index 29d412a..80505a0 100644
+--- a/src/osx/cocoa/dataview.mm
++++ b/src/osx/cocoa/dataview.mm
+@@ -1695,6 +1695,9 @@ outlineView:(NSOutlineView*)outlineView
+     model->GetAttr(dvItem, colIdx, attr);
+     renderer->OSXApplyAttr(attr);
+ 
++    // set the state (enabled/disabled) of the item
++    renderer->OSXApplyEnabled(model->IsEnabled(dvItem, colIdx));
++
+     // and finally do draw it
+     renderer->MacRender();
+ }
+@@ -2487,6 +2490,11 @@ void wxDataViewRenderer::OSXApplyAttr(const wxDataViewItemAttr& attr)
+         [(id)cell setTextColor:colText];
+ }
+ 
++void wxDataViewRenderer::OSXApplyEnabled(bool enabled)
++{
++    [GetNativeData()->GetItemCell() setEnabled:enabled];
++}
++
+ IMPLEMENT_ABSTRACT_CLASS(wxDataViewRenderer,wxDataViewRendererBase)
+ 
+ // ---------------------------------------------------------

@@ -1,0 +1,196 @@
+Index: src/common/imagpng.cpp
+===================================================================
+--- src/common/imagpng.cpp	(revision 66609)
++++ src/common/imagpng.cpp	(working copy)
+@@ -733,21 +733,14 @@
+ #if wxUSE_PALETTE
+     /*
+     Only save as an indexed image if the number of palette entries does not
+-    exceed libpng's limit (256).
+-    We assume here that we will need an extra palette entry if there's an
+-    alpha or mask, regardless of whether a possibly needed conversion from
+-    alpha to a mask fails (unlikely), or whether the mask colour already
+-    can be found in the palette (more likely). In the latter case an extra
+-    palette entry would not be required later on and the image could actually
+-    be saved as a palettised PNG (instead now it will be saved as true colour).
+-    A little bit of precision is lost, but at the benefit of a lot more
+-    simplified code.
++    exceed the libpng palette limit of 256. Subsequently we'll check for the 
++    special case of 256 palette colours plus a mask: If the mask is not already 
++    in the palette we'll bail out (because of the libpng palette limit).
+     */
+     bool bUsePalette =
+         (!bHasPngFormatOption || iColorType == wxPNG_TYPE_PALETTE)
+         && image->HasPalette()
+-        && image->GetPalette().GetColoursCount()
+-            + ((bHasAlpha || bHasMask) ? 1 : 0) <= PNG_MAX_PALETTE_LENGTH;
++        && (image->GetPalette().GetColoursCount() <= PNG_MAX_PALETTE_LENGTH);
+ 
+     wxImage temp_image(*image);
+     if (bUsePalette && image->HasAlpha() && !bHasMask)
+@@ -770,6 +763,86 @@
+             iColorType = wxPNG_TYPE_COLOUR;
+         }
+     }
++#endif // wxUSE_PALETTE
++
++    png_color mask;
++    if (bHasMask)
++    {
++        mask.red   = image->GetMaskRed();
++        mask.green = image->GetMaskGreen();
++        mask.blue  = image->GetMaskBlue();
++    }
++
++#if wxUSE_PALETTE
++    png_colorp palette = NULL;
++    int numPalette = 0;
++
++    if (bUsePalette)
++    {
++        const wxPalette& pal = image->GetPalette();
++        const int palCount = pal.GetColoursCount();
++        palette = (png_colorp) malloc(
++            (palCount + 1 /*headroom for trans */) * sizeof(png_color));
++
++        if (!palette)
++        {
++            png_destroy_write_struct( &png_ptr, (png_infopp)NULL );
++            if (verbose)
++            {
++               wxLogError(_("Couldn't save PNG image."));
++            }
++            return false;
++        }
++
++        for (int i = 0; i < palCount; ++i)
++        {
++            pal.GetRGB(i, &palette[i].red, &palette[i].green, &palette[i].blue);
++        }
++
++        numPalette = palCount;
++        if (bHasMask)
++        {
++            int index = PaletteFind(mask, palette, numPalette);
++
++            if (index == wxNOT_FOUND)
++            {
++                // any room left?
++                bUsePalette = (numPalette < PNG_MAX_PALETTE_LENGTH);
++                if (bUsePalette)
++                {
++                    numPalette++;
++                    index = palCount;
++                    palette[index] = mask;
++                }
++            }
++            if (bUsePalette)
++            {
++                if (index)
++                {
++                    // the mask colour needs to be first in the palette
++                    wxSwap(palette[0], palette[index]);
++                }
++                png_byte trans = 0;
++                png_set_tRNS(png_ptr, info_ptr, &trans, 1, NULL);
++            }
++        }
++
++        if (bUsePalette)
++        {
++            png_set_PLTE(png_ptr, info_ptr, palette, numPalette);
++            free(palette);
++            palette = NULL;
++            
++            // Let palette point to libpng's copy of the palette.
++            (void) png_get_PLTE(png_ptr, info_ptr, &palette, &numPalette);
++        }
++        else
++        {
++            free(palette);
++            palette = NULL;
++        }
++    }
++
+ #else
+     bool bUsePalette = false;
+ 
+@@ -781,15 +854,6 @@
+ 
+     bool bUseAlpha = !bUsePalette && (bHasAlpha || bHasMask);
+ 
+-    png_color mask;
+-    if (bHasMask)
+-    {
+-        mask.red   = image->GetMaskRed();
+-        mask.green = image->GetMaskGreen();
+-        mask.blue  = image->GetMaskBlue();
+-    }
+-
+-
+     int iPngColorType;
+ 
+ #if wxUSE_PALETTE
+@@ -835,62 +899,6 @@
+                   PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_BASE,
+                   PNG_FILTER_TYPE_BASE);
+ 
+-#if wxUSE_PALETTE
+-    png_colorp palette = NULL;
+-    int numPalette = 0;
+-
+-    if (bUsePalette)
+-    {
+-        const wxPalette& pal = image->GetPalette();
+-        const int palCount = pal.GetColoursCount();
+-        palette = (png_colorp) malloc(
+-            (palCount + 1 /*headroom for trans */) * sizeof(png_color));
+-
+-        if (!palette)
+-        {
+-            png_destroy_write_struct( &png_ptr, (png_infopp)NULL );
+-            if (verbose)
+-            {
+-               wxLogError(_("Couldn't save PNG image."));
+-            }
+-            return false;
+-        }
+-
+-        for (int i = 0; i < palCount; ++i)
+-        {
+-            pal.GetRGB(i, &palette[i].red, &palette[i].green, &palette[i].blue);
+-        }
+-
+-        numPalette = palCount;
+-        if (bHasMask)
+-        {
+-            int index = PaletteFind(mask, palette, numPalette);
+-
+-            if (index)
+-            {
+-                if (index == wxNOT_FOUND)
+-                {
+-                    numPalette++;
+-                    index = palCount;
+-                    palette[index] = mask;
+-                }
+-
+-                wxSwap(palette[0], palette[index]);
+-            }
+-
+-            png_byte trans = 0;
+-            png_set_tRNS(png_ptr, info_ptr, &trans, 1, NULL);
+-        }
+-
+-        png_set_PLTE(png_ptr, info_ptr, palette, numPalette);
+-        free (palette);
+-        palette = NULL;
+-
+-        // Let palette point to libpng's copy of the palette.
+-        (void) png_get_PLTE(png_ptr, info_ptr, &palette, &numPalette);
+-    }
+-#endif // wxUSE_PALETTE
+-
+     int iElements;
+     png_color_8 sig_bit;
+ 

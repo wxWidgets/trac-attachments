@@ -1,0 +1,196 @@
+Index: include/wx/generic/grid.h
+===================================================================
+--- include/wx/generic/grid.h	(revision 76396)
++++ include/wx/generic/grid.h	(working copy)
+@@ -173,7 +173,33 @@
+                                wxGridCellAttr& attr,
+                                wxDC& dc,
+                                int row, int col) = 0;
+-
++    
++    // get the preferred height for a given width. Most of the built in
++    // renderers have only one degree of freedom so GetBestSize() can only
++    // return one result, but for wxGridCellAutoWrapStringRenderer and
++    // wxGridCellHtmlRenderer the best height will depend on the width
++    // and vice versa
++    virtual int GetBestHeight(wxGrid& grid,
++                               wxGridCellAttr& attr,
++                               wxDC& dc,
++                               int row, int col,
++                               int width = -1)
++    {
++        (void)width; // avoid compiler unused param warning
++        return GetBestSize(grid, attr, dc, row, col).GetHeight();
++    }
++    
++    // get the preferred width for a given height (see also GetBestHeight())
++    virtual int GetBestWidth(wxGrid& grid,
++                               wxGridCellAttr& attr,
++                               wxDC& dc,
++                               int row, int col,
++                               int height = -1)
++    {
++        (void)height; // avoid compiler unused param warning
++        return GetBestSize(grid, attr, dc, row, col).GetWidth();
++    }
++    
+     // create a new object which is the copy of this one
+     virtual wxGridCellRenderer *Clone() const = 0;
+ };
+Index: include/wx/generic/gridctrl.h
+===================================================================
+--- include/wx/generic/gridctrl.h	(revision 76396)
++++ include/wx/generic/gridctrl.h	(working copy)
+@@ -237,7 +237,19 @@
+                                wxGridCellAttr& attr,
+                                wxDC& dc,
+                                int row, int col) wxOVERRIDE;
++    
++    virtual int GetBestHeight(wxGrid& grid,
++                              wxGridCellAttr& attr,
++                              wxDC& dc,
++                              int row, int col,
++                              int width) wxOVERRIDE;
+ 
++    virtual int GetBestWidth(wxGrid& grid,
++                              wxGridCellAttr& attr,
++                              wxDC& dc,
++                              int row, int col,
++                              int height) wxOVERRIDE;
++
+     virtual wxGridCellRenderer *Clone() const wxOVERRIDE
+         { return new wxGridCellAutoWrapStringRenderer; }
+ 
+Index: interface/wx/grid.h
+===================================================================
+--- interface/wx/grid.h	(revision 76396)
++++ interface/wx/grid.h	(working copy)
+@@ -47,11 +47,33 @@
+                       bool isSelected) = 0;
+ 
+     /**
+-        Get the preferred size of the cell for its contents.
++        Get the preferred size of the cell for its contents. Most grid
++        cell renderers have only one degree of freedom, and therefore there
++        is only one solution for GetBestSize(). However for cell renderers that
++        have two degrees of freedom (such as wxGridCellAutoWrapStringRenderer 
++        and wxGridCellHtmlRenderer) the best width will depend on the height
++        of the cell and vice versa. Therefore it is better to use 
++        GetBestHeight() and GetBestWidth() for that type of cell renderer.
+     */
+     virtual wxSize GetBestSize(wxGrid& grid, wxGridCellAttr& attr, wxDC& dc,
+                                int row, int col) = 0;
+ 
++    /**
++        Get the preferred height of the cell for its contents and a given width.
++    */
++    virtual wxSize GetBestHeight(wxGrid& grid, wxGridCellAttr& attr, wxDC& dc,
++                               int row, int col, int width = -1) = 0;
++        
++    @see GetBestSize(), GetBestWidth()
++    
++    /**
++        Get the preferred width of the cell for its contents and a given height.
++    */
++    virtual wxSize GetBestWidth(wxGrid& grid, wxGridCellAttr& attr, wxDC& dc,
++                               int row, int col, int height = -1) = 0;
++
++    @see GetBestSize(), GetBestHeight()
++
+ protected:
+     /**
+         The destructor is private because only DecRef() can delete us.
+Index: src/generic/grid.cpp
+===================================================================
+--- src/generic/grid.cpp	(revision 76396)
++++ src/generic/grid.cpp	(working copy)
+@@ -8407,8 +8407,11 @@
+         wxGridCellRenderer *renderer = attr->GetRenderer(this, row, col);
+         if ( renderer )
+         {
+-            wxSize size = renderer->GetBestSize(*this, *attr, dc, row, col);
+-            extent = column ? size.x : size.y;
++            // wxSize size = renderer->GetBestSize(*this, *attr, dc, row, col);
++            // extent = column ? size.x : size.y;
++            extent = column ? 
++                        renderer->GetBestWidth(*this, *attr, dc, row, col) :
++                        renderer->GetBestHeight(*this, *attr, dc, row, col);
+ 
+             if ( span != CellSpan_None )
+             {
+Index: src/generic/gridctrl.cpp
+===================================================================
+--- src/generic/gridctrl.cpp	(revision 76396)
++++ src/generic/gridctrl.cpp	(working copy)
+@@ -436,22 +436,59 @@
+                                               wxDC& dc,
+                                               int row, int col)
+ {
+-    const int lineHeight = dc.GetCharHeight();
++    int height = grid.GetRowHeight(row);
++    // auto wrap string cells can grow in two dimensions, but as this can
++    // be called in a loop (i.e. wxGrid::AutoSize) it is essential that
++    // all cells grow in one and the same direction. Therefore we arbitarily 
++    // decide to fix the cell height and find the corresponding best width.
++    
++    return wxSize (GetBestWidth(grid, attr, dc, row, col, height), height);
++}
+ 
+-    // Search for a shape no taller than the golden ratio.
+-    wxSize size;
+-    for ( size.x = 10; ; size.x += 10 )
+-    {
+-        const size_t
+-            numLines = GetTextLines(grid, dc, attr, size, row, col).size();
+-        size.y = numLines * lineHeight;
+-        if ( size.x >= size.y*1.68 )
+-            break;
+-    }
++int
++wxGridCellAutoWrapStringRenderer::GetBestHeight(wxGrid& grid,
++                                              wxGridCellAttr& attr,
++                                              wxDC& dc,
++                                              int row, int col,
++                                              int width)
++{
++    width = width != -1 ? width : grid.GetColSize(col);
++    
++    const size_t lineHeight = dc.GetCharHeight();
+ 
+-    return size;
++    // increase height until all the text fits. Starting with 4 allows for the
++    // border and a 1px margin top and bottom
++    int height = 4;
++
++    while (GetTextLines(grid, dc, attr, wxSize(width, height), row, col).size()
++                    * lineHeight > (size_t)height)
++        height += lineHeight;
++        
++    return height;
+ }
+ 
++int
++wxGridCellAutoWrapStringRenderer::GetBestWidth(wxGrid& grid,
++                                              wxGridCellAttr& attr,
++                                              wxDC& dc,
++                                              int row, int col,
++                                              int height)
++{
++    height = height != -1 ? height : grid.GetRowSize(row);
++    
++    const size_t lineHeight = dc.GetCharHeight();
++
++    // increase width 10px at a time until all the text fits 
++    int width = 10;
++
++    // (height -4 allows for the border and a 1px margin top and bottom)
++    while (GetTextLines(grid, dc, attr, wxSize(width, height), row, col).size()
++                    * lineHeight > (size_t)(height - 4))
++        width += 10;
++        
++    return width;
++}
++
+ // ----------------------------------------------------------------------------
+ // wxGridCellStringRenderer
+ // ----------------------------------------------------------------------------

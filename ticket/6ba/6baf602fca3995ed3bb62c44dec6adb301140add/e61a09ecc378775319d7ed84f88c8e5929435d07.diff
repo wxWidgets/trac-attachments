@@ -1,0 +1,293 @@
+diff -Nrbu2 -x '*CVS*' old\wxWindows/include/wx/msw/setup0.h wxWindows/include/wx/msw/setup0.h
+--- old\wxWindows/include/wx/msw/setup0.h	2003-11-10 12:03:59.000000000 +0100
++++ wxWindows/include/wx/msw/setup0.h	2003-11-10 12:16:59.000000000 +0100
+@@ -436,4 +436,12 @@
+ #define wxUSE_URL 1
+ 
++// Define this to use native platform url and protocol support.
++// Currently valid only for MS-Windows.
++// Note: if you set this to 1, you can open ftp/http/gopher sites
++// and obtain a valid input stream for these sites
++// even when you set wxUSE_PROTOCOL_FTP/HTTP to 0.
++// Doing so reduces the code size.
++#define wxUSE_URL_NATIVE 1
++
+ // Support for regular expression matching via wxRegEx class: enable this to
+ // use POSIX regular expressions in your code. You need to compile regex
+diff -Nrbu2 -x '*CVS*' old\wxWindows/include/wx/url.h wxWindows/include/wx/url.h
+--- old\wxWindows/include/wx/url.h	2003-11-10 12:04:49.000000000 +0100
++++ wxWindows/include/wx/url.h	2003-11-10 11:59:58.000000000 +0100
+@@ -38,4 +38,16 @@
+ } wxURLError;
+ 
++#if wxUSE_URL_NATIVE
++class WXDLLIMPEXP_NET wxURL;
++
++class WXDLLIMPEXP_NET wxURLNativeImp : public wxObject
++{
++public:
++    virtual ~wxURLNativeImp() { }
++        /// create 
++    virtual wxInputStream *GetInputStream(wxURL *owner) = 0;
++};
++#endif
++
+ class WXDLLIMPEXP_NET wxURL : public wxObject
+ {
+@@ -73,4 +85,12 @@
+ #endif // wxUSE_SOCKETS
+ 
++#if wxUSE_URL_NATIVE
++    friend class wxURLNativeImp;
++        /// pointer to a native URL implementation object
++    wxURLNativeImp *m_nativeImp;
++        /// Creates on the heap and returns a native 
++        /// implementation object for the current platform.
++    static wxURLNativeImp *CreateNativeImpObject();
++#endif
+     wxProtoInfo *m_protoinfo;
+     wxProtocol *m_protocol;
+diff -Nrbu2 -x '*CVS*' old\wxWindows/src/common/url.cpp wxWindows/src/common/url.cpp
+--- old\wxWindows/src/common/url.cpp	2003-11-10 12:05:45.000000000 +0100
++++ wxWindows/src/common/url.cpp	2003-11-06 20:33:59.000000000 +0100
+@@ -62,4 +62,7 @@
+     m_error = wxURL_NOERR;
+     m_url = url;
++#if wxUSE_URL_NATIVE
++    m_nativeImp = CreateNativeImpObject();
++#endif
+ 
+ #if wxUSE_SOCKETS
+@@ -163,4 +166,7 @@
+     delete m_proxy;
+ #endif
++#if wxUSE_URL_NATIVE
++  delete m_nativeImp;
++#endif
+ }
+ 
+@@ -286,4 +292,16 @@
+   }
+ 
++#if wxUSE_URL_NATIVE
++    // give the native implementation to return a better stream
++    // such as the native WinINet functionality under MS-Windows
++  if (m_nativeImp) {
++    wxInputStream *rc;
++    rc = m_nativeImp->GetInputStream(this);
++    if (rc != 0)
++        return rc;
++  }
++    // else use the standard behaviour
++#endif
++
+ #if wxUSE_SOCKETS
+     wxIPV4address addr;
+diff -Nrbu2 -x '*CVS*' old\wxWindows/src/msw/url.cpp wxWindows/src/msw/url.cpp
+--- old\wxWindows/src/msw/url.cpp	1970-01-01 01:00:00.000000000 +0100
++++ wxWindows/src/msw/url.cpp	2003-11-08 13:29:50.000000000 +0100
+@@ -0,0 +1,202 @@
++/////////////////////////////////////////////////////////////////////////////
++// Name:        url.cpp
++// Purpose:     MS-Windows native URL support based on WinINet
++// Author:      Hajo Kirchhoff
++// Modified by:
++// Created:     06/11/2003
++// RCS-ID:      $Id$
++// Copyright:   (c) 2003 Hajo Kirchhoff
++// Licence:     wxWindows licence
++/////////////////////////////////////////////////////////////////////////////
++
++#if defined(__GNUG__) && !defined(NO_GCC_PRAGMA)
++#pragma implementation "url.h"
++#endif
++
++// For compilers that support precompilation, includes "wx.h".
++#include "wx/wxprec.h"
++
++#ifdef __BORLANDC__
++#pragma hdrstop
++#endif
++
++#if wxUSE_URL
++
++#if wxUSE_URL_NATIVE
++
++#if !wxUSE_PROTOCOL_HTTP
++#include <wx/protocol/protocol.h>
++    // empty http protocol replacement (for now)
++    // so that wxUSE_URL_NATIVE can be used with
++    // wxSOCKETS==0 and wxUSE_PROTOCOL_HTTP==0
++class wxHTTPDummyProto:public wxProtocol
++{
++protected:
++    wxProtocolError m_error;
++public:
++    wxHTTPDummyProto():wxProtocol() {}
++    wxProtocolError GetError() { return m_error; }
++    bool Abort() { return TRUE; }
++    wxInputStream *GetInputStream(const wxString& WXUNUSED(path))
++    {
++        return 0;   // input stream is returned by wxURLNativeImp
++    }
++    DECLARE_DYNAMIC_CLASS_NO_COPY(wxHTTPDummyProto)
++    DECLARE_PROTOCOL(wxHTTPDummyProto)
++};
++
++// the only "reason for being" for this class is to tell
++// wxURL that there is someone dealing with the http protocol
++IMPLEMENT_DYNAMIC_CLASS(wxHTTPDummyProto, wxProtocol)
++IMPLEMENT_PROTOCOL(wxHTTPDummyProto, wxT("http"), NULL, FALSE)
++USE_PROTOCOL(wxHTTPDummyProto)
++
++#endif
++
++#ifdef __VISUALC__  // be conservative about this pragma
++    // tell the linker to include wininet.lib automatically
++#pragma comment(lib, "wininet.lib")
++#endif
++
++#include "wx/string.h"
++#include "wx/list.h"
++#include "wx/utils.h"
++#include "wx/module.h"
++#include "wx/url.h"
++
++#include <string.h>
++#include <ctype.h>
++#include <wininet.h>
++
++    //-----------------------------------------------------------------------------------------------------------//
++    //-----------------------------------------------------------------------------------------------------------//
++// this class needn't be exported
++class wxWinINetURL:public wxURLNativeImp
++{
++protected:
++    /// @return the WinINet session handle
++static HINTERNET GetSessionHandle();
++public:
++    wxInputStream *GetInputStream(wxURL *owner);
++};
++
++HINTERNET wxWinINetURL::GetSessionHandle()
++{
++    // this struct ensures that the session is opened when the
++    // first call to GetSessionHandle is made
++    // it also ensures that the session is closed when the program
++    // terminates
++static struct INetSession {
++    INetSession()
++    {
++        DWORD rc=InternetAttemptConnect(0);
++        m_handle=InternetOpen("wxWindows 2.5", 
++                INTERNET_OPEN_TYPE_PRECONFIG, 
++                NULL, 
++                NULL, 
++                rc==ERROR_SUCCESS ? 0 : INTERNET_FLAG_OFFLINE);
++    }
++    ~INetSession()
++    {
++        InternetCloseHandle(m_handle);
++    }
++    HINTERNET m_handle;
++} session;
++
++   return session.m_handle;
++}
++
++    //-----------------------------------------------------------------------------------------------------------//
++    //-----------------------------------------------------------------------------------------------------------//
++// this class needn't be exported
++class /*WXDLLIMPEXP_NET */wxWinINetInputStream : public wxInputStream
++{
++public:
++    wxWinINetInputStream(HINTERNET hFile=0);
++    ~wxWinINetInputStream();
++
++    void Attach(HINTERNET hFile);
++
++    off_t SeekI( off_t WXUNUSED(pos), wxSeekMode WXUNUSED(mode) )
++        { return -1; }
++    off_t TellI() const
++        { return -1; }
++
++protected:
++    void SetError(wxStreamError err) { m_lasterror=err; }
++    HINTERNET m_hFile;
++    size_t OnSysRead(void *buffer, size_t bufsize);
++
++    DECLARE_NO_COPY_CLASS(wxWinINetInputStream)
++};
++
++size_t wxWinINetInputStream::OnSysRead(void *buffer, size_t bufsize)
++{
++    DWORD bytesread = 0;
++    if (InternetReadFile(m_hFile, buffer, bufsize, &bytesread)==FALSE) {
++        DWORD lError=::GetLastError();
++        if (lError!=ERROR_SUCCESS)
++            SetError(wxSTREAM_READ_ERROR);
++
++        DWORD iError, bLength;
++        InternetGetLastResponseInfo(&iError, NULL, &bLength);
++        if (bLength>0) {
++            wxString errorString;
++            InternetGetLastResponseInfo(&iError, wxStringBuffer(errorString,
++                                        bLength), &bLength);
++            wxLogError(wxT("Read failed with error %d: %s"), iError, errorString);
++        }
++    }
++    if (bytesread==0) {
++        SetError(wxSTREAM_EOF);
++    }
++    return bytesread;
++}
++
++wxWinINetInputStream::wxWinINetInputStream(HINTERNET hFile)
++    :m_hFile(hFile)
++{
++}
++
++void wxWinINetInputStream::Attach(HINTERNET newHFile)
++{
++    wxCHECK_RET(m_hFile==NULL, 
++        wxT("cannot attach new stream when stream already exists"));
++    m_hFile=newHFile;
++    SetError(m_hFile!=NULL ? wxSTREAM_NO_ERROR : wxSTREAM_READ_ERROR);
++}
++
++wxWinINetInputStream::~wxWinINetInputStream()
++{
++    if (m_hFile)
++        InternetCloseHandle(m_hFile);
++    m_hFile=0;
++}
++
++wxURLNativeImp *wxURL::CreateNativeImpObject()
++{
++    return new wxWinINetURL;
++}
++
++wxInputStream *wxWinINetURL::GetInputStream(wxURL *owner)
++{
++    DWORD service;
++    if (owner->GetProtocolName()==wxT("http")) {
++        service=INTERNET_SERVICE_HTTP;
++    } else if (owner->GetProtocolName()==wxT("ftp")) {
++        service=INTERNET_SERVICE_FTP;
++    } else
++        return 0;   // unknown protocol. Let wxURL try another method.
++    wxWinINetInputStream *newStream=new wxWinINetInputStream;
++    HINTERNET newStreamHandle
++            =InternetOpenUrl(GetSessionHandle(), owner->GetURL(), 
++                    NULL, 0, 
++                    INTERNET_FLAG_KEEP_CONNECTION | INTERNET_FLAG_PASSIVE,
++                    (DWORD_PTR)newStream);
++    newStream->Attach(newStreamHandle);
++    return newStream;
++}
++
++#endif
++
++#endif
+
+ 	  	 

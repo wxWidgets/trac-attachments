@@ -1,0 +1,565 @@
+diff --git a/include/wx/app.h b/include/wx/app.h
+index 7b72d4b..cc06af0 100644
+--- a/include/wx/app.h
++++ b/include/wx/app.h
+@@ -53,6 +53,15 @@ enum
+ };
+ 
+ // ----------------------------------------------------------------------------
++// global variables
++// ----------------------------------------------------------------------------
++
++// use of this list is strongly deprecated, use wxApp ScheduleForDestruction()
++// and IsScheduledForDestruction()  methods instead of this list directly, it
++// is here for compatibility purposes only
++extern WXDLLIMPEXP_DATA_BASE(wxList) wxPendingDelete;
++
++// ----------------------------------------------------------------------------
+ // wxAppConsoleBase: wxApp for non-GUI applications
+ // ----------------------------------------------------------------------------
+ 
+@@ -317,8 +326,27 @@ public:
+     void DeletePendingEvents();
+ 
+ 
+-    // wxEventLoop redirections
+-    // ------------------------
++    // delayed destruction
++    // -------------------
++
++    // If an object may have pending events for it, it shouldn't be deleted
++    // immediately as this would result in a crash when trying to handle these
++    // events: instead, it should be scheduled for destruction and really
++    // destroyed only after processing all pending events.
++    //
++    // Notice that this is only possible if we have a running event loop,
++    // otherwise the object is just deleted directly by ScheduleForDestruction()
++    // and IsScheduledForDestruction() always returns false.
++
++    // schedule the object for destruction in the near future
++    void ScheduleForDestruction(wxObject *object);
++
++    // return true if the object is scheduled for destruction
++    bool IsScheduledForDestruction(wxObject *object) const;
++
++
++    // wxEventLoop-related methods
++    // ---------------------------
+ 
+     // all these functions are forwarded to the corresponding methods of the
+     // currently active event loop -- and do nothing if there is none
+@@ -340,6 +368,12 @@ public:
+     // events are still sent out
+     virtual bool ProcessIdle();
+ 
++    // this virtual function is overridden in GUI wxApp to always return true
++    // as GUI applications always have an event loop -- but console ones may
++    // have it or not, so it simply returns true if already have an event loop
++    // running but false otherwise
++    virtual bool UsesEventLoop() const;
++
+ 
+     // debugging support
+     // -----------------
+@@ -401,6 +435,11 @@ public:
+ #endif
+ 
+ protected:
++    // delete all objects in wxPendingDelete list
++    //
++    // called from ProcessPendingEvents()
++    void DeletePendingObjects();
++
+     // the function which creates the traits object when GetTraits() needs it
+     // for the first time
+     virtual wxAppTraits *CreateTraits();
+@@ -527,6 +566,9 @@ public:
+         // Returns true if more idle time is requested.
+     virtual bool SendIdleEvents(wxWindow* win, wxIdleEvent& event);
+ 
++        // override base class version: GUI apps always use an event loop
++    virtual bool UsesEventLoop() const { return true; }
++
+ 
+     // top level window functions
+     // --------------------------
+@@ -608,9 +650,6 @@ public:
+ #endif // WXWIN_COMPATIBILITY_2_6
+ 
+ protected:
+-    // delete all objects in wxPendingDelete list
+-    void DeletePendingObjects();
+-
+     // override base class method to use GUI traits
+     virtual wxAppTraits *CreateTraits();
+ 
+diff --git a/include/wx/apptrait.h b/include/wx/apptrait.h
+index 3d56cff..edef0a1 100644
+--- a/include/wx/apptrait.h
++++ b/include/wx/apptrait.h
+@@ -99,20 +99,6 @@ public:
+     // return true if fprintf(stderr) goes somewhere, false otherwise
+     virtual bool HasStderr() = 0;
+ 
+-    // managing "pending delete" list: in GUI mode we can't immediately delete
+-    // some objects because there may be unprocessed events for them and so we
+-    // only do it during the next idle loop iteration while this is, of course,
+-    // unnecessary in wxBase, so we have a few functions to abstract these
+-    // operations
+-
+-    // add the object to the pending delete list in GUI, delete it immediately
+-    // in wxBase
+-    virtual void ScheduleForDestroy(wxObject *object) = 0;
+-
+-    // remove this object from the pending delete list in GUI, do nothing in
+-    // wxBase
+-    virtual void RemoveFromPendingDelete(wxObject *object) = 0;
+-
+ #if wxUSE_SOCKETS
+     // this function is used by wxNet library to set the default socket manager
+     // to use: doing it like this allows us to keep all socket-related code in
+@@ -233,9 +219,6 @@ public:
+     virtual bool ShowAssertDialog(const wxString& msg);
+     virtual bool HasStderr();
+ 
+-    virtual void ScheduleForDestroy(wxObject *object);
+-    virtual void RemoveFromPendingDelete(wxObject *object);
+-
+     // the GetToolkitVersion for console application is always the same
+     virtual wxPortId GetToolkitVersion(int *verMaj = NULL, int *verMin = NULL) const
+     {
+@@ -272,9 +255,6 @@ public:
+     virtual bool ShowAssertDialog(const wxString& msg);
+     virtual bool HasStderr();
+ 
+-    virtual void ScheduleForDestroy(wxObject *object);
+-    virtual void RemoveFromPendingDelete(wxObject *object);
+-
+     virtual bool IsUsingUniversalWidgets() const
+     {
+     #ifdef __WXUNIVERSAL__
+diff --git a/include/wx/window.h b/include/wx/window.h
+index c8f7624..7a643bf 100644
+--- a/include/wx/window.h
++++ b/include/wx/window.h
+@@ -148,7 +148,9 @@ WX_DECLARE_LIST_3(wxWindow, wxWindowBase, wxWindowList, wxWindowListNode, class
+ // ----------------------------------------------------------------------------
+ 
+ extern WXDLLIMPEXP_DATA_CORE(wxWindowList) wxTopLevelWindows;
+-extern WXDLLIMPEXP_DATA_CORE(wxList) wxPendingDelete;
++
++// declared here for compatibility only, main declaration is in wx/app.h
++extern WXDLLIMPEXP_DATA_BASE(wxList) wxPendingDelete;
+ 
+ // ----------------------------------------------------------------------------
+ // wxWindowBase is the base class for all GUI controls/widgets, this is the public
+diff --git a/interface/wx/app.h b/interface/wx/app.h
+index b0f4083..63e2a1d 100644
+--- a/interface/wx/app.h
++++ b/interface/wx/app.h
+@@ -111,6 +111,20 @@ public:
+                              wxEventFunction func,
+                              wxEvent& event) const;
+ 
++    /**
++        Returns @true if the application is using an event loop.
++
++        This function always returns @true for the GUI applications which
++        must use an event loop but by default only returns @true for the
++        console programs if an event loop is already running as it can't know
++        whether one will be created in the future.
++
++        Thus, it only makes sense to override it in console applications which
++        do use an event loop, to return @true instead of checking if there is a
++        currently active event loop.
++     */
++    virtual bool UsesEventLoop() const;
++
+     //@}
+ 
+ 
+@@ -129,19 +143,19 @@ public:
+ 
+         This happens during each event loop iteration (see wxEventLoopBase) in GUI mode but
+         it may be also called directly.
+-        
++
+         Note that this function does not only process the pending events for the wxApp object
+         itself (which derives from wxEvtHandler) but also the pending events for @e any
+         event handler of this application.
+-        
++
+         This function will immediately return and do nothing if SuspendProcessingOfPendingEvents()
+         was called.
+     */
+     virtual void ProcessPendingEvents();
+-    
++
+     /**
+         Deletes the pending events of all wxEvtHandlers of this application.
+-        
++
+         See wxEvtHandler::DeletePendingEvents() for warnings about deleting the pending
+         events.
+     */
+@@ -149,9 +163,9 @@ public:
+ 
+     /**
+         Returns @true if there are pending events on the internal pending event list.
+-        
++
+         Whenever wxEvtHandler::QueueEvent or wxEvtHandler::AddPendingEvent() are
+-        called (not only for wxApp itself, but for any event handler of the application!), 
++        called (not only for wxApp itself, but for any event handler of the application!),
+         the internal wxApp's list of handlers with pending events is updated and this
+         function will return true.
+     */
+@@ -172,6 +186,40 @@ public:
+ 
+     //@}
+ 
++    /**
++        Delayed objects destruction.
++
++        In applications using events it may be unsafe for an event handler to
++        delete the object which generated the event because more events may be
++        still pending for the same object. In this case the handler may call
++        ScheduleForDestruction() instead.
++     */
++    //@{
++
++    /**
++        Schedule the object for destruction in the near future.
++
++        Notice that if the application is not using an event loop, i.e. if
++        UsesEventLoop() returns @false, this method will simply delete the
++        object immediately.
++
++        Examples of using this function inside wxWidgets itself include
++        deleting the top level windows when they are closed and sockets when
++        they are disconnected.
++     */
++    void ScheduleForDestruction(wxObject *object);
++
++    /**
++        Check if the object had been scheduled for destruction with
++        ScheduleForDestruction().
++
++        This function may be useful as an optimization to avoid doing something
++        with an object which will be soon destroyed in any case.
++     */
++    bool IsScheduledForDestruction(wxObject *object) const;
++
++    //@}
++
+ 
+     /**
+         Allows external code to modify global ::wxTheApp, but you should really
+diff --git a/src/common/appbase.cpp b/src/common/appbase.cpp
+index fd98187..197ebbc 100644
+--- a/src/common/appbase.cpp
++++ b/src/common/appbase.cpp
+@@ -115,6 +115,8 @@ wxAppInitializerFunction wxAppConsoleBase::ms_appInitFn = NULL;
+ 
+ wxSocketManager *wxAppTraitsBase::ms_manager = NULL;
+ 
++WXDLLIMPEXP_DATA_BASE(wxList) wxPendingDelete;
++
+ // ----------------------------------------------------------------------------
+ // wxEventLoopPtr
+ // ----------------------------------------------------------------------------
+@@ -341,6 +343,13 @@ bool wxAppConsoleBase::ProcessIdle()
+     return event.MoreRequested();
+ }
+ 
++bool wxAppConsoleBase::UsesEventLoop() const
++{
++    // in console applications we don't know whether we're going to have an
++    // event loop so assume we won't -- unless we already have one running
++    return wxEventLoopBase::GetActive() != NULL;
++}
++
+ // ----------------------------------------------------------------------------
+ // events
+ // ----------------------------------------------------------------------------
+@@ -433,43 +442,46 @@ void wxAppConsoleBase::ResumeProcessingOfPendingEvents()
+ 
+ void wxAppConsoleBase::ProcessPendingEvents()
+ {
+-    if (!m_bDoPendingEventProcessing)
+-        return;
++    if ( m_bDoPendingEventProcessing )
++    {
++        wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
+ 
+-    wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
++        wxCHECK_RET( m_handlersWithPendingDelayedEvents.IsEmpty(),
++                     "this helper list should be empty" );
+ 
+-    wxCHECK_RET( m_handlersWithPendingDelayedEvents.IsEmpty(),
+-                 "this helper list should be empty" );
++        // iterate until the list becomes empty: the handlers remove themselves
++        // from it when they don't have any more pending events
++        while (!m_handlersWithPendingEvents.IsEmpty())
++        {
++            // In ProcessPendingEvents(), new handlers might be added
++            // and we can safely leave the critical section here.
++            wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
+ 
+-    // iterate until the list becomes empty: the handlers remove themselves
+-    // from it when they don't have any more pending events
+-    while (!m_handlersWithPendingEvents.IsEmpty())
+-    {
+-        // In ProcessPendingEvents(), new handlers might be added
+-        // and we can safely leave the critical section here.
+-        wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
++            // NOTE: we always call ProcessPendingEvents() on the first event handler
++            //       with pending events because handlers auto-remove themselves
++            //       from this list (see RemovePendingEventHandler) if they have no
++            //       more pending events.
++            m_handlersWithPendingEvents[0]->ProcessPendingEvents();
+ 
+-        // NOTE: we always call ProcessPendingEvents() on the first event handler
+-        //       with pending events because handlers auto-remove themselves
+-        //       from this list (see RemovePendingEventHandler) if they have no
+-        //       more pending events.
+-        m_handlersWithPendingEvents[0]->ProcessPendingEvents();
++            wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
++        }
+ 
+-        wxENTER_CRIT_SECT(m_handlersWithPendingEventsLocker);
+-    }
++        // now the wxHandlersWithPendingEvents is surely empty; however some event
++        // handlers may have moved themselves into wxHandlersWithPendingDelayedEvents
++        // because of a selective wxYield call in progress.
++        // Now we need to move them back to wxHandlersWithPendingEvents so the next
++        // call to this function has the chance of processing them:
++        if (!m_handlersWithPendingDelayedEvents.IsEmpty())
++        {
++            WX_APPEND_ARRAY(m_handlersWithPendingEvents, m_handlersWithPendingDelayedEvents);
++            m_handlersWithPendingDelayedEvents.Clear();
++        }
+ 
+-    // now the wxHandlersWithPendingEvents is surely empty; however some event
+-    // handlers may have moved themselves into wxHandlersWithPendingDelayedEvents
+-    // because of a selective wxYield call in progress.
+-    // Now we need to move them back to wxHandlersWithPendingEvents so the next
+-    // call to this function has the chance of processing them:
+-    if (!m_handlersWithPendingDelayedEvents.IsEmpty())
+-    {
+-        WX_APPEND_ARRAY(m_handlersWithPendingEvents, m_handlersWithPendingDelayedEvents);
+-        m_handlersWithPendingDelayedEvents.Clear();
++        wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
+     }
+ 
+-    wxLEAVE_CRIT_SECT(m_handlersWithPendingEventsLocker);
++    // Garbage collect all objects previously scheduled for destruction.
++    DeletePendingObjects();
+ }
+ 
+ void wxAppConsoleBase::DeletePendingEvents()
+@@ -488,6 +500,50 @@ void wxAppConsoleBase::DeletePendingEvents()
+ }
+ 
+ // ----------------------------------------------------------------------------
++// delayed objects destruction
++// ----------------------------------------------------------------------------
++
++bool wxAppConsoleBase::IsScheduledForDestruction(wxObject *object) const
++{
++    return wxPendingDelete.Member(object);
++}
++
++void wxAppConsoleBase::ScheduleForDestruction(wxObject *object)
++{
++    if ( !UsesEventLoop() )
++    {
++        // we won't be able to delete it later so do it right now
++        delete object;
++        return;
++    }
++    //else: we either already have or will soon start an event loop
++
++    if ( !wxPendingDelete.Member(object) )
++        wxPendingDelete.Append(object);
++}
++
++void wxAppConsoleBase::DeletePendingObjects()
++{
++    wxList::compatibility_iterator node = wxPendingDelete.GetFirst();
++    while (node)
++    {
++        wxObject *obj = node->GetData();
++
++        // remove it from the list first so that if we get back here somehow
++        // during the object deletion (e.g. wxYield called from its dtor) we
++        // wouldn't try to delete it the second time
++        if ( wxPendingDelete.Member(obj) )
++            wxPendingDelete.Erase(node);
++
++        delete obj;
++
++        // Deleting one object may have deleted other pending
++        // objects, so start from beginning of list again.
++        node = wxPendingDelete.GetFirst();
++    }
++}
++
++// ----------------------------------------------------------------------------
+ // exception handling
+ // ----------------------------------------------------------------------------
+ 
+@@ -738,16 +794,6 @@ bool wxConsoleAppTraitsBase::HasStderr()
+     return true;
+ }
+ 
+-void wxConsoleAppTraitsBase::ScheduleForDestroy(wxObject *object)
+-{
+-    delete object;
+-}
+-
+-void wxConsoleAppTraitsBase::RemoveFromPendingDelete(wxObject * WXUNUSED(object))
+-{
+-    // nothing to do
+-}
+-
+ // ----------------------------------------------------------------------------
+ // wxAppTraits
+ // ----------------------------------------------------------------------------
+diff --git a/src/common/appcmn.cpp b/src/common/appcmn.cpp
+index 6c9f8f3..fe5ee1c 100644
+--- a/src/common/appcmn.cpp
++++ b/src/common/appcmn.cpp
+@@ -50,8 +50,6 @@
+ #include "wx/build.h"
+ WX_CHECK_BUILD_OPTIONS("wxCore")
+ 
+-WXDLLIMPEXP_DATA_CORE(wxList) wxPendingDelete;
+-
+ // ============================================================================
+ // wxAppBase implementation
+ // ============================================================================
+@@ -341,33 +339,11 @@ bool wxAppBase::SafeYieldFor(wxWindow *win, long eventsToProcess)
+ // idle handling
+ // ----------------------------------------------------------------------------
+ 
+-void wxAppBase::DeletePendingObjects()
+-{
+-    wxList::compatibility_iterator node = wxPendingDelete.GetFirst();
+-    while (node)
+-    {
+-        wxObject *obj = node->GetData();
+-
+-        // remove it from the list first so that if we get back here somehow
+-        // during the object deletion (e.g. wxYield called from its dtor) we
+-        // wouldn't try to delete it the second time
+-        if ( wxPendingDelete.Member(obj) )
+-            wxPendingDelete.Erase(node);
+-
+-        delete obj;
+-
+-        // Deleting one object may have deleted other pending
+-        // objects, so start from beginning of list again.
+-        node = wxPendingDelete.GetFirst();
+-    }
+-}
+-
+ // Returns true if more time is needed.
+ bool wxAppBase::ProcessIdle()
+ {
+-    // call the base class version first, it will process the pending events
+-    // (which should be done before the idle events generation) and send the
+-    // idle event to wxTheApp itself
++    // call the base class version first to send the idle event to wxTheApp
++    // itself
+     bool needMore = wxAppConsoleBase::ProcessIdle();
+     wxIdleEvent event;
+     wxWindowList::compatibility_iterator node = wxTopLevelWindows.GetFirst();
+@@ -379,9 +355,6 @@ bool wxAppBase::ProcessIdle()
+         node = node->GetNext();
+     }
+ 
+-    // 'Garbage' collection of windows deleted with Close().
+-    DeletePendingObjects();
+-
+ #if wxUSE_LOG
+     // flush the logged messages if any
+     wxLog::FlushActive();
+@@ -544,14 +517,3 @@ bool wxGUIAppTraitsBase::HasStderr()
+ #endif
+ }
+ 
+-void wxGUIAppTraitsBase::ScheduleForDestroy(wxObject *object)
+-{
+-    if ( !wxPendingDelete.Member(object) )
+-        wxPendingDelete.Append(object);
+-}
+-
+-void wxGUIAppTraitsBase::RemoveFromPendingDelete(wxObject *object)
+-{
+-    wxPendingDelete.DeleteObject(object);
+-}
+-
+diff --git a/src/common/sckipc.cpp b/src/common/sckipc.cpp
+index 06f3780..ff92f6b 100644
+--- a/src/common/sckipc.cpp
++++ b/src/common/sckipc.cpp
+@@ -695,6 +695,11 @@ void wxTCPEventHandler::HandleDisconnect(wxTCPConnection *connection)
+     connection->m_sock->Notify(false);
+     connection->m_sock->Close();
+ 
++    // don't leave references to this soon-to-be-dangling connection in the
++    // socket as it won't be destroyed immediately as its destruction will be
++    // delayed in case there are more events pending for it
++    connection->m_sock->SetClientData(NULL);
++
+     connection->SetConnected(false);
+     connection->OnDisconnect();
+ }
+diff --git a/src/common/socket.cpp b/src/common/socket.cpp
+index 41cca59..71d5ef2 100644
+--- a/src/common/socket.cpp
++++ b/src/common/socket.cpp
+@@ -841,12 +841,6 @@ wxSocketBase::wxSocketBase(wxSocketFlags flags, wxSocketType type)
+ 
+ wxSocketBase::~wxSocketBase()
+ {
+-    // Just in case the app called Destroy() *and* then deleted the socket
+-    // immediately: don't leave dangling pointers.
+-    wxAppTraits *traits = wxTheApp ? wxTheApp->GetTraits() : NULL;
+-    if ( traits )
+-        traits->RemoveFromPendingDelete(this);
+-
+     // Shutdown and close the socket
+     if (!m_beingDeleted)
+         Close();
+@@ -855,8 +849,7 @@ wxSocketBase::~wxSocketBase()
+     delete m_impl;
+ 
+     // Free the pushback buffer
+-    if (m_unread)
+-        free(m_unread);
++    free(m_unread);
+ }
+ 
+ bool wxSocketBase::Destroy()
+@@ -872,14 +865,13 @@ bool wxSocketBase::Destroy()
+     // Suppress events from now on
+     Notify(false);
+ 
+-    // schedule this object for deletion
+-    wxAppTraits *traits = wxTheApp ? wxTheApp->GetTraits() : NULL;
+-    if ( traits )
++    // Schedule this object for deletion instead of destroying it right now if
++    // possible as we may have other events pending for it
++    if ( wxTheApp )
+     {
+-        // let the traits object decide what to do with us
+-        traits->ScheduleForDestroy(this);
++        wxTheApp->ScheduleForDestruction(this);
+     }
+-    else // no app or no traits
++    else // no app
+     {
+         // in wxBase we might have no app object at all, don't leak memory
+         delete this;
